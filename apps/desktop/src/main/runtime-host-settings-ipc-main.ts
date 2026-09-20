@@ -389,6 +389,25 @@ async function applyHostPatchWithoutLane(
       "set_chat_defaults",
     );
   }
+  if (patch.permissions) {
+    // Not mergePolicy: that spreads one level, which would replace the whole
+    // trustedPaths object with the partial one and silently drop the list the
+    // patch did not mention.
+    const trustedPaths = patch.permissions.trustedPaths;
+    if (trustedPaths) {
+      await client.updateRuntimePolicy(
+        ((policy: { permissions: RuntimePolicy["permissions"] }) => ({
+          kind: "set_permissions" as const,
+          value: {
+            trustedPaths: {
+              ...policy.permissions.trustedPaths,
+              ...trustedPaths,
+            },
+          },
+        })) as Parameters<DesktopRuntimeHostClient["updateRuntimePolicy"]>[0],
+      );
+    }
+  }
   if (patch.externalAgents) {
     const mutation = () => ({
       kind: "set_external_agents" as const,

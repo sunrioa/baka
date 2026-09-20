@@ -68,6 +68,7 @@ describe('runtime policy stores', () => {
       const {
         shell: _shell,
         externalAgents: _externalAgents,
+        permissions: _permissions,
         ...policyV2
       } = createDefaultRuntimePolicy();
       await writeFile(
@@ -86,13 +87,17 @@ describe('runtime policy stores', () => {
       const persisted = JSON.parse(await readFile(join(root, 'runtime-policy.json'), 'utf8')) as {
         schemaVersion: number;
       };
-      assert.equal(persisted.schemaVersion, 4);
+      assert.equal(persisted.schemaVersion, 5);
     });
   });
 
   test('migrates v3 external agent defaults and persists configuration with revision checks', async () => {
     await withInteractiveOwner(async ({ root, stores }) => {
-      const { externalAgents: _externalAgents, ...policyV3 } = createDefaultRuntimePolicy();
+      const {
+        externalAgents: _externalAgents,
+        permissions: _permissions,
+        ...policyV3
+      } = createDefaultRuntimePolicy();
       await writeFile(
         join(root, 'runtime-policy.json'),
         JSON.stringify({ schemaVersion: 3, revision: 8, policy: policyV3 }),

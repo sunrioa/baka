@@ -1269,7 +1269,9 @@ function SettingsPageBody(props: {
         />
       );
     case 'permissions':
-      return <PermissionCenterPage />;
+      return (
+        <PermissionCenterPage settings={props.settings} onUpdate={props.onUpdateSettings} />
+      );
     case 'health':
       return <HealthCenterPage />;
     case 'memory':

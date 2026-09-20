@@ -30,6 +30,7 @@ import {
   networkProxyCredentialTarget,
   type ChatDefaultPermissionMode,
   type NetworkProxyCredentialTarget,
+  type PermissionSettings,
   type ProxyProtocol,
   type ShellSettings,
 } from './settings.js';
@@ -54,6 +55,7 @@ export {
   normalizeNetworkProxyCredentialTarget,
   decodeRuntimePolicyV2,
   decodeRuntimePolicyV3,
+  decodeRuntimePolicyV4,
   normalizeNetworkProxyUpdate,
   normalizeRuntimePolicyMutation,
 } from './runtime-policy/policy-codec.js';
@@ -165,6 +167,12 @@ export interface RuntimePolicy {
   readonly subagents: SubagentSettings;
   readonly shell: ShellSettings;
   readonly externalAgents: { readonly antigravity: { readonly executable: string } };
+  /**
+   * Trusted paths compiled into every new managed session's genesis boundary.
+   * Lives here, not only in `AppSettings`, because the Host is what reads it
+   * at session creation — same reason `chatDefaults.permissionMode` does.
+   */
+  readonly permissions: PermissionSettings;
 }
 
 export interface RuntimePolicySnapshot {
@@ -190,6 +198,7 @@ export type RuntimePolicyMutation =
     }
   | { readonly kind: 'set_privacy'; readonly value: RuntimePolicy['privacy'] }
   | { readonly kind: 'set_chat_defaults'; readonly value: RuntimePolicy['chatDefaults'] }
+  | { readonly kind: 'set_permissions'; readonly value: RuntimePolicy['permissions'] }
   | { readonly kind: 'set_web_search'; readonly value: RuntimePolicy['webSearch'] }
   | { readonly kind: 'set_subagents'; readonly value: RuntimePolicy['subagents'] }
   | { readonly kind: 'set_external_agents'; readonly value: RuntimePolicy['externalAgents'] }
@@ -264,6 +273,7 @@ export function createDefaultRuntimePolicy(): RuntimePolicy {
     subagents: { presets: [] },
     shell: { preference: 'auto', executable: '' },
     externalAgents: { antigravity: { executable: '' } },
+    permissions: { trustedPaths: { readPaths: [], denyPaths: [] } },
   };
 }
 

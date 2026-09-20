@@ -134,6 +134,8 @@ export interface AppShellChatActions {
     options?: MessageContextOptions,
   ): Promise<boolean>;
   respondToSandboxBoundary(response: SandboxBoundaryResponse): Promise<void>;
+  /** Appends `paths` to the trusted read paths so this prompt stops recurring. */
+  alwaysAllowSandboxPaths(paths: readonly string[]): Promise<void>;
   respondToUserQuestion(response: UserQuestionResponse): Promise<void>;
   respondToUserForm(response: InteractionFormResponse): Promise<void>;
   refreshMessages(sessionId: string, options?: RefreshMessagesOptions): Promise<boolean>;
@@ -666,6 +668,15 @@ export function createAppShellChatActions(deps: {
         window.maka.sessions.respondToSandboxBoundary,
         onExecutionBoundaryChanged,
       ),
+    alwaysAllowSandboxPaths: async (paths) => {
+      // Read-modify-write rather than a blind patch: the settings patch
+      // replaces the array wholesale, so appending needs the current list.
+      // Unguarded on purpose — a lost race drops a convenience entry, which
+      // costs one more prompt, and never widens authority.
+      const current = await window.maka.settings.get();
+      const merged = [...new Set([...current.permissions.trustedPaths.readPaths, ...paths])].sort();
+      await window.maka.settings.update({ permissions: { trustedPaths: { readPaths: merged } } });
+    },
     respondToUserQuestion: (response) =>
       respondToInteraction(response, window.maka.sessions.respondToUserQuestion),
     respondToUserForm: (response) => respondToInteraction(response, submitUserForm),

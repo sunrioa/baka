@@ -226,16 +226,48 @@ export function executionBoundaryDisplayMode(
   return readOnly ? 'explore' : 'ask';
 }
 
-export function createGenesisExecutionBoundary(mode: PermissionMode): ExecutionBoundary {
+export interface GenesisExecutionBoundaryOptions {
+  /**
+   * Entries compiled from the user's trusted paths, prepended to the profile's
+   * own entries so a pre-declared directory is already contained and never
+   * raises a prompt. Build them with `compileTrustedPaths`; passing raw
+   * user input here would reach `decodeSandboxProfile` unvalidated.
+   *
+   * Applies to both managed modes. Explore is deliberately included: a
+   * read-only session is exactly where extra read authority is safe, and it is
+   * where the per-file prompts are most annoying.
+   */
+  readonly trustedEntries?: readonly FileSystemSandboxEntry[];
+}
+
+export function createGenesisExecutionBoundary(
+  mode: PermissionMode,
+  options: GenesisExecutionBoundaryOptions = {},
+): ExecutionBoundary {
   if (mode === 'bypass') return { kind: 'bypass', revision: 0 };
-  return {
-    kind: 'managed',
-    profile:
-      mode === 'explore'
-        ? createReadOnlyPermissionProfile()
-        : createWorkspaceWritePermissionProfile(),
-    revision: 0,
-  };
+  const base =
+    mode === 'explore'
+      ? createReadOnlyPermissionProfile()
+      : createWorkspaceWritePermissionProfile();
+  const trustedEntries = options.trustedEntries ?? [];
+  const profile: SandboxProfile =
+    trustedEntries.length === 0
+      ? base
+      : {
+          ...base,
+          // A profile carrying extra roots is no longer the canonical Explore
+          // or workspace-write policy, so name it for what it is. Leaving the
+          // stock name on it would make `isCanonicalReadOnlyPermissionProfile`
+          // the only thing that notices, silently and far from here.
+          name: 'custom',
+          fileSystem: {
+            ...base.fileSystem,
+            // Deny entries come first for readability; `isDeniedPath`
+            // short-circuits regardless of order.
+            entries: [...trustedEntries, ...base.fileSystem.entries],
+          },
+        };
+  return { kind: 'managed', profile, revision: 0 };
 }
 
 export function createManagedExecutionBoundary(

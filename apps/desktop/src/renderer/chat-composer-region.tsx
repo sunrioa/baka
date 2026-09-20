@@ -115,6 +115,7 @@ interface ChatComposerRegionProps
   newTaskSendPending: boolean;
   stopPendingBySession: Record<string, boolean>;
   respondToSandboxBoundary: ComponentProps<typeof SandboxBoundaryPrompt>['onRespond'];
+  alwaysAllowSandboxPaths?: ComponentProps<typeof SandboxBoundaryPrompt>['onAlwaysAllow'];
   respondToClientCapability: ComponentProps<typeof ClientCapabilityPrompt>['onRespond'];
   respondToUserQuestion: ComponentProps<typeof UserQuestionPrompt>['onRespond'];
   respondToUserForm: ComponentProps<typeof FormInteractionPrompt>['onRespond'];
@@ -170,6 +171,7 @@ export function ChatComposerRegion({
   newTaskSendPending,
   stopPendingBySession,
   respondToSandboxBoundary,
+  alwaysAllowSandboxPaths,
   respondToClientCapability,
   respondToUserQuestion,
   respondToUserForm,
@@ -345,6 +347,7 @@ export function ChatComposerRegion({
           <SandboxBoundaryPrompt
             request={activeSandboxBoundary}
             onRespond={respondToSandboxBoundary}
+            {...(alwaysAllowSandboxPaths ? { onAlwaysAllow: alwaysAllowSandboxPaths } : {})}
           />
         )}
         {activeClientCapability && (

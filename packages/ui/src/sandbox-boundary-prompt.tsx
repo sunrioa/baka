@@ -20,6 +20,8 @@
 import type { SandboxBoundaryRequestEvent } from '@maka/core/events';
 import { useEffect, useId, useRef, useState } from 'react';
 
+import { suggestTrustedReadPaths } from '@maka/core/trusted-paths';
+
 import { getConversationCopy } from './conversation-copy.js';
 import { useUiLocale } from './locale-context.js';
 import { Button } from '@astryxdesign/core';
@@ -28,14 +30,24 @@ import { useMountedRef } from './use-mounted-ref.js';
 export interface SandboxBoundaryPromptProps {
   request: SandboxBoundaryRequestEvent;
   onRespond(response: { requestId: string; decision: 'allow' | 'deny' }): void | Promise<void>;
+  /**
+   * Adds `paths` to the trusted read paths, then allows this request.
+   *
+   * Optional: a surface that cannot write settings simply does not show the
+   * third button. The paths are computed here from the request, so what the
+   * button remembers is always what the prompt is showing.
+   */
+  onAlwaysAllow?(paths: readonly string[]): void | Promise<void>;
 }
 
 export function SandboxBoundaryPrompt({
   request,
   onRespond,
+  onAlwaysAllow,
 }: SandboxBoundaryPromptProps) {
   const copy = getConversationCopy(useUiLocale()).sandboxBoundary;
   const titleId = useId();
+  const hintId = useId();
   const [responsePending, setResponsePending] = useState(false);
   const responsePendingRef = useRef(false);
   const activeRequestIdRef = useRef(request.requestId);
@@ -65,7 +77,28 @@ export function SandboxBoundaryPrompt({
     }
   }
 
+  // Remember first, then allow. If persisting the path fails the user still
+  // gets told, and this turn falls back to the one-task grant they would have
+  // had anyway — rather than the request being allowed while the setting the
+  // button promised silently never landed.
+  async function alwaysAllow(paths: readonly string[]): Promise<void> {
+    if (responsePendingRef.current || !onAlwaysAllow) return;
+    const requestId = request.requestId;
+    responsePendingRef.current = true;
+    setResponsePending(true);
+    try {
+      await onAlwaysAllow(paths);
+      await onRespond({ requestId, decision: 'allow' });
+    } finally {
+      if (activeRequestIdRef.current === requestId) {
+        responsePendingRef.current = false;
+        if (mountedRef.current) setResponsePending(false);
+      }
+    }
+  }
+
   const entries = request.expansion.filesystem?.entries ?? [];
+  const suggestedPaths = onAlwaysAllow ? suggestTrustedReadPaths(request.expansion) : [];
   return (
     <section
       className="maka-composer-interaction maka-sandbox-boundary-prompt composer"
@@ -92,6 +125,11 @@ export function SandboxBoundaryPrompt({
             </li>
           ) : null}
         </ul>
+        {suggestedPaths.length > 0 ? (
+          <p className="maka-sandbox-boundary-always-hint" id={hintId}>
+            {copy.allowAlwaysHint(suggestedPaths.join(' · '))}
+          </p>
+        ) : null}
         <div className="maka-sandbox-boundary-actions">
           <Button
             ref={rejectButtonRef}
@@ -106,6 +144,15 @@ export function SandboxBoundaryPrompt({
             onClick={() => void respond('allow')}
             label={copy.allowSession}
           />
+          {suggestedPaths.length > 0 ? (
+            <Button
+              variant="secondary"
+              isDisabled={responsePending}
+              onClick={() => void alwaysAllow(suggestedPaths)}
+              label={copy.allowAlways}
+              aria-describedby={hintId}
+            />
+          ) : null}
         </div>
       </div>
     </section>

@@ -1391,6 +1391,7 @@ function AppShellContent({
     send,
     enqueueMessage,
     respondToSandboxBoundary,
+    alwaysAllowSandboxPaths,
     respondToUserQuestion,
     respondToUserForm,
     refreshMessages,
@@ -2417,6 +2418,7 @@ function AppShellContent({
                   newTaskSendPending={newTaskSendPending}
                   stopPendingBySession={stopPendingBySession}
                   respondToSandboxBoundary={respondToSandboxBoundary}
+                  alwaysAllowSandboxPaths={alwaysAllowSandboxPaths}
                   respondToClientCapability={commands.respondToClientCapability}
                   respondToUserQuestion={respondToUserQuestion}
                   respondToUserForm={respondToUserForm}

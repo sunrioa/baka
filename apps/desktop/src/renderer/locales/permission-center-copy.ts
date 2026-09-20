@@ -98,6 +98,27 @@ export type PermissionCenterCopy = {
   // name stays a literal in copy. Revisit when a second backend lands.
   cuBackendStatus(missingPermissionLabels: readonly string[], health: RuntimeProbeState): string;
   reasonFallback: string;
+  /** Trusted read paths compiled into every new session's sandbox boundary. */
+  trustedPaths: {
+    section: string;
+    sectionHelp: string;
+    readLabel: string;
+    readHelp: string;
+    denyLabel: string;
+    denyHelp: string;
+    addPlaceholder: string;
+    add: string;
+    remove: string;
+    removeAria(path: string): string;
+    empty: string;
+    denyEmpty: string;
+    denyPlatformNote: string;
+    invalidPath: string;
+    duplicatePath: string;
+    saveFailed: string;
+    listAria: string;
+    appliesToNewSessions: string;
+  };
 };
 
 const PERMISSION_CENTER_COPY = {
@@ -157,6 +178,27 @@ const PERMISSION_CENTER_COPY = {
         not_run: 'service 将在首次调用时启动；按目标与动作类别授权后可操作本机应用。',
       } satisfies Record<RuntimeProbeState, string>)[health],
     reasonFallback: '状态详情请查看运行日志。',
+    trustedPaths: {
+      section: '可信读取路径',
+      sectionHelp: '这些目录对新建会话直接可读，不再逐个文件弹窗确认。只给读取权限，写入仍然每次询问。',
+      readLabel: '可读目录',
+      readHelp: '以子树方式授予读取权限，包含其下所有内容。',
+      denyLabel: '排除路径',
+      denyHelp: '优先于可读目录。用来在一个可读目录里挖掉不该被读的部分。',
+      addPlaceholder: '/Users/你/Documents',
+      add: '添加',
+      remove: '移除',
+      removeAria: (path: string) => `移除 ${path}`,
+      empty: '尚未添加任何可读目录。',
+      denyEmpty: '尚未添加任何排除路径。',
+      denyPlatformNote:
+        '仅 macOS 的沙箱能表达排除路径。在 Linux 和 Windows 上，含有排除路径的可读目录会被整体拒绝，而不是在缺少排除的情况下放开。',
+      invalidPath: '需要一个规范化的绝对路径，且结尾不能有斜杠。',
+      duplicatePath: '该路径已在列表中。',
+      saveFailed: '保存可信路径失败',
+      listAria: '可信路径列表',
+      appliesToNewSessions: '改动只影响此后新建的会话，已有会话的边界不变。',
+    },
   },
   'zh-TW': {
     readiness: {
@@ -214,6 +256,27 @@ const PERMISSION_CENTER_COPY = {
         not_run: 'service 將在首次呼叫時啟動；依目標與動作類別授權後可操作本機應用程式。',
       } satisfies Record<RuntimeProbeState, string>)[health],
     reasonFallback: '狀態詳情請查看執行日誌。',
+    trustedPaths: {
+      section: '可信讀取路徑',
+      sectionHelp: '這些目錄對新建工作階段直接可讀，不再逐個檔案彈窗確認。只給讀取權限，寫入仍然每次詢問。',
+      readLabel: '可讀目錄',
+      readHelp: '以子樹方式授予讀取權限，包含其下所有內容。',
+      denyLabel: '排除路徑',
+      denyHelp: '優先於可讀目錄。用來在一個可讀目錄裡挖掉不該被讀的部分。',
+      addPlaceholder: '/Users/你/Documents',
+      add: '新增',
+      remove: '移除',
+      removeAria: (path: string) => `移除 ${path}`,
+      empty: '尚未新增任何可讀目錄。',
+      denyEmpty: '尚未新增任何排除路徑。',
+      denyPlatformNote:
+        '僅 macOS 的沙箱能表達排除路徑。在 Linux 與 Windows 上，含有排除路徑的可讀目錄會被整體拒絕，而不是在缺少排除的情況下放開。',
+      invalidPath: '需要一個規範化的絕對路徑，且結尾不能有斜線。',
+      duplicatePath: '該路徑已在清單中。',
+      saveFailed: '儲存可信路徑失敗',
+      listAria: '可信路徑清單',
+      appliesToNewSessions: '變更只影響此後新建的工作階段，既有工作階段的邊界不變。',
+    },
   },
   en: {
     readiness: {
@@ -271,6 +334,29 @@ const PERMISSION_CENTER_COPY = {
         not_run: 'The service starts on first use; grant by target and action category to operate local apps.',
       } satisfies Record<RuntimeProbeState, string>)[health],
     reasonFallback: 'See the runtime logs for details.',
+    trustedPaths: {
+      section: 'Trusted read paths',
+      sectionHelp:
+        'New sessions can read these directories without asking. Read access only — writes still prompt every time.',
+      readLabel: 'Readable directories',
+      readHelp: 'Granted as a subtree, covering everything beneath the directory.',
+      denyLabel: 'Excluded paths',
+      denyHelp:
+        'Takes precedence over readable directories. Use it to carve a hole out of one you trust.',
+      addPlaceholder: '/Users/you/Documents',
+      add: 'Add',
+      remove: 'Remove',
+      removeAria: (path: string) => `Remove ${path}`,
+      empty: 'No readable directories yet.',
+      denyEmpty: 'No excluded paths yet.',
+      denyPlatformNote:
+        'Only the macOS sandbox can express an excluded path. On Linux and Windows a readable directory that needs one is refused outright rather than granted without it.',
+      invalidPath: 'Enter a normalized absolute path with no trailing separator.',
+      duplicatePath: 'That path is already listed.',
+      saveFailed: 'Could not save trusted paths',
+      listAria: 'Trusted paths',
+      appliesToNewSessions: 'Applies to sessions created from now on; existing boundaries are unchanged.',
+    },
   },
 } satisfies UiCatalog<PermissionCenterCopy>;
 

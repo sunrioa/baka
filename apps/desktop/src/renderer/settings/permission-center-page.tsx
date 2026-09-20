@@ -36,6 +36,7 @@ import type {
   PermissionSnapshot,
 } from '@maka/core/capabilities';
 import type { UiLocale } from '@maka/core/ui-locale';
+import type { AppSettings, UpdateAppSettingsResult } from '@maka/core/settings';
 import {
   isCapabilityReasonCode,
   isDragGrantPermissionId,
@@ -60,6 +61,7 @@ import { getCapabilityReasonCopy } from '../locales/capability-reason-copy';
 import { getPermissionCenterCopy, type PermissionCenterCopy } from '../locales/permission-center-copy';
 import { botStatusReasonCopy } from '../locales/settings-bot-copy';
 import { settingsActionErrorMessage } from './settings-error-copy';
+import { TrustedPathsSection } from './trusted-paths-section';
 import {
   useRuntimeHostSettingsErrorReporter,
   useRuntimeHostSettingsTarget,
@@ -100,7 +102,19 @@ const OS_PERMISSION_ICONS: Record<OsPermissionId, ComponentType<LucideProps>> = 
 
 type PermissionStatusFilter = 'granted' | 'pending' | 'denied' | 'other';
 
-export function PermissionCenterPage() {
+/**
+ * Settings are optional so the page still renders on a surface that has not
+ * wired the settings bridge; the trusted-paths section is simply absent there
+ * rather than half-functional.
+ */
+export interface PermissionCenterPageProps {
+  settings?: AppSettings;
+  onUpdate?(
+    patch: Parameters<typeof window.maka.settings.update>[0],
+  ): Promise<UpdateAppSettingsResult>;
+}
+
+export function PermissionCenterPage(props: PermissionCenterPageProps) {
   const host = useRuntimeHostSettingsTarget();
   const locale = useUiLocale();
   const copy = getPermissionCenterCopy(locale);
@@ -336,6 +350,10 @@ export function PermissionCenterPage() {
           ))}
         </CollapsibleGroup>
       </SettingsSection>
+
+      {props.settings && props.onUpdate ? (
+        <TrustedPathsSection settings={props.settings} onUpdate={props.onUpdate} />
+      ) : null}
 
       <Text type="supporting" size="sm" color="secondary">{copy.footnote}</Text>
     </SettingsPage>

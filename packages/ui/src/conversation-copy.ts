@@ -217,6 +217,9 @@ export interface ConversationCopy {
     enabled: string;
     reject: string;
     allowSession: string;
+    /** Offered only for read-only, offline requests; see `suggestTrustedReadPaths`. */
+    allowAlways: string;
+    allowAlwaysHint: (paths: string) => string;
   };
   clientCapability: {
     title: string;
@@ -557,6 +560,8 @@ const CONVERSATION_COPY = {
       enabled: '已启用',
       reject: '拒绝',
       allowSession: '本任务允许',
+      allowAlways: '一直允许',
+      allowAlwaysHint: (paths) => `把 ${paths} 加入可信读取路径，以后不再询问`,
     },
     clientCapability: {
       title: '允许使用客户端能力？',
@@ -716,6 +721,8 @@ const CONVERSATION_COPY = {
       enabled: '已啟用',
       reject: '拒絕',
       allowSession: '本任務允許',
+      allowAlways: '一直允許',
+      allowAlwaysHint: (paths) => `把 ${paths} 加入可信讀取路徑，以後不再詢問`,
     },
     clientCapability: {
       title: '允許使用用戶端能力？',
@@ -901,6 +908,8 @@ const CONVERSATION_COPY = {
       enabled: 'Enabled',
       reject: 'Reject',
       allowSession: 'Allow for this task',
+      allowAlways: 'Always allow',
+      allowAlwaysHint: (paths) => `Add ${paths} to trusted read paths and stop asking`,
     },
     clientCapability: {
       title: 'Allow this client capability?',

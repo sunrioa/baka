@@ -28,10 +28,13 @@ import {
   thinkingVariantsForConnection,
 } from '@maka/core/model-thinking';
 import {
+  createGenesisExecutionBoundary,
   executionBoundaryDisplayMode,
   type ExecutionBoundary,
   type ExecutionBoundarySummary,
 } from '@maka/core/sandbox-boundary';
+import { compileTrustedPaths, platformSupportsDenyEntries } from '@maka/core/trusted-paths';
+import type { PermissionSettings } from '@maka/core/settings';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
 import { isExecutorId } from '@maka/core/executor-id';
 import type { ToolMode } from '@maka/core/tool-mode';
@@ -656,11 +659,14 @@ export class HostSessionCatalogCoordinator {
               orchestrationMode: input.orchestrationMode ?? 'default',
             };
             commitAttempted = true;
-            const result = await this.#stores.createStableSession({
-              sessionId: input.sessionId,
-              requestFingerprint,
-              input: createInput,
-            });
+            const result = await this.#stores.createStableSession(
+              {
+                sessionId: input.sessionId,
+                requestFingerprint,
+                input: createInput,
+              },
+              genesisBoundaryForSettings(createInput.permissionMode, policy.policy.permissions),
+            );
             if (result.kind === 'conflict') {
               return createFailure(
                 'operation_conflict',
@@ -1358,6 +1364,32 @@ export class HostSessionCatalogCoordinator {
       throw new SessionOperationFailure('persistence_failed', 'Runtime policy is unavailable');
     }
   }
+}
+
+/**
+ * Seeds a new session's genesis boundary with the user's trusted read paths.
+ *
+ * Returns `undefined` when there is nothing to add, so an unconfigured install
+ * keeps taking the storage default (`createGenesisExecutionBoundary(mode)`)
+ * and the written row is byte-identical to what it was before this existed.
+ *
+ * `bypass` is left alone on purpose: that boundary carries no profile, so
+ * there is nothing to widen and nothing the entries would mean.
+ */
+function genesisBoundaryForSettings(
+  permissionMode: CreateSessionInput['permissionMode'],
+  permissions: PermissionSettings | undefined,
+): ExecutionBoundary | undefined {
+  if (permissionMode === undefined || permissionMode === 'bypass') return undefined;
+  const trustedPaths = permissions?.trustedPaths;
+  if (!trustedPaths) return undefined;
+  const { entries } = compileTrustedPaths({
+    readPaths: trustedPaths.readPaths,
+    denyPaths: trustedPaths.denyPaths,
+    denySupported: platformSupportsDenyEntries(process.platform),
+  });
+  if (entries.length === 0) return undefined;
+  return createGenesisExecutionBoundary(permissionMode, { trustedEntries: entries });
 }
 
 function sessionConfigurationMatches(

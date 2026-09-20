@@ -18,6 +18,7 @@
  */
 
 import { isThinkingLevel } from '../model-thinking.js';
+import { isNormalizedAbsolutePath } from '../absolute-path.js';
 import { CHAT_DEFAULT_PERMISSION_MODES } from '../settings.js';
 import { normalizeSubagentSettings } from '../subagent-settings.js';
 import type {
@@ -68,7 +69,11 @@ export function decodeRuntimePolicyV2(value: unknown): RuntimePolicy {
     normalizeSubagentSettings(policy.subagents),
     { preference: 'auto', executable: '' },
   );
-  assertCanonicalValue(value, withoutExternalAgents(withoutShell(decoded)), 'runtime policy v2');
+  assertCanonicalValue(
+    value,
+    withoutPermissions(withoutExternalAgents(withoutShell(decoded))),
+    'runtime policy v2',
+  );
   return decoded;
 }
 
@@ -186,12 +191,14 @@ function normalizeRuntimePolicy(value: unknown): RuntimePolicy {
     'subagents',
     'shell',
     'externalAgents',
+    'permissions',
   ]);
   return normalizeRuntimePolicyFields(
     policy,
     normalizeSubagentSettings(policy.subagents),
     normalizeShell(policy.shell),
     normalizeExternalAgents(policy.externalAgents),
+    normalizePermissions(policy.permissions),
   );
 }
 
@@ -200,6 +207,9 @@ function normalizeRuntimePolicyFields(
   subagents: RuntimePolicy['subagents'],
   shell: RuntimePolicy['shell'],
   externalAgents: RuntimePolicy['externalAgents'] = { antigravity: { executable: '' } },
+  // v2 calls this directly and predates trusted paths; every later version
+  // synthesizes the field before delegating to the canonical decoder.
+  permissions: RuntimePolicy['permissions'] = emptyPermissions(),
 ): RuntimePolicy {
   return {
     networkProxy: normalizeNetworkProxy(policy.networkProxy),
@@ -212,6 +222,7 @@ function normalizeRuntimePolicyFields(
     subagents,
     shell,
     externalAgents,
+    permissions,
   };
 }
 
@@ -234,6 +245,8 @@ function normalizeMutationOperation(operation: Record<string, unknown>): Runtime
       return { kind: operation.kind, value: normalizePrivacy(operation.value) };
     case 'set_chat_defaults':
       return { kind: operation.kind, value: normalizeChatDefaults(operation.value) };
+    case 'set_permissions':
+      return { kind: operation.kind, value: normalizePermissions(operation.value) };
     case 'set_web_search':
       return { kind: operation.kind, value: normalizeWebSearch(operation.value) };
     case 'set_subagents':
@@ -427,6 +440,37 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   };
 }
 
+function normalizeTrustedPathList(value: unknown, label: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw domainError(`${label} must be an array`);
+  for (const entry of value) {
+    if (typeof entry !== 'string') throw domainError(`${label} must contain only strings`);
+    // These strings are compiled straight into a sandbox profile. Reject
+    // rather than repair: `decodeSandboxProfile` throws on a non-normalized
+    // entry, so a silently "fixed" path would surface far from here as a
+    // session that cannot open at all.
+    if (!isNormalizedAbsolutePath(entry)) {
+      throw domainError(`${label} must contain normalized absolute paths`);
+    }
+  }
+  return [...new Set(value as string[])].sort();
+}
+
+function normalizePermissions(value: unknown): RuntimePolicy['permissions'] {
+  const item = exactRecord(value, 'permission policy', ['trustedPaths']);
+  const trustedPaths = exactRecord(item.trustedPaths, 'trusted paths', ['readPaths', 'denyPaths']);
+  const denyPaths = normalizeTrustedPathList(trustedPaths.denyPaths, 'trusted deny paths');
+  const denied = new Set(denyPaths);
+  return {
+    trustedPaths: {
+      readPaths: normalizeTrustedPathList(trustedPaths.readPaths, 'trusted read paths').filter(
+        (path) => !denied.has(path),
+      ),
+      denyPaths,
+    },
+  };
+}
+
 function normalizeWebSearch(value: unknown): RuntimePolicy['webSearch'] {
   const item = exactRecord(value, 'web search policy', ['enabled', 'defaultProvider']);
   if (!(WEB_SEARCH_PROVIDERS as readonly unknown[]).includes(item.defaultProvider)) {
@@ -454,7 +498,36 @@ export function decodeRuntimePolicyV3(value: unknown): RuntimePolicy {
   return decodeCanonicalRuntimePolicy({
     ...old,
     externalAgents: { antigravity: { executable: '' } },
+    permissions: emptyPermissions(),
   });
+}
+
+/** Read the previous document, which predates trusted paths. */
+export function decodeRuntimePolicyV4(value: unknown): RuntimePolicy {
+  const old = exactRecord(value, 'runtime policy v4', [
+    'networkProxy',
+    'personalization',
+    'memory',
+    'workspaceInstructions',
+    'privacy',
+    'chatDefaults',
+    'webSearch',
+    'subagents',
+    'shell',
+    'externalAgents',
+  ]);
+  return decodeCanonicalRuntimePolicy({ ...old, permissions: emptyPermissions() });
+}
+
+function emptyPermissions(): RuntimePolicy['permissions'] {
+  return { trustedPaths: { readPaths: [], denyPaths: [] } };
+}
+
+function withoutPermissions<T extends { permissions: RuntimePolicy['permissions'] }>(
+  policy: T,
+): Omit<T, 'permissions'> {
+  const { permissions: _permissions, ...legacy } = policy;
+  return legacy;
 }
 
 function withoutExternalAgents<T extends { externalAgents: RuntimePolicy['externalAgents'] }>(

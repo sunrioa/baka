@@ -36,6 +36,7 @@ import {
 import { defaultLocalMemorySettings, normalizeLocalMemorySettings } from './local-memory.js';
 import type { PermissionMode } from './permission.js';
 import { decodePersistedPermissionMode } from './permission.js';
+import { isNormalizedAbsolutePath, trimTrailingPathSeparators } from './absolute-path.js';
 import type { UsageProvenance } from './usage-ledger-merge.js';
 import {
   UI_LOCALE_PREFERENCES,
@@ -537,6 +538,49 @@ export interface WorkHubSettings {
 }
 
 /**
+ * Directories the user has pre-declared as readable by managed sessions
+ * (Settings surface: 权限中心 → 可信读取路径).
+ *
+ * Without this, a managed boundary only ever contains `:workspace_roots`,
+ * `:tmpdir` and `:slash_tmp`, so every read outside the workspace becomes a
+ * `sandbox_boundary_required` prompt — one per file, per session, because
+ * grants are keyed by session. These entries are compiled into the genesis
+ * profile as read-only subtree entries, which lets
+ * `assessSandboxBoundaryExpansion` answer `noop` and skip the prompt
+ * entirely.
+ *
+ * Read-only on purpose: a pre-declared write path would hand the model
+ * silent authority to modify files the user never saw named in a prompt.
+ * Writes keep going through the existing per-request approval.
+ *
+ * `denyPaths` wins over `readPaths` so a credential directory nested under a
+ * trusted root stays unreadable. Only the macOS seatbelt backend can express
+ * a deny entry — bubblewrap and the Windows profile builder throw on one — so
+ * elsewhere a read root that needs a carve-out is refused outright rather than
+ * granted without it. See `compileTrustedPaths` in `trusted-paths.ts`.
+ */
+export interface TrustedPathsSettings {
+  /** Normalized absolute directories granted read access, as subtrees. */
+  readPaths: string[];
+  /** Normalized absolute paths denied outright; takes precedence over `readPaths`. */
+  denyPaths: string[];
+}
+
+/** Sandbox-permission preferences that seed every new managed session. */
+export interface PermissionSettings {
+  trustedPaths: TrustedPathsSettings;
+}
+
+/**
+ * `Partial<PermissionSettings>` would still demand a whole `TrustedPathsSettings`,
+ * forcing every caller that edits one list to resend the other. `mergeSettings`
+ * merges this field one level deeper for exactly that reason.
+ */
+export interface PermissionSettingsPatch {
+  trustedPaths?: Partial<TrustedPathsSettings>;
+}
+
+/**
  * System-level power behavior (Settings surface: the 定时任务 page's
  * capability row). Scheduled tasks are driven by an in-process timer; when
  * the machine sleeps, that timer is frozen and reminders silently never
@@ -578,6 +622,7 @@ export interface AppSettings {
   projects: ProjectPreferencesSettings;
   notifications: NotificationSettings;
   workHub: WorkHubSettings;
+  permissions: PermissionSettings;
   system: SystemSettings;
   externalAgents: { antigravity: { executable: string } };
   shell: ShellSettings;
@@ -768,6 +813,7 @@ export type UpdateAppSettingsInput = Partial<{
   projects: Partial<ProjectPreferencesSettings>;
   notifications: Partial<NotificationSettings>;
   workHub: Partial<WorkHubSettings>;
+  permissions: PermissionSettingsPatch;
   system: Partial<SystemSettings>;
   externalAgents: AppSettings['externalAgents'];
   shell: Partial<ShellSettings>;
@@ -856,6 +902,10 @@ export function createDefaultSettings(): AppSettings {
     workHub: {
       enabled: false,
     },
+    // Empty by default: a fresh install grants no authority the user did not
+    // ask for. Adding a path here is the deliberate act that stops the
+    // per-file prompts for that subtree.
+    permissions: defaultPermissionSettings(),
     system: {
       // Off by default: holding a power-save blocker is an explicit,
       // battery-affecting opt-in, not a silent default.
@@ -946,6 +996,14 @@ export function mergeSettings(current: AppSettings, patch: UpdateAppSettingsInpu
       ...current.workHub,
       ...(patch.workHub ?? {}),
     },
+    permissions: {
+      ...current.permissions,
+      ...(patch.permissions ?? {}),
+      trustedPaths: {
+        ...current.permissions.trustedPaths,
+        ...(patch.permissions?.trustedPaths ?? {}),
+      },
+    },
     system: {
       ...current.system,
       ...(patch.system ?? {}),
@@ -981,6 +1039,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     projects: value.projects,
     notifications: value.notifications,
     workHub: value.workHub,
+    permissions: value.permissions,
     system: value.system,
     externalAgents: value.externalAgents,
     shell: value.shell,
@@ -1077,6 +1136,13 @@ export function normalizeSettings(input: unknown): AppSettings {
     workHub: {
       enabled: typeof base.workHub.enabled === 'boolean' ? base.workHub.enabled : false,
     },
+    // Fail-closed path sanitization. These strings are compiled straight into
+    // a sandbox profile, so a hand-edited settings.json must never be able to
+    // widen the boundary with a relative path, a traversal segment, or a
+    // non-string. Anything that is not already a normalized absolute path is
+    // dropped rather than repaired — a repaired path is a path the user never
+    // reviewed.
+    permissions: normalizePermissionSettings(base.permissions),
     // Fail-closed boolean coercion, same reasoning as
     // `notifications.runComplete`: a non-boolean `keepSystemAwake` (from a
     // hand-edited or legacy settings.json) must not reach the main-process
@@ -1124,6 +1190,45 @@ function normalizeWorkspaceInstructionsSettings(
 
 function defaultPrivacySettings(): PrivacySettings {
   return { incognitoActive: false };
+}
+
+function defaultPermissionSettings(): PermissionSettings {
+  return { trustedPaths: { readPaths: [], denyPaths: [] } };
+}
+
+/**
+ * Keep only entries that are already normalized absolute paths, de-duplicated
+ * and ordered deterministically so two installs with the same setting compile
+ * to byte-identical profiles.
+ */
+function normalizeTrustedPathList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const kept = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue;
+    const trimmed = trimTrailingPathSeparators(entry.trim());
+    if (trimmed.length === 0) continue;
+    if (!isNormalizedAbsolutePath(trimmed)) continue;
+    kept.add(trimmed);
+  }
+  return [...kept].sort();
+}
+
+function normalizePermissionSettings(settings: PermissionSettings | undefined): PermissionSettings {
+  const trustedPaths = settings?.trustedPaths;
+  const denyPaths = normalizeTrustedPathList(trustedPaths?.denyPaths);
+  const denied = new Set(denyPaths);
+  return {
+    trustedPaths: {
+      // A path listed in both lists is a contradiction the user can create by
+      // hand. Resolve it the safe way rather than letting entry order in the
+      // compiled profile decide.
+      readPaths: normalizeTrustedPathList(trustedPaths?.readPaths).filter(
+        (path) => !denied.has(path),
+      ),
+      denyPaths,
+    },
+  };
 }
 
 function defaultProjectPreferencesSettings(): ProjectPreferencesSettings {
