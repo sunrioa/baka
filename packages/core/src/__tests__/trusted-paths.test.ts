@@ -22,10 +22,13 @@ import { describe, it } from 'node:test';
 
 import {
   compileTrustedPaths,
+  consolidateTrustedPaths,
+  MAX_TRUSTED_PATHS,
   parentDirectory,
   platformSupportsDenyEntries,
   suggestTrustedReadPaths,
 } from '../trusted-paths.js';
+import { normalizeSettings } from '../settings.js';
 import {
   assessSandboxBoundaryExpansion,
   createGenesisExecutionBoundary,
@@ -318,5 +321,72 @@ describe('suggestTrustedReadPaths', () => {
       }),
       ['/Users/me/Docs'],
     );
+  });
+});
+
+describe('consolidateTrustedPaths', () => {
+  it('drops a path another entry already covers', () => {
+    assert.deepEqual(
+      consolidateTrustedPaths(['/Users/me/proj', '/Users/me/proj/src', '/Users/me/proj/src/a']),
+      ['/Users/me/proj'],
+    );
+  });
+
+  it('adding a broader root collapses the children it subsumes', () => {
+    const before = ['/Users/me/proj/src/a', '/Users/me/proj/src/b', '/Users/me/other'];
+    assert.deepEqual(consolidateTrustedPaths(before), [
+      '/Users/me/other',
+      '/Users/me/proj/src/a',
+      '/Users/me/proj/src/b',
+    ]);
+    assert.deepEqual(consolidateTrustedPaths([...before, '/Users/me/proj']), [
+      '/Users/me/other',
+      '/Users/me/proj',
+    ]);
+  });
+
+  it('leaves siblings alone rather than inventing their parent', () => {
+    // Merging these would grant /Users/me, which nobody approved.
+    assert.deepEqual(consolidateTrustedPaths(['/Users/me/a', '/Users/me/b']), [
+      '/Users/me/a',
+      '/Users/me/b',
+    ]);
+  });
+
+  it('is not fooled by a shared name prefix', () => {
+    assert.deepEqual(consolidateTrustedPaths(['/Users/me/doc', '/Users/me/documents']), [
+      '/Users/me/doc',
+      '/Users/me/documents',
+    ]);
+  });
+
+  it('drops entries that are not normalized absolute paths', () => {
+    assert.deepEqual(consolidateTrustedPaths(['relative', '/a/../a', '/ok/', '/ok']), ['/ok']);
+  });
+
+  it('is idempotent and order-independent', () => {
+    const once = consolidateTrustedPaths(['/b/x', '/a', '/a/y', '/b']);
+    assert.deepEqual(once, consolidateTrustedPaths([...once].reverse()));
+    assert.deepEqual(once, ['/a', '/b']);
+  });
+});
+
+describe('trusted path list limits', () => {
+  it('normalizeSettings consolidates and caps the stored lists', () => {
+    const many = Array.from({ length: MAX_TRUSTED_PATHS + 20 }, (_, index) => `/root/p${index}`);
+    const settings = normalizeSettings({
+      permissions: { trustedPaths: { readPaths: [...many, '/root/p1/nested'], denyPaths: [] } },
+    });
+    const readPaths = settings.permissions.trustedPaths.readPaths;
+    assert.equal(readPaths.length, MAX_TRUSTED_PATHS);
+    assert.ok(!readPaths.includes('/root/p1/nested'), 'a covered path must not survive');
+  });
+
+  it('a single broad root collapses a full list back to one entry', () => {
+    const many = Array.from({ length: 40 }, (_, index) => `/root/p${index}`);
+    const settings = normalizeSettings({
+      permissions: { trustedPaths: { readPaths: [...many, '/root'], denyPaths: [] } },
+    });
+    assert.deepEqual(settings.permissions.trustedPaths.readPaths, ['/root']);
   });
 });

@@ -21,6 +21,7 @@ import { useState } from 'react';
 import { Button, HStack, List, ListItem, Text, VStack } from '@astryxdesign/core';
 import { TextInput, useMountedRef, useToast, useUiLocale } from '@maka/ui';
 import { isNormalizedAbsolutePath, trimTrailingPathSeparators } from '@maka/core/absolute-path';
+import { MAX_TRUSTED_PATHS } from '@maka/core/trusted-paths';
 import type { AppSettings, UpdateAppSettingsResult } from '@maka/core/settings';
 
 import { SettingsSection, SettingsField, SettingsRow } from './settings-section';
@@ -95,8 +96,9 @@ function PathListField(props: {
   // require the result to already be a normalized absolute path. Repairing it
   // here would store a path the user never saw.
   const candidate = trimTrailingPathSeparators(draft.trim());
+  const full = props.paths.length >= MAX_TRUSTED_PATHS;
   const canAdd =
-    candidate.length > 0 && !saving && isNormalizedAbsolutePath(candidate);
+    candidate.length > 0 && !saving && !full && isNormalizedAbsolutePath(candidate);
 
   async function commit(paths: string[], actionKey: string): Promise<boolean> {
     if (!guard.begin(actionKey)) return false;
@@ -116,6 +118,10 @@ function PathListField(props: {
   }
 
   async function add(): Promise<void> {
+    if (full) {
+      setError(copy.listFull(MAX_TRUSTED_PATHS));
+      return;
+    }
     if (!isNormalizedAbsolutePath(candidate)) {
       setError(copy.invalidPath);
       return;
@@ -142,6 +148,11 @@ function PathListField(props: {
       <VStack>
         <Text>{props.label}</Text>
         <Text>{props.description}</Text>
+        {props.paths.length > 0 ? (
+          <Text type="supporting" size="sm" color="secondary">
+            {copy.count(props.paths.length, MAX_TRUSTED_PATHS)}
+          </Text>
+        ) : null}
         {props.paths.length === 0 ? (
           <Text>{props.emptyLabel}</Text>
         ) : (

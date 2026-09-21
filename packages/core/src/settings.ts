@@ -36,7 +36,8 @@ import {
 import { defaultLocalMemorySettings, normalizeLocalMemorySettings } from './local-memory.js';
 import type { PermissionMode } from './permission.js';
 import { decodePersistedPermissionMode } from './permission.js';
-import { isNormalizedAbsolutePath, trimTrailingPathSeparators } from './absolute-path.js';
+import { trimTrailingPathSeparators } from './absolute-path.js';
+import { consolidateTrustedPaths, MAX_TRUSTED_PATHS } from './trusted-paths.js';
 import type { UsageProvenance } from './usage-ledger-merge.js';
 import {
   UI_LOCALE_PREFERENCES,
@@ -1197,21 +1198,25 @@ function defaultPermissionSettings(): PermissionSettings {
 }
 
 /**
- * Keep only entries that are already normalized absolute paths, de-duplicated
- * and ordered deterministically so two installs with the same setting compile
- * to byte-identical profiles.
+ * Keep only entries that are already normalized absolute paths, drop the ones
+ * another entry already covers, and order the rest deterministically so two
+ * installs with the same setting compile to byte-identical profiles.
+ *
+ * Truncation is the backstop, not the interface: the settings surface refuses
+ * the add that would exceed `MAX_TRUSTED_PATHS` and says so. Reaching it here
+ * means a hand-edited or migrated file, where keeping fewer paths than asked
+ * is the safe direction.
  */
 function normalizeTrustedPathList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  const kept = new Set<string>();
+  const candidates: string[] = [];
   for (const entry of value) {
     if (typeof entry !== 'string') continue;
     const trimmed = trimTrailingPathSeparators(entry.trim());
     if (trimmed.length === 0) continue;
-    if (!isNormalizedAbsolutePath(trimmed)) continue;
-    kept.add(trimmed);
+    candidates.push(trimmed);
   }
-  return [...kept].sort();
+  return consolidateTrustedPaths(candidates).slice(0, MAX_TRUSTED_PATHS);
 }
 
 function normalizePermissionSettings(settings: PermissionSettings | undefined): PermissionSettings {

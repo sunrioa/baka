@@ -34,6 +34,45 @@
 import { pathWithinRoot, isNormalizedAbsolutePath } from './absolute-path.js';
 import type { FileSystemSandboxEntry } from './permission-profile.js';
 
+/**
+ * How many entries one trusted list may hold.
+ *
+ * The list is not only an audit surface, it is compiled into every new
+ * session's profile: each entry becomes a seatbelt clause on macOS and a bind
+ * argument under bubblewrap, and the whole boundary is capped at
+ * `MAX_EXECUTION_BOUNDARY_SERIALIZED_BYTES`. An unbounded list eventually
+ * fails session creation outright.
+ *
+ * 64 is well inside every backend's comfort and still more than a person will
+ * read in one sitting — past that the list has stopped being reviewable, which
+ * is the real limit.
+ */
+export const MAX_TRUSTED_PATHS = 64;
+
+/**
+ * Reduces a list to the paths that are not already covered by another one.
+ *
+ * Without this, clicking "always allow" around a deep tree accumulates
+ * `/proj/src/a`, `/proj/src/b`, `/proj/tests/c` … forever, and adding the
+ * obvious `/proj` later would leave all of them behind. Consolidation makes
+ * broadening a path actually clean up: the children disappear.
+ *
+ * It never grants more than the input already did — an entry is dropped only
+ * when a different entry in the same list contains it. Siblings are left
+ * alone, because merging them would hand out a parent directory nobody
+ * approved.
+ */
+export function consolidateTrustedPaths(paths: readonly string[]): string[] {
+  const valid = [...new Set(paths.filter(isNormalizedAbsolutePath))].sort();
+  const kept: string[] = [];
+  for (const path of valid) {
+    // `valid` is sorted, so any container is already in `kept`.
+    if (kept.some((existing) => pathWithinRoot(path, existing))) continue;
+    kept.push(path);
+  }
+  return kept;
+}
+
 export interface CompileTrustedPathsInput {
   /** Directories granted read access as subtrees. */
   readonly readPaths: readonly string[];

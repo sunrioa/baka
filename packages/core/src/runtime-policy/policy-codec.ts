@@ -19,6 +19,7 @@
 
 import { isThinkingLevel } from '../model-thinking.js';
 import { isNormalizedAbsolutePath } from '../absolute-path.js';
+import { consolidateTrustedPaths, MAX_TRUSTED_PATHS } from '../trusted-paths.js';
 import { CHAT_DEFAULT_PERMISSION_MODES } from '../settings.js';
 import { normalizeSubagentSettings } from '../subagent-settings.js';
 import type {
@@ -453,7 +454,16 @@ function normalizeTrustedPathList(value: unknown, label: string): string[] {
       throw domainError(`${label} must contain normalized absolute paths`);
     }
   }
-  return [...new Set(value as string[])].sort();
+  // Consolidation cannot grant anything the caller did not send, so it is safe
+  // to apply rather than reject: it only drops paths another entry in the same
+  // list already covers. The cap is a hard refusal instead, because silently
+  // keeping 64 of the 80 paths a caller asked for would leave the policy
+  // disagreeing with whatever wrote it.
+  const consolidated = consolidateTrustedPaths(value as string[]);
+  if (consolidated.length > MAX_TRUSTED_PATHS) {
+    throw domainError(`${label} must hold at most ${MAX_TRUSTED_PATHS} paths`);
+  }
+  return consolidated;
 }
 
 function normalizePermissions(value: unknown): RuntimePolicy['permissions'] {

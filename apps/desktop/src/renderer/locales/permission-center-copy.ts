@@ -115,6 +115,8 @@ export type PermissionCenterCopy = {
     denyPlatformNote: string;
     invalidPath: string;
     duplicatePath: string;
+    listFull(max: number): string;
+    count(shown: number, max: number): string;
     saveFailed: string;
     listAria: string;
     appliesToNewSessions: string;
@@ -195,6 +197,8 @@ const PERMISSION_CENTER_COPY = {
         '仅 macOS 的沙箱能表达排除路径。在 Linux 和 Windows 上，含有排除路径的可读目录会被整体拒绝，而不是在缺少排除的情况下放开。',
       invalidPath: '需要一个规范化的绝对路径，且结尾不能有斜杠。',
       duplicatePath: '该路径已在列表中。',
+      listFull: (max: number) => `最多 ${max} 条。先移除用不到的，或改用范围更大的上级目录。`,
+      count: (shown: number, max: number) => `${shown} / ${max}`,
       saveFailed: '保存可信路径失败',
       listAria: '可信路径列表',
       appliesToNewSessions: '改动只影响此后新建的会话，已有会话的边界不变。',
@@ -273,6 +277,8 @@ const PERMISSION_CENTER_COPY = {
         '僅 macOS 的沙箱能表達排除路徑。在 Linux 與 Windows 上，含有排除路徑的可讀目錄會被整體拒絕，而不是在缺少排除的情況下放開。',
       invalidPath: '需要一個規範化的絕對路徑，且結尾不能有斜線。',
       duplicatePath: '該路徑已在清單中。',
+      listFull: (max: number) => `最多 ${max} 條。先移除用不到的，或改用範圍更大的上級目錄。`,
+      count: (shown: number, max: number) => `${shown} / ${max}`,
       saveFailed: '儲存可信路徑失敗',
       listAria: '可信路徑清單',
       appliesToNewSessions: '變更只影響此後新建的工作階段，既有工作階段的邊界不變。',
@@ -353,6 +359,8 @@ const PERMISSION_CENTER_COPY = {
         'Only the macOS sandbox can express an excluded path. On Linux and Windows a readable directory that needs one is refused outright rather than granted without it.',
       invalidPath: 'Enter a normalized absolute path with no trailing separator.',
       duplicatePath: 'That path is already listed.',
+      listFull: (max: number) => `At most ${max}. Remove one you no longer need, or use a broader parent directory instead.`,
+      count: (shown: number, max: number) => `${shown} / ${max}`,
       saveFailed: 'Could not save trusted paths',
       listAria: 'Trusted paths',
       appliesToNewSessions: 'Applies to sessions created from now on; existing boundaries are unchanged.',
