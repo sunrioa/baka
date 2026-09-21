@@ -75,6 +75,7 @@ export function hasRuntimeHostSettingsPatch(
       patch.workspaceInstructions ||
       patch.privacy ||
       patch.chatDefaults ||
+      patch.permissions ||
       patch.webSearch ||
       patch.subagents ||
       patch.personalization?.displayName !== undefined ||

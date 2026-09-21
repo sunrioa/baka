@@ -288,6 +288,7 @@ async function loadRuntimeHostSettingsWithoutLane(
     workspaceInstructions: policy.workspaceInstructions,
     privacy: policy.privacy,
     chatDefaults: policy.chatDefaults,
+    permissions: policy.permissions,
     externalAgents: policy.externalAgents,
     shell: policy.shell,
     webSearch: {

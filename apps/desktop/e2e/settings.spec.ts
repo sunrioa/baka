@@ -81,3 +81,38 @@ test('opening settings commits an active titlebar rename', async ({ window: page
     (await window.maka.sessions.list()).some((session) => session.name === 'renamed before settings'),
   )).toBe(true);
 });
+
+test('a trusted read path round-trips through the Host policy document', async ({ window: page }) => {
+  const TRUSTED_PATH = '/tmp/maka-e2e-trusted-read';
+
+  await ensureSidebarExpanded(page);
+  await page.getByRole('button', { name: '设置' }).click();
+  await page.getByRole('button', { name: '权限与能力', exact: true }).click();
+
+  const readField = page.getByRole('textbox', { name: '可读目录', exact: true });
+  await expect(readField).toBeVisible();
+  await readField.fill(TRUSTED_PATH);
+  await page.getByRole('button', { name: '添加', exact: true }).first().click();
+
+  // The Host is the authority: assert the policy document took it, not just
+  // that a row appeared in the list.
+  await expect
+    .poll(() =>
+      page.evaluate(async () => (await window.maka.settings.get()).permissions.trustedPaths.readPaths),
+    )
+    .toContain(TRUSTED_PATH);
+
+  // Reopening proves it was read back from the Host rather than held in
+  // renderer state.
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '设置' }).click();
+  await page.getByRole('button', { name: '权限与能力', exact: true }).click();
+  await expect(page.getByRole('button', { name: `移除 ${TRUSTED_PATH}` })).toBeVisible();
+
+  await page.getByRole('button', { name: `移除 ${TRUSTED_PATH}` }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(async () => (await window.maka.settings.get()).permissions.trustedPaths.readPaths),
+    )
+    .not.toContain(TRUSTED_PATH);
+});
