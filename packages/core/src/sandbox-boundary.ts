@@ -38,6 +38,7 @@ import {
   type PermissionProfileMatchContext,
 } from './permission-profile.js';
 import { serializedByteLength } from './serialized-byte-length.js';
+import { suggestTrustedReadPaths } from './trusted-paths.js';
 
 export const SANDBOX_BOUNDARY_ACCESS_MODES = ['read', 'write'] as const;
 export type SandboxBoundaryAccess = (typeof SANDBOX_BOUNDARY_ACCESS_MODES)[number];
@@ -112,6 +113,8 @@ export type SandboxBoundaryDecision = 'allow' | 'deny';
 export interface SandboxBoundaryResponse {
   readonly requestId: string;
   readonly decision: SandboxBoundaryDecision;
+  /** Defaults to `request` when absent. */
+  readonly scope?: SandboxBoundaryDecisionScope;
 }
 
 export const SANDBOX_BOUNDARY_CLOSURE_REASONS = [
@@ -122,10 +125,63 @@ export const SANDBOX_BOUNDARY_CLOSURE_REASONS = [
 export type SandboxBoundaryClosureReason = (typeof SANDBOX_BOUNDARY_CLOSURE_REASONS)[number];
 export const SANDBOX_BOUNDARY_HOST_RESTART_CLOSURE_REASON = 'host_restarted';
 
+/**
+ * How much of the surrounding tree an approval covers.
+ *
+ * `request` grants exactly what the tool asked for. `suggested_directory`
+ * grants the directory that request sits in, so the rest of a working session
+ * in that folder stops prompting file by file.
+ *
+ * A level, never a path: the caller cannot name the directory, the Host
+ * derives it from the stored request. That keeps a renderer from widening a
+ * boundary to somewhere the request never mentioned.
+ */
+export const SANDBOX_BOUNDARY_DECISION_SCOPES = ['request', 'suggested_directory'] as const;
+export type SandboxBoundaryDecisionScope = (typeof SANDBOX_BOUNDARY_DECISION_SCOPES)[number];
+
+export function isSandboxBoundaryDecisionScope(
+  value: unknown,
+): value is SandboxBoundaryDecisionScope {
+  return (
+    typeof value === 'string' &&
+    (SANDBOX_BOUNDARY_DECISION_SCOPES as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Rewrites an expansion to cover its suggested directories instead of the
+ * exact paths requested.
+ *
+ * Returns the input unchanged whenever widening is refused — a write, a
+ * network request, or a suggestion that lands on a filesystem root. The
+ * approval then means exactly what it would have meant without the scope, so
+ * a caller asking to widen can never end up granting *less* either.
+ */
+export function widenSandboxBoundaryExpansion(
+  expansion: SandboxBoundaryExpansion,
+  scope: SandboxBoundaryDecisionScope,
+): SandboxBoundaryExpansion {
+  if (scope !== 'suggested_directory') return expansion;
+  const directories = suggestTrustedReadPaths(expansion);
+  if (directories.length === 0) return expansion;
+  return {
+    ...expansion,
+    filesystem: {
+      entries: directories.map((path) => ({
+        path,
+        access: 'read' as const,
+        scope: 'subtree' as const,
+      })),
+    },
+  };
+}
+
 export interface SettleSandboxBoundaryRequest {
   readonly sessionId: string;
   readonly requestId: string;
   readonly decision: SandboxBoundaryDecision;
+  /** Defaults to `request`; only an `allow` can widen. */
+  readonly scope?: SandboxBoundaryDecisionScope;
   /** Internal fail-closed settlement used when a live request owner cannot continue. */
   readonly closureReason?: SandboxBoundaryClosureReason;
 }

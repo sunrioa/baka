@@ -39,6 +39,7 @@ import {
   createGenesisExecutionBoundary,
   decodeExecutionBoundary,
   assessSandboxBoundaryExpansion,
+  widenSandboxBoundaryExpansion,
   validateSandboxBoundaryExpansion,
   isSandboxBoundaryRestartClosure,
   type ExecutionBoundary,
@@ -1196,11 +1197,15 @@ export function createMemorySessionStore(
             settledAt: Date.now(),
           };
         else {
-          const assessment = assessSandboxBoundaryExpansion(current.profile, request!.expansion, {
-            root: requireHeader(s, input.sessionId).header.cwd,
-            tmpdir: tmpdir(),
-            slashTmp: '/tmp',
-          });
+          const assessment = assessSandboxBoundaryExpansion(
+            current.profile,
+            widenSandboxBoundaryExpansion(request!.expansion, input.scope ?? 'request'),
+            {
+              root: requireHeader(s, input.sessionId).header.cwd,
+              tmpdir: tmpdir(),
+              slashTmp: '/tmp',
+            },
+          );
           if (assessment.outcome === 'conflict')
             settled = {
               ...request!,

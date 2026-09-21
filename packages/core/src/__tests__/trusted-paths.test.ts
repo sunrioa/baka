@@ -30,8 +30,10 @@ import {
 } from '../trusted-paths.js';
 import { normalizeSettings } from '../settings.js';
 import {
+  applySandboxBoundaryExpansion,
   assessSandboxBoundaryExpansion,
   createGenesisExecutionBoundary,
+  widenSandboxBoundaryExpansion,
 } from '../sandbox-boundary.js';
 import { canReadPath, canWritePath } from '../permission-profile.js';
 
@@ -388,5 +390,97 @@ describe('trusted path list limits', () => {
       permissions: { trustedPaths: { readPaths: [...many, '/root'], denyPaths: [] } },
     });
     assert.deepEqual(settings.permissions.trustedPaths.readPaths, ['/root']);
+  });
+});
+
+describe('widenSandboxBoundaryExpansion', () => {
+  const READ_FILE = {
+    filesystem: {
+      entries: [{ path: '/Users/me/Docs/a.md', access: 'read' as const, scope: 'exact' as const }],
+    },
+  };
+
+  it('leaves the expansion alone for the request scope', () => {
+    assert.deepEqual(widenSandboxBoundaryExpansion(READ_FILE, 'request'), READ_FILE);
+  });
+
+  it('replaces an exact read with its directory as a subtree', () => {
+    assert.deepEqual(widenSandboxBoundaryExpansion(READ_FILE, 'suggested_directory'), {
+      filesystem: {
+        entries: [{ path: '/Users/me/Docs', access: 'read', scope: 'subtree' }],
+      },
+    });
+  });
+
+  it('refuses to widen a write, leaving the request untouched', () => {
+    const write = {
+      filesystem: {
+        entries: [
+          { path: '/Users/me/Docs/a.md', access: 'write' as const, scope: 'exact' as const },
+        ],
+      },
+    };
+    assert.deepEqual(widenSandboxBoundaryExpansion(write, 'suggested_directory'), write);
+  });
+
+  it('refuses to widen a network request', () => {
+    const networked = { ...READ_FILE, network: { enabled: true as const } };
+    assert.deepEqual(widenSandboxBoundaryExpansion(networked, 'suggested_directory'), networked);
+  });
+
+  it('refuses to widen up to a filesystem root', () => {
+    const shallow = {
+      filesystem: {
+        entries: [{ path: '/etc', access: 'read' as const, scope: 'exact' as const }],
+      },
+    };
+    assert.deepEqual(widenSandboxBoundaryExpansion(shallow, 'suggested_directory'), shallow);
+  });
+
+  it('collapses sibling files into the one directory they share', () => {
+    const siblings = {
+      filesystem: {
+        entries: [
+          { path: '/Users/me/Docs/a.md', access: 'read' as const, scope: 'exact' as const },
+          { path: '/Users/me/Docs/b.md', access: 'read' as const, scope: 'exact' as const },
+        ],
+      },
+    };
+    assert.deepEqual(widenSandboxBoundaryExpansion(siblings, 'suggested_directory'), {
+      filesystem: { entries: [{ path: '/Users/me/Docs', access: 'read', scope: 'subtree' }] },
+    });
+  });
+
+  it('a widened approval makes the sibling read a noop in the same session', () => {
+    const base = createGenesisExecutionBoundary('ask');
+    assert.equal(base.kind, 'managed');
+    if (base.kind !== 'managed') throw new Error('unreachable');
+    const widened = applySandboxBoundaryExpansion(
+      base.profile,
+      widenSandboxBoundaryExpansion(READ_FILE, 'suggested_directory'),
+    );
+
+    const sibling = assessSandboxBoundaryExpansion(
+      widened,
+      {
+        filesystem: {
+          entries: [{ path: '/Users/me/Docs/b.md', access: 'read', scope: 'exact' }],
+        },
+      },
+      MATCH_CONTEXT,
+    );
+    assert.equal(sibling.outcome, 'noop');
+
+    // Widening a read must not have handed out a write.
+    const write = assessSandboxBoundaryExpansion(
+      widened,
+      {
+        filesystem: {
+          entries: [{ path: '/Users/me/Docs/b.md', access: 'write', scope: 'exact' }],
+        },
+      },
+      MATCH_CONTEXT,
+    );
+    assert.notEqual(write.outcome, 'noop');
   });
 });

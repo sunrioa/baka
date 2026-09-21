@@ -33,8 +33,10 @@ import {
   type InteractionPermissionProjectionInput,
 } from './interaction-permission-review.js';
 import {
+  SANDBOX_BOUNDARY_DECISION_SCOPES,
   SANDBOX_BOUNDARY_REQUEST_STATUSES,
   validateSandboxBoundaryExpansion,
+  type SandboxBoundaryDecisionScope,
   type SandboxBoundaryExpansion,
   type SandboxBoundaryRequestStatus,
 } from './sandbox-boundary.js';
@@ -221,6 +223,11 @@ export type InteractionFormResponse = { readonly requestId: string } & Interacti
 export interface InteractionSandboxBoundaryAnswer {
   readonly kind: 'sandbox_boundary';
   readonly decision: 'allow' | 'deny';
+  /**
+   * How much of the surrounding tree an `allow` covers. Absent means the
+   * request itself, which is what every client sent before this existed.
+   */
+  readonly scope?: SandboxBoundaryDecisionScope;
 }
 
 export interface InteractionClientCapabilityAnswer {
@@ -342,7 +349,7 @@ const FORM_EMPTY_RESPONSE_SHAPE = defineObjectShape<
 >()(['requestId', 'action'], []);
 const SANDBOX_BOUNDARY_ANSWER_SHAPE = defineObjectShape<InteractionSandboxBoundaryAnswer>()(
   ['kind', 'decision'],
-  [],
+  ['scope'],
 );
 const CLIENT_CAPABILITY_ANSWER_SHAPE = defineObjectShape<InteractionClientCapabilityAnswer>()(
   ['kind', 'decision'],
@@ -505,6 +512,11 @@ export function decodeInteractionAnswer(value: unknown): InteractionAnswer {
     answer = {
       kind: 'sandbox_boundary',
       decision: oneOf(record.decision, ['allow', 'deny'] as const, 'decision'),
+      ...(record.scope === undefined
+        ? {}
+        : {
+            scope: oneOf(record.scope, SANDBOX_BOUNDARY_DECISION_SCOPES, 'scope'),
+          }),
     };
   } else if (record.kind === 'client_capability') {
     exact(record, CLIENT_CAPABILITY_ANSWER_SHAPE, 'Client Capability answer');

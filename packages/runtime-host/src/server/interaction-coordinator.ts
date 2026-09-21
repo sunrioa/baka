@@ -973,6 +973,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       sessionId: request.sessionId,
       requestId: request.requestId,
       decision: answer.decision,
+      ...(answer.scope === undefined ? {} : { scope: answer.scope }),
     });
     await this.#refreshCanonicalContinuity(request.sessionId, admission);
     this.#throwIfPoisoned();

@@ -218,6 +218,7 @@ export interface ConversationCopy {
     reject: string;
     allowSession: string;
     /** Offered only for read-only, offline requests; see `suggestTrustedReadPaths`. */
+    allowSessionDirectory: string;
     allowAlways: string;
     allowAlwaysHint: (paths: string) => string;
   };
@@ -560,8 +561,9 @@ const CONVERSATION_COPY = {
       enabled: '已启用',
       reject: '拒绝',
       allowSession: '本任务允许',
+      allowSessionDirectory: '本任务允许该目录',
       allowAlways: '一直允许',
-      allowAlwaysHint: (paths) => `把 ${paths} 加入可信读取路径，以后不再询问`,
+      allowAlwaysHint: (paths) => `两个允许都将覆盖整个目录：${paths}。「一直允许」还会把它记进可信读取路径。`,
     },
     clientCapability: {
       title: '允许使用客户端能力？',
@@ -721,8 +723,9 @@ const CONVERSATION_COPY = {
       enabled: '已啟用',
       reject: '拒絕',
       allowSession: '本任務允許',
+      allowSessionDirectory: '本任務允許該目錄',
       allowAlways: '一直允許',
-      allowAlwaysHint: (paths) => `把 ${paths} 加入可信讀取路徑，以後不再詢問`,
+      allowAlwaysHint: (paths) => `兩個允許都將涵蓋整個目錄：${paths}。「一直允許」還會把它記進可信讀取路徑。`,
     },
     clientCapability: {
       title: '允許使用用戶端能力？',
@@ -908,8 +911,10 @@ const CONVERSATION_COPY = {
       enabled: 'Enabled',
       reject: 'Reject',
       allowSession: 'Allow for this task',
+      allowSessionDirectory: 'Allow this folder for the task',
       allowAlways: 'Always allow',
-      allowAlwaysHint: (paths) => `Add ${paths} to trusted read paths and stop asking`,
+      allowAlwaysHint: (paths) =>
+        `Both allows cover the whole folder: ${paths}. "Always allow" also records it in trusted read paths.`,
     },
     clientCapability: {
       title: 'Allow this client capability?',

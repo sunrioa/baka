@@ -741,7 +741,11 @@ export function registerRuntimeHostSessionExecutionIpc(
       const answered = await deps.client.answerInteraction({
         sessionId,
         interactionId: response.requestId,
-        answer: { kind: "sandbox_boundary", decision: response.decision },
+        answer: {
+          kind: "sandbox_boundary",
+          decision: response.decision,
+          ...(response.scope === undefined ? {} : { scope: response.scope }),
+        },
       });
       deps.observer.publishInteractionAnswer(answered, pending);
     },

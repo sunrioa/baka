@@ -29,7 +29,10 @@ import {
   type QuoteRef,
 } from '@maka/core/events';
 import type { UserQuestionResponse } from '@maka/core/user-question';
-import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
+import {
+  isSandboxBoundaryDecisionScope,
+  type SandboxBoundaryResponse,
+} from '@maka/core/sandbox-boundary';
 import type { ClientCapabilityResponse } from '@maka/core/client-capability-grant';
 import { MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
 import { isAttachmentRef, isCanonicalStorageRef, type AttachmentRef } from '@maka/core/events';
@@ -92,9 +95,15 @@ export function normalizeSandboxBoundaryResponse(input: unknown): SandboxBoundar
   if (value.decision !== 'allow' && value.decision !== 'deny') {
     throw new Error('Invalid sandbox boundary response decision');
   }
+  // A closed level, not a path: the renderer picks how wide, the Host decides
+  // where from the request it already stored.
+  if (value.scope !== undefined && !isSandboxBoundaryDecisionScope(value.scope)) {
+    throw new Error('Invalid sandbox boundary response scope');
+  }
   return {
     requestId: value.requestId,
     decision: value.decision,
+    ...(value.scope === undefined ? {} : { scope: value.scope }),
   };
 }
 

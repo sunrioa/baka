@@ -51,6 +51,8 @@ import {
 } from '@maka/core/agent-graph-client-projection';
 import {
   assessSandboxBoundaryExpansion,
+  isSandboxBoundaryDecisionScope,
+  widenSandboxBoundaryExpansion,
   assertExecutionBoundaryCapacity,
   decodeExecutionBoundary,
   createGenesisExecutionBoundary,
@@ -730,6 +732,9 @@ export class SqliteSessionMetadataStore {
     ) {
       throw new Error('Invalid sandbox boundary closure reason');
     }
+    if (input.scope !== undefined && !isSandboxBoundaryDecisionScope(input.scope)) {
+      throw new Error('Invalid sandbox boundary decision scope');
+    }
 
     return this.transaction(() => {
       const record = this.readRecordSync(input.sessionId);
@@ -772,7 +777,11 @@ export class SqliteSessionMetadataStore {
         };
       }
 
-      const assessment = assessSandboxBoundaryExpansion(current.profile, request.expansion, {
+      // Widening is derived from the stored request, never supplied: the
+      // answer only chose a level. A scope that cannot widen safely returns
+      // the request unchanged, so the approval still means what it says.
+      const expansion = widenSandboxBoundaryExpansion(request.expansion, input.scope ?? 'request');
+      const assessment = assessSandboxBoundaryExpansion(current.profile, expansion, {
         root: record.header.cwd,
         workspaceRoots: [record.header.cwd],
         tmpdir: tmpdir(),

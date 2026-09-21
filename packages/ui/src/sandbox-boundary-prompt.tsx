@@ -21,6 +21,7 @@ import type { SandboxBoundaryRequestEvent } from '@maka/core/events';
 import { useEffect, useId, useRef, useState } from 'react';
 
 import { suggestTrustedReadPaths } from '@maka/core/trusted-paths';
+import type { SandboxBoundaryDecisionScope } from '@maka/core/sandbox-boundary';
 
 import { getConversationCopy } from './conversation-copy.js';
 import { useUiLocale } from './locale-context.js';
@@ -29,7 +30,11 @@ import { useMountedRef } from './use-mounted-ref.js';
 
 export interface SandboxBoundaryPromptProps {
   request: SandboxBoundaryRequestEvent;
-  onRespond(response: { requestId: string; decision: 'allow' | 'deny' }): void | Promise<void>;
+  onRespond(response: {
+    requestId: string;
+    decision: 'allow' | 'deny';
+    scope?: SandboxBoundaryDecisionScope;
+  }): void | Promise<void>;
   /**
    * Adds `paths` to the trusted read paths, then allows this request.
    *
@@ -62,13 +67,16 @@ export function SandboxBoundaryPrompt({
     return () => window.cancelAnimationFrame(frame);
   }, [request.requestId]);
 
-  async function respond(decision: 'allow' | 'deny'): Promise<void> {
+  async function respond(
+    decision: 'allow' | 'deny',
+    scope?: SandboxBoundaryDecisionScope,
+  ): Promise<void> {
     if (responsePendingRef.current) return;
     const requestId = request.requestId;
     responsePendingRef.current = true;
     setResponsePending(true);
     try {
-      await onRespond({ requestId, decision });
+      await onRespond({ requestId, decision, ...(scope === undefined ? {} : { scope }) });
     } finally {
       if (activeRequestIdRef.current === requestId) {
         responsePendingRef.current = false;
@@ -88,7 +96,7 @@ export function SandboxBoundaryPrompt({
     setResponsePending(true);
     try {
       await onAlwaysAllow(paths);
-      await onRespond({ requestId, decision: 'allow' });
+      await onRespond({ requestId, decision: 'allow', scope: 'suggested_directory' });
     } finally {
       if (activeRequestIdRef.current === requestId) {
         responsePendingRef.current = false;
@@ -98,7 +106,9 @@ export function SandboxBoundaryPrompt({
   }
 
   const entries = request.expansion.filesystem?.entries ?? [];
-  const suggestedPaths = onAlwaysAllow ? suggestTrustedReadPaths(request.expansion) : [];
+  // The directory offer stands on its own: widening this conversation needs
+  // no settings write, so it is available even where `onAlwaysAllow` is not.
+  const suggestedPaths = suggestTrustedReadPaths(request.expansion);
   return (
     <section
       className="maka-composer-interaction maka-sandbox-boundary-prompt composer"
@@ -141,10 +151,12 @@ export function SandboxBoundaryPrompt({
           <Button
             variant="primary"
             isDisabled={responsePending}
-            onClick={() => void respond('allow')}
-            label={copy.allowSession}
+            onClick={() =>
+              void respond('allow', suggestedPaths.length > 0 ? 'suggested_directory' : undefined)
+            }
+            label={suggestedPaths.length > 0 ? copy.allowSessionDirectory : copy.allowSession}
           />
-          {suggestedPaths.length > 0 ? (
+          {suggestedPaths.length > 0 && onAlwaysAllow ? (
             <Button
               variant="secondary"
               isDisabled={responsePending}
