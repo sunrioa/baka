@@ -17,6 +17,8 @@
  * under the License.
  */
 
+import { redactContextCredentials } from '@maka/core/redaction';
+
 import type { ToolResultOutput } from './model-protocol.js';
 import { toolResultOutput } from './tool-result-output.js';
 
@@ -34,7 +36,55 @@ export function projectBashToolResultForModel(output: unknown): unknown {
     return output;
   }
   const { cmd: _cmd, ...projected } = output as Record<string, unknown>;
-  return projected;
+  return {
+    ...projected,
+    ...(typeof projected.failureMessage === 'string'
+      ? { failureMessage: redactContextCredentials(projected.failureMessage) }
+      : {}),
+    output: redactShellOutputForModel(projected.output),
+  };
+}
+
+/**
+ * Which fields of a `ShellOutput` carry command output, by mode.
+ *
+ * Listed rather than derived so a future field is redacted only once someone
+ * has decided it should be. A new text field defaults to passing through,
+ * which is the failure this list is meant to make visible in review — the
+ * alternative, redacting every string, would eventually mangle a field that
+ * has to survive intact.
+ */
+const SHELL_OUTPUT_TEXT_FIELDS: Readonly<Record<'pipes' | 'pty', readonly string[]>> = {
+  pipes: ['stdout', 'stderr'],
+  pty: ['screen', 'scrollback', 'lastAlternateScreen'],
+};
+
+/**
+ * Redacts a shell result's captured output and records that it happened.
+ *
+ * `redacted` is already on the wire type and every producer hardcodes it to
+ * `false`; the display stream is the only place that has ever computed it.
+ * Setting it here is what lets a model tell an empty search from a redacted
+ * one, instead of concluding a tree holds no credentials because their values
+ * were removed before it looked.
+ */
+function redactShellOutputForModel(output: unknown): unknown {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return output;
+  const shell = output as Record<string, unknown>;
+  const fields =
+    shell.mode === 'pty' ? SHELL_OUTPUT_TEXT_FIELDS.pty : SHELL_OUTPUT_TEXT_FIELDS.pipes;
+  const next: Record<string, unknown> = { ...shell };
+  let changed = false;
+  for (const field of fields) {
+    const value = next[field];
+    if (typeof value !== 'string') continue;
+    const redacted = redactContextCredentials(value);
+    if (redacted === value) continue;
+    next[field] = redacted;
+    changed = true;
+  }
+  if (!changed) return shell;
+  return { ...next, redacted: true };
 }
 
 export function bashToolResultToModelOutput(output: unknown): ToolResultOutput {

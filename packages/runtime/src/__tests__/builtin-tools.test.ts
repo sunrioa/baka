@@ -2132,6 +2132,60 @@ describe('builtin read tools path containment', () => {
     }
   });
 
+  test('Grep redacts credential values from match lines and says so', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'maka-grep-redaction-'));
+    try {
+      await writeFile(
+        join(cwd, 'notes.txt'),
+        ['OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx', 'const token = parseToken(raw);'].join('\n'),
+      );
+      const grep = tool('Grep');
+      const input = (grep.parameters as z.ZodTypeAny).parse({
+        pattern: 'token|KEY',
+        path: '',
+        glob: '',
+      });
+      const result = (await runTool(grep, input, cwd)) as {
+        matches: string[];
+        redacted?: boolean;
+      };
+      assert.equal(
+        result.matches.some((line) => line.includes('sk-abcdefghijklmnopqrstuvwx')),
+        false,
+      );
+      assert.equal(
+        result.matches.some((line) => line.includes('[redacted]')),
+        true,
+      );
+      // The identifier survives: a code search that returned `const token =
+      // [redacted]` would be describing a file that does not exist.
+      assert.equal(
+        result.matches.some((line) => line.includes('parseToken(raw)')),
+        true,
+      );
+      assert.equal(result.redacted, true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test('Grep leaves a clean search unflagged', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'maka-grep-unflagged-'));
+    try {
+      await writeFile(join(cwd, 'notes.txt'), 'const token = parseToken(raw);\n');
+      const grep = tool('Grep');
+      const input = (grep.parameters as z.ZodTypeAny).parse({
+        pattern: 'token',
+        path: '',
+        glob: '',
+      });
+      const result = (await runTool(grep, input, cwd)) as { redacted?: boolean };
+      assert.equal(result.redacted, undefined);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   test('Glob and Grep constrain search roots to session cwd', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-read-root-'));
     const outside = await mkdtemp(join(tmpdir(), 'maka-read-outside-'));

@@ -68,6 +68,66 @@ export function redactSecrets(value: string): string {
   return json ?? redactTextSecrets(value);
 }
 
+/**
+ * Credential formats that identify themselves, with no keyword heuristics.
+ *
+ * `SECRET_PATTERNS` above is tuned for logs, telemetry and display, where a
+ * false positive costs a reader nothing. This list feeds model context
+ * instead, where one costs the agent its work: `[a-f0-9]{40,}` is a git SHA
+ * far more often than a token, and `token = parseToken(raw)` is source code,
+ * not a leak. Only values whose own shape names their issuer belong here.
+ */
+const CONTEXT_CREDENTIAL_PATTERNS: RegExp[] = [
+  /\b(sk-(?:ant-)?[a-z0-9_-]{8,})\b/gi,
+  /\b(AIza[0-9A-Za-z_-]{20,})\b/g,
+  /\b(gh[pousr]_[0-9A-Za-z_]{20,})\b/g,
+  /\b(xox[abprs]-[0-9A-Za-z-]{10,})\b/g,
+];
+
+/**
+ * A PEM private key, header through footer. The body is base64 with no issuer
+ * prefix to key off, so the armor is the only available signal — and it is a
+ * dependable one, since nothing but a key carries it.
+ */
+const PRIVATE_KEY_BLOCK_PATTERN =
+  /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/g;
+
+/**
+ * Redacts credential values from text on its way into model context.
+ *
+ * `redactSecrets` already covers everything a person may see: the display
+ * stream, the clipboard, telemetry, extracted memories, error traces. Nothing
+ * covered the other direction. A tool result reaches the provider verbatim, so
+ * a `Grep` over a trusted directory or a `cat` under `Bash` puts whatever it
+ * found into the request, into the transcript, and into every later turn that
+ * replays them.
+ *
+ * This is the narrow redactor for that path. A pattern earns a place here only
+ * when a match is a credential *value* rather than a credential-shaped
+ * identifier, because a false positive does not merely read oddly — it hands
+ * the model wrong file contents, and the model will act on them.
+ *
+ * It bounds blast radius; it is not a boundary. A password with no
+ * recognizable shape still passes, and `Read` is deliberately left alone so an
+ * explicit read stays faithful and stays safe to edit against. Paths that must
+ * never be reachable at all belong in the profile's deny entries, which no
+ * tool can route around.
+ */
+export function redactContextCredentials(value: string): string {
+  let next = redactUrlUserinfoSecrets(value);
+  next = redactUrlQuerySecrets(next);
+  next = next.replace(
+    AUTHORIZATION_HEADER_PATTERN,
+    (_match, boundary: string, prefix: string) => `${boundary}${prefix}[redacted]`,
+  );
+  next = next.replace(PRIVATE_KEY_BLOCK_PATTERN, () => '[redacted]');
+  for (const pattern of CONTEXT_CREDENTIAL_PATTERNS) {
+    // As above: each group holds only the token, so never echo part of a match.
+    next = next.replace(pattern, () => '[redacted]');
+  }
+  return next;
+}
+
 function redactTextSecrets(value: string): string {
   let next = value;
   next = redactUrlUserinfoSecrets(next);

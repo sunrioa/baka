@@ -47,6 +47,7 @@ import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import { type SandboxBoundaryExpansion } from '@maka/core/sandbox-boundary';
 import { isStorageRef, type StorageRef, type ToolResultContent } from '@maka/core/events';
 import { type PermissionProfile } from '@maka/core/permission-profile';
+import { redactContextCredentials } from '@maka/core/redaction';
 import { bashToolResultToModelOutput } from './bash-model-output.js';
 import { fileWriteToolResultToModelOutput } from './file-tool-model-output.js';
 import { toolResultOutput } from './tool-result-output.js';
@@ -565,7 +566,7 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
     {
       name: 'Grep',
       activityKind: 'search',
-      description: `Search file contents with a ripgrep regex. Scans files as text, including binary files; directory traversal respects ripgrep ignore rules and glob filters. Returns path:line:content matches and exact matchedLines, returnedLines, omittedLines, and truncated from one completed search. Keeps at most ${GREP_MAX_LINES_PER_FILE} lines per file, ${GREP_MAX_LINES} total, and ${GREP_MAX_MATCH_BYTES / 1024} KiB of JSON matches; oversized or non-UTF8 lines/paths may be omitted. Narrow path, glob, or pattern for more matches, or use Read to inspect a file. Failed searches have unknown totals.`,
+      description: `Search file contents with a ripgrep regex. Scans files as text, including binary files; directory traversal respects ripgrep ignore rules and glob filters. Returns path:line:content matches and exact matchedLines, returnedLines, omittedLines, and truncated from one completed search. Keeps at most ${GREP_MAX_LINES_PER_FILE} lines per file, ${GREP_MAX_LINES} total, and ${GREP_MAX_MATCH_BYTES / 1024} KiB of JSON matches; oversized or non-UTF8 lines/paths may be omitted. Narrow path, glob, or pattern for more matches, or use Read to inspect a file. Failed searches have unknown totals. Recognizable credential values are replaced with [redacted] in match lines, and the redacted flag is true when that happened.`,
       parameters: z.object({
         pattern: z
           .string()
@@ -601,7 +602,13 @@ export function buildBuiltinTools(options: BuildBuiltinToolsOptions = {}): MakaT
             'the pattern is absent',
           );
         const { kind: _kind, ...searchResult } = result;
-        return searchResult;
+        // Match lines are the one tool result that carries arbitrary file
+        // content the model never asked for by name, so they are redacted
+        // before they enter context. `Read` is deliberately left alone: it is
+        // an explicit request, and Edit reproduces its text back into the file.
+        const matches = searchResult.matches.map(redactContextCredentials);
+        const redacted = matches.some((line, index) => line !== searchResult.matches[index]);
+        return { ...searchResult, matches, ...(redacted ? { redacted: true } : {}) };
       },
     },
   ];

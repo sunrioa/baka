@@ -23,6 +23,7 @@ import { describe, test } from 'node:test';
 import {
   generalizedErrorMessage,
   generalizedErrorMessageForLocale,
+  redactContextCredentials,
   redactSecrets,
 } from '../redaction.js';
 
@@ -526,6 +527,76 @@ describe('localized generalized error messages', () => {
     assert.equal(
       generalizedErrorMessageForLocale(error, 'English fallback', 'en'),
       'English fallback',
+    );
+  });
+});
+
+describe('redactContextCredentials', () => {
+  test('masks credential formats that name their issuer', () => {
+    const cases: [string, string][] = [
+      ['OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwx', 'OPENAI_API_KEY=[redacted]'],
+      ['key: sk-ant-api03-abcdefghijklmnop', 'key: [redacted]'],
+      ['GOOGLE=AIzaSyA0123456789abcdefghijklmnopqrst', 'GOOGLE=[redacted]'],
+      ['token ghp_0123456789abcdefghijklmnopqrstuvwxyz', 'token [redacted]'],
+      ['slack xoxb-1234567890-abcdefghij', 'slack [redacted]'],
+    ];
+    for (const [input, expected] of cases) {
+      assert.equal(redactContextCredentials(input), expected);
+    }
+  });
+
+  test('masks authorization headers, URL userinfo and URL query credentials', () => {
+    assert.equal(
+      redactContextCredentials('authorization: Bearer abcdefghijklmnop'),
+      'authorization: Bearer [redacted]',
+    );
+    assert.equal(
+      redactContextCredentials('https://user:pw@example.com/repo.git'),
+      'https://[redacted]@example.com/repo.git',
+    );
+    assert.equal(
+      redactContextCredentials('https://example.com/a?api_key=abcdef123456'),
+      'https://example.com/a?api_key=[redacted]',
+    );
+  });
+
+  test('masks a PEM private key from armor to armor', () => {
+    const pem = [
+      '-----BEGIN OPENSSH PRIVATE KEY-----',
+      'b3BlbnNzaC1rZXktdjEAAAAABG5vbmU=',
+      'AAAAAAAAAAEAAAAzAAAAC3NzaC1lZDI1NQ==',
+      '-----END OPENSSH PRIVATE KEY-----',
+    ].join('\n');
+    assert.equal(redactContextCredentials(`before\n${pem}\nafter`), 'before\n[redacted]\nafter');
+  });
+
+  test('leaves source code and git object ids intact', () => {
+    // The whole reason this redactor is separate from `redactSecrets`: these
+    // are the shapes a code search returns all day, and mangling them would
+    // hand the model file contents that do not exist.
+    const untouched = [
+      'const token = parseToken(raw);',
+      'password = process.env.DB_PASSWORD',
+      '  secret: getSecret(name),',
+      'commit 97c83e4fb0000000000000000000000000000000',
+      '"integrity": "sha512-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"',
+      'api_key: <unset>',
+    ];
+    for (const line of untouched) {
+      assert.equal(redactContextCredentials(line), line);
+    }
+  });
+
+  test('is narrower than the display redactor on the same input', () => {
+    const line = 'const token = parseToken(raw);';
+    assert.notEqual(redactSecrets(line), line);
+    assert.equal(redactContextCredentials(line), line);
+  });
+
+  test('masks every occurrence on a line', () => {
+    assert.equal(
+      redactContextCredentials('a=sk-aaaaaaaaaaaaaaaaaaaa b=sk-bbbbbbbbbbbbbbbbbbbb'),
+      'a=[redacted] b=[redacted]',
     );
   });
 });
