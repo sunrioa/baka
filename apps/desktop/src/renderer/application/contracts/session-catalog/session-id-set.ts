@@ -17,15 +17,16 @@
  * under the License.
  */
 
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { buildDeepResearchSystemPromptFragment } from '../deep-research.js';
-
-test('Deep Research directs inspection through the standard read-only tool surface', () => {
-  const prompt = buildDeepResearchSystemPromptFragment();
-
-  for (const toolName of ['Read', 'Glob', 'Grep', 'WebSearch']) {
-    assert.match(prompt, new RegExp(`\\b${toolName}\\b`));
+/** Value equality for sets of session ids — rebuilt sets stay off the token path. */
+export function sessionIdSetsEqual(
+  a: ReadonlySet<string> | undefined,
+  b: ReadonlySet<string> | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.size !== b.size) return false;
+  for (const id of a) {
+    if (!b.has(id)) return false;
   }
-  assert.doesNotMatch(prompt, /ExploreAgent/);
-});
+  return true;
+}
