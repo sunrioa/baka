@@ -242,6 +242,7 @@ Before submitting code, run typecheck, build, and focused tests proportionate to
 
 - [Website](https://maka.apache.org/en/)
 - [Documentation index and authority map](./docs/README.md)
+- [Jev 决策层：设计与实施计划](./docs/jev-decision-layer.zh-CN.md) — fork-local design draft; not implemented
 - [Backend architecture](./ARCHITECTURE.md)
 - [Product design](./DESIGN.md)
 - [Contributing guide](./CONTRIBUTING.md)
