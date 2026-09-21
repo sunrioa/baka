@@ -30,7 +30,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
-import { createGenesisExecutionBoundary } from '@maka/core/sandbox-boundary';
+import {
+  createGenesisExecutionBoundary,
+  type ExecutionBoundary,
+} from '@maka/core/sandbox-boundary';
 import { DEEP_RESEARCH_SESSION_LABEL, DEEP_RESEARCH_SESSION_NAME } from '@maka/core/deep-research';
 import { type ModelOverride } from '@maka/core/model-thinking';
 import {
@@ -2395,3 +2398,94 @@ function catalogRecord(header: SessionHeader, revision: number): SessionCatalogR
     summary: headerToSummary(header),
   };
 }
+
+test('trusted read paths reach a new Session as genesis boundary entries', async () => {
+  const runtimePolicy: RuntimePolicy = {
+    ...runtimePolicyFixture({}),
+    runtimePolicy: {
+      getSnapshot: async () => ({
+        revision: 1,
+        policy: {
+          ...createDefaultRuntimePolicy(),
+          chatDefaults: { permissionMode: 'ask' },
+          permissions: {
+            trustedPaths: { readPaths: ['/Users/me/Docs'], denyPaths: [] },
+          },
+        },
+      }),
+    },
+  };
+  const boundaries: (ExecutionBoundary | undefined)[] = [];
+  const fixture = createFixture({
+    runtimePolicy,
+    stores: {
+      createStableSession: async (request, initialBoundary) => {
+        boundaries.push(initialBoundary);
+        return {
+          kind: 'existing',
+          record: headerSnapshot(sessionHeader(request.sessionId, []), 3),
+        };
+      },
+    },
+  });
+
+  const outcome = await fixture.coordinator.handlers['session.create'](
+    {
+      sessionId: fixture.sessionId,
+      workspace: { kind: 'host_path', path: process.cwd() },
+      modelTarget: { kind: 'default' },
+    },
+    context,
+  );
+
+  assert.equal(outcome.ok, true);
+  assert.equal(boundaries.length, 1);
+  const boundary = boundaries[0];
+  assert.equal(boundary?.kind, 'managed');
+  if (boundary?.kind !== 'managed') throw new Error('unreachable');
+  assert.ok(
+    boundary.profile.fileSystem.entries.some(
+      (entry) =>
+        entry.kind === 'path' &&
+        entry.access === 'read' &&
+        entry.path === '/Users/me/Docs' &&
+        entry.match === 'subtree',
+    ),
+    'the configured read path must be compiled into the genesis profile',
+  );
+  // The stock workspace-write authority has to survive alongside it.
+  assert.ok(
+    boundary.profile.fileSystem.entries.some(
+      (entry) => entry.kind === 'special' && entry.special === ':workspace_roots',
+    ),
+  );
+});
+
+test('an unconfigured Host still takes the storage default genesis boundary', async () => {
+  const boundaries: (ExecutionBoundary | undefined)[] = [];
+  const fixture = createFixture({
+    stores: {
+      createStableSession: async (request, initialBoundary) => {
+        boundaries.push(initialBoundary);
+        return {
+          kind: 'existing',
+          record: headerSnapshot(sessionHeader(request.sessionId, []), 3),
+        };
+      },
+    },
+  });
+
+  const outcome = await fixture.coordinator.handlers['session.create'](
+    {
+      sessionId: fixture.sessionId,
+      workspace: { kind: 'host_path', path: process.cwd() },
+      modelTarget: { kind: 'default' },
+    },
+    context,
+  );
+
+  assert.equal(outcome.ok, true);
+  // undefined, not a synthesized boundary: storage must keep writing exactly
+  // the row it wrote before trusted paths existed.
+  assert.deepEqual(boundaries, [undefined]);
+});
