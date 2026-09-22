@@ -68,6 +68,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Side Conversation](./side-conversation.md)
 - [Agent Graph stream scheduling](./architecture/agent-graph-stream-scheduling-draft.md) ([中文](./architecture/agent-graph-stream-scheduling-draft.zh-CN.md))
 - [Jev 决策层设计与实施计划](./jev-decision-layer.zh-CN.md)（设计稿，未实施；fork 本地文档）
+- [Jev：更远的方向](./jev-beyond-maka.zh-CN.md)（方向探索，非实施计划；fork 本地文档）
 - [IM 扫码接入 runtime architecture](./architecture/bot-onboarding-runtime.zh-CN.md)
 - [Backend architecture chapters](./architecture/)
 
