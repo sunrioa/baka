@@ -19,7 +19,7 @@
 
 # Jev 决策层：设计与实施计划
 
-> **状态：设计稿，尚未实施。** 本文档描述把 TypeSafe Jev 接入 Maka 的七个方案、
+> **状态：设计稿，尚未实施。** 本文档描述把 TypeSafe Jev 接入 Maka 的若干方案、
 > 它们为什么按这个顺序排、以及每一个的落地步骤与验收标准。
 >
 > 代码和契约测试始终是最终权威；本文档与实现冲突时以实现为准。
@@ -31,7 +31,7 @@
 - [2. 为什么值得接：带外判断](#2-为什么值得接带外判断)
 - [3. 两条约束](#3-两条约束)
 - [4. 共享基础设施](#4-共享基础设施)
-- [5. 六个方案](#5-六个方案)
+- [5. 方案](#5-方案)
 - [6. 明确不做的](#6-明确不做的)
 - [7. 实施流程](#7-实施流程)
 - [8. 参考](#8-参考)
@@ -63,7 +63,8 @@ Maka 里有三类位置适合它：
 | 4 | [压缩取舍策略](#方案-4压缩取舍策略) | 无额外 | 大 |
 | 5a | [模型路由](#方案-5a模型路由带滞回) | 高 | 中 |
 | 5b | [自适应推理与 effort 路由](#方案-5b自适应推理与-effort-路由) | 零 | 中 |
-| 6 | [改工具集的 turn 路由](#6-明确不做的) | **最高** | —— 不做 |
+| 6 | [中断恢复判定](#方案-6中断恢复判定) | 零 | 小 |
+| ✗ | [改工具集的 turn 路由](#6-明确不做的) | **最高** | 不做 |
 
 5a 和 5b 看起来是同一件事，缓存代价却差一个数量级：换 **model** 会作废缓存
 （缓存按模型分），换 **effort** 不会（它是请求参数，不是前缀内容）。
@@ -209,7 +210,7 @@ Jev 只属于那些"错了的代价是多弹一次窗 / 多读一次文件 / 多
 
 ## 4. 共享基础设施
 
-六个方案都依赖同一套底座。**这部分必须先做，且独立可测。**
+所有方案都依赖同一套底座。**这部分必须先做，且独立可测。**
 
 ### 4.1 客户端
 
@@ -240,7 +241,7 @@ JevClient
 - 回退路径就是现有代码，一行不改地保留
 - 因此每个功能都可以**在运行时安全关闭**，上线风险接近零
 
-具体到每个方案，"今天的行为"是什么会在各自的[实施步骤](#5-六个方案)里写明。
+具体到每个方案，"今天的行为"是什么会在各自的[实施步骤](#5-方案)里写明。
 
 ### 4.3 配置与开关
 
@@ -290,7 +291,7 @@ jev: {
 
 ---
 
-## 5. 六个方案
+## 5. 方案
 
 每个方案统一给出：现状 / 缺口 / 设计 / 缓存代价 / 实施步骤 / 验收 / 风险。
 
@@ -471,7 +472,7 @@ criteria: ["无关", "可能相关", "很可能相关"]
 
 先跑高分的，全量在后台继续。
 
-**这是六个方案里风险最低的一个** —— 它连产品代码都不碰，
+**这是所有方案里风险最低的一个** —— 它连产品代码都不碰，
 最坏情况是排序没用，退回全量。
 
 #### 缓存代价
@@ -821,6 +822,133 @@ Claude Code 对会话 effort 的规定是：
 
 ---
 
+### 方案 6｜中断恢复判定
+
+#### 现状
+
+一轮被中断后（应用重启、超时、宿主消失），是否给用户一个"继续"按钮，
+由 `apps/desktop/src/renderer/interrupted-resume.ts` 决定，全文如下：
+
+```ts
+export function latestInterruptedResumeTurnId(turns): string | undefined {
+  const latestTurn = turns.at(-1);
+  if (latestTurn?.status !== 'failed') return undefined;
+  const errorClass = latestTurn.errorClass?.toLowerCase();
+  if (errorClass === 'app_restarted') return latestTurn.turnId;
+  if (
+    errorClass?.includes('timeout') &&
+    latestTurn.tools?.every((tool) => tool.status === 'completed')
+  ) {
+    return latestTurn.turnId;
+  }
+  return undefined;
+}
+```
+
+它看三样东西：**状态、错误类、工具完成情况**。注意 `errorClass?.includes('timeout')`
+—— 又一个子串匹配，与 [`classifyGeneralizedError`](#a-类一个正则在假装自己是分类器)
+是同一个毛病的第二例。
+
+底下那层 `classifyAgentRunRecovery`（`packages/runtime/src/agent-run-recovery.ts`）
+按**最后一个事件类型**做结构性归类：`tool_started` → `tool_interrupted`、
+`permission_requested` → `stale_user_wait`，等等。
+
+**这一层不该动。** 它回答的是"中断时在干什么"，答得准确，而且它的存在理由写在
+注释第一句：「Why a run the events never closed has to be failed closed」。
+
+#### 缺口
+
+**没有任何一层看那一轮实际在做什么。** 同样是 `app_restarted`，下面四种处境
+该不该继续完全不同，但从 `status` + `errorClass` + 工具状态里看起来一模一样：
+
+| 中断时的处境 | 继续是否合适 |
+|---|---|
+| 实际工作已完成，正在写总结 | 继续几乎免费且正确 |
+| 12 步重构做到第 5 步，4 个文件改了一半 | 工作区状态不自洽，继续可能比重来更糟 |
+| 卡在无效循环里被中断 | 继续就是继续打转 |
+| 目标在更早的轮次已经达成 | 纯浪费 |
+
+#### 设计
+
+用 Choice 而不是布尔判断 —— 有用的不只是"要不要"，而是"恢复前该知道什么"：
+
+```
+criteria: {
+  work_complete_summary_pending: 实际工作已完成，中断在收尾阶段
+  work_partial_consistent:       做了一部分，但工作区状态自洽
+  work_partial_inconsistent:     改到一半，文件处于中间状态
+  unproductive_loop:             中断前在重复同样的动作
+  goal_already_met:              目标在更早的轮次已经达成
+}
+```
+
+这直接决定按钮该说什么。「继续」和「4 个文件处于半改状态，建议先检查再继续」
+是完全不同的两句话，而今天这两种情况显示同一个按钮。
+
+#### 为什么这里特别适合
+
+**带外性质在这里格外关键。** 中断那一轮的内容**还没在上下文里** —— 恢复才会把它
+放进去。所以用 LLM 判断"要不要恢复"会陷入一个悖论：为了判断该不该读进来，
+得先读进来；判断完决定不恢复，那些 token 也已经花掉了。
+
+Jev 没有这个问题。这是 [§2](#2-为什么值得接带外判断) 那条性质最纯粹的一次体现。
+
+#### 缓存代价
+
+**零。** 决策发生在请求构造之前，此时还没有 prompt。
+
+#### 一条必须守住的线
+
+**Jev 只决定要不要给这个按钮，不决定自动恢复。**
+
+今天的代码正好就是这个形状 —— `latestInterruptedResumeTurnId` 产出
+`resumeCandidateTurnId` 交给 view model（`app-shell-turn-view-model.ts`），
+最终由用户点击。**保持这个形状。**
+
+理由：中断的那一轮可能正在做写操作。自动恢复一个做到一半的破坏性动作，
+属于 [§3.3](#33-不该去的地方) 那类不可逆动作，「五次错一次」在那里不够用。
+
+#### 无人值守时的非对称规则
+
+scheduled task 或自主循环里没有人点按钮，"要不要继续"必须自动答。
+此时规则是**非对称的**：
+
+```
+work_complete_summary_pending + 高置信度  →  自动继续
+其他所有情况                              →  停下并上报
+```
+
+**自动继续只在一种明确安全的情形下发生，其余一律 fail-closed。**
+这与 `classifyAgentRunRecovery` 本身的哲学一致 —— Jev 在那道保守默认之上
+开一个很窄的口子，而不是把默认改成乐观。
+
+#### 实施步骤
+
+1. 观测模式：在现有启发式旁边跑 Choice，只记遥测，按钮照旧
+2. 对比：Jev 的处境判断与用户**实际是否点了恢复**、以及**恢复后是否返工**相关吗？
+3. 相关性成立后，用 Choice 结果决定按钮的**文案**（风险最低的一步）
+4. 再之后才用它决定按钮的**有无**
+5. 无人值守分支单独评估，规则见上
+
+#### 验收
+
+- 观测期 ≥ 50 次真实中断
+- 用户点了恢复的场景中，被判为 `work_complete_summary_pending` 或
+  `work_partial_consistent` 的占比 ≥ 70%
+- 被判为 `work_partial_inconsistent` 却被用户顺利恢复的比例 ≤ 15%
+  （高于此说明判据过于悲观）
+- Jev 不可用时，行为与今天的启发式完全一致
+
+#### 风险
+
+| 风险 | 缓解 |
+|---|---|
+| 漏掉用户想要的恢复 | 错的代价不对称：多给一个不点的按钮代价为零，先偏向"提供" |
+| 自动恢复半成品破坏工作区 | 只在无人值守分支自动，且只对一种处境自动 |
+| 判据与真实处境脱节 | 第 3 步先只改文案，风险可控且能收集数据 |
+
+---
+
 ## 6. 明确不做的
 
 ### 6.1 随 turn 改动工具集
@@ -853,12 +981,13 @@ Claude Code 对会话 effort 的规定是：
 第 0 步   共享基础设施（§4）             ← 前置，独立可测
 第 1 步   方案 3 测试选择                ← 不碰产品代码，风险最低，先练手
 第 2 步   方案 1 Grep 密钥判断           ← 最小的产品改动，验证带外性质
-第 3 步   方案 5b.1 追加计划指令          ← 纯追加，零代价，最小的行为改变
-第 4 步   方案 5b.2 effort 路由          ← 零缓存代价，档位枚举现成
-第 5 步   方案 2a/2b 核验                ← 零缓存代价，价值高
-第 6 步   方案 4 压缩取舍（先观测）       ← 工作量大，但基础设施已就位
-第 7 步   方案 5b.3 子 agent 委派         ← 零缓存代价，但验收标准自成一套
-第 8 步   方案 5a 模型路由（先观测）      ← 唯一有缓存代价的，最后做
+第 3 步   方案 6 中断恢复判定（先改文案） ← 零代价，决策点现成，带外性质最纯
+第 4 步   方案 5b.1 追加计划指令          ← 纯追加，零代价，最小的行为改变
+第 5 步   方案 5b.2 effort 路由          ← 零缓存代价，档位枚举现成
+第 6 步   方案 2a/2b 核验                ← 零缓存代价，价值高
+第 7 步   方案 4 压缩取舍（先观测）       ← 工作量大，但基础设施已就位
+第 8 步   方案 5b.3 子 agent 委派         ← 零缓存代价，但验收标准自成一套
+第 9 步   方案 5a 模型路由（先观测）      ← 唯一有缓存代价的，最后做
 ```
 
 把方案 3 放在方案 1 之前，是因为它完全在产品代码之外 ——
@@ -917,6 +1046,9 @@ Claude Code 对会话 effort 的规定是：
 | 压缩 | `packages/runtime/src/history-compact-*.ts` |
 | 工具结果归档 / 恢复 | `packages/runtime/src/tool-result-archive.ts` |
 | 沙箱拒绝检测（正则） | `packages/runtime/src/sandbox/detect.ts` |
+| 中断恢复的按钮判定（启发式） | `apps/desktop/src/renderer/interrupted-resume.ts` |
+| 中断的结构性归类（不要动） | `packages/runtime/src/agent-run-recovery.ts` → `classifyAgentRunRecovery` |
+| 恢复按钮的消费方 | `apps/desktop/src/renderer/app-shell-turn-view-model.ts` |
 | 错误分类（关键词） | `packages/core/src/redaction.ts` → `classifyGeneralizedError` |
 | 权限 profile | `packages/core/src/permission-profile.ts` |
 | 沙箱边界 | `packages/core/src/sandbox-boundary.ts` |
