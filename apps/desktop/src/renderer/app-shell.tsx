@@ -653,7 +653,8 @@ function AppShellContent({
     setNewTaskPermissionMode,
     confirmBypass: () => confirmBypassPermission(toastApi, uiLocale),
   });
-  const { setPermissionMode, setSessionModel, setSessionThinkingLevel } = sessionSettingIntent;
+  const { setPermissionMode, setSessionModel, setSessionThinkingLevel, setSessionExecutor } =
+    sessionSettingIntent;
   const modelConfigurationOverlay = activeSession
     ? sessionSettingIntent.overlays.modelConfiguration[activeSession.id]
     : undefined;
@@ -727,13 +728,17 @@ function AppShellContent({
     activeThinkingLevels,
     activeThinkingLevel,
     newChatModel,
+    newChatExecutionTarget,
     newChatModelLabel,
+    newChatProviderType,
     newChatThinkingLevels,
     newChatThinkingLevel,
-    pendingNewChatThinkingLevel,
+    newChatExecutionThinkingLevel,
     composerSupportsVision,
     setPendingNewChatModel,
     setPendingNewChatThinkingLevel,
+    executorTarget,
+    onExecutorTargetChange,
     sessionHealthNotice,
   } = useShellChatModel({
     uiLocale,
@@ -756,10 +761,8 @@ function AppShellContent({
     openSettingsSection,
     openModelPicker: openComposerModelPicker,
     refreshModelChoices: sessionHostConnections.refreshConnections,
+    setSessionExecutor,
   });
-  const newChatProviderType = connections.find(
-    (connection) => connection.slug === newChatModel?.llmConnectionSlug,
-  )?.providerType;
   // PR109d-b: turn footer actions per turn. Derived from the
   // materialized turn list (status + lineage descendants) + pending
   // mask. Per @kenji PR109d review: pending state prevents double-click
@@ -1371,12 +1374,12 @@ function AppShellContent({
     respondToUserForm: commands.respondToUserForm,
     showModelSetupToast,
     toastApi,
-    newChatModel: newChatModel ?? null,
-    pendingNewChatThinkingLevel,
+    newChatModel: newChatExecutionTarget ?? null,
+    pendingNewChatThinkingLevel: newChatExecutionThinkingLevel ?? null,
     newChatPermissionChoice: newTaskPermissionChoice,
     clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
-    newChatOrchestrationMode: newChatOrchestrationMode,
+    newChatOrchestrationMode,
     newTaskTarget: taskEntry.selectors.target,
   });
 
@@ -2423,6 +2426,7 @@ function AppShellContent({
                   onAttachFilePaths={contextPickEnabled ? attachFilePaths : undefined}
                   modelLabel={activeModelLabel ?? newChatModelLabel}
                   activeSession={activeSessionForView}
+                  {...{ executorTarget, onExecutorTargetChange }}
                   activeModelConnectionId={activeSessionForModelControls?.llmConnectionId}
                   activeModelConnectionSlug={activeSessionForModelControls?.llmConnectionSlug}
                   activeModel={activeModel}
