@@ -19,7 +19,7 @@
 
 # Jev 决策层：设计与实施计划
 
-> **状态：设计稿，尚未实施。** 本文档描述把 TypeSafe Jev 接入 Maka 的六个方案、
+> **状态：设计稿，尚未实施。** 本文档描述把 TypeSafe Jev 接入 Maka 的七个方案、
 > 它们为什么按这个顺序排、以及每一个的落地步骤与验收标准。
 >
 > 代码和契约测试始终是最终权威；本文档与实现冲突时以实现为准。
@@ -49,6 +49,8 @@ Maka 里有三类位置适合它：
    `classifyGeneralizedError` 是 `lower.includes('timeout')`。
 2. **现在要烧一次完整 LLM 调用** —— 记忆抽取、压缩时的取舍、召回排序。
 3. **现在直接甩给用户** —— 沙箱边界弹窗。
+4. **现在是静态设置，本可以逐请求决定** —— 思考档位（`thinkingLevel`）
+   在设置里选一次就锁定整个会话。
 
 排序不是按价值排的，是按**前缀缓存代价**排的（见 [§3.1](#31-前缀缓存)）。
 这条约束推翻了直觉上最诱人的那个方案。
@@ -59,8 +61,13 @@ Maka 里有三类位置适合它：
 | 2 | [带外核验三件套](#方案-2带外核验三件套) | 零 | 中 |
 | 3 | [测试选择](#方案-3测试选择) | 零 | 小 |
 | 4 | [压缩取舍策略](#方案-4压缩取舍策略) | 无额外 | 大 |
-| 5 | [模型路由](#方案-5模型路由带滞回) | 高 | 中 |
+| 5a | [模型路由](#方案-5a模型路由带滞回) | 高 | 中 |
+| 5b | [自适应推理与 effort 路由](#方案-5b自适应推理与-effort-路由) | 零 | 中 |
 | 6 | [改工具集的 turn 路由](#6-明确不做的) | **最高** | —— 不做 |
+
+5a 和 5b 看起来是同一件事，缓存代价却差一个数量级：换 **model** 会作废缓存
+（缓存按模型分），换 **effort** 不会（它是请求参数，不是前缀内容）。
+把两者混为一谈，会让零代价的 5b 被 5a 连累着一起排到最后。
 
 ---
 
@@ -559,7 +566,10 @@ criteria:  ["无关", "可能有用", "承重"]
 
 ---
 
-### 方案 5｜模型路由（带滞回）
+### 方案 5a｜模型路由（带滞回）
+
+> 本方案只管**换模型**。换思考档位是[方案 5b](#方案-5b自适应推理与-effort-路由)，
+> 两者缓存代价完全不同，不要合并实现。
 
 #### 现状
 
@@ -574,7 +584,7 @@ criteria:  ["无关", "可能有用", "承重"]
 criteria: ["简单查找", "常规改动", "多文件重构", "需要设计判断"]
 ```
 
-映射到模型和思考预算。
+映射到模型。
 
 #### 缓存代价
 
@@ -588,9 +598,6 @@ criteria: ["简单查找", "常规改动", "多文件重构", "需要设计判�
 
 **工具集不能随路由改动。** 工具定义在 prompt 最前面，动一下 100% 作废
 （这就是[方案 6](#6-明确不做的)被否决的原因）。
-
-思考预算是请求参数而非前缀内容，理论上不作废缓存，
-但 Anthropic 那边思考配置变化是否影响缓存键**需要实测**，不要当成已知。
 
 #### 实施步骤
 
@@ -612,6 +619,205 @@ criteria: ["简单查找", "常规改动", "多文件重构", "需要设计判�
 |---|---|
 | 缓存抖动吃掉全部收益 | 滞回；验收标准直接看总成本而非模型单价 |
 | 难任务被路由到弱模型 | 只做向下路由，且阈值保守 |
+
+---
+
+### 方案 5b｜自适应推理与 effort 路由
+
+#### 背景：`thinking` 参数的三代演进
+
+理解这个方案最快的方式，是看 `adaptive` 在解决上一代的什么问题。
+
+**第一代：没有思考。** 模型直接出答案。
+
+**第二代：`thinking: { type: 'enabled', budget_tokens: N }`**
+
+请求里给一个 token 预算，模型回答前先"想"，最多想 N 个 token，思考 token 按
+output 计费。问题是 **N 是在看到问题之前拍的数**：定低了难题上思考被截断，
+定高了简单题上模型倾向于把预算填满，而且整个会话一个值。
+
+**第三代：`thinking: { type: 'adaptive' }`**
+
+**没有 budget 字段。** 模型自己按感知到的难度**逐请求**决定想多少，
+按实际生成计费。
+
+**这就是"自适应推理"，而 Maka 已经在用了。**
+
+#### 现状：两层，一层已自适应，一层是静态的
+
+`packages/runtime/src/model-factory.ts` 的 `visibleClaudeThinking()`：
+
+```ts
+const thinking =
+  mode === 'adaptive'
+    ? { type: 'adaptive' as const, display: 'summarized' as const }   // 现代 Claude
+    : { type: 'enabled' as const, budgetTokens: 1_024 };              // 老 Claude 4 裸别名
+return { thinking, ...(effort ? { effort } : {}) };
+```
+
+`claudeThinkingMode()` 查 `getAnthropicModelCapabilities(...).supportsAdaptiveThinking`
+决定走哪条。于是形成两层：
+
+| 层 | 决策者 | 信息量 | 现状 |
+|---|---|---|---|
+| `thinking: adaptive` | **模型** | **完整** —— 看得见整个上下文、工具结果、当前进展 | 已启用 |
+| `effort` | 外部 | 少 —— 只看得见请求文本 | **静态**，来自 `settings.thinkingLevel` |
+
+几个实现细节值得记住：
+
+- 不支持 adaptive 的模型退回**固定 1024 token**，很小，实际上被钉死在浅档
+- `level === 'off'` 且 provider 声明 `offBehavior: 'anthropic-thinking-disabled'`
+  → `thinking: { type: 'disabled' }`，彻底关闭
+- 档位**原样透传**，不做换算。代码注释：
+  > No budget-token mapping — the provider's native effort values pass through unchanged.
+- 不只 Claude。Kimi K3 那条分支的注释是
+  「supports adaptive thinking only; effort defaults to max when unset」
+
+#### 设计原则：两层互补，不是竞争
+
+Jev 的作用**不是替模型判断难度** —— 它的信息比模型少得多，抢这个活是输定的。
+它的作用是**移动模型自适应的基线**。
+
+Jev 判断"这轮像个多文件重构" → `effort=high` → 模型在更高的基线上继续自适应，
+仍然会在简单的子步骤上少想。两层叠加，不冲突。
+
+这也解释了为什么外部路由在 `effort` 上合理，而在"决定思考多少 token"上不合理。
+
+**由此得出一个不对称：设高的代价小，设低的代价大。**
+
+```
+effort = max  + "1+1 等于几"   →  模型还是不会想很久（adaptive 兜着）
+effort = low  + 一个难重构      →  模型受限，想得比它该想的浅
+```
+
+所以 effort 路由应主要**往下**调（识别明显简单的请求，省钱），
+往上调的收益大半被 adaptive 层吃掉了。
+
+#### 设计：criteria 必须按模型的实际档位梯子构造
+
+**这是实现时第一个会踩的坑。** 不同模型的档位数不同 —— 有的三档，有的六档。
+
+`packages/core/src/model-thinking.ts` 已经有完整的能力阶梯系统：
+
+```ts
+thinkingVariantsForConnection(connection, modelId): readonly ThinkingLevel[]
+```
+
+按显示顺序返回该模型支持的档位。解析链两级：
+
+1. `modelOverride(connection, modelId)?.thinkingLevels` —— 用户为
+   openai-compatible 中转声明的。粒度是**模型**而不是连接，因为
+   「a relay may front a DeepSeek-family reasoner and a plain instruct model side by side」
+2. 回落到 `thinkingVariantsForModel()` —— 从 `model-metadata.ts` 的
+   `thinkingOptions` 派生（`deriveThinkingChoices`）：
+   `offBehavior` → 加 `'off'`；`efforts` 里的 `'none'` → `'off'`；
+   合法 `ThinkingLevel` → 加；**不认识的值丢弃**；没有声明 → 返回 `[]`，UI 隐藏开关
+
+所以 criteria 必须这样构造：
+
+```ts
+const levels = thinkingVariantsForConnection(connection, modelId)
+  .filter((l) => l !== 'off');        // off 不是强度档，Jev 不碰
+if (levels.length < 2) return;        // 没有可选空间，跳过调用
+// levels 直接就是 criteria —— Jev 的 Score 要 2–10 档，天然满足
+```
+
+**为什么不能用固定的 `THINKING_LEVELS`：** Jev 会返回 `xhigh`，而模型只有
+`low/medium/high`。映射到 `high`？还是判为无效？`resolveThinkingLevel()`
+现在的行为是**丢弃**，而丢弃意味着回落到默认值 —— 这次路由白做了，钱也白花了。
+
+按实际梯子构造就绕开了整个问题，还有个附带好处：**给 Jev 的选项集本身就是一份
+能力声明**，返回值天然合法，`resolveThinkingLevel()` 在这条路径上退化成冗余保险
+而不是实际的过滤器。
+
+`off` 不进量表，依据是 `model-thinking.ts` 的注释：
+
+> `off` is not an intensity tier but a *disable* wire (`reasoning_effort: 'none'`)
+
+这也符合[方向不变量](#32-方向不变量)：Jev 能在强度轴上移动，但不能替用户关掉思考。
+
+#### 三个零缓存代价的形态
+
+按可做程度排序：
+
+**5b.1 追加计划指令。** 判断这轮像多文件重构时，在当前轮尾部**追加**一条提示
+（「这看起来要动多个文件，先规划再改」）。纯追加，符合规则 R1，前缀照常命中。
+效果与调高 effort 有相当部分重叠，但代价确定为零。**最先做这个。**
+
+**5b.2 effort 路由。** 上面那套。零缓存代价 —— `effort` 是请求参数而非前缀内容。
+
+**5b.3 子 agent 委派判断。** `packages/core/src/subagent-settings.ts` 的
+`SubagentPreset` **自带 `model` 和 `thinkingLevel`**，注释写着
+「User-approved model route」。子 agent 在**自己全新的上下文**里跑，
+没有缓存可破坏 —— 这是零缓存代价地用上强模型 + 高 effort 的唯一途径。
+
+今天由模型自己通过 `agent_list` + `agent_spawn` 选（`subagent-tools.ts`），
+要花工具调用和上下文。Jev 的两个可能接入点里，第二个更值钱：
+
+- 帮它挑 preset —— 省几个工具调用，收益一般
+- **判断"该不该委派"** —— 模型经常意识不到该委派，自己一头扎进去干
+
+而且 preset 是用户批准的，Jev 只能在已批准的路由里**选**，不能**造**，
+天然满足方向不变量。
+
+> 压缩点也可以重定 effort：缓存在那里本来就要作废，且此时判断是**有信息的**
+> （已看完整段会话）。归入[方案 4](#方案-4压缩取舍策略)一并实现。
+
+#### 缓存代价
+
+**零。** `effort` 与 `thinking` 是请求参数，不是消息前缀内容；5b.1 是纯追加；
+5b.3 的子 agent 本来就是冷上下文。
+
+#### 一条硬约束：不能自己给自己提价
+
+Claude Code 对会话 effort 的规定是：
+
+> a session must not silently re-price its own turns
+
+理由很直接：那等于 agent 悄悄抬高自己的消费。Jev 自动拨 effort 正是这个形状。
+
+**因此本方案必须满足以下至少一条：**
+
+- 用户设的档位是**上限**，Jev 只能在其下移动，不能突破；或
+- 变更对用户**可见**（例如在轮次页脚显示本轮实际用了哪档）
+
+推荐第一条 —— 它和方向不变量是同一个形状：**Jev 可以省钱，不能花钱。**
+
+#### 实施步骤
+
+1. 5b.1 先做：在轮次组装处按 Score 结果追加计划提示，纯追加
+2. 5b.2 观测模式：按模型梯子构造 criteria，打分、记遥测，**不改实际 effort**
+3. 对比：Jev 的档位建议与实际消耗（思考 token 数、轮数、是否返工）相关吗？
+4. 相关性成立后启用，且**只向下**，以用户设定为上限
+5. 5b.3 单独评估，它的验收标准与前两者不同
+
+#### 验收
+
+- 5b.1：在一组多文件改动任务上，追加提示后的返工率下降 ≥ 15%
+- 5b.2 观测期 ≥ 200 轮；档位建议与实际思考 token 消耗的秩相关系数 ≥ 0.5
+- 5b.2 启用后 `cacheRead` 相对基线**无下降**（若下降，说明关于 effort 不作废
+  缓存的前提不成立，立即停用并回到观测）
+- 任一失败时，行为与今天完全一致（静态 `thinkingLevel`）
+
+#### 风险
+
+| 风险 | 缓解 |
+|---|---|
+| 难任务被压到低档，质量下降 | 只向下调，且以用户设定为上限；阈值保守 |
+| 档位映射错误导致静默回落 | criteria 按实际梯子构造，从源头消除 |
+| 前提（effort 不作废缓存）不成立 | 验收标准直接盯 `cacheRead`，不达标即停用 |
+| 用户感到失控 | 上限语义 + 页脚可见，二选一必须实现 |
+
+#### 一个已知的观察
+
+`deriveThinkingChoices()` 会丢弃不认识的 effort 值，注释写着：
+
+> add the level to `THINKING_LEVELS` if a provider introduces a new effort tier
+
+所以某个 provider 引入新档位（例如 `ultra`）时，在有人手工把它加进
+`THINKING_LEVELS` 之前，那一档会**静默消失** —— 模型支持，但 Maka 不给选，
+也不告警。对 Jev 路由本身是安全的（它只在已知档位里选），
+但排查"某模型档位比官方文档少"时应先看这里。
 
 ---
 
@@ -647,13 +853,19 @@ criteria: ["简单查找", "常规改动", "多文件重构", "需要设计判�
 第 0 步   共享基础设施（§4）             ← 前置，独立可测
 第 1 步   方案 3 测试选择                ← 不碰产品代码，风险最低，先练手
 第 2 步   方案 1 Grep 密钥判断           ← 最小的产品改动，验证带外性质
-第 3 步   方案 2a/2b 核验                ← 零缓存代价，价值高
-第 4 步   方案 4 压缩取舍（先观测）       ← 工作量大，但基础设施已就位
-第 5 步   方案 5 模型路由（先观测）       ← 唯一有缓存代价的，最后做
+第 3 步   方案 5b.1 追加计划指令          ← 纯追加，零代价，最小的行为改变
+第 4 步   方案 5b.2 effort 路由          ← 零缓存代价，档位枚举现成
+第 5 步   方案 2a/2b 核验                ← 零缓存代价，价值高
+第 6 步   方案 4 压缩取舍（先观测）       ← 工作量大，但基础设施已就位
+第 7 步   方案 5b.3 子 agent 委派         ← 零缓存代价，但验收标准自成一套
+第 8 步   方案 5a 模型路由（先观测）      ← 唯一有缓存代价的，最后做
 ```
 
 把方案 3 放在方案 1 之前，是因为它完全在产品代码之外 ——
 用它把客户端、键值约定、超时、遥测这套底座跑通，代价最小。
+
+把 5b 整体排在 5a 之前，是因为两者的缓存代价差一个数量级：
+5b 动的是请求参数，5a 动的是缓存分区。**顺序由代价决定，不由价值决定。**
 
 ### 7.2 每个方案的推进流程
 
@@ -698,6 +910,10 @@ criteria: ["简单查找", "常规改动", "多文件重构", "需要设计判�
 | Grep / Bash 调用点 | `packages/runtime/src/builtin-tools.ts`、`packages/runtime/src/bash-model-output.ts` |
 | 缓存控制 | `packages/runtime/src/model-factory.ts` |
 | 缓存遥测 | `packages/runtime/src/telemetry/llm-call-usage.ts` |
+| 自适应思考接线 | `packages/runtime/src/model-factory.ts` → `visibleClaudeThinking` / `claudeThinkingMode` |
+| 档位能力梯子 | `packages/core/src/model-thinking.ts` → `thinkingVariantsForConnection` / `deriveThinkingChoices` |
+| 子 agent 路由（自带 model + thinkingLevel） | `packages/core/src/subagent-settings.ts` → `SubagentPreset` |
+| 子 agent 选择工具 | `packages/runtime/src/subagent-tools.ts` |
 | 压缩 | `packages/runtime/src/history-compact-*.ts` |
 | 工具结果归档 / 恢复 | `packages/runtime/src/tool-result-archive.ts` |
 | 沙箱拒绝检测（正则） | `packages/runtime/src/sandbox/detect.ts` |
