@@ -18,5 +18,9 @@
 -->
 
 实施测试文档
-- [Jev 决策层：设计与实施计划](./docs/jev-decision-layer.zh-CN.md) — fork-local design draft; not implemented
-- [Jev：更远的方向](./docs/jev-beyond-maka.zh-CN.md) — fork-local exploration; not a plan
+
+| 文档 | 性质 | 进度 |
+|---|---|---|
+| [Jev 决策层：设计与实施计划](./docs/jev-decision-layer.zh-CN.md) | fork-local 计划 | 6 个方案 **0 已接入 Jev**；方案 1 的格式化脱敏底座已合入 main |
+| [Jev：更远的方向](./docs/jev-beyond-maka.zh-CN.md) | fork-local 探索 | 非实施计划 |
+| [Windows 沙箱 W2 实施计划](./docs/architecture/windows-sandbox-w2-plan.zh-CN.md) | fork-local 计划 | 5 步 **0 已开工**；自用范围，已裁掉签名与外审 |
