@@ -184,6 +184,7 @@
     "src/renderer/settings/subagent-settings-page.tsx",
     "src/renderer/settings/task-catalog-rows.ts",
     "src/renderer/settings/tasks-settings-page.tsx",
+    "src/renderer/settings/trusted-paths-section.tsx",
     "src/renderer/settings/ui-locale-update-gate.ts",
     "src/renderer/settings/usage-settings-page.tsx",
     "src/renderer/settings/use-action-guard.ts",
@@ -306,7 +307,9 @@
           "window.maka.sessions.remove": 1,
           "window.maka.sessions.respondToSandboxBoundary": 1,
           "window.maka.sessions.respondToUserQuestion": 1,
-          "window.maka.sessions.submitMessage": 1
+          "window.maka.sessions.submitMessage": 1,
+          "window.maka.settings.get": 1,
+          "window.maka.settings.update": 1
         },
         "environmentCapabilities": {},
         "hookCalls": {},
@@ -327,7 +330,7 @@
           "@maka/ui": 1
         },
         "importSpecifiers": 10,
-        "nonTriviaTokens": 3590
+        "nonTriviaTokens": 3686
       },
       "src/renderer/app-shell-chrome-actions.tsx": {
         "importDeclarations": 4,
@@ -831,7 +834,7 @@
           "react": 1
         },
         "importSpecifiers": 98,
-        "nonTriviaTokens": 12729
+        "nonTriviaTokens": 12736
       },
       "src/renderer/use-app-shell-composer-quotes.ts": {
         "importDeclarations": 0,
@@ -2705,6 +2708,7 @@
           "./settings-section": 1,
           "./settings-skeleton": 1,
           "./settings-status-summary-filter": 1,
+          "./trusted-paths-section": 1,
           "./use-action-guard": 1,
           "@astryxdesign/core": 1,
           "@maka/core/capabilities": 1,
@@ -3540,6 +3544,31 @@
           "@maka/runtime-host/profile-kind": 1,
           "@maka/ui": 1,
           "@maka/ui/icons": 1,
+          "react": 1
+        }
+      },
+      "src/renderer/settings/trusted-paths-section.tsx": {
+        "bridgePaths": {},
+        "environmentCapabilities": {},
+        "hookCalls": {
+          "useActionGuard": 1,
+          "useMountedRef": 1,
+          "useState": 3,
+          "useToast": 1,
+          "useUiLocale": 1
+        },
+        "lifecycleMethods": {},
+        "unresolvedDependencies": 0,
+        "actionFactories": [],
+        "dependencyPaths": {
+          "../locales/permission-center-copy": 1,
+          "./settings-error-copy": 1,
+          "./settings-section": 1,
+          "./use-action-guard": 1,
+          "@astryxdesign/core": 1,
+          "@maka/core/absolute-path": 1,
+          "@maka/core/trusted-paths": 1,
+          "@maka/ui": 1,
           "react": 1
         }
       },
