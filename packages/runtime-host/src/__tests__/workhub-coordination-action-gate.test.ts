@@ -1992,6 +1992,13 @@ function fakeEffects(initialSessions: WorkHubActionGateSession[]) {
       }
       return result;
     },
+    async withReplacementCapacity<T>(
+      _input: WorkHubDelegationAssignmentInput,
+      _context: ConnectionContext,
+      operation: () => Promise<T>,
+    ) {
+      return operation();
+    },
     async prepareReplacement(input: WorkHubDelegationReplacementInput) {
       const existing = replacements.get(input.replacesDelegationId);
       if (existing) return existing;

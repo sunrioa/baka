@@ -94,6 +94,101 @@ const reorderMutationInput = (
 
 const retractMutationInput = (entryId: string, retractId: string) => ({ entryId, retractId });
 
+test('a capacity reservation protects its slot without delivering a phantom Message', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.reserveRootTurn(ROOT);
+  const owner = fixture.coordinator.bindRun(ROOT);
+  let release: (() => void) | undefined;
+  try {
+    for (let index = 0; index < MESSAGE_QUEUE_MAX_ENTRIES - 1; index++) {
+      assert.ok((await submit(fixture, `queued-${index}`, 'Other work', 'next_turn')).ok);
+    }
+    const reserved = await fixture.coordinator.reserveFollowupCapacity(
+      ROOT.sessionId,
+      'replacement',
+      { text: 'Replacement work' },
+    );
+    assert.ok(reserved.ok, JSON.stringify(reserved));
+    release = reserved.result;
+    assert.equal(
+      fixture.coordinator.projection(ROOT.sessionId).followup.length,
+      MESSAGE_QUEUE_MAX_ENTRIES - 1,
+    );
+    const competing = await submit(
+      fixture,
+      'competing',
+      'Cannot take the reserved slot',
+      'next_turn',
+    );
+    assert.equal(competing.ok, false);
+    if (!competing.ok) assert.equal(competing.error.code, 'session_busy');
+    const admission: PendingMessageAdmission = {
+      ...ROOT,
+      messageId: 'replacement',
+      content: { text: 'Replacement work' },
+      submittedContentDigest: messageContentDigest({ text: 'Replacement work' }),
+      submittedPlacement: 'next_turn',
+      placement: 'next_turn',
+      disposition: 'followup',
+      skillInvocation: EMPTY_SKILL_INVOCATION,
+      admittedAt: Date.now(),
+    };
+    await fixture.sessionAdmission.run(ROOT.sessionId, async (lease) => {
+      const capacity = await fixture.coordinator.preflightQueuedAdmissionAdmitted(admission, lease);
+      assert.ok(capacity.ok, JSON.stringify(capacity));
+      await fixture.admissions.commitMessageAdmission(admission);
+      release!();
+      await fixture.coordinator.consumePendingAdmissionsAdmitted(ROOT.sessionId, lease);
+    });
+    assert.equal(
+      fixture.coordinator.projection(ROOT.sessionId).followup.length,
+      MESSAGE_QUEUE_MAX_ENTRIES,
+    );
+    assert.equal((await submit(fixture, 'competing-again', 'Still full', 'next_turn')).ok, false);
+  } finally {
+    release?.();
+    await queueMutation(fixture, 'queue.retract', { retractId: 'cleanup' });
+    owner.release();
+    fixture.coordinator.completeIdle(fixture.coordinator.beginTerminalTransition(ROOT));
+    await fixture.coordinator.close();
+  }
+});
+
+test('capacity reservations include bytes during submit and edit, and release on failure', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.reserveRootTurn(ROOT);
+  const owner = fixture.coordinator.bindRun(ROOT);
+  let release: (() => void) | undefined;
+  try {
+    assert.ok((await submit(fixture, 'existing', 'x'.repeat(40 * 1024), 'next_turn')).ok);
+    const reserved = await fixture.coordinator.reserveFollowupCapacity(
+      ROOT.sessionId,
+      'replacement',
+      { text: 'y'.repeat(8 * 1024) },
+    );
+    assert.ok(reserved.ok, JSON.stringify(reserved));
+    release = reserved.result;
+    assert.equal((await submit(fixture, 'competing', 'z'.repeat(8 * 1024), 'next_turn')).ok, false);
+    const entry = fixture.coordinator.projection(ROOT.sessionId).followup[0]!;
+    const edit = (updateId: string) =>
+      queueMutation(fixture, 'queue.entry.update', {
+        updateId,
+        entryId: entry.entryId,
+        expectedQueueRevision: fixture.coordinator.projection(ROOT.sessionId).queueRevision,
+        text: 'x'.repeat(48 * 1024),
+      });
+    assert.equal((await edit('reserved-edit')).ok, false);
+    release();
+    assert.ok((await edit('released-edit')).ok);
+  } finally {
+    release?.();
+    await queueMutation(fixture, 'queue.retract', { retractId: 'cleanup' });
+    owner.release();
+    fixture.coordinator.completeIdle(fixture.coordinator.beginTerminalTransition(ROOT));
+    await fixture.coordinator.close();
+  }
+});
+
 test('consumes an active-target admission before the terminal transition can make it idle', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'maka-workhub-active-consume-'));
   const store = createSessionStore(root);

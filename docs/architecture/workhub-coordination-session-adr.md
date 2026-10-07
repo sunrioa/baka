@@ -222,10 +222,20 @@ Stop ambiguity checks still reject a Session with multiple working delegations
 rather than choosing one implicitly. Crash recovery resumes durable pending
 admissions; an orderly Host drain retains its existing queue-cancellation policy.
 
+Correction reserves the replacement Message's queue capacity before writing a
+replacement intent or retiring the source. Ordinary submissions and queue edits
+account for this reservation while Stop is awaited, without holding a Session
+admission lock across execution. Assignment consumes the reservation; any failure
+releases it. A capacity rejection leaves the source intact and allows correction
+with a new action identity. Reservations are transient admission guards, not
+Messages or a second durable queue; recovery rechecks capacity from canonical facts.
+
 The first-response contract is hybrid. The atomic `delegation_assigned` record is
 an immediate durable acknowledgement, so WorkHub confirms acceptance without
 waiting for target execution. The target Message is the stable delegation
-identity; `targetTurnId` records only its admission location. WorkHub asks the
+identity. The assignment record's `targetTurnId` records its admission location;
+the public receipt exposes `targetMessageId` and includes `targetTurnId` only
+when Message authority proves actual execution ownership. WorkHub asks the
 target Message authority which Turn durably consumed or admitted that Message,
 then joins the resolved Turn's recorded lifecycle and the target Session's exact
 live-Turn membership to project `running`, `waiting_for_user`, `completed`,

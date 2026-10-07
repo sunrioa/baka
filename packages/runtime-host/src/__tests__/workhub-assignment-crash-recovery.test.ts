@@ -229,7 +229,9 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         assert.ok('targetSessionId' in replay);
         assert.equal(replay.targetSessionId, assignment.targetSessionId);
         assert.ok('targetTurnId' in replay);
-        assert.equal(replay.targetTurnId, assignment.targetTurnId);
+        assert.equal(replay.targetTurnId, dispatch.turnId);
+        assert.ok('targetMessageId' in replay);
+        assert.equal(replay.targetMessageId, assignment.targetMessageId);
         assert.deepEqual(await actWorkHub(connection, action), replay);
         await assert.rejects(
           actWorkHub(connection, {
@@ -352,6 +354,7 @@ for (const failAssignment of [false, true]) {
         const assigned: WorkHubCoordinationActResult = await actWorkHub(client, action);
         assert.ok(assigned.disposition === 'delegate_existing');
         assert.equal(assigned.targetSessionId, sessionId);
+        assert.ok(assigned.targetTurnId);
         turnIds.push(assigned.targetTurnId);
         assert.equal(
           (await waitForTerminalTurn(client, sessionId, assigned.targetTurnId)).status,
@@ -476,6 +479,7 @@ test('real Host uses the independent Memory provider for messages, history and W
     const assigned = await actWorkHub(client, action);
     assert.equal(assigned.disposition, 'delegate_existing');
     if (assigned.disposition !== 'delegate_existing') throw new Error('Delegation not admitted');
+    assert.ok(assigned.targetTurnId);
     assert.equal(
       (await waitForTerminalTurn(client, assigned.targetSessionId, assigned.targetTurnId)).status,
       'completed',
@@ -490,6 +494,7 @@ test('real Host uses the independent Memory provider for messages, history and W
     const created = await actWorkHub(client, create);
     assert.equal(created.disposition, 'create_new');
     if (created.disposition !== 'create_new') throw new Error('New delegation not admitted');
+    assert.ok(created.targetTurnId);
     assert.equal(
       (await waitForTerminalTurn(client, created.targetSessionId, created.targetTurnId)).status,
       'completed',

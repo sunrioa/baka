@@ -335,6 +335,7 @@ export type CandidateSnapshotPreflight = (
   candidate: {
     readonly queue?: SessionMessageQueueProjection;
     readonly interactions?: SessionInteractionProjection;
+    readonly rootTurn?: TurnSnapshot;
   },
 ) => Promise<boolean> | boolean;
 
@@ -492,6 +493,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   readonly #createId: () => string;
   readonly #preflightSessionSnapshot: CandidateSnapshotPreflight;
   readonly #sessions = new Map<string, SessionState>();
+  readonly #capacityReservations = new Map<string, Map<string, RootFollowupSource>>();
   readonly #pendingSubmits = new Map<string, PendingSubmit>();
   readonly #completedOperations = new Map<string, CompletedOperation>();
   readonly #queueMutations: QueuedMutationExecutor;
@@ -537,6 +539,85 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   hasLiveSessionState(sessionId: string): boolean {
     const state = this.#sessions.get(sessionId);
     return state ? hasLiveMessageState(state) : false;
+  }
+
+  /** Reserve queue capacity across an asynchronous destructive operation, not a Session lock. */
+  reserveFollowupCapacity(
+    sessionId: string,
+    messageId: string,
+    content: MessageContent,
+  ): Promise<MessageOutcome<() => void>> {
+    return this.#sessionAdmission.run(sessionId, async (lease) => {
+      if (this.#draining || this.#failStopped)
+        return failure('host_draining', 'Runtime Host is draining');
+      await this.#consumePendingAdmissions(sessionId, lease);
+      const root = await this.#root.readRootState(sessionId);
+      if (root.kind === 'reserved')
+        return failure('session_busy', 'A target root Turn is being admitted');
+      const state = this.#state(sessionId);
+      if (state.phase !== 'open') return failure('session_busy', 'Message queue is closed');
+      const source: RootFollowupSource = {
+        messageId,
+        content,
+        submittedContentDigest: messageContentDigest(content),
+        submittedPlacement: 'next_turn',
+        placement: 'next_turn',
+        disposition: 'followup',
+        skillInvocation: EMPTY_SKILL_INVOCATION,
+      };
+      const revision = state.revision;
+      const generation = state.generation;
+      const capacityRoot =
+        root.kind === 'active'
+          ? root
+          : { sessionId, turnId: 'r'.repeat(128), runId: 's'.repeat(128) };
+      const capacity = await this.#preflightQueuedMessage(
+        state,
+        capacityRoot,
+        source,
+        reservedFollowupSnapshot(source),
+        // An idle Session cannot publish a nonempty queue without a root. Size
+        // the reservation with a prospective root, never publish this candidate.
+        root.kind === 'idle' ? { ...capacityRoot, status: 'running' } : undefined,
+      );
+      if (!capacity.ok) {
+        this.#maybeReclaim(sessionId, state);
+        return capacity;
+      }
+      if (state.phase !== 'open' || state.revision !== revision || state.generation !== generation)
+        return failure('session_busy', 'Message queue changed before capacity reservation');
+      const reservations = this.#capacityReservations.get(sessionId) ?? new Map();
+      reservations.set(messageId, source);
+      this.#capacityReservations.set(sessionId, reservations);
+      return success(() => {
+        if (reservations.get(messageId) !== source) return;
+        reservations.delete(messageId);
+        if (reservations.size === 0) this.#capacityReservations.delete(sessionId);
+        const current = this.#sessions.get(sessionId);
+        if (current) this.#maybeReclaim(sessionId, current);
+      });
+    });
+  }
+
+  #reservedSources(state: SessionState, excludeMessageId?: string): RootFollowupSource[] {
+    const liveIds = new Set(allLiveEntries(state).map((entry) => entry.messageId));
+    return [...(this.#capacityReservations.get(state.sessionId)?.values() ?? [])].filter(
+      (source) => source.messageId !== excludeMessageId && !liveIds.has(source.messageId),
+    );
+  }
+
+  #withReservedCapacity(
+    state: SessionState,
+    projection: SessionMessageQueueProjection,
+    excludeMessageId?: string,
+  ): SessionMessageQueueProjection {
+    return {
+      ...projection,
+      followup: [
+        ...projection.followup,
+        ...this.#reservedSources(state, excludeMessageId).map(reservedFollowupSnapshot),
+      ],
+    };
   }
 
   /** Preflight an atomic external admission without committing a second Message. */
@@ -1682,31 +1763,48 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     root: RuntimeMessageRunIdentity,
     source: RootFollowupSource,
     entry: QueuedMessageSnapshot,
+    prospectiveRoot?: TurnSnapshot,
   ): Promise<MessageOutcome<void>> {
-    if (allLiveEntries(state).length >= MESSAGE_QUEUE_MAX_ENTRIES) {
+    if (
+      allLiveEntries(state).length + this.#reservedSources(state, source.messageId).length >=
+      MESSAGE_QUEUE_MAX_ENTRIES
+    ) {
       return failure('session_busy', 'Message queue capacity is full');
     }
     const current = this.#project(state);
-    const candidate: SessionMessageQueueProjection = {
-      ...current,
-      queueRevision: state.revision + 1,
-      steering:
-        source.disposition === 'steering'
-          ? [...current.steering, { ...entry, placement: 'current_turn' }]
-          : current.steering,
-      followup: source.disposition === 'followup' ? [...current.followup, entry] : current.followup,
-    };
+    const candidate: SessionMessageQueueProjection = this.#withReservedCapacity(
+      state,
+      {
+        ...current,
+        queueRevision: state.revision + 1,
+        steering:
+          source.disposition === 'steering'
+            ? [...current.steering, { ...entry, placement: 'current_turn' }]
+            : current.steering,
+        followup:
+          source.disposition === 'followup' ? [...current.followup, entry] : current.followup,
+      },
+      source.messageId,
+    );
     if (!projectionFitsEveryEntryState(candidate)) {
       return failure('session_busy', 'Message queue projection capacity is full');
     }
-    if (!(await this.#preflightSessionSnapshot(state.sessionId, { queue: candidate }))) {
+    if (
+      !(await this.#preflightSessionSnapshot(state.sessionId, {
+        queue: candidate,
+        ...(prospectiveRoot ? { rootTurn: prospectiveRoot } : {}),
+      }))
+    ) {
       return failure('session_busy', 'Session projection capacity is full');
     }
     if (!interruptResultFits(candidate, root)) {
       return failure('session_busy', 'Message queue interrupt result capacity is full');
     }
     const steering = [...state.inFlight.values(), ...state.steering].map(sourceFromEntry);
-    const followup = state.followup.map(sourceFromEntry);
+    const followup = [
+      ...state.followup.map(sourceFromEntry),
+      ...this.#reservedSources(state, source.messageId),
+    ];
     if (source.disposition === 'steering') steering.push(source);
     else followup.push(source);
     if (!successorAdmissionsFit(state.sessionId, root.turnId, steering, followup)) {
@@ -1838,6 +1936,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     const prospectiveFollowup = state.followup
       .filter((queued) => queued !== entry)
       .map(sourceFromEntry);
+    prospectiveFollowup.push(...this.#reservedSources(state));
     if (
       !successorAdmissionsFit(
         input.sessionId,
@@ -1905,12 +2004,12 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       entry: T,
     ): T =>
       entry.entryId === input.entryId && entry.state === 'queued' ? { ...entry, content } : entry;
-    const updatedProjection = {
+    const updatedProjection = this.#withReservedCapacity(state, {
       ...candidate,
       queueRevision: candidate.queueRevision + 1,
       steering: candidate.steering.map(updateSnapshot),
       followup: candidate.followup.map(updateSnapshot),
-    };
+    });
     if (!projectionFitsEveryEntryState(updatedProjection)) {
       return failure('session_busy', 'Message queue projection capacity is full');
     }
@@ -1924,7 +2023,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           }
         : sourceFromEntry(entry);
     const steeringSources = [...state.inFlight.values(), ...state.steering].map(updatedSource);
-    const followupSources = state.followup.map(updatedSource);
+    const followupSources = [...state.followup.map(updatedSource), ...this.#reservedSources(state)];
     if (
       !successorAdmissionsFit(
         input.sessionId,
@@ -2819,6 +2918,16 @@ function queuedSteeringSnapshot(entry: LiveEntry): SteeringMessageSnapshot {
  */
 function queuedFollowupSnapshot(entry: LiveEntry): QueuedMessageSnapshot {
   return { ...queuedSnapshot(entry), placement: 'next_turn' };
+}
+
+function reservedFollowupSnapshot(source: RootFollowupSource): QueuedMessageSnapshot {
+  return {
+    entryId: 'q'.repeat(128 - source.messageId.length) + source.messageId,
+    messageId: source.messageId,
+    content: submittedProjectionContent(source.content),
+    placement: 'next_turn',
+    state: 'queued',
+  };
 }
 
 function inFlightSnapshot(entry: LiveEntry): SteeringMessageSnapshot {

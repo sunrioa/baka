@@ -2336,6 +2336,7 @@ function coordinator(
       },
     },
     sessionActions: {
+      withReplacementCapacity: async (_input, _context, operation) => operation(),
       readDelegationRetirement: async () => 'not_retired',
       resumeDelegation: async () => ({
         outcome: 'resume_started' as const,

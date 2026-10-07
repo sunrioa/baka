@@ -264,6 +264,7 @@ import { HostWebSearchCoordinator } from './web-search-coordinator.js';
 import { HostWorkHubCoordinationCoordinator } from './workhub-coordination-coordinator.js';
 import {
   WorkHubActionEffectFailure,
+  type WorkHubDelegationAssignmentInput,
   workHubResumedTurnId,
 } from './workhub-coordination-action-gate.js';
 
@@ -2299,6 +2300,33 @@ export async function createExecutionRuntimeHostComposition(
         return outcome.result.kind === 'committed' ? 'committed' : 'revision_conflict';
       },
     });
+    async function prepareWorkHubMessage(input: WorkHubDelegationAssignmentInput) {
+      const suffix = createHash('sha256').update(input.actionId, 'utf8').digest('hex').slice(0, 48);
+      const durable = await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      const targetAttachments = durable
+        ? durable.targetAttachments
+        : input.attachments?.length
+          ? await copyWorkHubAttachmentsToTarget(
+              openedArtifactStore,
+              artifacts,
+              input.targetSessionId,
+              input.attachments,
+            )
+          : input.attachments;
+      return {
+        suffix,
+        messageId: `whm_${suffix}`,
+        targetAttachments,
+        content: normalizeMessageContent({
+          text: input.delegationText ?? input.userText,
+          ...(targetAttachments ? { attachments: targetAttachments } : {}),
+        }),
+      };
+    }
+    const replacementCapacity = new Map<
+      string,
+      Awaited<ReturnType<typeof prepareWorkHubMessage>> & { release(): void }
+    >();
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
       routingModel:
         dependencies.workHubRoutingModel ?? createJevRoutingModel({ stores: runtimePolicyStores }),
@@ -2316,6 +2344,29 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       executions: coordinator,
       sessionActions: {
+        withReplacementCapacity: async (input, _context, operation) => {
+          if (input.create) return operation();
+          const prepared = await prepareWorkHubMessage(input);
+          const reserved = await messages.reserveFollowupCapacity(
+            input.targetSessionId,
+            prepared.messageId,
+            prepared.content,
+          );
+          if (!reserved.ok)
+            throw new WorkHubActionEffectFailure(
+              reserved.error.code === 'outcome_unknown'
+                ? 'commit_outcome_unknown'
+                : reserved.error.code,
+              reserved.error.message,
+            );
+          replacementCapacity.set(input.actionId, { ...prepared, release: reserved.result });
+          try {
+            return await operation();
+          } finally {
+            reserved.result();
+            replacementCapacity.delete(input.actionId);
+          }
+        },
         readDelegationRetirement: async (assignment, admission) => {
           const disposition = admission
             ? await messages.readMessageExecutionDispositionAdmitted(
@@ -2538,25 +2589,8 @@ export async function createExecutionRuntimeHostComposition(
                   orchestrationMode: 'default',
                 })
               : undefined;
-          const suffix = createHash('sha256')
-            .update(input.actionId, 'utf8')
-            .digest('hex')
-            .slice(0, 48);
-          const messageId = `whm_${suffix}`;
-          const targetAttachments = durable
-            ? durable.targetAttachments
-            : input.attachments?.length
-              ? await copyWorkHubAttachmentsToTarget(
-                  openedArtifactStore,
-                  artifacts,
-                  input.targetSessionId,
-                  input.attachments,
-                )
-              : input.attachments;
-          const content = normalizeMessageContent({
-            text: input.delegationText ?? input.userText,
-            ...(targetAttachments ? { attachments: targetAttachments } : {}),
-          });
+          const { suffix, messageId, targetAttachments, content } =
+            replacementCapacity.get(input.actionId) ?? (await prepareWorkHubMessage(input));
           const persisted =
             durable ??
             (await sessionAdmission.runMany(
@@ -2655,6 +2689,7 @@ export async function createExecutionRuntimeHostComposition(
                   ...(create ? { create } : {}),
                   ...(supersession ? { supersession } : {}),
                 });
+                replacementCapacity.get(input.actionId)?.release();
                 // Keep the durable Message identity and its live queue owner
                 // under one Session admission. A terminal transition must not
                 // observe the committed Message before the queue does.
@@ -2673,8 +2708,14 @@ export async function createExecutionRuntimeHostComposition(
               },
             ));
 
+          const execution = await messages.queryMessageExecutions({
+            sessionId: persisted.targetSessionId,
+            messageIds: [persisted.targetMessageId],
+          });
+          const resolution = execution.ok ? execution.result.resolutions[0] : undefined;
           return {
-            turnId: persisted.targetTurnId,
+            messageId: persisted.targetMessageId,
+            ...(resolution?.state === 'owned' ? { turnId: resolution.turnId } : {}),
             ...(persisted.steered ? { steered: true as const } : {}),
           };
         },

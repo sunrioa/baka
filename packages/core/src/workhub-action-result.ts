@@ -23,6 +23,8 @@ import { isRecord } from './record-schema.js';
  * Durable coordination receipt schema. The linked-operation variants retain
  * their historical `disposition` tags so existing records and replay
  * fingerprints stay compatible; transient proposals use `operation` instead.
+ * New delegations expose stable Message identity. A queued receipt omits Turn
+ * identity until Message ownership is proven; legacy Turn-only receipts remain readable.
  */
 export type WorkHubActionResult =
   | { readonly disposition: 'answer_here'; readonly coordinationTurnId: string }
@@ -30,20 +32,23 @@ export type WorkHubActionResult =
   | {
       readonly disposition: 'delegate_existing';
       readonly targetSessionId: string;
-      readonly targetTurnId: string;
+      readonly targetTurnId?: string;
+      readonly targetMessageId?: string;
       readonly steered?: true;
     }
   | {
       readonly disposition: 'create_new';
       readonly targetSessionId: string;
-      readonly targetTurnId: string;
+      readonly targetTurnId?: string;
+      readonly targetMessageId?: string;
       readonly steered?: true;
     }
   | {
       readonly disposition: 'replace';
       readonly replacementDisposition: 'delegate_existing' | 'create_new';
       readonly targetSessionId: string;
-      readonly targetTurnId: string;
+      readonly targetTurnId?: string;
+      readonly targetMessageId?: string;
       readonly steered?: true;
     }
   | {
@@ -100,11 +105,14 @@ export function isWorkHubActionResult(r: unknown): r is WorkHubActionResult {
         'disposition',
         'targetSessionId',
         'targetTurnId',
+        'targetMessageId',
         'steered',
         ...(r.disposition === 'replace' ? ['replacementDisposition'] : []),
       ]) &&
       text('targetSessionId') &&
-      text('targetTurnId') &&
+      (r.targetTurnId !== undefined || r.targetMessageId !== undefined) &&
+      (r.targetTurnId === undefined || text('targetTurnId')) &&
+      (r.targetMessageId === undefined || text('targetMessageId')) &&
       (r.steered === undefined || r.steered === true) &&
       (r.disposition !== 'replace' ||
         r.replacementDisposition === 'delegate_existing' ||

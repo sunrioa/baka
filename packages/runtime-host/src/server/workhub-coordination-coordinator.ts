@@ -141,7 +141,7 @@ type WorkHubResumeResult =
 
 type CoordinationSessionActions = Pick<
   WorkHubActionGateEffects,
-  'assign' | 'readDelegationRetirement' | 'retireDelegation'
+  'assign' | 'readDelegationRetirement' | 'retireDelegation' | 'withReplacementCapacity'
 > & {
   resumeDelegation(
     assignment: WorkHubDelegationAssignedMessage,
@@ -251,6 +251,7 @@ export class HostWorkHubCoordinationCoordinator {
         this.#stores.readWorkHubStopResolution(delegationId, actionId),
 
       assign: options.sessionActions.assign,
+      withReplacementCapacity: options.sessionActions.withReplacementCapacity,
       prepareReplacement: (input) => this.#prepareReplacement(input),
       abortReplacement: (input) => this.#abortReplacement(input),
       prepareStop: (input) => this.#prepareStop(input),

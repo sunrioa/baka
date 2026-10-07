@@ -188,6 +188,8 @@ test('delegation receipts explicitly distinguish admission from completion evide
 
 test('task status can be checked without dispatching another task', () => {
   assert.equal(workHubTasksSchema.safeParse({ operation: 'status', targetSessionId: 'target', targetTurnId: 'target-turn' }).success, true);
+  assert.equal(workHubTasksSchema.safeParse({ operation: 'status', targetSessionId: 'target', targetMessageId: 'message' }).success, true);
+  assert.equal(workHubTasksSchema.safeParse({ operation: 'status', targetSessionId: 'target' }).success, false);
 });
 
 test('status reads exact turn facts without delegation and rejects stale Host or target identity', async () => {
@@ -218,6 +220,41 @@ test('status does not treat waiting, cancelled or failed execution as completed'
     assert.equal(result.executionEvidence?.status, status);
     assert.equal(result.executionEvidence?.completionVerified, false);
   }
+});
+
+test('delegation status follows Message ownership, never the completed admission Turn', async () => {
+  const f = fixture();
+  f.client.listWorkHubCoordinationCandidates = async () => ({ candidateSetId: 'set', candidates: [{ sessionId: 'target' }] }) as unknown as Awaited<ReturnType<typeof f.client.listWorkHubCoordinationCandidates>>;
+  const queriedTurns: string[] = [];
+  f.client.queryTurn = async ({ turnId }) => {
+    queriedTurns.push(turnId);
+    return turnId === 'ancestor'
+      ? { sessionId: 'target', turnId, runId: 'execution-run', status: 'completed', terminalEventId: 'done' }
+      : { sessionId: 'target', turnId, runId: 'execution-run', status: 'running' };
+  };
+  let state: 'pending' | 'cancelled' | 'not_admitted' | 'owned' = 'pending';
+  f.client.queryMessageExecutions = async () => ({ resolutions: [state === 'owned'
+    ? { messageId: 'message', state, turnId: 'delegated-turn', runId: 'execution-run' }
+    : { messageId: 'message', state }] });
+  const request = { operation: 'status' as const, targetSessionId: 'target', targetMessageId: 'message', targetTurnId: 'ancestor' };
+  for (state of ['pending', 'cancelled', 'not_admitted', 'owned'] as const) {
+    const result = await f.runtime.actTasks(scope, 'turn', 'status', request);
+    assert.ok('executionEvidence' in result);
+    assert.equal(result.executionEvidence?.status, state === 'owned' ? 'running' : state);
+    assert.equal(result.executionEvidence?.completionVerified, false);
+  }
+  assert.deepEqual(queriedTurns, ['delegated-turn']);
+  assert.deepEqual(f.requests, []);
+  f.client.queryTurn = async () => ({ sessionId: 'target', turnId: 'delegated-turn', runId: 'execution-run', status: 'completed', terminalEventId: 'done' });
+  const completed = await f.runtime.actTasks(scope, 'turn', 'completed', request);
+  assert.ok('executionEvidence' in completed);
+  assert.equal(completed.executionEvidence?.completionVerified, true);
+  f.client.queryTurn = async () => ({ sessionId: 'target', turnId: 'delegated-turn', runId: 'wrong-run', status: 'completed', terminalEventId: 'done' });
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'wrong-run', request), /identity changed/);
+  f.client.queryMessageExecutions = async () => ({ resolutions: [{ messageId: 'other', state: 'pending' }] });
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'wrong-message', request), /identity is unresolved/);
+  f.client.queryMessageExecutions = async () => { f.retire(); return { resolutions: [{ messageId: 'message', state: 'pending' }] }; };
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'stale', request), /Host changed/);
 });
 
 test('stop and resume receipts survive the client capability JSON boundary', async () => {
