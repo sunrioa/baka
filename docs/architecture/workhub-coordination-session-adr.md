@@ -223,8 +223,11 @@ rather than choosing one implicitly. Crash recovery resumes durable pending
 admissions; an orderly Host drain retains its existing queue-cancellation policy.
 
 Correction reserves the replacement Message's queue capacity before writing a
-replacement intent or retiring the source. Ordinary submissions and queue edits
-account for this reservation while Stop is awaited, without holding a Session
+replacement intent or retiring the source. The canonical snapshot capacity check
+includes reservations for every admission, including ordinary submissions, queue
+edits, Interactions and sandbox boundaries. Its private capacity projection does
+not expose phantom Messages in the public queue, and counts an admitted reserved
+Message only once. This applies while Stop is awaited, without holding a Session
 admission lock across execution. Assignment consumes the reservation; any failure
 releases it. A capacity rejection leaves the source intact and allows correction
 with a new action identity. Reservations are transient admission guards, not

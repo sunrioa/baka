@@ -606,16 +606,24 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     );
   }
 
-  #withReservedCapacity(
-    state: SessionState,
+  /** Admission-only projection; never publish reserved Messages to clients. */
+  capacityProjection(
+    sessionId: string,
     projection: SessionMessageQueueProjection,
     excludeMessageId?: string,
   ): SessionMessageQueueProjection {
+    const included = new Set(
+      [...projection.steering, ...projection.followup].map((entry) => entry.messageId),
+    );
     return {
       ...projection,
       followup: [
         ...projection.followup,
-        ...this.#reservedSources(state, excludeMessageId).map(reservedFollowupSnapshot),
+        ...[...(this.#capacityReservations.get(sessionId)?.values() ?? [])]
+          .filter(
+            (source) => source.messageId !== excludeMessageId && !included.has(source.messageId),
+          )
+          .map(reservedFollowupSnapshot),
       ],
     };
   }
@@ -1772,8 +1780,8 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       return failure('session_busy', 'Message queue capacity is full');
     }
     const current = this.#project(state);
-    const candidate: SessionMessageQueueProjection = this.#withReservedCapacity(
-      state,
+    const candidate: SessionMessageQueueProjection = this.capacityProjection(
+      state.sessionId,
       {
         ...current,
         queueRevision: state.revision + 1,
@@ -2004,7 +2012,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       entry: T,
     ): T =>
       entry.entryId === input.entryId && entry.state === 'queued' ? { ...entry, content } : entry;
-    const updatedProjection = this.#withReservedCapacity(state, {
+    const updatedProjection = this.capacityProjection(state.sessionId, {
       ...candidate,
       queueRevision: candidate.queueRevision + 1,
       steering: candidate.steering.map(updateSnapshot),

@@ -66,14 +66,14 @@ export interface CanonicalSessionProjectionCandidate {
 export interface CanonicalSessionProjectionReaderOptions {
   readonly stores: CanonicalSessionProjectionStores;
   readonly rootAdmissions: RootAdmissionOwner;
-  readonly messages: Pick<HostMessageCoordinator, 'projection'>;
+  readonly messages: Pick<HostMessageCoordinator, 'projection' | 'capacityProjection'>;
   readonly readGoal?: (sessionId: string) => GoalProjection | null;
 }
 
 export class CanonicalSessionProjectionReader {
   readonly #stores: CanonicalSessionProjectionStores;
   readonly #rootAdmissions: RootAdmissionOwner;
-  readonly #messages: Pick<HostMessageCoordinator, 'projection'>;
+  readonly #messages: Pick<HostMessageCoordinator, 'projection' | 'capacityProjection'>;
   readonly #readGoal: (sessionId: string) => GoalProjection | null;
 
   constructor(options: CanonicalSessionProjectionReaderOptions) {
@@ -147,7 +147,11 @@ export class CanonicalSessionProjectionReader {
           ? worstCaseFailedTurnSnapshot(rootTurn)
           : rootTurn,
       goal: worstCaseGoalProjection(sessionId),
-      queue: worstCaseMessageQueueProjection(candidate.queue ?? canonical.queue),
+      // Every admission shares this budget, including Interactions and sandbox
+      // boundaries. The public read above must remain free of reservations.
+      queue: worstCaseMessageQueueProjection(
+        this.#messages.capacityProjection(sessionId, candidate.queue ?? canonical.queue),
+      ),
     };
     const snapshotInput = sessionContinuitySnapshotInput(
       candidateProjection,

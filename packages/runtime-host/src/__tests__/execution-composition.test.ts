@@ -41,6 +41,7 @@ import type { SessionEvent } from '@maka/core/events';
 import { runtimeHandoffPause } from '@maka/core/runtime-handoff';
 import { deferred } from '@maka/core/test-only/async-primitives';
 import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-model';
+import { RuntimeInteractionAdmissionRejectedError } from '@maka/runtime/interaction-authority';
 import { parseNoRealConnectionError } from '@maka/core/connection-error-copy';
 import { createRequire } from 'node:module';
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
@@ -3320,6 +3321,182 @@ test('WorkHub correction reserves target capacity while awaiting source Stop', a
       );
     } finally {
       releaseStop.resolve();
+      await correction;
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub reserved snapshot capacity rejects a competing question during source Stop', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const releaseStop = deferred<void>();
+    const releaseQuestion = deferred<void>();
+    const questionAttempt = deferred<unknown>();
+    let sourceId: string | undefined;
+    let destinationId: string | undefined;
+    let stopping = false;
+    let questionAttempted = false;
+    const questions = Array.from({ length: 3 }, (_, index) => ({
+      question: `Question ${index} ${'Q'.repeat(1000)}`,
+      options: Array.from({ length: 3 }, (_, option) => ({
+        label: `Option ${option} ${'L'.repeat(220)}`,
+        description: 'D'.repeat(510),
+      })),
+    }));
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (backendContext) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncGenerator<SessionEvent> {
+            if (
+              backendContext.sessionId !== destinationId ||
+              input.text !== 'Delayed target question'
+            ) {
+              yield* super.send(input);
+              return;
+            }
+            await releaseQuestion.promise;
+            const bridge = input.hostedInteraction;
+            assert.ok(bridge);
+            const hostedInteraction = {
+              ...bridge,
+              admitUserQuestionRequest: async (
+                request: Parameters<typeof bridge.admitUserQuestionRequest>[0],
+              ) => {
+                try {
+                  await bridge.admitUserQuestionRequest({
+                    ...request,
+                    request: { ...request.request, questions },
+                  });
+                  questionAttempt.resolve(undefined);
+                } catch (error) {
+                  questionAttempt.resolve(error);
+                  throw error;
+                } finally {
+                  questionAttempted = true;
+                }
+              },
+            };
+            for await (const event of super.send({
+              ...input,
+              text: FAKE_ASK_USER_QUESTION_PROMPT,
+              hostedInteraction,
+            })) {
+              if (event.type === 'tool_start' && event.toolName === 'AskUserQuestion')
+                yield { ...event, args: { questions } };
+              else if (event.type === 'user_question_request') yield { ...event, questions };
+              else yield event;
+            }
+          }
+          override async stop(): Promise<void> {
+            if (backendContext.sessionId === sourceId) {
+              stopping = true;
+              await releaseStop.promise;
+            }
+            if (backendContext.sessionId === destinationId) releaseQuestion.resolve();
+            await super.stop();
+          }
+        })(backendContext),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-snapshot-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    let correction: Promise<Awaited<ReturnType<typeof actWorkHub>>> | undefined;
+    try {
+      const source = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      sourceId = source.id;
+      const destination = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      destinationId = destination.id;
+      const started = await composition.handlers['turn.start'](
+        {
+          sessionId: destination.id,
+          turnId: 'manual-question-turn',
+          content: { text: 'Delayed target question' },
+        },
+        context,
+      );
+      assert.ok(started.ok, JSON.stringify(started));
+      await composition.handlers['workhub.coordination.resolve']({}, context);
+      let candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+      assert.ok(candidates.ok);
+      const delegated = await actWorkHub(
+        composition,
+        {
+          actionId: 'snapshot-source',
+          userText: FAKE_HOLD_OPEN_PROMPT,
+          candidateSetId: candidates.result.candidateSetId,
+          proposal: {
+            disposition: 'delegate_existing',
+            candidateRef: candidates.result.candidates.find(
+              (entry) => entry.sessionId === source.id,
+            )!.candidateRef,
+          },
+        },
+        context,
+      );
+      assert.ok(delegated.ok, JSON.stringify(delegated));
+      candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+      assert.ok(candidates.ok);
+      correction = actWorkHub(
+        composition,
+        {
+          actionId: 'snapshot-correction',
+          userText: 'Move the source work to the target',
+          delegationText: 'X'.repeat(48 * 1024),
+          candidateSetId: candidates.result.candidateSetId,
+          proposal: {
+            operation: 'correct',
+            replacesActionId: 'snapshot-source',
+            target: {
+              disposition: 'delegate_existing',
+              candidateRef: candidates.result.candidates.find(
+                (entry) => entry.sessionId === destination.id,
+              )!.candidateRef,
+            },
+          },
+        },
+        context,
+      );
+      await waitFor(async () => stopping);
+      releaseQuestion.resolve();
+      await waitFor(async () => questionAttempted);
+      const rejected = await questionAttempt.promise;
+      assert.ok(rejected instanceof RuntimeInteractionAdmissionRejectedError);
+      assert.equal(rejected.reason, 'capacity_exceeded');
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      assert.deepEqual(
+        await stores.interactionStore.listPending({ sessionId: destination.id }),
+        [],
+      );
+      releaseStop.resolve();
+      const corrected = await correction;
+      assert.ok(corrected.ok, JSON.stringify(corrected));
+      assert.equal(corrected.result.disposition, 'replace');
+      assert.ok(await stores.sessionStore.readWorkHubAssignment('snapshot-correction'));
+      const assignment = await stores.sessionStore.readWorkHubAssignment('snapshot-source');
+      assert.ok(assignment);
+      assert.equal(
+        await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId),
+        undefined,
+      );
+    } finally {
+      releaseStop.resolve();
+      releaseQuestion.resolve();
       await correction;
       await composition.close();
     }
