@@ -2322,6 +2322,11 @@ test('WorkHub creates new work through the production assignment composition', a
       assert.equal(session?.name, 'Login stability');
       assert.equal(session?.llmConnectionId, connectionId);
       assert.equal(session?.model, 'fake-model-b');
+      assert.equal(
+        session?.permissionMode,
+        'ask',
+        'unconfigured WorkHub work does not inherit the ordinary chat bypass default',
+      );
 
       const current = await composition.handlers['workhub.coordination.candidates']({}, context);
       assert.equal(current.ok, true);
@@ -2749,8 +2754,21 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
   test(`WorkHub queues independent Turns behind ${scenario} without steering`, async () => {
     await withCompositionRoot(async ({ root, owner }) => {
       const connectionId = await configureFakeDefaultTarget(owner);
+      const policyStores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+      const policy = await policyStores.runtimePolicy.getSnapshot();
+      await policyStores.runtimePolicy.mutate({
+        expectedRevision: policy.revision,
+        operation: {
+          kind: 'set_chat_defaults',
+          value: {
+            ...policy.policy.chatDefaults,
+            workHubPermissionMode: scenario === 'running' ? 'ask' : 'bypass',
+          },
+        },
+      });
       const releaseOriginal = deferred<void>();
       const sends: BackendSendInput[] = [];
+      const executionPermissions: string[] = [];
       const originalText =
         scenario === 'waiting_for_user'
           ? FAKE_ASK_USER_QUESTION_PROMPT
@@ -2759,6 +2777,9 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
             sends.push(input);
+            executionPermissions.push(
+              (await context.store.readHeader(context.sessionId)).permissionMode,
+            );
             if (input.text === originalText && scenario !== 'waiting_for_user') {
               await releaseOriginal.promise;
             }
@@ -2784,7 +2805,7 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
           llmConnectionId: connectionId,
           llmConnectionSlug: 'fake',
           model: 'fake-model',
-          permissionMode: 'ask',
+          permissionMode: scenario === 'running' ? 'bypass' : 'ask',
         });
         const started = await composition.handlers['turn.start'](
           {
@@ -2858,6 +2879,28 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
         );
         assert.equal(sends.length, 1, 'queued requests must not call the target backend yet');
 
+        if (scenario === 'running') {
+          const current = await stores.sessionStore.readHeaderRecordSnapshot(target.id);
+          const tightened = await composition.handlers['session.configuration.update'](
+            {
+              sessionId: target.id,
+              expectedRevision: current.revision,
+              patch: { permissionMode: 'ask' },
+            },
+            context,
+          );
+          assert.equal(
+            tightened.ok,
+            false,
+            'WorkHub does not bypass the existing active-Turn configuration guard',
+          );
+          if (!tightened.ok) assert.equal(tightened.error.code, 'session_busy');
+          assert.equal(
+            (await stores.sessionStore.readHeaderSnapshot(target.id)).permissionMode,
+            'bypass',
+          );
+        }
+
         if (scenario === 'waiting_for_user') {
           const question = (
             await stores.interactionStore.listPending({ sessionId: target.id })
@@ -2885,6 +2928,12 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
           [originalText, 'First delegated job', 'Second delegated job'],
         );
         assert.equal(new Set(sends.map((input) => input.turnId)).size, 3);
+        const expectedPermission = scenario === 'running' ? 'bypass' : 'ask';
+        assert.deepEqual(
+          executionPermissions.slice(1),
+          [expectedPermission, expectedPermission],
+          'queued delegations use the target Session permission at execution, not the WorkHub default',
+        );
         const executed = await composition.handlers['turn.message.execution.query'](
           { sessionId: target.id, messageIds },
           context,
@@ -2904,7 +2953,7 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
           assert.notEqual(users[0]!.turnId, 'manual-original-turn');
         }
         const session = (await manager.listSessions()).find((entry) => entry.id === target.id)!;
-        assert.equal(session.permissionMode, 'ask');
+        assert.equal(session.permissionMode, expectedPermission);
         assert.equal(session.model, 'fake-model');
         assert.equal(session.cwd, root);
       } finally {

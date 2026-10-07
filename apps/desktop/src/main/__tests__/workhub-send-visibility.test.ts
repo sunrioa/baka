@@ -101,6 +101,9 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
     setNewWorkDefaults: async (_id: string, defaults: typeof newWorkDefaults) => {
       newWorkDefaults = defaults;
     },
+    getNewWorkPermissionMode: async () => 'ask',
+    setNewWorkPermissionMode: async (_id: string, mode: 'ask' | 'bypass') => mode,
+    subscribeNewWorkPermissionMode: () => () => {},
     subscribeHosts: () => () => {},
     subscribeAvailability: () => () => {},
     subscribeSessions: () => () => {},
@@ -278,6 +281,95 @@ test('WorkHub model selection configures only newly created work', async () => {
   await act(async () => { h.admit('busy-turn'); });
   await act(async () => { await h.controller.changeThinkingLevel('high'); });
   assert.equal(requests.length, count, 'running coordination turns freeze new-work defaults');
+});
+
+test('WorkHub new-work permissions require confirmation and never change the coordination Session', async () => {
+  let mode: 'ask' | 'bypass' = 'ask';
+  let confirmations = 0;
+  const writes: string[] = [];
+  const h = await mountController(false, {
+    getSession: async (id) => ({
+      id, revision: 1, runningTurnIds: [], permissionMode: 'bypass', name: 'WorkHub',
+      isFlagged: false, isArchived: false, labels: [], hasUnread: false, status: 'active',
+      backend: 'fake', llmConnectionSlug: 'fake', connectionLocked: false, model: 'fake-model',
+    }),
+    getNewWorkPermissionMode: async () => mode,
+    setNewWorkPermissionMode: async (_id, next) => { writes.push(next); return mode = next; },
+  });
+  assert.equal(h.controller.newWorkPermissionMode, 'ask');
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('bypass', async () => { confirmations++; return false; }); });
+  assert.deepEqual(writes, []);
+  assert.equal(h.controller.newWorkPermissionMode, 'ask');
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('bypass', async () => { confirmations++; return true; }); });
+  assert.equal(h.controller.newWorkPermissionMode, 'bypass');
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('ask', async () => { throw new Error('tightening must not ask for bypass consent'); }); });
+  assert.deepEqual(writes, ['bypass', 'ask']);
+  assert.equal(confirmations, 2);
+  assert.equal(h.controller.session?.permissionMode, 'bypass');
+  assert.deepEqual(h.controller.newWorkDefaults, {});
+});
+
+test('WorkHub permission read and write failures do not silently enable bypass', async () => {
+  let failRead = true;
+  let refresh!: () => void;
+  let writes = 0;
+  const h = await mountController(false, {
+    getNewWorkPermissionMode: async () => { if (failRead) throw new Error('Host policy unavailable'); return 'ask'; },
+    setNewWorkPermissionMode: async () => { writes++; throw new Error('Host rejected permission change'); },
+    subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
+  });
+  assert.equal(h.controller.newWorkPermissionMode, undefined);
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('bypass', async () => true); });
+  assert.equal(writes, 0);
+  failRead = false;
+  await act(async () => { refresh(); });
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('bypass', async () => true); });
+  assert.equal(writes, 1);
+  assert.equal(h.controller.newWorkPermissionMode, 'ask');
+  assert.equal(h.controller.error, 'Host rejected permission change');
+  assert.equal(h.controller.savingPermission, false);
+});
+
+test('a stale WorkHub permission read cannot overwrite a confirmed write', async () => {
+  const stale = deferred<'ask'>();
+  let mode: 'ask' | 'bypass' = 'ask';
+  let reads = 0;
+  let refresh!: () => void;
+  const h = await mountController(false, {
+    getNewWorkPermissionMode: () => ++reads === 2 ? stale.promise : Promise.resolve(mode),
+    setNewWorkPermissionMode: async (_id, next) => mode = next,
+    subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
+  });
+  await act(async () => { refresh(); });
+  await act(async () => { await h.controller.changeNewWorkPermissionMode('bypass', async () => true); });
+  await act(async () => { stale.resolve('ask'); });
+  assert.equal(h.controller.newWorkPermissionMode, 'bypass');
+});
+
+test('switching Hosts cancels pending bypass consent and ignores old permission reads', async () => {
+  const consent = deferred<boolean>();
+  const stale = deferred<'bypass'>();
+  let id = JSON.stringify(['host-1', 'workhub-coordination']);
+  let hostsChanged!: Parameters<WorkHubServices['subscribeHosts']>[0];
+  let refresh!: () => void;
+  let reads = 0;
+  const writes: string[] = [];
+  const h = await mountController(false, {
+    resolve: async () => id,
+    getNewWorkPermissionMode: () => ++reads === 2 ? stale.promise : Promise.resolve('ask'),
+    setNewWorkPermissionMode: async (target, mode) => { writes.push(target); return mode; },
+    subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
+    subscribeHosts: (handler) => { hostsChanged = handler; return () => {}; },
+  });
+  await act(async () => { refresh(); });
+  let changing!: Promise<void>;
+  await act(async () => { changing = h.controller.changeNewWorkPermissionMode('bypass', () => consent.promise); });
+  await act(async () => { id = JSON.stringify(['host-2', 'workhub-coordination']); hostsChanged({ hostId: 'host-2', isDefault: true, readiness: 'ready' }); });
+  assert.equal(h.controller.sessionId, id);
+  await act(async () => { consent.resolve(true); stale.resolve('bypass'); await changing; });
+  assert.deepEqual(writes, []);
+  assert.equal(h.controller.newWorkPermissionMode, 'ask');
+  assert.equal(h.controller.savingPermission, false);
 });
 
 test('WorkHub stops presenting execution on observation loss while retaining the Stop target', async () => {

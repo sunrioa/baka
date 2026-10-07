@@ -34,6 +34,59 @@ import type { WorkHubPrepareAttachmentsResult } from '../../shared/workhub-conve
 import { encodeDesktopTranscriptBatches, encodeDesktopTranscriptSnapshot } from '../desktop-transcript-ipc.js';
 import { AttachmentIngestBlockedError } from '@maka/core/attachments';
 import type { AttachmentRef } from '@maka/core/events';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+
+test('WorkHub permission reads, writes and notifications stay on the Coordination Host', async () => {
+  const owners = ['host-a', 'host-b'].map((hostId, index) => ({
+    hostId, targetEpoch: `epoch-${hostId}`, epoch: `epoch-${hostId}`, profileId: hostId,
+    profileName: hostId, profileKind: 'local', profileAccess: 'owner', readiness: 'ready', isDefault: index === 0,
+  }));
+  const modes = new Map<string, 'ask' | 'bypass'>(owners.map((owner) => [owner.hostId, 'ask']));
+  const calls: string[] = [];
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+  let bridge!: MakaBridge;
+  const bundle = await build({
+    entryPoints: [fileURLToPath(new URL('../../../src/preload/preload.ts', import.meta.url))],
+    bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron'],
+  });
+  const require = createRequire(import.meta.url);
+  runInNewContext(bundle.outputFiles[0]!.text, {
+    require: (id: string) => id === 'electron' ? {
+      contextBridge: { exposeInMainWorld(name: string, value: MakaBridge) { if (name === 'maka') bridge = value; } },
+      ipcRenderer: {
+        on(channel: string, listener: (...args: unknown[]) => void) { listeners.set(channel, listener); },
+        off(channel: string) { listeners.delete(channel); }, send() {},
+        async invoke(channel: string, scope: { hostId: string }, mode: 'ask' | 'bypass') {
+          if (channel === 'runtime-host:identities') return owners;
+          if (channel === 'runtime-host:awaitReady') return { ready: true };
+          assert.ok(modes.has(scope.hostId));
+          calls.push(`${channel}:${scope.hostId}`);
+          if (channel === 'workhub:setNewWorkPermissionMode') modes.set(scope.hostId, mode);
+          return modes.get(scope.hostId);
+        },
+      },
+    } : require(id),
+    process: { env: {} }, Buffer, console, setTimeout, clearTimeout, TextEncoder, TextDecoder, Uint8Array, crypto: globalThis.crypto,
+  });
+  const session = (hostId: string, sessionId: string = WORKHUB_COORDINATION_SESSION_ID) => desktopSessionKey({ hostId, sessionId });
+  assert.equal(await bridge.workHub.getNewWorkPermissionMode(session('host-b')), 'ask');
+  assert.equal(await bridge.workHub.setNewWorkPermissionMode(session('host-b'), 'bypass'), 'bypass');
+  assert.equal(await bridge.workHub.getNewWorkPermissionMode(session('host-a')), 'ask');
+  const before = calls.length;
+  await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('host-b', 'ordinary-session'), 'bypass'), /Invalid WorkHub Coordination Session identity/u);
+  await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('unknown-host'), 'bypass'));
+  assert.equal(calls.length, before, 'invalid identities never reach the mutation IPC');
+  let notifications = 0;
+  const unsubscribe = bridge.workHub.subscribeNewWorkPermissionMode(session('host-b'), () => { notifications++; });
+  const notify = listeners.get('settings:externalChanged')!;
+  notify({}, owners[0], {});
+  notify({}, { ...owners[1], targetEpoch: 'old-epoch' }, {});
+  assert.equal(notifications, 0);
+  notify({}, owners[1], {});
+  assert.equal(notifications, 1);
+  unsubscribe();
+  assert.equal(listeners.has('settings:externalChanged'), false);
+});
 
 test('WorkHub upload references round-trip through idle answers, both queue modes and attachment reads', async (t) => {
   const owner = {

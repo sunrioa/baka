@@ -42,6 +42,7 @@ import type { AttachmentRef, FollowUpMode, MessageQueueEntryProjection, MessageQ
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import type { WorkHubCreateDefaults } from '@maka/core/session';
+import { isChatDefaultPermissionMode, type ChatDefaultPermissionMode } from '@maka/core/settings';
 import {
   startWorkHubCoordinationLifecycle,
   WorkHubModelConfigurationRequiredError,
@@ -83,6 +84,11 @@ export function useWorkHubController(
   const [newWorkDefaults, setNewWorkDefaults] = useState<
     Omit<WorkHubCreateDefaults, 'permissionMode'>
   >({});
+  const [permissionDefault, setPermissionDefault] = useState<{ sessionId: string; mode: ChatDefaultPermissionMode }>();
+  const [savingPermission, setSavingPermission] = useState(false);
+  const permissionChange = useRef<{ sessionId: string }>(undefined);
+  const permissionReadRevision = useRef(0);
+  const refreshPermission = useRef<() => void>(() => undefined);
   const [choices, setChoices] = useState<ChatModelChoice[]>([]);
   const [modelSetupChoicesReady, setModelSetupChoicesReady] = useState(false);
   const [transcript, setTranscript] = useState(emptyTranscript);
@@ -365,6 +371,37 @@ export function useWorkHubController(
       });
     return () => {
       disposed = true;
+    };
+  }, [services, sessionId]);
+
+  useEffect(() => {
+    let disposed = false;
+    permissionReadRevision.current++;
+    permissionChange.current = undefined;
+    setSavingPermission(false);
+    setPermissionDefault(undefined);
+    if (!sessionId) return;
+    const refresh = () => {
+      if (permissionChange.current) return;
+      const revision = ++permissionReadRevision.current;
+      void services.getNewWorkPermissionMode(sessionId).then((mode) => {
+        if (disposed || revision !== permissionReadRevision.current || currentSessionId.current !== sessionId) return;
+        if (!isChatDefaultPermissionMode(mode)) throw new Error('Invalid WorkHub new-work permission mode');
+        setPermissionDefault({ sessionId, mode });
+      }).catch((reason: unknown) => {
+        if (disposed || revision !== permissionReadRevision.current || currentSessionId.current !== sessionId) return;
+        setPermissionDefault(undefined);
+        report(reason);
+      });
+    };
+    refreshPermission.current = refresh;
+    const unsubscribe = services.subscribeNewWorkPermissionMode(sessionId, refresh);
+    refresh();
+    return () => {
+      disposed = true;
+      if (refreshPermission.current === refresh) refreshPermission.current = () => undefined;
+      if (permissionChange.current?.sessionId === sessionId) permissionChange.current = undefined;
+      unsubscribe();
     };
   }, [services, sessionId]);
 
@@ -709,6 +746,33 @@ export function useWorkHubController(
       setConfiguringModel(false);
     }
   }
+  async function changeNewWorkPermissionMode(mode: ChatDefaultPermissionMode, confirmBypass: () => Promise<boolean>) {
+    if (!sessionId || permissionDefault?.sessionId !== sessionId ||
+      !isChatDefaultPermissionMode(mode) || mode === permissionDefault.mode || permissionChange.current) return;
+    const change = { sessionId };
+    permissionChange.current = change;
+    permissionReadRevision.current++;
+    setSavingPermission(true);
+    const current = () => permissionChange.current === change && currentSessionId.current === sessionId;
+    try {
+      if (mode === 'bypass' && !(await confirmBypass())) return;
+      if (!current()) return;
+      const saved = await services.setNewWorkPermissionMode(sessionId, mode);
+      if (!current()) return;
+      if (!isChatDefaultPermissionMode(saved)) throw new Error('Invalid WorkHub new-work permission mode');
+      setPermissionDefault({ sessionId, mode: saved });
+      setError(undefined);
+    } catch (reason) {
+      if (current()) report(reason);
+    } finally {
+      if (current()) {
+        permissionChange.current = undefined;
+        setSavingPermission(false);
+        refreshPermission.current();
+      }
+    }
+  }
+
   async function mutateQueue(action: (target: string) => Promise<void>) {
     if (!sessionId) return;
     setError(undefined);
@@ -726,6 +790,9 @@ export function useWorkHubController(
     sessions,
     choices,
     newWorkDefaults,
+    newWorkPermissionMode: permissionDefault && permissionDefault.sessionId === sessionId ? permissionDefault.mode : undefined,
+    savingPermission,
+    changeNewWorkPermissionMode,
     transcript,
     activeForm: activeInteraction?.type === 'form_request' ? activeInteraction : undefined,
     respondToUserForm: async (response: import('@maka/core/interaction').InteractionFormResponse) => {

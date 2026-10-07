@@ -446,7 +446,8 @@ export class HostSessionCatalogCoordinator {
           model: model.model,
           ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
           ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
-          permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
+          permissionMode:
+            prepared.permissionMode ?? policy.policy.chatDefaults.workHubPermissionMode ?? 'ask',
           toolMode: policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct',
           collaborationMode: input.collaborationMode ?? 'agent',
           orchestrationMode: input.orchestrationMode ?? 'default',

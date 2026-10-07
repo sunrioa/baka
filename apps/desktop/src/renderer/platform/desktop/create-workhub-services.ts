@@ -120,6 +120,9 @@ export function createDesktopWorkHubServices(
     getNewWorkDefaults: (sessionId) => bridge.workHub.getNewWorkDefaults(sessionId),
     setNewWorkDefaults: (sessionId, defaults) =>
       bridge.workHub.setNewWorkDefaults(sessionId, defaults),
+    getNewWorkPermissionMode: (sessionId) => bridge.workHub.getNewWorkPermissionMode(sessionId),
+    setNewWorkPermissionMode: (sessionId, mode) => bridge.workHub.setNewWorkPermissionMode(sessionId, mode),
+    subscribeNewWorkPermissionMode: (sessionId, handler) => bridge.workHub.subscribeNewWorkPermissionMode(sessionId, handler),
     observe: (sessionId, handler, onError, onPhase, onExecution) =>
       bridge.sessions.subscribeEvents(sessionId, handler, onPhase, onError, onExecution),
     stop: async (sessionId, turnId) => {

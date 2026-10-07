@@ -18,14 +18,16 @@
  */
 
 import type { WorkHubCreateDefaults } from '@maka/core/session';
+import { isChatDefaultPermissionMode, type ChatDefaultPermissionMode } from '@maka/core/settings';
+import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 type WorkHubExecutionDefaults = Omit<WorkHubCreateDefaults, 'permissionMode'>;
 
 // A transport reconnect replaces the client object but preserves the logical
 // Host identity. Keep this Desktop-owned preference on that stable boundary so
 // the renderer and the WorkHub creation path cannot disagree after reconnect.
-// This remains process-local by design: persisting a user preference across
-// app restarts is a separate product decision.
+// Model/executor preferences remain process-local. Permission defaults use the
+// Host's durable policy below, rather than this Desktop cache.
 const defaultsByHost = new Map<string, WorkHubExecutionDefaults>();
 
 export function readWorkHubNewWorkDefaults(hostId: string): WorkHubExecutionDefaults {
@@ -37,4 +39,26 @@ export function writeWorkHubNewWorkDefaults(
   defaults: WorkHubExecutionDefaults,
 ): void {
   defaultsByHost.set(hostId, Object.freeze({ ...defaults }));
+}
+
+type WorkHubPermissionClient = Pick<DesktopRuntimeHostClient, 'queryRuntimePolicy' | 'updateRuntimePolicy'>;
+
+// Permission defaults belong to the selected Host's durable policy, not the
+// coordination Session's internal bypass boundary or the ordinary chat default.
+export async function readWorkHubNewWorkPermissionMode(
+  client: Pick<WorkHubPermissionClient, 'queryRuntimePolicy'>,
+): Promise<ChatDefaultPermissionMode> {
+  return (await client.queryRuntimePolicy()).policy.chatDefaults.workHubPermissionMode ?? 'ask';
+}
+
+export async function writeWorkHubNewWorkPermissionMode(
+  client: WorkHubPermissionClient,
+  mode: unknown,
+): Promise<ChatDefaultPermissionMode> {
+  if (!isChatDefaultPermissionMode(mode)) throw new Error('Invalid WorkHub new-work permission mode');
+  const snapshot = await client.updateRuntimePolicy((policy) => ({
+    kind: 'set_chat_defaults',
+    value: { ...policy.chatDefaults, workHubPermissionMode: mode },
+  }));
+  return snapshot.policy.chatDefaults.workHubPermissionMode ?? 'ask';
 }

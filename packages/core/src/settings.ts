@@ -539,6 +539,8 @@ export function isChatDefaultPermissionMode(value: unknown): value is ChatDefaul
 /** Seeds new sessions' starting permission mode (Settings → 通用 → 默认权限模式). */
 export interface ChatDefaultsSettings {
   permissionMode: ChatDefaultPermissionMode;
+  /** WorkHub-created Sessions only; absent means ask, not the ordinary chat default. */
+  workHubPermissionMode?: ChatDefaultPermissionMode;
   /** Applies only when a new task is created. */
   codeModeEnabled?: boolean;
   /** @deprecated Read-only compatibility for older settings; new tasks ignore it. */
@@ -1173,6 +1175,11 @@ function defaultChatDefaultsSettings(): ChatDefaultsSettings {
 // doesn't recognize -- fall back to the safest default instead.
 function normalizeChatDefaultsSettings(settings: ChatDefaultsSettings): ChatDefaultsSettings {
   return {
+    ...(isChatDefaultPermissionMode(settings.workHubPermissionMode)
+      ? {
+          workHubPermissionMode: settings.workHubPermissionMode,
+        }
+      : {}),
     ...(settings.codeModeEnabled === true ? { codeModeEnabled: true } : {}),
     // Preserve the retired field while older settings documents still carry it.
     // No task creation path consumes it; defaults now live on model overrides.

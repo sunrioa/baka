@@ -20,6 +20,7 @@
 import type { ArtifactBinaryReadResult } from '@maka/core/artifacts';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
 import type { UiLocale } from '@maka/core/ui-locale';
+import type { ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { StoredMessage, SessionSummary, WorkHubCreateDefaults } from '@maka/core/session';
 import type { ComposerAttachmentService } from '@maka/ui/use-composer-attachments';
 import type { SessionEvent, AttachmentRef, MessageQueuePlacement } from '@maka/core/events';
@@ -78,6 +79,9 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
     sessionId: string,
     defaults: Omit<WorkHubCreateDefaults, 'permissionMode'>,
   ): Promise<void>;
+  getNewWorkPermissionMode(sessionId: string): Promise<ChatDefaultPermissionMode>;
+  setNewWorkPermissionMode(sessionId: string, mode: ChatDefaultPermissionMode): Promise<ChatDefaultPermissionMode>;
+  subscribeNewWorkPermissionMode(sessionId: string, handler: () => void): () => void;
   observe(
     sessionId: string,
     handler: (event: SessionEvent) => void,

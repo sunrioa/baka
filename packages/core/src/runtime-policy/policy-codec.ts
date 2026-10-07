@@ -428,11 +428,17 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   const item = exactRecord(
     value,
     'chat defaults',
-    ['permissionMode', 'thinkingLevel', 'codeModeEnabled'],
+    ['permissionMode', 'workHubPermissionMode', 'thinkingLevel', 'codeModeEnabled'],
     ['permissionMode'],
   );
   if (!(CHAT_DEFAULT_PERMISSION_MODES as readonly unknown[]).includes(item.permissionMode)) {
     throw domainError('chat default permission mode is invalid');
+  }
+  if (
+    item.workHubPermissionMode !== undefined &&
+    !(CHAT_DEFAULT_PERMISSION_MODES as readonly unknown[]).includes(item.workHubPermissionMode)
+  ) {
+    throw domainError('WorkHub default permission mode is invalid');
   }
   if (item.thinkingLevel !== undefined && !isThinkingLevel(item.thinkingLevel)) {
     throw domainError('chat default thinking level is invalid');
@@ -442,6 +448,12 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   }
   return {
     permissionMode: item.permissionMode as RuntimePolicy['chatDefaults']['permissionMode'],
+    ...(item.workHubPermissionMode === undefined
+      ? {}
+      : {
+          workHubPermissionMode:
+            item.workHubPermissionMode as RuntimePolicy['chatDefaults']['workHubPermissionMode'],
+        }),
     ...(item.codeModeEnabled === true ? { codeModeEnabled: true } : {}),
     ...(item.thinkingLevel === undefined ? {} : { thinkingLevel: item.thinkingLevel }),
   };
