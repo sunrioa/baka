@@ -206,6 +206,22 @@ so WorkHub does not own a second recovery state machine or compensation chain.
 The `delegation_assigned` record itself projects the visible WorkHub turn; the
 renderer does not append a second summary.
 
+In baka, a new delegation to an active target is admitted as an ordinary
+`next_turn` / `followup` Message, including when that target is waiting on its
+original user request. It does not steer or stop the current Turn. Each queued
+delegation starts its own successor Turn in acceptance order. WorkHub applies
+the ordinary queue count, byte, snapshot and successor-admission capacity checks
+under the same Session admission lease before atomically committing the assignment.
+An idle target still starts immediately through the existing native admission.
+Historical steering assignments remain readable; their shared-Turn ownership
+and cancellation protections are unchanged. New admission does not overwrite
+the target Session's permissions, model or working directory.
+For a queued assignment, its admission Turn is not an execution-ownership claim;
+the target Message remains the proof for its eventual successor Turn. Existing
+Stop ambiguity checks still reject a Session with multiple working delegations
+rather than choosing one implicitly. Crash recovery resumes durable pending
+admissions; an orderly Host drain retains its existing queue-cancellation policy.
+
 The first-response contract is hybrid. The atomic `delegation_assigned` record is
 an immediate durable acknowledgement, so WorkHub confirms acceptance without
 waiting for target execution. The target Message is the stable delegation
@@ -225,8 +241,9 @@ WorkHub after restart rebuilds it from the same link and target facts.
 The renderer persists only a Host-scoped action id until acknowledgement. Composer
 draft text uses a separate storage key and lifecycle. A reload therefore preserves
 idempotency without freezing old text or coupling draft edits to Host authority.
-`waiting_for_user` remains a local, retryable result because no assignment has yet
-been committed.
+Queue exhaustion remains a local, retryable result because no assignment has yet
+been committed. A target waiting for user input can accept a queued delegation,
+but Resume cannot bypass that target's original pending interaction.
 
 Before any destructive retirement, replacement persists a
 `delegation_replacement_requested` record whose identity is unique to the source
@@ -239,8 +256,8 @@ commit atomically. Retrying the same action recovers the crash seam after
 retirement/Stop and before replacement assignment. The replacement fingerprint
 binds the resolved stable target Session id rather than its transient candidate
 reference, so metadata refreshes do not change action identity and a retry cannot
-select a different Session. If the target becomes archived, unavailable, or
-waiting after the destructive retirement boundary, Coordination appends a
+select a different Session. If the target becomes archived or unavailable
+after the destructive retirement boundary, Coordination appends a
 `delegation_replacement_aborted` terminal fact. That auditable fact removes the
 retired source from active linkage and makes later retries return the same terminal
 outcome instead of displaying a stopped, unsuperseded link.

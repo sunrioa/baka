@@ -1050,9 +1050,9 @@ export function createMemorySessionStore(
             }),
           ) ||
           admission.submittedContentDigest !== messageContentDigest(admission.content) ||
-          admission.submittedPlacement !== 'current_turn' ||
-          admission.placement !== 'current_turn' ||
-          admission.disposition !== 'steering'
+          admission.submittedPlacement !== admission.placement ||
+          (admission.disposition === 'followup' &&
+            (v.disposition !== 'delegate_existing' || v.steered === true))
         )
           conflict('Assignment identity mismatch');
         const hub = requireHeader(s, HUB).header;
@@ -1113,7 +1113,11 @@ export function createMemorySessionStore(
           targetCreated = created.kind === 'created';
         }
         const h = requireHeader(s, v.targetSessionId).header;
-        if (h.isArchived || h.status === 'waiting_for_user') conflict('Target unavailable');
+        if (
+          h.isArchived ||
+          (h.status === 'waiting_for_user' && admission.disposition !== 'followup')
+        )
+          conflict('Target unavailable');
         if (
           h.name !== v.targetSessionName &&
           !(v.disposition === 'delegate_existing' && v.replacesDelegationId)

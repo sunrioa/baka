@@ -1003,88 +1003,115 @@ for (const backend of ['Local', 'Memory'] as const) {
       });
     },
   );
-  test(
-    backend + ': WorkHub binds delegated text and copied attachments to admission and replay',
-    async () => {
-      await withProvider(make(), async ({ sessionStore: s }, root) => {
-        await createCoordinationSession(s, root);
-        const target = await s.create(sessionInput(root));
-        const base = assignmentRequest('bound-input', target.id, target.name, 'target-turn');
-        const source = {
-          kind: 'other' as const,
-          name: 'requirements.txt',
-          mimeType: 'text/plain',
-          bytes: 12,
-          ref: { kind: 'session_file' as const, sessionId: HUB, relativePath: 'source.txt' },
-        };
-        const copied = {
-          ...source,
-          ref: { ...source.ref, sessionId: target.id, relativePath: 'copy.txt' },
-        };
-        const delegationText = 'Inspect the payment retry invariants';
-        const content = normalizeMessageContent({ text: delegationText, attachments: [copied] });
-        const request: WorkHubMessageAssignmentRequest = {
-          assignment: {
-            ...base.assignment,
-            delegationText,
-            attachments: [source],
-            targetAttachments: [copied],
-          },
-          admission: {
-            ...base.admission,
-            content,
-            submittedContentDigest: messageContentDigest(content),
-          },
-        };
-        for (const targetAttachments of [undefined, [source], [{ ...copied, bytes: 13 }]]) {
+  for (const placement of ['current_turn', 'next_turn'] as const) {
+    test(
+      backend +
+        `: WorkHub binds delegated text and copied attachments to ${placement} admission and replay`,
+      async () => {
+        await withProvider(make(), async ({ sessionStore: s }, root) => {
+          await createCoordinationSession(s, root);
+          const target = await s.create(sessionInput(root));
+          const base = assignmentRequest('bound-input', target.id, target.name, 'target-turn');
+          const source = {
+            kind: 'other' as const,
+            name: 'requirements.txt',
+            mimeType: 'text/plain',
+            bytes: 12,
+            ref: { kind: 'session_file' as const, sessionId: HUB, relativePath: 'source.txt' },
+          };
+          const copied = {
+            ...source,
+            ref: { ...source.ref, sessionId: target.id, relativePath: 'copy.txt' },
+          };
+          const delegationText = 'Inspect the payment retry invariants';
+          const content = normalizeMessageContent({ text: delegationText, attachments: [copied] });
+          const request: WorkHubMessageAssignmentRequest = {
+            assignment: {
+              ...base.assignment,
+              delegationText,
+              attachments: [source],
+              targetAttachments: [copied],
+            },
+            admission: {
+              ...base.admission,
+              submittedPlacement: placement,
+              placement,
+              disposition: placement === 'next_turn' ? 'followup' : 'steering',
+              content,
+              submittedContentDigest: messageContentDigest(content),
+            },
+          };
+          for (const targetAttachments of [undefined, [source], [{ ...copied, bytes: 13 }]]) {
+            await assert.rejects(
+              s.assignWorkHubMessage({
+                ...request,
+                assignment: { ...request.assignment, targetAttachments },
+              }),
+              SessionMetadataConflictError,
+            );
+            assert.equal(await s.readWorkHubAssignment(base.assignment.actionId), undefined);
+            assert.deepEqual(await s.listMessageAdmissions(target.id), []);
+          }
+          const originalText = normalizeMessageContent({
+            text: base.assignment.userText,
+            attachments: [copied],
+          });
+          if (placement === 'next_turn') {
+            await assert.rejects(
+              s.assignWorkHubMessage({
+                ...request,
+                assignment: { ...request.assignment, steered: true },
+              }),
+              SessionMetadataConflictError,
+            );
+            await assert.rejects(
+              s.assignWorkHubMessage({
+                ...request,
+                admission: { ...request.admission, submittedPlacement: 'current_turn' },
+              }),
+              SessionMetadataConflictError,
+            );
+            assert.equal(await s.readWorkHubAssignment(base.assignment.actionId), undefined);
+            assert.deepEqual(await s.listMessageAdmissions(target.id), []);
+          }
           await assert.rejects(
             s.assignWorkHubMessage({
               ...request,
-              assignment: { ...request.assignment, targetAttachments },
+              admission: {
+                ...request.admission,
+                content: originalText,
+                submittedContentDigest: messageContentDigest(originalText),
+              },
             }),
             SessionMetadataConflictError,
           );
-          assert.equal(await s.readWorkHubAssignment(base.assignment.actionId), undefined);
-          assert.deepEqual(await s.listMessageAdmissions(target.id), []);
-        }
-        const originalText = normalizeMessageContent({
-          text: base.assignment.userText,
-          attachments: [copied],
+          assert.equal((await s.assignWorkHubMessage(request)).kind, 'assigned');
+          assert.equal((await s.assignWorkHubMessage(request)).kind, 'existing');
+          const changed = normalizeMessageContent({
+            text: 'Different task',
+            attachments: [copied],
+          });
+          await assert.rejects(
+            s.assignWorkHubMessage({
+              ...request,
+              assignment: { ...request.assignment, delegationText: changed.text },
+              admission: {
+                ...request.admission,
+                content: changed,
+                submittedContentDigest: messageContentDigest(changed),
+              },
+            }),
+            SessionMetadataConflictError,
+          );
+          assert.deepEqual(
+            await s.readWorkHubAssignment(base.assignment.actionId),
+            request.assignment,
+          );
+          assert.deepEqual(await s.listMessageAdmissions(target.id), [request.admission]);
         });
-        await assert.rejects(
-          s.assignWorkHubMessage({
-            ...request,
-            admission: {
-              ...request.admission,
-              content: originalText,
-              submittedContentDigest: messageContentDigest(originalText),
-            },
-          }),
-          SessionMetadataConflictError,
-        );
-        assert.equal((await s.assignWorkHubMessage(request)).kind, 'assigned');
-        assert.equal((await s.assignWorkHubMessage(request)).kind, 'existing');
-        const changed = normalizeMessageContent({ text: 'Different task', attachments: [copied] });
-        await assert.rejects(
-          s.assignWorkHubMessage({
-            ...request,
-            assignment: { ...request.assignment, delegationText: changed.text },
-            admission: {
-              ...request.admission,
-              content: changed,
-              submittedContentDigest: messageContentDigest(changed),
-            },
-          }),
-          SessionMetadataConflictError,
-        );
-        assert.deepEqual(
-          await s.readWorkHubAssignment(base.assignment.actionId),
-          request.assignment,
-        );
-        assert.deepEqual(await s.listMessageAdmissions(target.id), [request.admission]);
-      });
-    },
-  );
+      },
+    );
+  }
   test(backend + ': closed children cannot escape the execution group authority', async () => {
     const provider = make();
     await withProvider(provider, async (stores, root, owner) => {

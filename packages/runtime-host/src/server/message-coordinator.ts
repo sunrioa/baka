@@ -539,6 +539,31 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     return state ? hasLiveMessageState(state) : false;
   }
 
+  /** Preflight an atomic external admission without committing a second Message. */
+  preflightQueuedAdmissionAdmitted(
+    admission: PendingMessageAdmission,
+    lease: SessionAdmissionLease,
+  ): Promise<MessageOutcome<void>> {
+    return this.#sessionAdmission.runAdmitted(admission.sessionId, lease, async () => {
+      await this.#consumePendingAdmissions(admission.sessionId, lease);
+      const rootState = await this.#root.readRootState(admission.sessionId);
+      if (rootState.kind !== 'active' || !sameRun(rootState, admission)) {
+        return failure('session_busy', 'Target root changed before queued admission');
+      }
+      const state = this.#requireState(admission.sessionId);
+      if (state.phase !== 'open') return failure('session_busy', 'Message queue is closed');
+      return this.#preflightQueuedMessage(state, rootState, pendingMessageSource(admission), {
+        // Recovery allocates a fresh entry identity. Reserve its protocol maximum,
+        // not just the length of the identity this process happens to generate.
+        entryId: 'q'.repeat(128),
+        messageId: admission.messageId,
+        content: submittedProjectionContent(admission.content),
+        placement: admission.placement,
+        state: 'queued',
+      });
+    });
+  }
+
   /**
    * Durable cancellation proof for client-held transient identities. Absence of
    * a tombstone is never delivery or cancellation proof, so only cancelled
@@ -1552,9 +1577,6 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           }
           return failure('operation_conflict', prepared.error);
         }
-        if (allLiveEntries(state).length >= MESSAGE_QUEUE_MAX_ENTRIES) {
-          return failure('session_busy', 'Message queue capacity is full');
-        }
         const candidateRevision = state.revision;
         const candidateGeneration = state.generation;
         const entryId = this.#createId();
@@ -1570,34 +1592,6 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           placement: input.placement,
           state: 'queued',
         };
-        const current = this.#project(state);
-        const candidate: SessionMessageQueueProjection = {
-          ...current,
-          queueRevision: state.revision + 1,
-          steering:
-            disposition === 'steering'
-              ? [
-                  ...[...state.inFlight.values()].map(inFlightSnapshot),
-                  ...state.steering.map(queuedSteeringSnapshot),
-                  { ...candidateEntry, placement: 'current_turn' },
-                ]
-              : current.steering,
-          followup:
-            disposition === 'followup' ? [...current.followup, candidateEntry] : current.followup,
-        };
-        if (!projectionFitsEveryEntryState(candidate)) {
-          return failure('session_busy', 'Message queue projection capacity is full');
-        }
-        if (
-          !(await this.#preflightSessionSnapshot(input.sessionId, {
-            queue: candidate,
-          }))
-        ) {
-          return failure('session_busy', 'Session projection capacity is full');
-        }
-        if (!interruptResultFits(candidate, rootState)) {
-          return failure('session_busy', 'Message queue interrupt result capacity is full');
-        }
         const candidateSource = {
           messageId: input.messageId,
           content: prepared.content,
@@ -1607,22 +1601,13 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           placement: input.placement,
           disposition,
         } satisfies RootTurnSourceMessage;
-        const prospectiveSteering = [...state.inFlight.values(), ...state.steering].map(
-          sourceFromEntry,
+        const capacity = await this.#preflightQueuedMessage(
+          state,
+          rootState,
+          candidateSource,
+          candidateEntry,
         );
-        const prospectiveFollowup = state.followup.map(sourceFromEntry);
-        if (disposition === 'steering') prospectiveSteering.push(candidateSource);
-        else prospectiveFollowup.push(candidateSource);
-        if (
-          !successorAdmissionsFit(
-            input.sessionId,
-            rootState.turnId,
-            prospectiveSteering,
-            prospectiveFollowup,
-          )
-        ) {
-          return failure('session_busy', 'Message queue cannot form a durable follow-up Turn');
-        }
+        if (!capacity.ok) return capacity;
         if (
           state.phase !== 'open' ||
           state.revision !== candidateRevision ||
@@ -1690,6 +1675,44 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           execute(admittedLease),
         )
       : this.#sessionAdmission.run(input.sessionId, execute);
+  }
+
+  async #preflightQueuedMessage(
+    state: SessionState,
+    root: RuntimeMessageRunIdentity,
+    source: RootFollowupSource,
+    entry: QueuedMessageSnapshot,
+  ): Promise<MessageOutcome<void>> {
+    if (allLiveEntries(state).length >= MESSAGE_QUEUE_MAX_ENTRIES) {
+      return failure('session_busy', 'Message queue capacity is full');
+    }
+    const current = this.#project(state);
+    const candidate: SessionMessageQueueProjection = {
+      ...current,
+      queueRevision: state.revision + 1,
+      steering:
+        source.disposition === 'steering'
+          ? [...current.steering, { ...entry, placement: 'current_turn' }]
+          : current.steering,
+      followup: source.disposition === 'followup' ? [...current.followup, entry] : current.followup,
+    };
+    if (!projectionFitsEveryEntryState(candidate)) {
+      return failure('session_busy', 'Message queue projection capacity is full');
+    }
+    if (!(await this.#preflightSessionSnapshot(state.sessionId, { queue: candidate }))) {
+      return failure('session_busy', 'Session projection capacity is full');
+    }
+    if (!interruptResultFits(candidate, root)) {
+      return failure('session_busy', 'Message queue interrupt result capacity is full');
+    }
+    const steering = [...state.inFlight.values(), ...state.steering].map(sourceFromEntry);
+    const followup = state.followup.map(sourceFromEntry);
+    if (source.disposition === 'steering') steering.push(source);
+    else followup.push(source);
+    if (!successorAdmissionsFit(state.sessionId, root.turnId, steering, followup)) {
+      return failure('session_busy', 'Message queue cannot form a durable follow-up Turn');
+    }
+    return success(undefined);
   }
 
   #runQueueMutation<I extends { originHostEpoch: string; sessionId: string }, R>(
@@ -2733,7 +2756,7 @@ function sourceFromEntry(entry: LiveEntry): RootFollowupSource {
   };
 }
 
-function pendingMessageSource(admission: PendingMessageAdmission): RootTurnSourceMessage {
+function pendingMessageSource(admission: PendingMessageAdmission): RootFollowupSource {
   return {
     messageId: admission.messageId,
     content: normalizeMessageContent(admission.content),

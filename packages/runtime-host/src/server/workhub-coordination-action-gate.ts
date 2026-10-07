@@ -459,7 +459,7 @@ export class WorkHubCoordinationActionGate {
             'candidate_unavailable',
             'WorkHub resume target is unavailable',
           );
-        this.#assertTarget(target);
+        this.#assertTarget(target, 'resume');
         const current = await this.#soleWorkingDelegation(target.sessionId, 'resume');
         if (current.actionId !== source.actionId) {
           throw new WorkHubActionGateFailure(
@@ -1044,11 +1044,14 @@ export class WorkHubCoordinationActionGate {
     } as WorkHubCoordinationActResult;
   }
 
-  #assertTarget(target: WorkHubCoordinationCandidate): void {
+  #assertTarget(
+    target: WorkHubCoordinationCandidate,
+    operation: 'delegate' | 'resume' = 'delegate',
+  ): void {
     if (target.sessionId === WORKHUB_COORDINATION_SESSION_ID) {
       throw new WorkHubActionGateFailure('self_route', 'WorkHub cannot delegate to itself');
     }
-    if (target.state === 'waiting_for_user') {
+    if (operation === 'resume' && target.state === 'waiting_for_user') {
       throw new WorkHubActionGateFailure(
         'target_waiting_for_user',
         'Target Session is waiting for user input',

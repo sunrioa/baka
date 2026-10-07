@@ -1781,9 +1781,9 @@ export class SqliteSessionMetadataStore {
         }),
       ) ||
       admission.submittedContentDigest !== messageContentDigest(admission.content) ||
-      admission.submittedPlacement !== 'current_turn' ||
-      admission.placement !== 'current_turn' ||
-      admission.disposition !== 'steering'
+      admission.submittedPlacement !== admission.placement ||
+      (admission.disposition === 'followup' &&
+        (assignment.disposition !== 'delegate_existing' || assignment.steered === true))
     ) {
       throw new SessionMetadataConflictError('Invalid WorkHub assignment identity');
     }
@@ -1942,7 +1942,7 @@ export class SqliteSessionMetadataStore {
       if (!target || target.header.isArchived) {
         throw new SessionMetadataConflictError('WorkHub target Session is unavailable');
       }
-      if (target.header.status === 'waiting_for_user') {
+      if (target.header.status === 'waiting_for_user' && admission.disposition !== 'followup') {
         throw new SessionMetadataConflictError('WorkHub target Session is waiting for user input');
       }
       let committedAssignment = assignment;

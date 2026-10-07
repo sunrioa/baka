@@ -2570,10 +2570,32 @@ export async function createExecutionRuntimeHostComposition(
                     'A target root Turn is being admitted',
                   );
                 }
-                const steered = rootState.kind === 'active';
-                const turnId = steered ? rootState.turnId : `wht_${suffix}`;
-                const runId = steered ? rootState.runId : `whr_${suffix}`;
+                const queued = rootState.kind === 'active';
+                const turnId = queued ? rootState.turnId : `wht_${suffix}`;
+                const runId = queued ? rootState.runId : `whr_${suffix}`;
                 const assignedAt = Date.now();
+                const admission = {
+                  sessionId: input.targetSessionId,
+                  turnId,
+                  runId,
+                  messageId,
+                  content,
+                  submittedContentDigest: messageContentDigest(content),
+                  submittedPlacement: queued ? ('next_turn' as const) : ('current_turn' as const),
+                  placement: queued ? ('next_turn' as const) : ('current_turn' as const),
+                  disposition: queued ? ('followup' as const) : ('steering' as const),
+                  skillInvocation: { loaded: [], failed: [], receipts: [] },
+                  admittedAt: assignedAt,
+                };
+                if (queued) {
+                  const capacity = await messages.preflightQueuedAdmissionAdmitted(
+                    admission,
+                    lease,
+                  );
+                  if (!capacity.ok) {
+                    throw new WorkHubActionEffectFailure('session_busy', capacity.error.message);
+                  }
+                }
                 const delegationId = `whd_${suffix}`;
                 const supersession =
                   input.replacesActionId && input.replacesDelegationId
@@ -2621,7 +2643,6 @@ export async function createExecutionRuntimeHostComposition(
                     ...(input.delegationText === undefined
                       ? {}
                       : { delegationText: input.delegationText }),
-                    ...(steered ? { steered: true as const } : {}),
                     ...(input.create ? { create: input.create } : {}),
                     ...(input.replacesActionId && input.replacesDelegationId
                       ? {
@@ -2630,23 +2651,11 @@ export async function createExecutionRuntimeHostComposition(
                         }
                       : {}),
                   },
-                  admission: {
-                    sessionId: input.targetSessionId,
-                    turnId,
-                    runId,
-                    messageId,
-                    content,
-                    submittedContentDigest: messageContentDigest(content),
-                    submittedPlacement: 'current_turn',
-                    placement: 'current_turn',
-                    disposition: 'steering',
-                    skillInvocation: { loaded: [], failed: [], receipts: [] },
-                    admittedAt: assignedAt,
-                  },
+                  admission,
                   ...(create ? { create } : {}),
                   ...(supersession ? { supersession } : {}),
                 });
-                // Keep the durable steering identity and its live queue owner
+                // Keep the durable Message identity and its live queue owner
                 // under one Session admission. A terminal transition must not
                 // observe the committed Message before the queue does.
                 await messages.consumePendingAdmissionsAdmitted(input.targetSessionId, lease);
