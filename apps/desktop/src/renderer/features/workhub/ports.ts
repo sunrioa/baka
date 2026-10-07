@@ -82,6 +82,8 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   getNewWorkPermissionMode(sessionId: string): Promise<ChatDefaultPermissionMode>;
   setNewWorkPermissionMode(sessionId: string, mode: ChatDefaultPermissionMode): Promise<ChatDefaultPermissionMode>;
   subscribeNewWorkPermissionMode(sessionId: string, handler: () => void): () => void;
+  getExecutionConcurrency(sessionId: string): Promise<number>;
+  setExecutionConcurrency(sessionId: string, value: number): Promise<number>;
   observe(
     sessionId: string,
     handler: (event: SessionEvent) => void,

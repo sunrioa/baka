@@ -18,7 +18,7 @@
  */
 
 import { isThinkingLevel } from '../model-thinking.js';
-import { CHAT_DEFAULT_PERMISSION_MODES } from '../settings.js';
+import { CHAT_DEFAULT_PERMISSION_MODES, isWorkHubMaxConcurrentSessions } from '../settings.js';
 import { normalizeSubagentSettings } from '../subagent-settings.js';
 import type {
   AgentRuntimeSettingsPatch,
@@ -428,7 +428,13 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   const item = exactRecord(
     value,
     'chat defaults',
-    ['permissionMode', 'workHubPermissionMode', 'thinkingLevel', 'codeModeEnabled'],
+    [
+      'permissionMode',
+      'workHubPermissionMode',
+      'workHubMaxConcurrentSessions',
+      'thinkingLevel',
+      'codeModeEnabled',
+    ],
     ['permissionMode'],
   );
   if (!(CHAT_DEFAULT_PERMISSION_MODES as readonly unknown[]).includes(item.permissionMode)) {
@@ -443,11 +449,20 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   if (item.thinkingLevel !== undefined && !isThinkingLevel(item.thinkingLevel)) {
     throw domainError('chat default thinking level is invalid');
   }
+  if (
+    item.workHubMaxConcurrentSessions !== undefined &&
+    !isWorkHubMaxConcurrentSessions(item.workHubMaxConcurrentSessions)
+  ) {
+    throw domainError('WorkHub concurrency must be an integer between 1 and 8');
+  }
   if (item.codeModeEnabled !== undefined && typeof item.codeModeEnabled !== 'boolean') {
     throw domainError('chat default code mode is invalid');
   }
   return {
     permissionMode: item.permissionMode as RuntimePolicy['chatDefaults']['permissionMode'],
+    ...(item.workHubMaxConcurrentSessions === undefined
+      ? {}
+      : { workHubMaxConcurrentSessions: item.workHubMaxConcurrentSessions as number }),
     ...(item.workHubPermissionMode === undefined
       ? {}
       : {

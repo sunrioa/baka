@@ -90,6 +90,38 @@ test('WorkHub permission defaults survive canonical policy decoding and reject u
   }
 });
 
+test('WorkHub concurrency is an optional bounded integer in policy and mutations', () => {
+  const policy = createDefaultRuntimePolicy();
+  assert.equal(
+    Reflect.get(decodeCanonicalRuntimePolicy(policy).chatDefaults, 'workHubMaxConcurrentSessions'),
+    undefined,
+  );
+  for (const workHubMaxConcurrentSessions of [1, 2, 3, 8]) {
+    const chatDefaults = { ...policy.chatDefaults, workHubMaxConcurrentSessions };
+    assert.deepEqual(
+      decodeCanonicalRuntimePolicy({ ...policy, chatDefaults }).chatDefaults,
+      chatDefaults,
+    );
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value: chatDefaults },
+      }).operation,
+      { kind: 'set_chat_defaults', value: chatDefaults },
+    );
+  }
+  for (const workHubMaxConcurrentSessions of [0, -1, 1.5, 9, '3', true, null, NaN, Infinity]) {
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubMaxConcurrentSessions },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
+  }
+});
+
 test('Code Mode is opt-in and survives policy decoding', () => {
   const policy = createDefaultRuntimePolicy();
   assert.notEqual(decodeCanonicalRuntimePolicy(policy).chatDefaults.codeModeEnabled, true);

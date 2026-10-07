@@ -62,6 +62,7 @@ import {
 } from '@maka/runtime/stream-graph-coordinator';
 import {
   FAKE_ASK_USER_QUESTION_PROMPT,
+  FAKE_ERROR_PROMPT_PREFIX,
   FAKE_HOLD_OPEN_PROMPT,
   FakeBackend,
 } from '@maka/runtime/test-only/fake-backend';
@@ -2962,6 +2963,474 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
       }
     });
   });
+}
+
+test('WorkHub default concurrency admits three direct workers without blocking coordination', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const release = deferred<void>();
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(input.text);
+            await Promise.race([
+              release.promise,
+              new Promise<void>((resolve) => {
+                context.abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+              }),
+            ]);
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-concurrency-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const targets = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          manager.createSession({
+            cwd: root,
+            llmConnectionId: connectionId,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode: 'ask',
+          }),
+        ),
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      for (const [index, target] of targets.entries()) {
+        const candidates = await composition.handlers['workhub.coordination.candidates'](
+          {},
+          context,
+        );
+        assert.ok(candidates.ok, JSON.stringify(candidates));
+        const candidate = candidates.result.candidates.find((item) => item.sessionId === target.id);
+        assert.ok(candidate);
+        const accepted = await actWorkHub(
+          composition,
+          {
+            actionId: `concurrent-${index}`,
+            userText: `worker-${index}`,
+            candidateSetId: candidates.result.candidateSetId,
+            proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+          },
+          context,
+        );
+        assert.ok(accepted.ok, JSON.stringify(accepted));
+      }
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const assignment = await stores.sessionStore.readWorkHubAssignment('concurrent-3');
+      assert.ok(assignment);
+      const queued = await composition.handlers['turn.query'](
+        { sessionId: targets[3]!.id, turnId: assignment.targetTurnId },
+        context,
+      );
+      assert.ok(queued.ok, JSON.stringify(queued));
+      assert.equal(
+        queued.result.status,
+        'admitted',
+        'a fourth accepted worker must not dispatch yet',
+      );
+      assert.deepEqual(sends, ['worker-0', 'worker-1', 'worker-2']);
+      release.resolve();
+      await waitFor(async () => sends.length === 4);
+      assert.equal(sends[3], 'worker-3');
+    } finally {
+      release.resolve();
+      await composition.close();
+    }
+  });
+});
+
+for (const limit of [1, 2, 8]) {
+  test(`WorkHub concurrency ${limit} holds direct roots and cancels queued work before dispatch`, {
+    timeout: 30_000,
+  }, async () => {
+    await withCompositionRoot(async ({ root, owner }) => {
+      const connectionId = await configureFakeDefaultTarget(owner);
+      const sends: string[] = [];
+      let drainRequested = false;
+      const { composition, manager } = await createCapturedExecutionComposition(owner, {
+        context: {
+          requestDrain: () => {
+            drainRequested = true;
+          },
+          retainUntilProcessExit: () => undefined,
+        },
+        primaryBackendFactory: (context) =>
+          new (class extends FakeBackend {
+            override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+              sends.push(this.sessionId);
+              yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+            }
+          })(context),
+      });
+      const context = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'workhub-pool-client',
+        principal: 'local_os_user' as const,
+        acquireResidency: () => ({ release() {} }),
+      };
+      try {
+        await setWorkHubConcurrency(composition, context, limit);
+        const targets = await Promise.all(
+          Array.from({ length: limit + 1 }, () =>
+            manager.createSession({
+              cwd: root,
+              llmConnectionId: connectionId,
+              llmConnectionSlug: 'fake',
+              model: 'fake-model',
+              permissionMode: 'ask',
+            }),
+          ),
+        );
+        assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+        for (const [index, target] of targets.entries())
+          await delegateWorkHubTarget(
+            composition,
+            context,
+            target.id,
+            `pool-${index}`,
+            `worker-${index}`,
+          );
+        await waitFor(async () => sends.length === limit);
+        const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+        const queued = await stores.sessionStore.readWorkHubAssignment(`pool-${limit}`);
+        assert.ok(queued);
+        const snapshot = await composition.handlers['turn.query'](
+          { sessionId: queued.targetSessionId, turnId: queued.targetTurnId },
+          context,
+        );
+        assert.ok(snapshot.ok, JSON.stringify(snapshot));
+        assert.equal(snapshot.result.status, 'admitted');
+        const stopped = await composition.handlers['turn.stop'](
+          {
+            sessionId: queued.targetSessionId,
+            turnId: queued.targetTurnId,
+            runId: snapshot.result.runId,
+          },
+          context,
+        );
+        assert.ok(stopped.ok, JSON.stringify(stopped));
+        assert.equal(stopped.result.status, 'cancelled');
+        assert.ok(
+          !sends.includes(queued.targetSessionId),
+          'cancelled queued roots must not call a backend',
+        );
+        assert.equal(drainRequested, false);
+        // A normal user Turn in another Session is deliberately outside this budget.
+        const manual = await manager.createSession({
+          cwd: root,
+          llmConnectionId: connectionId,
+          llmConnectionSlug: 'fake',
+          model: 'fake-model',
+          permissionMode: 'ask',
+        });
+        const started = await composition.handlers['turn.start'](
+          {
+            sessionId: manual.id,
+            turnId: 'manual-outside-pool',
+            content: { text: FAKE_HOLD_OPEN_PROMPT },
+          },
+          context,
+        );
+        assert.ok(started.ok, JSON.stringify(started));
+        assert.ok(sends.includes(manual.id));
+      } finally {
+        await composition.close();
+      }
+    });
+  });
+}
+
+test('WorkHub concurrency raises immediately, lowers without killing and releases exact terminal roots', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(this.sessionId);
+            yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+          }
+        })(context),
+    });
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-resize-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      await setWorkHubConcurrency(composition, context, 1);
+      const targets = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          manager.createSession({
+            cwd: root,
+            llmConnectionId: connectionId,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode: 'ask',
+          }),
+        ),
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      for (const [index, target] of targets.entries())
+        await delegateWorkHubTarget(
+          composition,
+          context,
+          target.id,
+          `resize-${index}`,
+          `worker-${index}`,
+        );
+      await waitFor(async () => sends.length === 1);
+      await setWorkHubConcurrency(composition, context, 2);
+      await waitFor(async () => sends.length === 2);
+      await setWorkHubConcurrency(composition, context, 1);
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const identities = await Promise.all(
+        targets.map(async (target, index) => {
+          const assignment = await stores.sessionStore.readWorkHubAssignment(`resize-${index}`);
+          assert.ok(assignment);
+          const queried = await composition.handlers['turn.query'](
+            { sessionId: target.id, turnId: assignment.targetTurnId },
+            context,
+          );
+          assert.ok(queried.ok, JSON.stringify(queried));
+          return {
+            sessionId: target.id,
+            turnId: assignment.targetTurnId,
+            runId: queried.result.runId,
+            status: queried.result.status,
+          };
+        }),
+      );
+      assert.deepEqual(
+        identities.map((entry) => entry.status),
+        ['running', 'running', 'admitted'],
+      );
+      assert.ok((await composition.handlers['turn.stop'](identities[0]!, context)).ok);
+      assert.equal(
+        sends.length,
+        2,
+        'lowering must not start work while the remaining slot is occupied',
+      );
+      assert.ok((await composition.handlers['turn.stop'](identities[1]!, context)).ok);
+      await waitFor(async () => sends.length === 3);
+      assert.deepEqual(
+        sends,
+        targets.map((target) => target.id),
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub concurrency retains a live user question until its original answer settles', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(input.text);
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-question-pool-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      await setWorkHubConcurrency(composition, context, 1);
+      const first = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const second = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        first.id,
+        'pool-question',
+        FAKE_ASK_USER_QUESTION_PROMPT,
+      );
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      await waitFor(async () => {
+        const pending = await stores.interactionStore.listPending({ sessionId: first.id });
+        const catalog = await stores.sessionStore.readCatalogRecord(first.id);
+        return pending.length === 1 && catalog.header.status === 'waiting_for_user';
+      });
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        second.id,
+        'pool-after-question',
+        'Only after the answer',
+      );
+      const assignment = await stores.sessionStore.readWorkHubAssignment('pool-after-question');
+      assert.ok(assignment);
+      const queried = await composition.handlers['turn.query'](
+        { sessionId: second.id, turnId: assignment.targetTurnId },
+        context,
+      );
+      assert.ok(queried.ok, JSON.stringify(queried));
+      assert.equal(queried.result.status, 'admitted');
+      const question = (await stores.interactionStore.listPending({ sessionId: first.id }))[0]!;
+      assert.ok(
+        (
+          await composition.handlers['interaction.answer'](
+            {
+              sessionId: first.id,
+              interactionId: question.requestId,
+              answer: { kind: 'question', answers: ['邀请制', '本周', '是'] },
+            },
+            context,
+          )
+        ).ok,
+      );
+      await waitFor(async () => sends.length === 2);
+      assert.deepEqual(sends, [FAKE_ASK_USER_QUESTION_PROMPT, 'Only after the answer']);
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub concurrency releases failed roots and places same-Session successors behind other ready work', {
+  timeout: 20_000,
+}, async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const releases = new Map(
+      ['fail-first', 'next-first', 'other'].map((text) => [text, deferred<void>()]),
+    );
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(input.text);
+            await releases.get(input.text)!.promise;
+            yield* super.send({
+              ...input,
+              text:
+                input.text === 'fail-first'
+                  ? `${FAKE_ERROR_PROMPT_PREFIX}expected failure`
+                  : input.text,
+            });
+          }
+        })(context),
+    });
+    const context = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'workhub-fair-client',
+      principal: 'local_os_user' as const,
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      await setWorkHubConcurrency(composition, context, 1);
+      const targets = await Promise.all(
+        Array.from({ length: 2 }, () =>
+          manager.createSession({
+            cwd: root,
+            llmConnectionId: connectionId,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode: 'ask',
+          }),
+        ),
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      await delegateWorkHubTarget(composition, context, targets[0]!.id, 'fair-first', 'fail-first');
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        targets[0]!.id,
+        'fair-successor',
+        'next-first',
+      );
+      await delegateWorkHubTarget(composition, context, targets[1]!.id, 'fair-other', 'other');
+      assert.deepEqual(sends, ['fail-first']);
+      releases.get('fail-first')!.resolve();
+      await waitFor(async () => sends.length === 2);
+      assert.deepEqual(sends, ['fail-first', 'other']);
+      releases.get('other')!.resolve();
+      await waitFor(async () => sends.length === 3);
+      assert.deepEqual(sends, ['fail-first', 'other', 'next-first']);
+      releases.get('next-first')!.resolve();
+    } finally {
+      for (const release of releases.values()) release.resolve();
+      await composition.close();
+    }
+  });
+});
+
+async function setWorkHubConcurrency(
+  composition: ExecutionRuntimeHostComposition,
+  context: ConnectionContext,
+  value: number,
+): Promise<void> {
+  const current = await composition.handlers['runtime.policy.query']({}, context);
+  assert.ok(current.ok, JSON.stringify(current));
+  const saved = await composition.handlers['runtime.policy.mutate'](
+    {
+      expectedRevision: current.result.revision,
+      operation: {
+        kind: 'set_chat_defaults',
+        value: { ...current.result.policy.chatDefaults, workHubMaxConcurrentSessions: value },
+      },
+    },
+    context,
+  );
+  assert.ok(saved.ok, JSON.stringify(saved));
+  assert.equal(saved.result.kind, 'committed');
+}
+
+async function delegateWorkHubTarget(
+  composition: ExecutionRuntimeHostComposition,
+  context: ConnectionContext,
+  sessionId: string,
+  actionId: string,
+  text: string,
+): Promise<void> {
+  const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+  assert.ok(candidates.ok, JSON.stringify(candidates));
+  const candidate = candidates.result.candidates.find((item) => item.sessionId === sessionId);
+  assert.ok(candidate);
+  const result = await actWorkHub(
+    composition,
+    {
+      actionId,
+      userText: text,
+      candidateSetId: candidates.result.candidateSetId,
+      proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+    },
+    context,
+  );
+  assert.ok(result.ok, JSON.stringify(result));
 }
 
 for (const operation of ['stop', 'correct'] as const) {

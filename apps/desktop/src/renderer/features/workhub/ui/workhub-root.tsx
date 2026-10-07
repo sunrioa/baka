@@ -19,8 +19,9 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChatSurfaceLayout, UserQuestionPrompt, MakaWordmark, PermissionModeSelect, getPermissionModeMeta, useToast, useUiLocale, type ComposerHandle } from '@maka/ui';
-import { Button, IconButton } from '@astryxdesign/core';
-import { ChevronDown, PictureInPicture2, Undo2, X } from '@maka/ui/icons';
+import { Button, IconButton, Selector } from '@astryxdesign/core';
+import { WORKHUB_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
+import { ChevronDown, PictureInPicture2, Undo2, Workflow, X } from '@maka/ui/icons';
 import { useLiveContextUsage } from '../../../application/contracts/session-inspector/use-live-context-usage.js';
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
@@ -400,6 +401,18 @@ export function WorkHubRoot() {
                         destructive: true,
                       });
                     })}
+                  />
+                  <Selector
+                    label={t.executionConcurrency}
+                    isLabelHidden
+                    variant="ghost"
+                    size="sm"
+                    width={80}
+                    value={controller.executionConcurrency?.toString()}
+                    options={Array.from({ length: WORKHUB_MAX_CONCURRENT_SESSIONS }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))}
+                    renderValue={(option) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }} title={`${t.executionConcurrency}: ${option.value} — ${t.executionConcurrencyHint}`}><Workflow size={14} aria-hidden="true" />{option.value}</span>}
+                    isDisabled={controller.executionConcurrency === undefined || controller.savingConcurrency}
+                    onChange={(value) => controller.changeExecutionConcurrency(Number(value))}
                   />
                   {control?.canUndo && <IconButton type="button" size="sm" variant="ghost" icon={<Undo2 size={16} />} label={t.undo} isDisabled={busy} onClick={() => call(services.control.undo())} />}
                   {!floating && <IconButton type="button" size="sm" variant="ghost" icon={<PictureInPicture2 size={16} />} label={t.float} tooltip={`${t.float} · ${shortcutLabel}`} onClick={() => call(services.presentation.detach())} />}

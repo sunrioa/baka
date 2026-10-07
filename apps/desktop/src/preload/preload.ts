@@ -2249,6 +2249,14 @@ const makaBridge = {
         if (scope.hostId === hostId) handler();
       });
     },
+    async getExecutionConcurrency(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:getExecutionConcurrency', scope) as Promise<number>;
+    },
+    async setExecutionConcurrency(coordinationSessionId: string, value: number) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:setExecutionConcurrency', scope, value) as Promise<number>;
+    },
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }> {
       return resolveDesktopWorkHubCoordinationSession(
         activeRuntimeHostRef,

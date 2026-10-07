@@ -114,6 +114,8 @@ test('new-work permissions use Host policy, preserve other defaults and reject i
     return {
       read: () => handlers.get('workhub:getNewWorkPermissionMode')!({} as Parameters<IpcHandler>[0]),
       write: (mode: unknown) => handlers.get('workhub:setNewWorkPermissionMode')!({} as Parameters<IpcHandler>[0], mode),
+      readConcurrency: () => handlers.get('workhub:getExecutionConcurrency')!({} as Parameters<IpcHandler>[0]),
+      writeConcurrency: (value: unknown) => handlers.get('workhub:setExecutionConcurrency')!({} as Parameters<IpcHandler>[0], value),
     };
   }
   const original = register();
@@ -129,6 +131,14 @@ test('new-work permissions use Host policy, preserve other defaults and reject i
     await assert.rejects(async () => original.write(mode), /Invalid WorkHub new-work permission mode/u);
   }
   assert.equal(writes, 2);
+  assert.equal(await original.readConcurrency(), 3);
+  assert.equal(await original.writeConcurrency(1), 1);
+  assert.equal(await register().readConcurrency(), 1);
+  assert.equal(await register(createDefaultRuntimePolicy).readConcurrency(), 3);
+  assert.equal(policy.chatDefaults.workHubPermissionMode, 'ask');
+  assert.equal(policy.chatDefaults.codeModeEnabled, true);
+  for (const value of [0, -1, 1.5, 9, '3', null]) await assert.rejects(async () => original.writeConcurrency(value), /Invalid WorkHub execution concurrency/u);
+  assert.equal(writes, 3);
 });
 
 test('returns a structured WorkHub attachment rejection across IPC', async () => {

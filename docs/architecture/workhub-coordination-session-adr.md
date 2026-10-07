@@ -212,7 +212,8 @@ original user request. It does not steer or stop the current Turn. Each queued
 delegation starts its own successor Turn in acceptance order. WorkHub applies
 the ordinary queue count, byte, snapshot and successor-admission capacity checks
 under the same Session admission lease before atomically committing the assignment.
-An idle target still starts immediately through the existing native admission.
+An idle target uses the existing native admission and starts when direct-worker
+capacity is available.
 Historical steering assignments remain readable; their shared-Turn ownership
 and cancellation protections are unchanged. New admission does not overwrite
 the target Session's permissions, model or working directory.
@@ -229,6 +230,20 @@ Reused and queued tasks continue to use their target Session's execution
 authority, including the existing rejection of configuration changes while
 a Turn is active. WorkHub does not introduce a permission override or another
 sandbox authority.
+
+In baka, `RuntimePolicy.chatDefaults.workHubMaxConcurrentSessions` limits direct
+WorkHub root executions on that Host to an integer from 1 to 8 (absent means 3).
+Assignment and exact source-Message proofs identify the roots; a historically
+linked Session does not make unrelated manual Turns workers. Coordination and
+subagent executions remain outside this budget. An epoch-local dispatch gate
+waits before Runtime activation while the existing durable root remains
+`admitted`; it is not a second persistent queue or execution owner. Live questions
+and approvals keep their slot until the root actually retires. Raising the limit
+wakes waiting roots; lowering allows existing executions to drain without killing
+them. Stop fences cancel waiting roots without provider dispatch. Startup rebuilds
+waiting order from durable admission time and retains strict recovery of already
+dispatched Runs rather than replaying unknown effects. Cooperative handoff falls
+back to existing cold recovery when a queued root has no Runtime owner to seal.
 
 For a queued assignment, its admission Turn is not an execution-ownership claim;
 the target Message remains the proof for its eventual successor Turn. Existing

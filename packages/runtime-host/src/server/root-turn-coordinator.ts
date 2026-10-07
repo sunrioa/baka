@@ -181,6 +181,7 @@ interface ActiveRootTurn {
   observedCompletion?: HostedExecutionCompletion;
   observationSettled?: Promise<void>;
   startSettled: Deferred;
+  workHubSlot?: import('./workhub-execution-slots.js').WorkHubExecutionSlot;
   done: Promise<void>;
   residency: RuntimeHostResidency;
   stopRequested: StopSessionInput | undefined;
@@ -386,6 +387,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     private readonly prepareWorkHubRoutingDecision?: (
       input: HostWorkHubRoutingDecisionPreparation,
     ) => Promise<WorkHubRoutingDecision | undefined>,
+    private readonly workHubExecutionSlots?: import('./workhub-execution-slots.js').WorkHubExecutionSlots,
   ) {
     this.stores = authenticateExecutionStoresWriter(stores, 'interactive');
     this.executionProjection = new HostedExecutionProjectionReader(this.stores);
@@ -406,7 +408,13 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         ? { assertScheduledTaskAdmission: this.assertScheduledTaskRecoveryAdmission }
         : {}),
     });
-    for (const plan of plans) {
+    // Rebuild dispatch order from durable admission time, not Session catalog order.
+    for (const plan of [...plans].sort(
+      (left, right) =>
+        (left.rootReplayAdmission?.admittedAt ?? 0) -
+          (right.rootReplayAdmission?.admittedAt ?? 0) ||
+        left.sessionId.localeCompare(right.sessionId),
+    )) {
       this.#recoveryPlansBySession.set(plan.sessionId, plan);
     }
   }
@@ -754,6 +762,12 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       for (let pass = 0; pass < 3; pass += 1) {
         for (const [, active] of this.#executions.entries()) {
           if (held.has(active)) continue;
+          // A durable queued root has no Runtime owner to seal. Use the existing
+          // cold recovery path rather than wait for a worker to finish indefinitely.
+          if (active.workHubSlot?.waiting) {
+            cancel();
+            return undefined;
+          }
           await waitForHostedExecutionIdleOrAbort(active.startSettled.promise, signal);
           if (this.#executions.get(active.sessionId) !== active) continue;
           const request = this.manager.requestRunHandoff(
@@ -2720,6 +2734,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     );
     const shouldDeliverStop = !active.stopRequested;
     active.stopRequested = stopInput;
+    active.workHubSlot?.cancelWaiting();
     return {
       active,
       deliverStop: () =>
@@ -2896,6 +2911,8 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       return completedStart(sessionBusy('Root Turn reservation is no longer current'));
     }
 
+    const isWorkHubWorker =
+      this.workHubExecutionSlots && (await this.isDirectWorkHubExecution(admission));
     const residency = acquireResidency();
     const messageIdentity = {
       sessionId: input.sessionId,
@@ -2958,6 +2975,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         );
       }
     }
+    if (isWorkHubWorker) entry.workHubSlot = this.workHubExecutionSlots!.acquire();
     this.#executions.activate(entry, replacing);
     entry.done = this.sessionAdmission.detach(() => this.drainTurn(input, entry, startSettled));
     void entry.done.catch(() => undefined);
@@ -2972,7 +2990,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     disposition: TurnStartDisposition,
   ): Promise<RootMessageStartOutcome> {
     if (disposition.kind === 'complete') return disposition.outcome;
-    await disposition.active.startSettled.promise;
+    if (!disposition.active.workHubSlot?.waiting) await disposition.active.startSettled.promise;
     const result = await this.readCanonicalSnapshot(
       input.sessionId,
       input.turnId,
@@ -3018,6 +3036,17 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         runId: active.runId,
         userMessageId: active.userMessageId,
         durability: 'required',
+        admitTurn: async () => {
+          // Stop may have won while there was no Runtime execution claim yet.
+          // Deliver it after the normal claim exists, before backend activation.
+          // Stop marks the pending claim synchronously but settles only after
+          // this iterator retires; awaiting it here would wait on ourselves.
+          if (active.stopRequested)
+            void this.deliverRuntimeStopIntent(input.sessionId, active.stopRequested).catch(() =>
+              this.requestHostDrain(),
+            );
+          return 'admitted';
+        },
         onRunStarted: async (startedRunId) => {
           if (startedRunId !== active.runId) {
             throw new Error('Runtime started a different Run than the admitted identity');
@@ -3037,6 +3066,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     let terminalTransitionStarted = false;
     let detached = false;
     try {
+      await active.workHubSlot?.ready;
       const messageOrigin = hostedExecutionMessageOrigin(active.descriptor);
       const onRunStarted = async (): Promise<void> => {
         await this.manager.commitRevisionVersion(input.sessionId);
@@ -3193,6 +3223,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       if (!isShutdownCancelledInteractionAdmission(commandFailure)) this.requestHostDrain();
       throw commandFailure;
     } finally {
+      active.workHubSlot?.release();
       if (detached) {
         this.#executions.release(active);
         active.residency.release();
@@ -3224,6 +3255,32 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         this.#executions.publish(active);
       }
     }
+  }
+
+  private async isDirectWorkHubExecution(admission: RootTurnAdmission): Promise<boolean> {
+    if (isWorkHubCoordinationSessionId(admission.sessionId)) return false;
+    const visited = new Set<string>();
+    while (admission.execution.kind === 'safe_boundary_continuation') {
+      if (visited.has(admission.turnId))
+        throw new RuntimeMessageAuthorityInvariantError('Cyclic WorkHub root lineage');
+      visited.add(admission.turnId);
+      const source = await this.stores.agentRunStore.readRootTurnAdmission(
+        admission.sessionId,
+        admission.execution.sourceTurnId,
+      );
+      if (!source) return false;
+      admission = source;
+    }
+    if (admission.execution.kind !== 'external_message' || admission.sourceMessages.length === 0)
+      return false;
+    const assignments = await this.stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+      [admission.sessionId],
+      undefined,
+      true,
+    );
+    return assignments.some((assignment) =>
+      admission.sourceMessages.some((source) => source.messageId === assignment.targetMessageId),
+    );
   }
 
   private async materializeAdmittedMessageSources(active: ActiveRootTurn): Promise<void> {

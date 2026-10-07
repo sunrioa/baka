@@ -24,6 +24,7 @@ import {
   type RestoredDraftContent,
 } from '../../../application/contracts/transient-message-projection.js';
 import { useEffect, useRef, useState } from 'react';
+import { isWorkHubMaxConcurrentSessions } from '@maka/core/settings';
 import {
   applyLiveTurnBufferEvent,
   retainLiveTurn,
@@ -89,6 +90,11 @@ export function useWorkHubController(
   const permissionChange = useRef<{ sessionId: string }>(undefined);
   const permissionReadRevision = useRef(0);
   const refreshPermission = useRef<() => void>(() => undefined);
+  const [concurrency, setConcurrency] = useState<{ sessionId: string; value: number }>();
+  const [savingConcurrency, setSavingConcurrency] = useState(false);
+  const concurrencyChange = useRef<{ sessionId: string }>(undefined);
+  const concurrencyReadRevision = useRef(0);
+  const refreshConcurrency = useRef<() => void>(() => undefined);
   const [choices, setChoices] = useState<ChatModelChoice[]>([]);
   const [modelSetupChoicesReady, setModelSetupChoicesReady] = useState(false);
   const [transcript, setTranscript] = useState(emptyTranscript);
@@ -382,6 +388,7 @@ export function useWorkHubController(
     setPermissionDefault(undefined);
     if (!sessionId) return;
     const refresh = () => {
+      refreshConcurrency.current();
       if (permissionChange.current) return;
       const revision = ++permissionReadRevision.current;
       void services.getNewWorkPermissionMode(sessionId).then((mode) => {
@@ -402,6 +409,35 @@ export function useWorkHubController(
       if (refreshPermission.current === refresh) refreshPermission.current = () => undefined;
       if (permissionChange.current?.sessionId === sessionId) permissionChange.current = undefined;
       unsubscribe();
+    };
+  }, [services, sessionId]);
+
+  useEffect(() => {
+    let disposed = false;
+    concurrencyReadRevision.current++;
+    concurrencyChange.current = undefined;
+    setSavingConcurrency(false);
+    setConcurrency(undefined);
+    if (!sessionId) return;
+    const refresh = () => {
+      if (concurrencyChange.current) return;
+      const revision = ++concurrencyReadRevision.current;
+      void services.getExecutionConcurrency(sessionId).then((value) => {
+        if (disposed || revision !== concurrencyReadRevision.current || currentSessionId.current !== sessionId) return;
+        if (!isWorkHubMaxConcurrentSessions(value)) throw new Error('Invalid WorkHub execution concurrency');
+        setConcurrency({ sessionId, value });
+      }).catch((reason: unknown) => {
+        if (disposed || revision !== concurrencyReadRevision.current || currentSessionId.current !== sessionId) return;
+        setConcurrency(undefined);
+        report(reason);
+      });
+    };
+    refreshConcurrency.current = refresh;
+    refresh();
+    return () => {
+      disposed = true;
+      if (refreshConcurrency.current === refresh) refreshConcurrency.current = () => undefined;
+      if (concurrencyChange.current?.sessionId === sessionId) concurrencyChange.current = undefined;
     };
   }, [services, sessionId]);
 
@@ -746,6 +782,30 @@ export function useWorkHubController(
       setConfiguringModel(false);
     }
   }
+  async function changeExecutionConcurrency(value: number) {
+    if (!sessionId || concurrency?.sessionId !== sessionId || !isWorkHubMaxConcurrentSessions(value) || value === concurrency.value || concurrencyChange.current) return;
+    const change = { sessionId };
+    concurrencyChange.current = change;
+    concurrencyReadRevision.current++;
+    setSavingConcurrency(true);
+    const current = () => concurrencyChange.current === change && currentSessionId.current === sessionId;
+    try {
+      const saved = await services.setExecutionConcurrency(sessionId, value);
+      if (!current()) return;
+      if (!isWorkHubMaxConcurrentSessions(saved)) throw new Error('Invalid WorkHub execution concurrency');
+      setConcurrency({ sessionId, value: saved });
+      setError(undefined);
+    } catch (reason) {
+      if (current()) report(reason);
+    } finally {
+      if (current()) {
+        concurrencyChange.current = undefined;
+        setSavingConcurrency(false);
+        refreshConcurrency.current();
+      }
+    }
+  }
+
   async function changeNewWorkPermissionMode(mode: ChatDefaultPermissionMode, confirmBypass: () => Promise<boolean>) {
     if (!sessionId || permissionDefault?.sessionId !== sessionId ||
       !isChatDefaultPermissionMode(mode) || mode === permissionDefault.mode || permissionChange.current) return;
@@ -793,6 +853,9 @@ export function useWorkHubController(
     newWorkPermissionMode: permissionDefault && permissionDefault.sessionId === sessionId ? permissionDefault.mode : undefined,
     savingPermission,
     changeNewWorkPermissionMode,
+    executionConcurrency: concurrency?.sessionId === sessionId ? concurrency?.value : undefined,
+    savingConcurrency,
+    changeExecutionConcurrency,
     transcript,
     activeForm: activeInteraction?.type === 'form_request' ? activeInteraction : undefined,
     respondToUserForm: async (response: import('@maka/core/interaction').InteractionFormResponse) => {
