@@ -264,6 +264,7 @@ import { HostWebSearchCoordinator } from './web-search-coordinator.js';
 import { HostWorkHubCoordinationCoordinator } from './workhub-coordination-coordinator.js';
 import {
   WorkHubActionEffectFailure,
+  type WorkHubDelegationAssignmentInput,
   workHubResumedTurnId,
 } from './workhub-coordination-action-gate.js';
 
@@ -2299,6 +2300,33 @@ export async function createExecutionRuntimeHostComposition(
         return outcome.result.kind === 'committed' ? 'committed' : 'revision_conflict';
       },
     });
+    async function prepareWorkHubMessage(input: WorkHubDelegationAssignmentInput) {
+      const suffix = createHash('sha256').update(input.actionId, 'utf8').digest('hex').slice(0, 48);
+      const durable = await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      const targetAttachments = durable
+        ? durable.targetAttachments
+        : input.attachments?.length
+          ? await copyWorkHubAttachmentsToTarget(
+              openedArtifactStore,
+              artifacts,
+              input.targetSessionId,
+              input.attachments,
+            )
+          : input.attachments;
+      return {
+        suffix,
+        messageId: `whm_${suffix}`,
+        targetAttachments,
+        content: normalizeMessageContent({
+          text: input.delegationText ?? input.userText,
+          ...(targetAttachments ? { attachments: targetAttachments } : {}),
+        }),
+      };
+    }
+    const replacementCapacity = new Map<
+      string,
+      Awaited<ReturnType<typeof prepareWorkHubMessage>> & { release(): void }
+    >();
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
       routingModel:
         dependencies.workHubRoutingModel ?? createJevRoutingModel({ stores: runtimePolicyStores }),
@@ -2316,6 +2344,29 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       executions: coordinator,
       sessionActions: {
+        withReplacementCapacity: async (input, _context, operation) => {
+          if (input.create) return operation();
+          const prepared = await prepareWorkHubMessage(input);
+          const reserved = await messages.reserveFollowupCapacity(
+            input.targetSessionId,
+            prepared.messageId,
+            prepared.content,
+          );
+          if (!reserved.ok)
+            throw new WorkHubActionEffectFailure(
+              reserved.error.code === 'outcome_unknown'
+                ? 'commit_outcome_unknown'
+                : reserved.error.code,
+              reserved.error.message,
+            );
+          replacementCapacity.set(input.actionId, { ...prepared, release: reserved.result });
+          try {
+            return await operation();
+          } finally {
+            reserved.result();
+            replacementCapacity.delete(input.actionId);
+          }
+        },
         readDelegationRetirement: async (assignment, admission) => {
           const disposition = admission
             ? await messages.readMessageExecutionDispositionAdmitted(
@@ -2538,25 +2589,8 @@ export async function createExecutionRuntimeHostComposition(
                   orchestrationMode: 'default',
                 })
               : undefined;
-          const suffix = createHash('sha256')
-            .update(input.actionId, 'utf8')
-            .digest('hex')
-            .slice(0, 48);
-          const messageId = `whm_${suffix}`;
-          const targetAttachments = durable
-            ? durable.targetAttachments
-            : input.attachments?.length
-              ? await copyWorkHubAttachmentsToTarget(
-                  openedArtifactStore,
-                  artifacts,
-                  input.targetSessionId,
-                  input.attachments,
-                )
-              : input.attachments;
-          const content = normalizeMessageContent({
-            text: input.delegationText ?? input.userText,
-            ...(targetAttachments ? { attachments: targetAttachments } : {}),
-          });
+          const { suffix, messageId, targetAttachments, content } =
+            replacementCapacity.get(input.actionId) ?? (await prepareWorkHubMessage(input));
           const persisted =
             durable ??
             (await sessionAdmission.runMany(
@@ -2570,10 +2604,32 @@ export async function createExecutionRuntimeHostComposition(
                     'A target root Turn is being admitted',
                   );
                 }
-                const steered = rootState.kind === 'active';
-                const turnId = steered ? rootState.turnId : `wht_${suffix}`;
-                const runId = steered ? rootState.runId : `whr_${suffix}`;
+                const queued = rootState.kind === 'active';
+                const turnId = queued ? rootState.turnId : `wht_${suffix}`;
+                const runId = queued ? rootState.runId : `whr_${suffix}`;
                 const assignedAt = Date.now();
+                const admission = {
+                  sessionId: input.targetSessionId,
+                  turnId,
+                  runId,
+                  messageId,
+                  content,
+                  submittedContentDigest: messageContentDigest(content),
+                  submittedPlacement: queued ? ('next_turn' as const) : ('current_turn' as const),
+                  placement: queued ? ('next_turn' as const) : ('current_turn' as const),
+                  disposition: queued ? ('followup' as const) : ('steering' as const),
+                  skillInvocation: { loaded: [], failed: [], receipts: [] },
+                  admittedAt: assignedAt,
+                };
+                if (queued) {
+                  const capacity = await messages.preflightQueuedAdmissionAdmitted(
+                    admission,
+                    lease,
+                  );
+                  if (!capacity.ok) {
+                    throw new WorkHubActionEffectFailure('session_busy', capacity.error.message);
+                  }
+                }
                 const delegationId = `whd_${suffix}`;
                 const supersession =
                   input.replacesActionId && input.replacesDelegationId
@@ -2621,7 +2677,6 @@ export async function createExecutionRuntimeHostComposition(
                     ...(input.delegationText === undefined
                       ? {}
                       : { delegationText: input.delegationText }),
-                    ...(steered ? { steered: true as const } : {}),
                     ...(input.create ? { create: input.create } : {}),
                     ...(input.replacesActionId && input.replacesDelegationId
                       ? {
@@ -2630,23 +2685,12 @@ export async function createExecutionRuntimeHostComposition(
                         }
                       : {}),
                   },
-                  admission: {
-                    sessionId: input.targetSessionId,
-                    turnId,
-                    runId,
-                    messageId,
-                    content,
-                    submittedContentDigest: messageContentDigest(content),
-                    submittedPlacement: 'current_turn',
-                    placement: 'current_turn',
-                    disposition: 'steering',
-                    skillInvocation: { loaded: [], failed: [], receipts: [] },
-                    admittedAt: assignedAt,
-                  },
+                  admission,
                   ...(create ? { create } : {}),
                   ...(supersession ? { supersession } : {}),
                 });
-                // Keep the durable steering identity and its live queue owner
+                replacementCapacity.get(input.actionId)?.release();
+                // Keep the durable Message identity and its live queue owner
                 // under one Session admission. A terminal transition must not
                 // observe the committed Message before the queue does.
                 await messages.consumePendingAdmissionsAdmitted(input.targetSessionId, lease);
@@ -2664,8 +2708,14 @@ export async function createExecutionRuntimeHostComposition(
               },
             ));
 
+          const execution = await messages.queryMessageExecutions({
+            sessionId: persisted.targetSessionId,
+            messageIds: [persisted.targetMessageId],
+          });
+          const resolution = execution.ok ? execution.result.resolutions[0] : undefined;
           return {
-            turnId: persisted.targetTurnId,
+            messageId: persisted.targetMessageId,
+            ...(resolution?.state === 'owned' ? { turnId: resolution.turnId } : {}),
             ...(persisted.steered ? { steered: true as const } : {}),
           };
         },

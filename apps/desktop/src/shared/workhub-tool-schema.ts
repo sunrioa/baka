@@ -161,9 +161,10 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
   z.object({
     operation: z.literal("status"),
     targetSessionId: z.string().min(1),
-    targetTurnId: z.string().min(1),
-  }).strict().describe(
-    "Read the exact execution turn returned by a prior delegation or resume, without starting work. The Session must remain in current bounded discovery. Reports that turn only, not all work in the Session. Completed execution is not verification of files or tests; never resend a task just to check progress.",
+    targetMessageId: z.string().min(1).optional(),
+    targetTurnId: z.string().min(1).optional(),
+  }).strict().refine((input) => input.targetMessageId !== undefined || input.targetTurnId !== undefined, "A Message or Turn identity is required").describe(
+    "Read delegated execution using its returned targetSessionId and targetMessageId. Queued Messages report pending until they own an execution Turn; never substitute the ancestor admission Turn. For a linked resume or legacy receipt without a Message identity, use targetTurnId. The Session must remain in current bounded discovery. Completed execution is not verification of files or tests; never resend a task just to check progress.",
   ),
   z.object({
     operation: z.literal("select_and_delegate"),

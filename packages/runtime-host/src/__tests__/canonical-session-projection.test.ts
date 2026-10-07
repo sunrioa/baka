@@ -49,6 +49,7 @@ import { worstCaseGoalProjection } from '../server/goal-projection.js';
 import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { worstCaseFailedTurnSnapshot } from '../server/canonical-turn-snapshot.js';
+import { projectSessionInteractions } from '../server/interaction-projection.js';
 
 test('projects the canonical root lifecycle and the attachment queue from real Stores', async () => {
   await withStores(async (root, stores) => {
@@ -234,6 +235,110 @@ test('projects pending Interactions and preflights their combined snapshot capac
   });
 });
 
+for (const kind of ['question', 'sandbox_boundary'] as const) {
+  test(`snapshot preflight includes reserved Messages for ${kind}, without publishing them`, async () => {
+    await withStores(async (root, stores) => {
+      const { sessionId, rootAdmissions } = await createRunningRoot(root, stores);
+      const messages = createMessages(sessionId, stores);
+      messages.reserveRootTurn({ sessionId, turnId: 'turn-1', runId: 'run-1' });
+      const reader = new CanonicalSessionProjectionReader({ stores, rootAdmissions, messages });
+      const content = { text: 'q'.repeat(48 * 1024) };
+      const reserved = await messages.reserveFollowupCapacity(
+        sessionId,
+        'reserved-message',
+        content,
+      );
+      assert.ok(reserved.ok, JSON.stringify(reserved));
+      try {
+        assert.equal(
+          await reader.fitsCandidate(sessionId, {
+            interactions: projectSessionInteractions([
+              {
+                sessionId,
+                turnId: 'turn-1',
+                runId: 'run-1',
+                requestId: 'small-question',
+                createdAt: 1,
+                request: {
+                  kind: 'question',
+                  toolUseId: 'small-tool',
+                  questions: [
+                    {
+                      question: 'Continue?',
+                      options: [{ label: 'Yes' }, { label: 'No' }],
+                    },
+                  ],
+                },
+              },
+            ]),
+          }),
+          true,
+          'an Interaction that fits alongside the reservation is still admissible',
+        );
+        const candidate =
+          kind === 'question'
+            ? projectSessionInteractions([largePendingInteraction(sessionId, 0)])
+            : projectSessionInteractions(
+                [],
+                [
+                  {
+                    sessionId,
+                    requestId: 'boundary-request',
+                    turnId: 'turn-1',
+                    runId: 'run-1',
+                    status: 'pending',
+                    baseRevision: 0,
+                    createdAt: 1,
+                    justification: 'Read additional evidence',
+                    expansion: {
+                      filesystem: {
+                        entries: Array.from({ length: 8 }, (_, index) => ({
+                          path: `/outside/${index}/${'p'.repeat(1000)}`,
+                          access: 'read',
+                          scope: 'exact',
+                        })),
+                      },
+                    },
+                  },
+                ],
+              );
+        assert.equal(await reader.fitsCandidate(sessionId, { interactions: candidate }), false);
+        const canonical = await reader.read(sessionId);
+        assert.ok(canonical);
+        assert.deepEqual(
+          canonical.queue.followup,
+          [],
+          'reservations must not become public Messages',
+        );
+        assert.equal(
+          await reader.fitsCandidate(sessionId, {
+            queue: {
+              ...canonical.queue,
+              followup: [
+                {
+                  entryId: 'admitted-entry',
+                  messageId: 'reserved-message',
+                  content,
+                  placement: 'next_turn',
+                  state: 'queued',
+                },
+              ],
+            },
+          }),
+          true,
+          'the reserved Message must not be counted twice on admission',
+        );
+        reserved.result();
+        assert.equal(await reader.fitsCandidate(sessionId, { interactions: candidate }), true);
+      } finally {
+        reserved.result();
+        messages.abandonRootReservation({ sessionId, turnId: 'turn-1', runId: 'run-1' });
+        await messages.close();
+      }
+    });
+  });
+}
+
 test('preflights queued steering at the exact in-flight snapshot boundary', async () => {
   await withStores(async (root, stores) => {
     const session = await stores.sessionStore.create(sessionInput(root));
@@ -253,7 +358,10 @@ test('preflights queued steering at the exact in-flight snapshot boundary', asyn
     const reader = new CanonicalSessionProjectionReader({
       stores,
       rootAdmissions: new RootAdmissionOwner(stores.agentRunStore),
-      messages: { projection: () => currentQueue },
+      messages: {
+        projection: () => currentQueue,
+        capacityProjection: (_sessionId, queue) => queue,
+      },
     });
     const canonical = await reader.read(session.id);
     assert.ok(canonical);
@@ -335,7 +443,10 @@ test('preflights the worst-case failed Turn before accepting more queued content
     const reader = new CanonicalSessionProjectionReader({
       stores,
       rootAdmissions,
-      messages: { projection: () => currentQueue },
+      messages: {
+        projection: () => currentQueue,
+        capacityProjection: (_sessionId, queue) => queue,
+      },
     });
     const canonical = await reader.read(sessionId);
     assert.ok(canonical?.rootTurn);
@@ -421,6 +532,7 @@ test('projects a failed Turn message from the canonical terminal event', async (
       rootAdmissions,
       messages: {
         projection: () => ({ hostEpoch: 'epoch-1', queueRevision: 0, steering: [], followup: [] }),
+        capacityProjection: (_sessionId, queue) => queue,
       },
     });
     const canonical = await reader.read(sessionId);
@@ -486,6 +598,7 @@ test('a legacy context_budget_exhausted terminal event still projects, as a cont
       rootAdmissions,
       messages: {
         projection: () => ({ hostEpoch: 'epoch-1', queueRevision: 0, steering: [], followup: [] }),
+        capacityProjection: (_sessionId, queue) => queue,
       },
     });
     const canonical = await reader.read(sessionId);

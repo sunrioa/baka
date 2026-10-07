@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { withTimeout } from '@maka/core/test-only/async-primitives';
+import { FAKE_HOLD_OPEN_PROMPT } from '@maka/runtime/test-only/fake-backend';
 import type { AttachmentRef } from '@maka/core/events';
 import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import {
@@ -77,9 +78,11 @@ const clientHosts = new WeakMap<RuntimeHostConnection, HostProcess>();
 
 // This is a real process loss at a precise durable boundary, not a close/reopen
 // simulation. A fresh Host acquires a fresh lease and runs production recovery.
-for (const disposition of ['create_new', 'delegate_existing'] as const) {
+for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as const) {
+  const disposition = scenario === 'busy_existing' ? 'delegate_existing' : scenario;
+  const busy = scenario === 'busy_existing';
   for (const withAttachment of [false, true]) {
-    test(`WorkHub ${disposition} survives commit-before-dispatch process death (attachment=${withAttachment})`, {
+    test(`WorkHub ${scenario} survives commit-before-dispatch process death (attachment=${withAttachment})`, {
       timeout: 60_000,
     }, async () => {
       const base = await mkdtemp(join(tmpdir(), 'maka-workhub-crash-'));
@@ -111,6 +114,14 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
             workspace: { kind: 'host_path', path: root },
             modelTarget: { kind: 'default' },
           });
+          if (busy) {
+            await client.request('turn.start', {
+              sessionId: 'existing-target',
+              turnId: 'manual-before-crash',
+              content: { text: FAKE_HOLD_OPEN_PROMPT },
+            });
+            await first.wait('dispatch');
+          }
           const candidates = await client.request('workhub.coordination.candidates', {});
           const target = candidates.candidates.find((c) => c.sessionId === 'existing-target');
           assert.ok(target);
@@ -131,12 +142,15 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
         const committed = await Promise.race([first.wait('assignment_committed'), request]);
         assert.equal(committed.targetCreated, disposition === 'create_new');
         assert.deepEqual(
-          first.notices.filter((n) => n.type === 'dispatch'),
-          [],
+          first.notices.filter((n) => n.type === 'dispatch').map((n) => n.text),
+          busy ? [FAKE_HOLD_OPEN_PROMPT] : [],
         );
         await first.stop('SIGKILL');
         await assert.rejects(request);
         const { assignment, admission } = committed;
+        assert.equal(admission.disposition, busy ? 'followup' : 'steering');
+        assert.equal(admission.placement, busy ? 'next_turn' : 'current_turn');
+        assert.equal(assignment.steered, undefined);
 
         // Open brand-new handles after death. These observations prove we hit
         // the intended window, before any Root admission or first dispatch.
@@ -149,16 +163,23 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
             await stores.sessionStore.listMessageAdmissions(assignment.targetSessionId),
             [admission],
           );
-          assert.equal(
-            await stores.agentRunStore.readRootTurnAdmission(
-              assignment.targetSessionId,
-              assignment.targetTurnId,
-            ),
-            undefined,
+          const admittedRoot = await stores.agentRunStore.readRootTurnAdmission(
+            assignment.targetSessionId,
+            assignment.targetTurnId,
           );
-          assert.deepEqual(
-            await stores.runtimeEventStore.listSessionInvocations(assignment.targetSessionId),
-            [],
+          if (busy) {
+            assert.ok(admittedRoot);
+            assert.equal(
+              admittedRoot.sourceMessages.some(
+                (source) => source.messageId === assignment.targetMessageId,
+              ),
+              false,
+            );
+          } else assert.equal(admittedRoot, undefined);
+          assert.equal(
+            (await stores.runtimeEventStore.listSessionInvocations(assignment.targetSessionId))
+              .length,
+            busy ? 1 : 0,
           );
         });
 
@@ -170,12 +191,13 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
         clients.push(connection);
         const dispatch = await recovered.wait('dispatch');
         assert.equal(dispatch.sessionId, assignment.targetSessionId);
-        assert.equal(dispatch.turnId, assignment.targetTurnId);
+        if (busy) assert.notEqual(dispatch.turnId, assignment.targetTurnId);
+        else assert.equal(dispatch.turnId, assignment.targetTurnId);
         assert.equal(dispatch.text, action.userText);
         const terminal = await waitForTerminalTurn(
           connection,
           assignment.targetSessionId,
-          assignment.targetTurnId,
+          dispatch.turnId,
         );
         assert.equal(terminal.status, 'completed');
         if (withAttachment) {
@@ -207,7 +229,9 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
         assert.ok('targetSessionId' in replay);
         assert.equal(replay.targetSessionId, assignment.targetSessionId);
         assert.ok('targetTurnId' in replay);
-        assert.equal(replay.targetTurnId, assignment.targetTurnId);
+        assert.equal(replay.targetTurnId, dispatch.turnId);
+        assert.ok('targetMessageId' in replay);
+        assert.equal(replay.targetMessageId, assignment.targetMessageId);
         assert.deepEqual(await actWorkHub(connection, action), replay);
         await assert.rejects(
           actWorkHub(connection, {
@@ -239,7 +263,7 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
           );
           const rootAdmission = await stores.agentRunStore.readRootTurnAdmission(
             assignment.targetSessionId,
-            assignment.targetTurnId,
+            dispatch.turnId,
           );
           assert.ok(rootAdmission);
           assert.equal(rootAdmission.userMessageId, assignment.targetMessageId);
@@ -251,8 +275,8 @@ for (const disposition of ['create_new', 'delegate_existing'] as const) {
           const invocations = await stores.runtimeEventStore.listSessionInvocations(
             assignment.targetSessionId,
           );
-          assert.equal(invocations.length, 1);
-          assert.equal(invocations[0]!.runId, rootAdmission.runId);
+          assert.equal(invocations.length, busy ? 2 : 1);
+          assert.ok(invocations.some((run) => run.runId === rootAdmission.runId));
           const events = await stores.runtimeEventStore.readImmutableRuntimeEvents(
             assignment.targetSessionId,
             rootAdmission.runId,
@@ -330,6 +354,7 @@ for (const failAssignment of [false, true]) {
         const assigned: WorkHubCoordinationActResult = await actWorkHub(client, action);
         assert.ok(assigned.disposition === 'delegate_existing');
         assert.equal(assigned.targetSessionId, sessionId);
+        assert.ok(assigned.targetTurnId);
         turnIds.push(assigned.targetTurnId);
         assert.equal(
           (await waitForTerminalTurn(client, sessionId, assigned.targetTurnId)).status,
@@ -454,6 +479,7 @@ test('real Host uses the independent Memory provider for messages, history and W
     const assigned = await actWorkHub(client, action);
     assert.equal(assigned.disposition, 'delegate_existing');
     if (assigned.disposition !== 'delegate_existing') throw new Error('Delegation not admitted');
+    assert.ok(assigned.targetTurnId);
     assert.equal(
       (await waitForTerminalTurn(client, assigned.targetSessionId, assigned.targetTurnId)).status,
       'completed',
@@ -468,6 +494,7 @@ test('real Host uses the independent Memory provider for messages, history and W
     const created = await actWorkHub(client, create);
     assert.equal(created.disposition, 'create_new');
     if (created.disposition !== 'create_new') throw new Error('New delegation not admitted');
+    assert.ok(created.targetTurnId);
     assert.equal(
       (await waitForTerminalTurn(client, created.targetSessionId, created.targetTurnId)).status,
       'completed',

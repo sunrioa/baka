@@ -59,19 +59,21 @@ export interface CanonicalSessionProjection {
 export interface CanonicalSessionProjectionCandidate {
   readonly queue?: SessionMessageQueueProjection;
   readonly interactions?: SessionInteractionProjection;
+  /** Capacity-only prospective root; never an execution projection. */
+  readonly rootTurn?: TurnSnapshot;
 }
 
 export interface CanonicalSessionProjectionReaderOptions {
   readonly stores: CanonicalSessionProjectionStores;
   readonly rootAdmissions: RootAdmissionOwner;
-  readonly messages: Pick<HostMessageCoordinator, 'projection'>;
+  readonly messages: Pick<HostMessageCoordinator, 'projection' | 'capacityProjection'>;
   readonly readGoal?: (sessionId: string) => GoalProjection | null;
 }
 
 export class CanonicalSessionProjectionReader {
   readonly #stores: CanonicalSessionProjectionStores;
   readonly #rootAdmissions: RootAdmissionOwner;
-  readonly #messages: Pick<HostMessageCoordinator, 'projection'>;
+  readonly #messages: Pick<HostMessageCoordinator, 'projection' | 'capacityProjection'>;
   readonly #readGoal: (sessionId: string) => GoalProjection | null;
 
   constructor(options: CanonicalSessionProjectionReaderOptions) {
@@ -133,18 +135,23 @@ export class CanonicalSessionProjectionReader {
   ): Promise<boolean> {
     const canonical = await this.read(sessionId);
     if (!canonical) return false;
+    const rootTurn = candidate.rootTurn ?? canonical.rootTurn;
     const candidateProjection = {
       ...canonical,
       ...candidate,
       rootTurn:
-        canonical.rootTurn &&
-        canonical.rootTurn.status !== 'completed' &&
-        canonical.rootTurn.status !== 'failed' &&
-        canonical.rootTurn.status !== 'cancelled'
-          ? worstCaseFailedTurnSnapshot(canonical.rootTurn)
-          : canonical.rootTurn,
+        rootTurn &&
+        rootTurn.status !== 'completed' &&
+        rootTurn.status !== 'failed' &&
+        rootTurn.status !== 'cancelled'
+          ? worstCaseFailedTurnSnapshot(rootTurn)
+          : rootTurn,
       goal: worstCaseGoalProjection(sessionId),
-      queue: worstCaseMessageQueueProjection(candidate.queue ?? canonical.queue),
+      // Every admission shares this budget, including Interactions and sandbox
+      // boundaries. The public read above must remain free of reservations.
+      queue: worstCaseMessageQueueProjection(
+        this.#messages.capacityProjection(sessionId, candidate.queue ?? canonical.queue),
+      ),
     };
     const snapshotInput = sessionContinuitySnapshotInput(
       candidateProjection,

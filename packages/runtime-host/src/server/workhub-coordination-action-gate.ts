@@ -137,7 +137,12 @@ export interface WorkHubActionGateEffects {
   assign(
     input: WorkHubDelegationAssignmentInput,
     context: ConnectionContext,
-  ): Promise<{ readonly turnId: string; readonly steered?: true }>;
+  ): Promise<{ readonly turnId?: string; readonly messageId?: string; readonly steered?: true }>;
+  withReplacementCapacity<T>(
+    input: WorkHubDelegationAssignmentInput,
+    context: ConnectionContext,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   prepareReplacement(
     input: WorkHubDelegationReplacementInput,
   ): Promise<WorkHubDelegationReplacementRequestedMessage>;
@@ -459,7 +464,7 @@ export class WorkHubCoordinationActionGate {
             'candidate_unavailable',
             'WorkHub resume target is unavailable',
           );
-        this.#assertTarget(target);
+        this.#assertTarget(target, 'resume');
         const current = await this.#soleWorkingDelegation(target.sessionId, 'resume');
         if (current.actionId !== source.actionId) {
           throw new WorkHubActionGateFailure(
@@ -553,7 +558,11 @@ export class WorkHubCoordinationActionGate {
           },
           context,
         );
-        return this.#replace(prepared, context);
+        return this.#effects.withReplacementCapacity(
+          assignmentInputFromReplacement(prepared),
+          context,
+          () => this.#replace(prepared, context),
+        );
       }
       const replacement = await this.#replacementAssignment(input, replaced);
       await this.#claimAction(
@@ -563,8 +572,10 @@ export class WorkHubCoordinationActionGate {
         replacement.replacesDelegationId,
       );
       await this.#prepareTargetExecution(replacement, context);
-      const intent = await this.#effects.prepareReplacement(replacement);
-      return this.#replace(intent, context);
+      return this.#effects.withReplacementCapacity(replacement, context, async () => {
+        const intent = await this.#effects.prepareReplacement(replacement);
+        return this.#replace(intent, context);
+      });
     }
 
     const candidates = await this.candidates();
@@ -1032,23 +1043,28 @@ export class WorkHubCoordinationActionGate {
         disposition: 'replace',
         replacementDisposition: assignment.disposition,
         targetSessionId: assignment.targetSessionId,
-        targetTurnId: admitted.turnId,
+        ...(admitted.turnId ? { targetTurnId: admitted.turnId } : {}),
+        ...(admitted.messageId ? { targetMessageId: admitted.messageId } : {}),
         ...(admitted.steered ? { steered: true as const } : {}),
       };
     }
     return {
       disposition: assignment.disposition,
       targetSessionId: assignment.targetSessionId,
-      targetTurnId: admitted.turnId,
+      ...(admitted.turnId ? { targetTurnId: admitted.turnId } : {}),
+      ...(admitted.messageId ? { targetMessageId: admitted.messageId } : {}),
       ...(admitted.steered ? { steered: true as const } : {}),
     } as WorkHubCoordinationActResult;
   }
 
-  #assertTarget(target: WorkHubCoordinationCandidate): void {
+  #assertTarget(
+    target: WorkHubCoordinationCandidate,
+    operation: 'delegate' | 'resume' = 'delegate',
+  ): void {
     if (target.sessionId === WORKHUB_COORDINATION_SESSION_ID) {
       throw new WorkHubActionGateFailure('self_route', 'WorkHub cannot delegate to itself');
     }
-    if (target.state === 'waiting_for_user') {
+    if (operation === 'resume' && target.state === 'waiting_for_user') {
       throw new WorkHubActionGateFailure(
         'target_waiting_for_user',
         'Target Session is waiting for user input',

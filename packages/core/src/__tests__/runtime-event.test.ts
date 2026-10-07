@@ -1008,6 +1008,29 @@ test('Coordination Runtime receipts survive decoding and reject unrecognized res
     actions: { coordination },
   });
   assert.deepEqual(decodeRuntimeEvent(event).actions?.coordination, coordination);
+  for (const disposition of ['delegate_existing', 'create_new', 'replace'] as const) {
+    const result = {
+      disposition,
+      targetSessionId: 'target',
+      targetMessageId: 'message',
+      ...(disposition === 'replace' ? { replacementDisposition: 'delegate_existing' } : {}),
+    };
+    assert.deepEqual(
+      decodeRuntimeEvent({ ...event, actions: { coordination: { ...coordination, result } } })
+        .actions?.coordination?.result,
+      result,
+    );
+    for (const invalid of [
+      { ...result, targetMessageId: undefined },
+      { ...result, targetMessageId: '../invalid' },
+    ])
+      assert.throws(() =>
+        decodeRuntimeEvent({
+          ...event,
+          actions: { coordination: { ...coordination, result: invalid } },
+        }),
+      );
+  }
   for (const result of [
     { disposition: 'clarify', coordinationTurnId: '../invalid' },
     { disposition: 'stop_work', outcome: 'stop_delivered', targetSessionId: 'target' },

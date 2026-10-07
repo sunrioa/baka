@@ -1049,19 +1049,51 @@ describe('WorkHub Coordination Action Gate', () => {
     );
   });
 
-  test('rejects waiting targets independently of strategy behavior', async () => {
+  test('admits a new delegation to a waiting target without resuming its current work', async () => {
     const effects = fakeEffects([session('waiting', { status: 'waiting_for_user' })]);
     const gate = new WorkHubCoordinationActionGate(effects);
     const snapshot = await gate.candidates();
-    await assert.rejects(
-      gate.act(
+    const result = await gate.act(
+      {
+        actionId: 'waiting',
+        userText: 'Continue',
+        candidateSetId: snapshot.candidateSetId,
+        proposal: {
+          disposition: 'delegate_existing',
+          candidateRef: snapshot.candidates[0]!.candidateRef,
+        },
+      },
+      CONTEXT,
+    );
+    assert.equal(result.disposition, 'delegate_existing');
+    assert.equal(effects.assignments.length, 1);
+  });
+
+  test('resume still rejects a target waiting on its original user request', async () => {
+    const effects = fakeEffects([session('waiting', { status: 'waiting_for_user' })]);
+    effects.assignmentRecords.set(
+      'source-action',
+      assignmentRecord(
         {
-          actionId: 'waiting',
-          userText: 'Continue',
-          candidateSetId: snapshot.candidateSetId,
+          actionId: 'source-action',
+          actionFingerprint: `sha256:${'e'.repeat(64)}`,
+          targetSessionId: 'waiting',
+          targetSessionName: 'waiting',
+          disposition: 'delegate_existing',
+          userText: 'Original work',
+        },
+        'original-turn',
+      ),
+    );
+    await assert.rejects(
+      new WorkHubCoordinationActionGate(effects).act(
+        {
+          actionId: 'resume-waiting',
+          userText: 'Resume waiting',
           proposal: {
-            disposition: 'delegate_existing',
-            candidateRef: snapshot.candidates[0]!.candidateRef,
+            operation: 'resume',
+            resumesActionId: 'source-action',
+            expects: { targetSessionId: 'waiting' },
           },
         },
         CONTEXT,
@@ -1611,7 +1643,7 @@ describe('WorkHub Coordination Action Gate', () => {
   });
 
   for (const lifecycle of ['archived', 'waiting'] as const) {
-    test(`records a terminal abort when the replacement target becomes ${lifecycle} after retirement`, async () => {
+    test(`${lifecycle === 'archived' ? 'aborts' : 'admits'} replacement when the target becomes ${lifecycle} after retirement`, async () => {
       const effects = fakeEffects([session('source'), session('destination')]);
       effects.assignmentRecords.set(
         'source-action',
@@ -1659,18 +1691,24 @@ describe('WorkHub Coordination Action Gate', () => {
         },
       };
 
+      if (lifecycle === 'waiting') {
+        const result = await gate.act(input, CONTEXT);
+        assert.equal(result.disposition, 'replace');
+        assert.equal(effects.retirements.length, 1);
+        assert.equal(effects.assignments.length, 1);
+        assert.equal(effects.replacementAborts.size, 0);
+        return;
+      }
       await assert.rejects(
         gate.act(input, CONTEXT),
         (error) =>
-          error instanceof WorkHubActionGateFailure &&
-          error.code ===
-            (lifecycle === 'archived' ? 'candidate_unavailable' : 'target_waiting_for_user'),
+          error instanceof WorkHubActionGateFailure && error.code === 'candidate_unavailable',
       );
       assert.equal(effects.retirements.length, 1);
       assert.equal(effects.assignments.length, 0);
       assert.equal(
         effects.replacementAborts.get('delegation-source-action')?.reason,
-        lifecycle === 'archived' ? 'target_unavailable' : 'target_waiting_for_user',
+        'target_unavailable',
       );
 
       effects.sessions = effects.sessions.map((candidate) =>
@@ -1953,6 +1991,13 @@ function fakeEffects(initialSessions: WorkHubActionGateSession[]) {
         });
       }
       return result;
+    },
+    async withReplacementCapacity<T>(
+      _input: WorkHubDelegationAssignmentInput,
+      _context: ConnectionContext,
+      operation: () => Promise<T>,
+    ) {
+      return operation();
     },
     async prepareReplacement(input: WorkHubDelegationReplacementInput) {
       const existing = replacements.get(input.replacesDelegationId);

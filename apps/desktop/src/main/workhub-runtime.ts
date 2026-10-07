@@ -26,7 +26,7 @@ import type { WorkHubTasksInput } from '../shared/workhub-tool-schema.js';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 interface WorkHubRuntimeDeps {
-  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'stopTurn' | 'listWorkHubCoordinationCandidates' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
+  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'queryMessageExecutions' | 'stopTurn' | 'listWorkHubCoordinationCandidates' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
   isCurrent(scope: DesktopTargetScope): boolean;
   createContext(scope: DesktopTargetScope): Promise<{ workspace: WorkspaceTarget; defaults: WorkHubCreateDefaults }>;
   changed(scope: DesktopTargetScope, reason: 'created' | 'status-change', sessionId: string): void;
@@ -69,20 +69,38 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
       if (input.operation === 'candidates') {
         const candidates = await client.listWorkHubCoordinationCandidates();
         requireCurrent(scope);
-        return { ...candidates, observedAt: Date.now(), stateMeaning: 'Session availability only: active is idle/available, not running. Use status with the exact targetTurnId for execution progress.' };
+        return { ...candidates, observedAt: Date.now(), stateMeaning: 'Session availability only: active is idle/available, not running. Use status with the returned targetMessageId for delegation progress, or targetTurnId for linked resume.' };
       }
       if (input.operation === 'status') {
         const candidates = await client.listWorkHubCoordinationCandidates();
         requireCurrent(scope);
         if (!candidates.candidates.some((candidate) => candidate.sessionId === input.targetSessionId))
           throw new Error('Target Session is outside current WorkHub discovery');
-        const turn = await client.queryTurn({ sessionId: input.targetSessionId, turnId: input.targetTurnId });
+        let targetTurnId = input.targetTurnId;
+        let targetRunId: string | undefined;
+        if (input.targetMessageId) {
+          const execution = await client.queryMessageExecutions({ sessionId: input.targetSessionId, messageIds: [input.targetMessageId] });
+          requireCurrent(scope);
+          const resolution = execution.resolutions[0];
+          if (execution.resolutions.length !== 1 || resolution?.messageId !== input.targetMessageId)
+            throw new Error('WorkHub status Message identity is unresolved');
+          if (resolution.state !== 'owned') {
+            return { operation: 'status' as const, targetSessionId: input.targetSessionId, targetMessageId: input.targetMessageId,
+              targetSessionKey: desktopSessionKey({ hostId: scope.hostId, sessionId: input.targetSessionId }), observedAt: Date.now(),
+              executionEvidence: { status: resolution.state, scope: 'exact_message' as const, completionVerified: false, artifactsVerified: false } };
+          }
+          targetTurnId = resolution.turnId;
+          targetRunId = resolution.runId;
+        }
+        if (!targetTurnId) throw new Error('WorkHub status requires a Message or Turn identity');
+        const turn = await client.queryTurn({ sessionId: input.targetSessionId, turnId: targetTurnId });
         requireCurrent(scope);
-        if (turn.sessionId !== input.targetSessionId || turn.turnId !== input.targetTurnId)
+        if (turn.sessionId !== input.targetSessionId || turn.turnId !== targetTurnId || (targetRunId && turn.runId !== targetRunId))
           throw new Error('WorkHub status target identity changed');
         return { operation: 'status' as const, targetSessionId: turn.sessionId, targetTurnId: turn.turnId,
+          ...(input.targetMessageId ? { targetMessageId: input.targetMessageId } : {}),
           targetSessionKey: desktopSessionKey({ hostId: scope.hostId, sessionId: turn.sessionId }),
-          observedAt: Date.now(), executionEvidence: { status: turn.status, scope: 'exact_turn' as const,
+          observedAt: Date.now(), executionEvidence: { status: turn.status, scope: input.targetMessageId ? 'exact_message' as const : 'exact_turn' as const,
             completionVerified: turn.status === 'completed', artifactsVerified: false },
         };
       }
