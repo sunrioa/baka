@@ -280,7 +280,7 @@ export const NewTaskPermissionConfirmation: Story = {
     await userEvent.click(picker());
     await userEvent.click(page.getByRole('menuitemradio', { name: '完全权限' }));
     const dialog = await page.findByRole('alertdialog');
-    expect(within(dialog).getByText(/仅适用于新建任务，已有任务保留各自的权限/)).toBeVisible();
+    await waitFor(() => expect(within(dialog).getByText(/仅适用于新建任务，已有任务保留各自的权限/)).toBeVisible());
     expect(writes.permissions).not.toHaveBeenCalled();
   },
 };
