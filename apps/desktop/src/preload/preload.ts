@@ -2233,6 +2233,22 @@ const makaBridge = {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       await ipcRenderer.invoke('workhub:setNewWorkDefaults', scope, defaults);
     },
+    async getNewWorkPermissionMode(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:getNewWorkPermissionMode', scope) as Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
+    },
+    async setNewWorkPermissionMode(coordinationSessionId: string, mode: import('@maka/core/settings').ChatDefaultPermissionMode) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:setNewWorkPermissionMode', scope, mode) as Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
+    },
+    subscribeNewWorkPermissionMode(coordinationSessionId: string, handler: () => void) {
+      // Existing configuration notifications are epoch-checked before delivery.
+      // Match the logical Host so reconnects do not leave a parked window stale.
+      const { hostId } = parseDesktopSessionKey(coordinationSessionId);
+      return subscribeEveryRuntimeHostEvent('settings:externalChanged', (scope) => {
+        if (scope.hostId === hostId) handler();
+      });
+    },
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }> {
       return resolveDesktopWorkHubCoordinationSession(
         activeRuntimeHostRef,

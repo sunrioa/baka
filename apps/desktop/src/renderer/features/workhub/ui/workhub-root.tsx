@@ -18,7 +18,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChatSurfaceLayout, UserQuestionPrompt, MakaWordmark, useUiLocale, type ComposerHandle } from '@maka/ui';
+import { ChatSurfaceLayout, UserQuestionPrompt, MakaWordmark, PermissionModeSelect, getPermissionModeMeta, useToast, useUiLocale, type ComposerHandle } from '@maka/ui';
 import { Button, IconButton } from '@astryxdesign/core';
 import { ChevronDown, PictureInPicture2, Undo2, X } from '@maka/ui/icons';
 import { useLiveContextUsage } from '../../../application/contracts/session-inspector/use-live-context-usage.js';
@@ -106,7 +106,9 @@ export function WorkHubRoot() {
     ? controller.newWorkDefaults.thinkingLevel
     : undefined;
   const locale = useUiLocale();
+  const toast = useToast();
   const t = workHubLiveCopy[locale];
+  const permissionLabel = controller.newWorkPermissionMode && getPermissionModeMeta(locale)[controller.newWorkPermissionMode].label;
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘⇧K' : 'Ctrl+Shift+K';
   const composerSurface = useRef<HTMLDivElement>(null);
   const revealMark = useRef<HTMLDivElement>(null);
@@ -381,6 +383,24 @@ export function WorkHubRoot() {
               modelSwitchHasHistory={transcript.messages.length > 0}
               footerAccessory={
                 <div className="workHubComposerActions">
+                  <span>{t.newWorkPermissions}</span>
+                  <PermissionModeSelect
+                    appearance="icon"
+                    ariaLabel={permissionLabel ? `${t.newWorkPermissions}: ${permissionLabel}` : t.newWorkPermissions}
+                    activeMode={controller.newWorkPermissionMode}
+                    disabled={controller.savingPermission || Boolean(controller.activeInteraction)}
+                    disabledReason={controller.savingPermission ? t.savingPermissions : `${permissionLabel ? `${permissionLabel} — ` : ''}${t.newWorkPermissionsHint}`}
+                    onSelect={(mode) => controller.changeNewWorkPermissionMode(mode, () => {
+                      const copy = getShellCopy(locale).sessionSettingsActions;
+                      return toast.confirm({
+                        title: copy.bypassConfirmTitle,
+                        description: `${t.newWorkPermissionsHint} ${copy.bypassConfirmDescription}`,
+                        confirmLabel: copy.bypassConfirmLabel,
+                        cancelLabel: copy.bypassCancelLabel,
+                        destructive: true,
+                      });
+                    })}
+                  />
                   {control?.canUndo && <IconButton type="button" size="sm" variant="ghost" icon={<Undo2 size={16} />} label={t.undo} isDisabled={busy} onClick={() => call(services.control.undo())} />}
                   {!floating && <IconButton type="button" size="sm" variant="ghost" icon={<PictureInPicture2 size={16} />} label={t.float} tooltip={`${t.float} · ${shortcutLabel}`} onClick={() => call(services.presentation.detach())} />}
                 </div>

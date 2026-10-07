@@ -52,6 +52,29 @@ test('defaults new sessions to bypass while preserving saved choices and rejecti
   );
 });
 
+test('WorkHub permission defaults are independent, persisted and fail closed', () => {
+  assert.equal(normalizeSettings({}).chatDefaults.workHubPermissionMode, undefined);
+  for (const workHubPermissionMode of ['ask', 'bypass'] as const) {
+    const settings = mergeSettings(createDefaultSettings(), {
+      chatDefaults: { workHubPermissionMode },
+    });
+    assert.equal(settings.chatDefaults.workHubPermissionMode, workHubPermissionMode);
+    assert.equal(settings.chatDefaults.permissionMode, 'bypass');
+    assert.equal(
+      normalizeSettings(JSON.parse(JSON.stringify(settings))).chatDefaults.workHubPermissionMode,
+      workHubPermissionMode,
+    );
+  }
+  for (const workHubPermissionMode of ['explore', 'invalid', true, null]) {
+    assert.notEqual(
+      normalizeSettings({
+        chatDefaults: { workHubPermissionMode: workHubPermissionMode as never },
+      }).chatDefaults.workHubPermissionMode,
+      'bypass',
+    );
+  }
+});
+
 test('normalizes user-approved subagent presets without widening the catalog', () => {
   const normalized = normalizeSettings({
     subagents: {

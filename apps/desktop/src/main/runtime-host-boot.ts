@@ -80,7 +80,7 @@ import { createMcpOAuthController } from "./mcp-oauth-controller.js";
 import { createWorkHubControl } from './workhub-control.js';
 import { createWorkHubPresentation } from './workhub-presentation.js';
 import { createWorkHubRuntime } from './workhub-runtime.js';
-import { readWorkHubNewWorkDefaults } from './workhub-new-work-defaults.js';
+import { readWorkHubNewWorkDefaults, readWorkHubNewWorkPermissionMode } from './workhub-new-work-defaults.js';
 import { createWindowsAppTray } from './windows-app-tray.js';
 import { readableAppIconPath } from './app-icon-surface.js';
 import { registerAppClientIpc, registerAppIpc } from "./app-ipc-main.js";
@@ -754,7 +754,7 @@ const workHubRuntime = createWorkHubRuntime({
     return {
       workspace: await currentDesktopWorkspaceTarget(target.policy),
       defaults: {
-        permissionMode: (await settingsStore.get()).chatDefaults.permissionMode,
+        permissionMode: await readWorkHubNewWorkPermissionMode(target.client),
         ...readWorkHubNewWorkDefaults(target.client.hostId),
       },
     };

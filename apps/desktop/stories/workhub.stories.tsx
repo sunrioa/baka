@@ -30,7 +30,7 @@ import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), upload: fn(), open: fn(), question: fn(), form: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), upload: fn(), open: fn(), question: fn(), form: fn() };
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -52,7 +52,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   let session: SessionSummary & { revision: number } = {
     id: sessionId, name: 'WorkHub', revision: 1, isFlagged: false, isArchived: false, labels: [], hasUnread: false,
     status: 'active', runningTurnIds: [], backend: 'ai-sdk', llmConnectionId: 'connection-test', llmConnectionSlug: 'test', connectionLocked: false,
-    model: 'model-a', permissionMode: 'ask',
+    model: 'model-a', permissionMode: 'bypass',
   };
   const target = { ...session, id: targetId, name: '支付回调幂等性', cwd: '/projects/maka' };
   let messages: StoredMessage[] = withHistory ? [
@@ -86,6 +86,8 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   let questionPending = question;
   let pendingForm: import('@maka/core/events').FormRequestEvent | undefined;
   let newWorkDefaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'> = {};
+  let newWorkPermissionMode: 'ask' | 'bypass' = 'ask';
+  let permissionChanged: (() => void) | undefined;
   const publishExecution = () => updateExecution?.({ type: 'host_execution', available: true, rootTurn: pendingForm ? { sessionId, turnId: pendingForm.turnId, runId: 'selection-run', status: 'waiting_for_user' } : questionPending ? { sessionId, turnId: 'question-turn', runId: 'question-run', status: 'waiting_for_user' } : null });
   const publish = () => { publishExecution(); updateTranscript?.({ messages, hasOlder: false, ready: true }); };
   return {
@@ -172,6 +174,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       writes.defaults(id, defaults);
       newWorkDefaults = defaults;
     },
+    getNewWorkPermissionMode: async () => newWorkPermissionMode,
+    setNewWorkPermissionMode: async (id, mode) => { writes.permissions(id, mode); newWorkPermissionMode = mode; permissionChanged?.(); return mode; },
+    subscribeNewWorkPermissionMode: (_id, handler) => { permissionChanged = handler; return () => { permissionChanged = undefined; }; },
     observe: (_id, _event, _error, _phase, execution) => { updateExecution = execution; publishExecution(); return () => { updateExecution = undefined; }; },
     openTranscript: async (_id, handler) => { updateTranscript = handler; publish(); return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => { updateTranscript = undefined; } }; },
     stop: async () => {
@@ -263,6 +268,20 @@ export const StandardComposer: Story = {
     await userEvent.click(editor); await userEvent.type(editor, 'Review requirements'); await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(writes.answer).toHaveBeenCalledWith(sessionId, expect.objectContaining({ text: 'Review requirements', attachments: [expect.objectContaining({ name: 'requirements.txt' })] })));
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-composer-attachment-token')).toHaveLength(0));
+  },
+};
+// Real path: WorkHub → new-task permissions → full access → explicit confirmation.
+export const NewTaskPermissionConfirmation: Story = {
+  render: () => <Surface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement); const page = within(canvasElement.ownerDocument.body);
+    const picker = () => canvas.getByRole('button', { name: /新任务权限: 自动/ });
+    await waitFor(() => expect(picker()).toBeEnabled());
+    await userEvent.click(picker());
+    await userEvent.click(page.getByRole('menuitemradio', { name: '完全权限' }));
+    const dialog = await page.findByRole('alertdialog');
+    await waitFor(() => expect(within(dialog).getByText(/仅适用于新建任务，已有任务保留各自的权限/)).toBeVisible());
+    expect(writes.permissions).not.toHaveBeenCalled();
   },
 };
 // Real path: WorkHub composer → thinking level → choose an override or restore the default.

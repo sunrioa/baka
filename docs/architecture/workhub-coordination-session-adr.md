@@ -216,6 +216,20 @@ An idle target still starts immediately through the existing native admission.
 Historical steering assignments remain readable; their shared-Turn ownership
 and cancellation protections are unchanged. New admission does not overwrite
 the target Session's permissions, model or working directory.
+
+In baka, `RuntimePolicy.chatDefaults.workHubPermissionMode` stores the selected
+Host's permission default for newly created WorkHub tasks. An absent value means
+`ask`, independently of ordinary chat defaults. The WorkHub picker names this
+new-task scope and requires confirmation before enabling `bypass`. Permission
+defaults survive Host/Desktop restart; the existing model/executor preferences
+remain process-local. Creation validates and stores the chosen boundary on the
+new ordinary Session. The Coordination Session's internal `bypass` is never a
+source for that boundary. Later default changes do not update existing tasks.
+Reused and queued tasks continue to use their target Session's execution
+authority, including the existing rejection of configuration changes while
+a Turn is active. WorkHub does not introduce a permission override or another
+sandbox authority.
+
 For a queued assignment, its admission Turn is not an execution-ownership claim;
 the target Message remains the proof for its eventual successor Turn. Existing
 Stop ambiguity checks still reject a Session with multiple working delegations

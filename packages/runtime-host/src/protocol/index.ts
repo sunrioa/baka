@@ -104,7 +104,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 205 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 206 as const;
+// 206: Runtime Policy carries a separate, persisted WorkHub new-work permission default.
 // 205: WorkHub delegation receipts expose Message identity; queued work omits
 // the ancestor admission Turn until its actual execution ownership is proven.
 // 204: Executor catalogs and Session configuration carry opaque mode IDs;

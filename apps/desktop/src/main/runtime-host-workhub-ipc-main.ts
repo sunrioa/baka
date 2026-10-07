@@ -36,7 +36,9 @@ import type {
 import { toDesktopHostSessionSummary } from './runtime-host-session-catalog-ipc-main.js';
 import {
   readWorkHubNewWorkDefaults,
+  readWorkHubNewWorkPermissionMode,
   writeWorkHubNewWorkDefaults,
+  writeWorkHubNewWorkPermissionMode,
 } from './workhub-new-work-defaults.js';
 
 type RuntimeHostWorkHubClient = Pick<
@@ -47,6 +49,8 @@ type RuntimeHostWorkHubClient = Pick<
   | 'resolveWorkHubCoordinationSession'
   | 'getWorkHubSession'
   | 'queryTurn'
+  | 'queryRuntimePolicy'
+  | 'updateRuntimePolicy'
   | 'hostId'
   | 'hostEpoch'
 >;
@@ -138,6 +142,12 @@ export function registerRuntimeHostWorkHubIpc(
       value as Omit<WorkHubCreateDefaults, 'permissionMode'>,
     );
   });
+  handleReconnectableRead(ipcMain, 'workhub:getNewWorkPermissionMode', () =>
+    readWorkHubNewWorkPermissionMode(client),
+  );
+  ipcMain.handle('workhub:setNewWorkPermissionMode', (_event, mode: unknown) =>
+    writeWorkHubNewWorkPermissionMode(client, mode),
+  );
   ipcMain.handle('workhub:prepareAttachments', async (event, items: unknown): Promise<WorkHubPrepareAttachmentsResult> => {
     if (!options.attachmentIngest) throw new Error('WorkHub attachments are unavailable');
     try {

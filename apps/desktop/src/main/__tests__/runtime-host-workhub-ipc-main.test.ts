@@ -22,6 +22,7 @@ import test from 'node:test';
 import { RuntimeHostOperationError } from '@maka/runtime-host/client';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
+import { createDefaultRuntimePolicy, type RuntimePolicy } from '@maka/core/runtime-policy';
 
 test('registers the WorkHub Session projection as a reconnectable read', () => {
   const ordinary = new Set<string>();
@@ -92,6 +93,42 @@ test('stores new-work execution defaults separately from the coordination Sessio
     defaults,
     'replacement clients for the same Host retain the execution defaults',
   );
+});
+
+test('new-work permissions use Host policy, preserve other defaults and reject invalid writes', async () => {
+  let policy = createDefaultRuntimePolicy();
+  let writes = 0;
+  function register(readPolicy: () => RuntimePolicy = () => policy) {
+    const handlers = new Map<string, IpcHandler>();
+    const client = {
+      queryRuntimePolicy: async () => ({ revision: writes, policy: readPolicy() }),
+      updateRuntimePolicy: async (build: Parameters<Parameters<typeof registerRuntimeHostWorkHubIpc>[0]['updateRuntimePolicy']>[0]) => {
+        const operation = build(policy);
+        assert.equal(operation.kind, 'set_chat_defaults');
+        if (operation.kind === 'set_chat_defaults') policy = { ...policy, chatDefaults: operation.value };
+        writes++;
+        return { revision: writes, policy };
+      },
+    } as Parameters<typeof registerRuntimeHostWorkHubIpc>[0];
+    registerRuntimeHostWorkHubIpc(client, { handle: (channel, handler) => handlers.set(channel, handler) }, {});
+    return {
+      read: () => handlers.get('workhub:getNewWorkPermissionMode')!({} as Parameters<IpcHandler>[0]),
+      write: (mode: unknown) => handlers.get('workhub:setNewWorkPermissionMode')!({} as Parameters<IpcHandler>[0], mode),
+    };
+  }
+  const original = register();
+  assert.equal(await original.read(), 'ask', 'ordinary chat bypass is not inherited');
+  assert.equal(await original.write('bypass'), 'bypass');
+  assert.equal(policy.chatDefaults.permissionMode, 'bypass');
+  assert.equal(await register().read(), 'bypass', 'replacement Desktop clients read the saved Host value');
+  assert.equal(await register(createDefaultRuntimePolicy).read(), 'ask', 'another Host does not inherit the value');
+  policy = { ...policy, chatDefaults: { ...policy.chatDefaults, codeModeEnabled: true } };
+  assert.equal(await original.write('ask'), 'ask');
+  assert.equal(policy.chatDefaults.codeModeEnabled, true);
+  for (const mode of ['explore', 'invalid', true, null, { permissionMode: 'bypass' }]) {
+    await assert.rejects(async () => original.write(mode), /Invalid WorkHub new-work permission mode/u);
+  }
+  assert.equal(writes, 2);
 });
 
 test('returns a structured WorkHub attachment rejection across IPC', async () => {

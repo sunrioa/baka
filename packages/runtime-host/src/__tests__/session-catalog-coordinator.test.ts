@@ -1329,6 +1329,49 @@ test('creation rejects explore permission without a declared mode', async () => 
   assert.equal(fixture.drainRequests(), 0);
 });
 
+for (const initialMode of [undefined, 'ask', 'bypass'] as const) {
+  test(`WorkHub creation uses its current permission default (${initialMode ?? 'unconfigured'}) independently of ordinary chats`, async () => {
+    let workHubPermissionMode = initialMode;
+    const runtimePolicy: RuntimePolicy = {
+      ...runtimePolicyFixture({}),
+      runtimePolicy: {
+        getSnapshot: async () => ({
+          revision: 1,
+          policy: {
+            ...createDefaultRuntimePolicy(),
+            chatDefaults: {
+              permissionMode: 'bypass',
+              ...(workHubPermissionMode ? { workHubPermissionMode } : {}),
+            },
+          },
+        }),
+      },
+    };
+    const fixture = createFixture({ runtimePolicy });
+    const input = {
+      sessionId: 'workhub-new-permission',
+      workspace: { kind: 'host_path' as const, path: process.cwd() },
+      modelTarget: { kind: 'default' as const },
+    };
+    const prepared = await fixture.coordinator.prepareWorkHubCreate(input);
+    assert.equal(prepared.input.permissionMode, initialMode ?? 'ask');
+    assert.equal(
+      (await fixture.coordinator.resolveExternalSessionImportTarget()).permissionMode,
+      'bypass',
+    );
+    workHubPermissionMode = 'ask';
+    assert.equal(
+      (await fixture.coordinator.prepareWorkHubCreate(input)).input.permissionMode,
+      'ask',
+    );
+    assert.equal(
+      prepared.input.permissionMode,
+      initialMode ?? 'ask',
+      'a later default does not rewrite an already prepared creation',
+    );
+  });
+}
+
 test('new tasks snapshot the current global Code Mode setting', async () => {
   let enabled = true;
   const runtimePolicy: RuntimePolicy = {

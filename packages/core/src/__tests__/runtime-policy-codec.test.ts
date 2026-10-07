@@ -61,6 +61,35 @@ test('normalizes policy input while canonical policy decode rejects producer dri
   );
 });
 
+test('WorkHub permission defaults survive canonical policy decoding and reject unpickable modes', () => {
+  const policy = createDefaultRuntimePolicy();
+  assert.equal(decodeCanonicalRuntimePolicy(policy).chatDefaults.workHubPermissionMode, undefined);
+  for (const workHubPermissionMode of ['ask', 'bypass'] as const) {
+    const chatDefaults = { ...policy.chatDefaults, workHubPermissionMode };
+    assert.deepEqual(
+      decodeCanonicalRuntimePolicy({ ...policy, chatDefaults }).chatDefaults,
+      chatDefaults,
+    );
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value: chatDefaults },
+      }).operation,
+      { kind: 'set_chat_defaults', value: chatDefaults },
+    );
+  }
+  for (const workHubPermissionMode of ['explore', 'invalid', true, null]) {
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubPermissionMode },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
+  }
+});
+
 test('Code Mode is opt-in and survives policy decoding', () => {
   const policy = createDefaultRuntimePolicy();
   assert.notEqual(decodeCanonicalRuntimePolicy(policy).chatDefaults.codeModeEnabled, true);

@@ -63,6 +63,38 @@ import { removeControlDirectory } from './fixtures/control-directory-hygiene.js'
 const execFileAsync = promisify(execFile);
 
 describe('runtime policy stores', () => {
+  test('WorkHub permission defaults survive owner restart without replacing ordinary chat defaults', async () => {
+    await withInteractiveRoot(async ({ capability }) => {
+      const owner = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(owner);
+      try {
+        const stores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+        const before = await stores.runtimePolicy.getSnapshot();
+        assert.equal(before.policy.chatDefaults.workHubPermissionMode, undefined);
+        const saved = await stores.runtimePolicy.mutate({
+          expectedRevision: before.revision,
+          operation: {
+            kind: 'set_chat_defaults',
+            value: { ...before.policy.chatDefaults, workHubPermissionMode: 'bypass' },
+          },
+        });
+        assert.equal(saved.kind, 'committed');
+      } finally {
+        await owner.close();
+      }
+      const successor = await tryAcquireInteractiveRootOwner(capability);
+      assert.ok(successor);
+      try {
+        const stores = await openInteractiveRuntimePolicyStoresForWrite(successor.lease);
+        const restored = await stores.runtimePolicy.getSnapshot();
+        assert.equal(restored.policy.chatDefaults.workHubPermissionMode, 'bypass');
+        assert.equal(restored.policy.chatDefaults.permissionMode, 'bypass');
+      } finally {
+        await successor.close();
+      }
+    });
+  });
+
   test('upgrades schema v2 with the automatic Host shell default', async () => {
     await withInteractiveOwner(async ({ root, stores }) => {
       const {

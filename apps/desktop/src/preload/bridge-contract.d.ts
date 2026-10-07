@@ -1139,6 +1139,9 @@ export interface MakaBridge {
     configureModel(coordinationSessionId: string, input: OperationInput<'workhub.coordination.configureModel'>): Promise<OperationOutput<'workhub.coordination.configureModel'>>;
     getNewWorkDefaults(coordinationSessionId: string): Promise<Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>>;
     setNewWorkDefaults(coordinationSessionId: string, defaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>): Promise<void>;
+    getNewWorkPermissionMode(coordinationSessionId: string): Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
+    setNewWorkPermissionMode(coordinationSessionId: string, mode: import('@maka/core/settings').ChatDefaultPermissionMode): Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
+    subscribeNewWorkPermissionMode(coordinationSessionId: string, handler: () => void): () => void;
     /** Resolve the active Runtime Host's stable coordination conversation. */
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }>;
 
