@@ -30,7 +30,7 @@ import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), upload: fn(), open: fn(), question: fn(), form: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn() };
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -88,6 +88,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   let newWorkDefaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'> = {};
   let newWorkPermissionMode: 'ask' | 'bypass' = 'ask';
   let permissionChanged: (() => void) | undefined;
+  let executionConcurrency = 3;
   const publishExecution = () => updateExecution?.({ type: 'host_execution', available: true, rootTurn: pendingForm ? { sessionId, turnId: pendingForm.turnId, runId: 'selection-run', status: 'waiting_for_user' } : questionPending ? { sessionId, turnId: 'question-turn', runId: 'question-run', status: 'waiting_for_user' } : null });
   const publish = () => { publishExecution(); updateTranscript?.({ messages, hasOlder: false, ready: true }); };
   return {
@@ -177,6 +178,8 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     getNewWorkPermissionMode: async () => newWorkPermissionMode,
     setNewWorkPermissionMode: async (id, mode) => { writes.permissions(id, mode); newWorkPermissionMode = mode; permissionChanged?.(); return mode; },
     subscribeNewWorkPermissionMode: (_id, handler) => { permissionChanged = handler; return () => { permissionChanged = undefined; }; },
+    getExecutionConcurrency: async () => executionConcurrency,
+    setExecutionConcurrency: async (id, value) => { writes.concurrency(id, value); executionConcurrency = value; permissionChanged?.(); return value; },
     observe: (_id, _event, _error, _phase, execution) => { updateExecution = execution; publishExecution(); return () => { updateExecution = undefined; }; },
     openTranscript: async (_id, handler) => { updateTranscript = handler; publish(); return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => { updateTranscript = undefined; } }; },
     stop: async () => {
@@ -257,6 +260,12 @@ export const StandardComposer: Story = {
     const canvas = within(canvasElement); const page = within(canvasElement.ownerDocument.body);
     await waitFor(() => expect(canvas.getByRole('button', { name: /切换当前任务模型/ })).toBeEnabled());
     await waitFor(() => expect(canvas.getByRole('button', { name: '打开用量追踪' }).textContent).toContain('1%'));
+    const concurrency = canvas.getByRole('combobox', { name: '并发' });
+    await waitFor(() => expect(concurrency).toBeEnabled());
+    await userEvent.click(concurrency);
+    await userEvent.click(page.getByRole('option', { name: '1' }));
+    await waitFor(() => expect(writes.concurrency).toHaveBeenCalledWith(sessionId, 1));
+    await waitFor(() => expect(concurrency.textContent).toBe('1'));
     await userEvent.click(canvas.getByRole('button', { name: /切换当前任务模型/ }));
     await userEvent.click(page.getByRole('option', { name: /model-b/ }));
     await waitFor(() => expect(writes.defaults).toHaveBeenCalledWith(sessionId, {

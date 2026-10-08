@@ -536,11 +536,26 @@ export function isChatDefaultPermissionMode(value: unknown): value is ChatDefaul
   );
 }
 
-/** Seeds new sessions' starting permission mode (Settings → 通用 → 默认权限模式). */
+/** Host-local direct WorkHub root concurrency, not an aggregate subagent budget. */
+export const WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS = 3;
+export const WORKHUB_MAX_CONCURRENT_SESSIONS = 8;
+
+export function isWorkHubMaxConcurrentSessions(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 1 &&
+    value <= WORKHUB_MAX_CONCURRENT_SESSIONS
+  );
+}
+
+/** Seeds new Sessions and contains Host-local WorkHub preferences. */
 export interface ChatDefaultsSettings {
   permissionMode: ChatDefaultPermissionMode;
   /** WorkHub-created Sessions only; absent means ask, not the ordinary chat default. */
   workHubPermissionMode?: ChatDefaultPermissionMode;
+  /** Direct WorkHub root executions on this Host; absent means 3, not unlimited. */
+  workHubMaxConcurrentSessions?: number;
   /** Applies only when a new task is created. */
   codeModeEnabled?: boolean;
   /** @deprecated Read-only compatibility for older settings; new tasks ignore it. */
@@ -1175,6 +1190,9 @@ function defaultChatDefaultsSettings(): ChatDefaultsSettings {
 // doesn't recognize -- fall back to the safest default instead.
 function normalizeChatDefaultsSettings(settings: ChatDefaultsSettings): ChatDefaultsSettings {
   return {
+    ...(isWorkHubMaxConcurrentSessions(settings.workHubMaxConcurrentSessions)
+      ? { workHubMaxConcurrentSessions: settings.workHubMaxConcurrentSessions }
+      : {}),
     ...(isChatDefaultPermissionMode(settings.workHubPermissionMode)
       ? {
           workHubPermissionMode: settings.workHubPermissionMode,

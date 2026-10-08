@@ -56,12 +56,14 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
       ipcRenderer: {
         on(channel: string, listener: (...args: unknown[]) => void) { listeners.set(channel, listener); },
         off(channel: string) { listeners.delete(channel); }, send() {},
-        async invoke(channel: string, scope: { hostId: string }, mode: 'ask' | 'bypass') {
+        async invoke(channel: string, scope: { hostId: string }, mode: 'ask' | 'bypass' | number) {
           if (channel === 'runtime-host:identities') return owners;
           if (channel === 'runtime-host:awaitReady') return { ready: true };
           assert.ok(modes.has(scope.hostId));
           calls.push(`${channel}:${scope.hostId}`);
-          if (channel === 'workhub:setNewWorkPermissionMode') modes.set(scope.hostId, mode);
+          if (channel === 'workhub:getExecutionConcurrency') return 3;
+          if (channel === 'workhub:setExecutionConcurrency') return mode;
+          if (channel === 'workhub:setNewWorkPermissionMode') modes.set(scope.hostId, mode as 'ask' | 'bypass');
           return modes.get(scope.hostId);
         },
       },
@@ -72,9 +74,13 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   assert.equal(await bridge.workHub.getNewWorkPermissionMode(session('host-b')), 'ask');
   assert.equal(await bridge.workHub.setNewWorkPermissionMode(session('host-b'), 'bypass'), 'bypass');
   assert.equal(await bridge.workHub.getNewWorkPermissionMode(session('host-a')), 'ask');
+  assert.equal(await bridge.workHub.getExecutionConcurrency(session('host-b')), 3);
+  assert.equal(await bridge.workHub.setExecutionConcurrency(session('host-b'), 1), 1);
   const before = calls.length;
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('host-b', 'ordinary-session'), 'bypass'), /Invalid WorkHub Coordination Session identity/u);
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('unknown-host'), 'bypass'));
+  await assert.rejects(bridge.workHub.setExecutionConcurrency(session('host-b', 'ordinary-session'), 1));
+  await assert.rejects(bridge.workHub.getExecutionConcurrency(session('unknown-host')));
   assert.equal(calls.length, before, 'invalid identities never reach the mutation IPC');
   let notifications = 0;
   const unsubscribe = bridge.workHub.subscribeNewWorkPermissionMode(session('host-b'), () => { notifications++; });

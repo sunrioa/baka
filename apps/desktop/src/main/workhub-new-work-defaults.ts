@@ -18,7 +18,7 @@
  */
 
 import type { WorkHubCreateDefaults } from '@maka/core/session';
-import { isChatDefaultPermissionMode, type ChatDefaultPermissionMode } from '@maka/core/settings';
+import { isChatDefaultPermissionMode, isWorkHubMaxConcurrentSessions, WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS, type ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 type WorkHubExecutionDefaults = Omit<WorkHubCreateDefaults, 'permissionMode'>;
@@ -61,4 +61,16 @@ export async function writeWorkHubNewWorkPermissionMode(
     value: { ...policy.chatDefaults, workHubPermissionMode: mode },
   }));
   return snapshot.policy.chatDefaults.workHubPermissionMode ?? 'ask';
+}
+
+export async function readWorkHubExecutionConcurrency(client: Pick<WorkHubPermissionClient, 'queryRuntimePolicy'>): Promise<number> {
+  return (await client.queryRuntimePolicy()).policy.chatDefaults.workHubMaxConcurrentSessions ?? WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS;
+}
+
+export async function writeWorkHubExecutionConcurrency(client: WorkHubPermissionClient, value: unknown): Promise<number> {
+  if (!isWorkHubMaxConcurrentSessions(value)) throw new Error('Invalid WorkHub execution concurrency');
+  const snapshot = await client.updateRuntimePolicy((policy) => ({
+    kind: 'set_chat_defaults', value: { ...policy.chatDefaults, workHubMaxConcurrentSessions: value },
+  }));
+  return snapshot.policy.chatDefaults.workHubMaxConcurrentSessions ?? WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS;
 }

@@ -18,6 +18,8 @@
  */
 
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
+import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
+import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createJevRoutingModel } from './jev-routing-model.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
@@ -494,6 +496,10 @@ export async function createExecutionRuntimeHostComposition(
           await validateShellPreference(input.operation.value);
         }
       },
+    );
+    const workHubExecutionSlots = new WorkHubExecutionSlots(
+      (await runtimePolicyStores.runtimePolicy.getSnapshot()).policy.chatDefaults
+        .workHubMaxConcurrentSessions ?? WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS,
     );
     const sessionAdmission = new SessionAdmissionGate();
     const memoryExtractionLane = new MemoryExtractionSessionLane();
@@ -1826,6 +1832,7 @@ export async function createExecutionRuntimeHostComposition(
           return undefined;
         }
       },
+      workHubExecutionSlots,
     );
     const coordinator = rootCoordinator;
     const pluginModel = createHostPluginModel({
@@ -2210,6 +2217,10 @@ export async function createExecutionRuntimeHostComposition(
     });
     async function applyRuntimePolicyMutationEffects(): Promise<void> {
       try {
+        workHubExecutionSlots.setLimit(
+          (await runtimePolicyStores.runtimePolicy.getSnapshot()).policy.chatDefaults
+            .workHubMaxConcurrentSessions ?? WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS,
+        );
         pluginExecutors.invalidateCatalog();
         await builtinExternalAgentPlugins.reconcile();
         await requireMemory(memory).refreshAfterPolicyMutation();

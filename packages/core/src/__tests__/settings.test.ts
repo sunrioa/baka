@@ -75,6 +75,27 @@ test('WorkHub permission defaults are independent, persisted and fail closed', (
   }
 });
 
+test('legacy settings preserve valid WorkHub concurrency and normalize invalid values', () => {
+  assert.equal(normalizeSettings({}).chatDefaults.workHubMaxConcurrentSessions, undefined);
+  for (const workHubMaxConcurrentSessions of [1, 2, 3, 8]) {
+    const settings = mergeSettings(createDefaultSettings(), {
+      chatDefaults: { workHubMaxConcurrentSessions },
+    });
+    assert.equal(
+      normalizeSettings(JSON.parse(JSON.stringify(settings))).chatDefaults
+        .workHubMaxConcurrentSessions,
+      workHubMaxConcurrentSessions,
+    );
+  }
+  for (const workHubMaxConcurrentSessions of [0, -1, 1.5, 9, '3', true, null]) {
+    assert.equal(
+      normalizeSettings({ chatDefaults: { workHubMaxConcurrentSessions } }).chatDefaults
+        .workHubMaxConcurrentSessions,
+      undefined,
+    );
+  }
+});
+
 test('normalizes user-approved subagent presets without widening the catalog', () => {
   const normalized = normalizeSettings({
     subagents: {

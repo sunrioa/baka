@@ -104,6 +104,8 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
     getNewWorkPermissionMode: async () => 'ask',
     setNewWorkPermissionMode: async (_id: string, mode: 'ask' | 'bypass') => mode,
     subscribeNewWorkPermissionMode: () => () => {},
+    getExecutionConcurrency: async () => 3,
+    setExecutionConcurrency: async (_id: string, value: number) => value,
     subscribeHosts: () => () => {},
     subscribeAvailability: () => () => {},
     subscribeSessions: () => () => {},
@@ -283,6 +285,44 @@ test('WorkHub model selection configures only newly created work', async () => {
   assert.equal(requests.length, count, 'running coordination turns freeze new-work defaults');
 });
 
+test('WorkHub concurrency saves Host policy and ignores stale reads and invalid controls', async () => {
+  let value = 3;
+  let refresh!: () => void;
+  let reads = 0;
+  const stale = deferred<number>();
+  const writes: number[] = [];
+  const h = await mountController(false, {
+    getExecutionConcurrency: () => ++reads === 2 ? stale.promise : Promise.resolve(value),
+    setExecutionConcurrency: async (_id, next) => { writes.push(next); return value = next; },
+    subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
+  });
+  assert.equal(h.controller.executionConcurrency, 3);
+  await act(async () => { refresh(); });
+  await act(async () => { await h.controller.changeExecutionConcurrency(1); });
+  await act(async () => { stale.resolve(8); });
+  assert.equal(h.controller.executionConcurrency, 1);
+  await act(async () => { await h.controller.changeExecutionConcurrency(0); await h.controller.changeExecutionConcurrency(9); });
+  assert.deepEqual(writes, [1]);
+  assert.equal(h.controller.savingConcurrency, false);
+});
+
+test('WorkHub concurrency failures leave the control unavailable until a fresh policy read', async () => {
+  let failed = true;
+  let refresh!: () => void;
+  const h = await mountController(false, {
+    getExecutionConcurrency: async () => { if (failed) throw new Error('Host policy unavailable'); return 2; },
+    setExecutionConcurrency: async () => { throw new Error('Host rejected concurrency'); },
+    subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
+  });
+  assert.equal(h.controller.executionConcurrency, undefined);
+  await act(async () => { failed = false; refresh(); });
+  assert.equal(h.controller.executionConcurrency, 2);
+  await act(async () => { await h.controller.changeExecutionConcurrency(1); });
+  assert.equal(h.controller.executionConcurrency, 2);
+  assert.equal(h.controller.savingConcurrency, false);
+  assert.equal(h.controller.error, 'Host rejected concurrency');
+});
+
 test('WorkHub new-work permissions require confirmation and never change the coordination Session', async () => {
   let mode: 'ask' | 'bypass' = 'ask';
   let confirmations = 0;
@@ -346,28 +386,40 @@ test('a stale WorkHub permission read cannot overwrite a confirmed write', async
   assert.equal(h.controller.newWorkPermissionMode, 'bypass');
 });
 
-test('switching Hosts cancels pending bypass consent and ignores old permission reads', async () => {
+test('switching Hosts cancels pending bypass consent and ignores old policy reads and writes', async () => {
   const consent = deferred<boolean>();
   const stale = deferred<'bypass'>();
+  const staleConcurrency = deferred<number>();
+  const savedConcurrency = deferred<number>();
   let id = JSON.stringify(['host-1', 'workhub-coordination']);
   let hostsChanged!: Parameters<WorkHubServices['subscribeHosts']>[0];
   let refresh!: () => void;
   let reads = 0;
+  let concurrencyReads = 0;
   const writes: string[] = [];
+  const concurrencyWrites: string[] = [];
   const h = await mountController(false, {
     resolve: async () => id,
     getNewWorkPermissionMode: () => ++reads === 2 ? stale.promise : Promise.resolve('ask'),
     setNewWorkPermissionMode: async (target, mode) => { writes.push(target); return mode; },
+    getExecutionConcurrency: () => ++concurrencyReads === 2 ? staleConcurrency.promise : Promise.resolve(id.includes('host-2') ? 2 : 3),
+    setExecutionConcurrency: (target) => { concurrencyWrites.push(target); return savedConcurrency.promise; },
     subscribeNewWorkPermissionMode: (_id, handler) => { refresh = handler; return () => {}; },
     subscribeHosts: (handler) => { hostsChanged = handler; return () => {}; },
   });
   await act(async () => { refresh(); });
   let changing!: Promise<void>;
+  let changingConcurrency!: Promise<void>;
   await act(async () => { changing = h.controller.changeNewWorkPermissionMode('bypass', () => consent.promise); });
+  await act(async () => { changingConcurrency = h.controller.changeExecutionConcurrency(1); });
+  assert.equal(h.controller.savingConcurrency, true);
   await act(async () => { id = JSON.stringify(['host-2', 'workhub-coordination']); hostsChanged({ hostId: 'host-2', isDefault: true, readiness: 'ready' }); });
   assert.equal(h.controller.sessionId, id);
-  await act(async () => { consent.resolve(true); stale.resolve('bypass'); await changing; });
+  await act(async () => { consent.resolve(true); stale.resolve('bypass'); staleConcurrency.resolve(8); savedConcurrency.resolve(1); await changing; await changingConcurrency; });
   assert.deepEqual(writes, []);
+  assert.deepEqual(concurrencyWrites, [JSON.stringify(['host-1', 'workhub-coordination'])]);
+  assert.equal(h.controller.executionConcurrency, 2);
+  assert.equal(h.controller.savingConcurrency, false);
   assert.equal(h.controller.newWorkPermissionMode, 'ask');
   assert.equal(h.controller.savingPermission, false);
 });

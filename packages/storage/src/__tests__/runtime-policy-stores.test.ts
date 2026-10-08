@@ -75,7 +75,11 @@ describe('runtime policy stores', () => {
           expectedRevision: before.revision,
           operation: {
             kind: 'set_chat_defaults',
-            value: { ...before.policy.chatDefaults, workHubPermissionMode: 'bypass' },
+            value: {
+              ...before.policy.chatDefaults,
+              workHubPermissionMode: 'bypass',
+              workHubMaxConcurrentSessions: 1,
+            },
           },
         });
         assert.equal(saved.kind, 'committed');
@@ -88,6 +92,7 @@ describe('runtime policy stores', () => {
         const stores = await openInteractiveRuntimePolicyStoresForWrite(successor.lease);
         const restored = await stores.runtimePolicy.getSnapshot();
         assert.equal(restored.policy.chatDefaults.workHubPermissionMode, 'bypass');
+        assert.equal(restored.policy.chatDefaults.workHubMaxConcurrentSessions, 1);
         assert.equal(restored.policy.chatDefaults.permissionMode, 'bypass');
       } finally {
         await successor.close();

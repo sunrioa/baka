@@ -159,6 +159,8 @@ export interface RuntimePolicy {
     readonly permissionMode: ChatDefaultPermissionMode;
     /** WorkHub-created Sessions only; old policies without this field use ask. */
     readonly workHubPermissionMode?: ChatDefaultPermissionMode;
+    /** Direct WorkHub root executions on this Host; absent means 3. */
+    readonly workHubMaxConcurrentSessions?: number;
     /** @deprecated Wire compatibility only; task creation ignores this field. */
     readonly thinkingLevel?: ThinkingLevel;
     readonly codeModeEnabled?: boolean;
