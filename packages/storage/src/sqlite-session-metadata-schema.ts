@@ -19,7 +19,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 41;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 42;
 export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
 export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
@@ -37,6 +37,21 @@ export const SQLITE_AGENT_GRAPH_CONTROL_TABLES = [
 ] as const;
 
 const MIGRATIONS: ReadonlyMap<number, string> = new Map([
+  [
+    42,
+    `
+    CREATE TABLE IF NOT EXISTS task_execution_grants (
+      grant_id TEXT PRIMARY KEY,
+      root_session_id TEXT NOT NULL REFERENCES session_metadata(session_id) ON DELETE CASCADE,
+      root_turn_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
+      record_json TEXT NOT NULL,
+      closed_at INTEGER,
+      closure_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS task_execution_grants_by_root ON task_execution_grants(root_session_id, root_turn_id, closed_at);
+  `,
+  ],
   [
     41,
     `

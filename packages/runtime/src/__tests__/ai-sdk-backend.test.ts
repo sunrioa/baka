@@ -12861,6 +12861,7 @@ describe('AiSdkBackend concurrent turns', () => {
       ['turn-b', second],
     ]);
     const preparedRunIds: Array<string | undefined> = [];
+    const boundaryScopes: unknown[] = [];
     const executions: string[] = [];
     // The overlapping turn must reach its tool AFTER the other turn is fully
     // torn down: run identity was read at dispatch, so that is the window the
@@ -12924,6 +12925,10 @@ describe('AiSdkBackend concurrent turns', () => {
       connection: connection(),
       modelId: 'mock-model-id',
       modelFactory: () => model,
+      readExecutionBoundary: async (scope) => {
+        boundaryScopes.push(scope);
+        return readExternalExecutionBoundary(scope);
+      },
       tools: [
         {
           ...testTool('Read', z.object({ path: z.string() })),
@@ -12960,6 +12965,14 @@ describe('AiSdkBackend concurrent turns', () => {
 
     assert.deepEqual(executions, ['b.md']);
     assert.deepEqual(preparedRunIds, ['run-b']);
+    assert.deepEqual(boundaryScopes, [
+      {
+        sessionId: 'session-1',
+        turnId: 'turn-b',
+        runId: 'run-b',
+        invocationId: 'invocation-b',
+      },
+    ]);
     assert.equal(
       events.some((event) => event.type === 'error'),
       false,

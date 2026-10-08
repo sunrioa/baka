@@ -318,6 +318,10 @@ export function buildManagedBashTool(
           ...(transformed?.fdInputs ? { fdInputs: transformed.fdInputs } : {}),
           ...(timeoutMs !== undefined ? { timeoutMs } : {}),
           abortSignal: ctx.abortSignal,
+          ...(ctx.authoritySignal ? { authoritySignal: ctx.authoritySignal } : {}),
+          ...(ctx.registerAuthorityCleanup
+            ? { registerAuthorityCleanup: ctx.registerAuthorityCleanup }
+            : {}),
           emitOutput: ctx.emitOutput,
           ...(transformed?.sandboxType ? { sandboxType: transformed.sandboxType } : {}),
           ...(onCompletion ? { onCompletion } : {}),

@@ -122,8 +122,9 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   header: SessionHeader;
   /** Host-frozen provider endpoint and credential ownership for this backend generation. */
   providerStateIdentity?: `sha256:${string}`;
-  /** Reads the authoritative session boundary immediately before every local tool invocation. */
+  /** Reads live authority with the ToolRuntime's immutable dispatch identity. */
   readExecutionBoundary: ToolRuntimeInput['readExecutionBoundary'];
+  readTaskAuthority?: ToolRuntimeInput['readTaskAuthority'];
   /** Reads the user's current Session permission selection for each local tool invocation. */
   readPermissionMode: ToolRuntimeInput['readPermissionMode'];
   createSandboxBoundaryRequest?: ToolRuntimeInput['createSandboxBoundaryRequest'];
@@ -492,6 +493,7 @@ export class AiSdkBackend implements AgentBackend {
       connection: input.connection,
       modelId: input.modelId,
       readExecutionBoundary: input.readExecutionBoundary,
+      ...(input.readTaskAuthority ? { readTaskAuthority: input.readTaskAuthority } : {}),
       readPermissionMode: input.readPermissionMode,
       createSandboxBoundaryRequest: input.createSandboxBoundaryRequest,
       settleSandboxBoundaryRequest: input.settleSandboxBoundaryRequest,

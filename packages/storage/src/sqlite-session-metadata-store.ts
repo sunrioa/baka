@@ -36,6 +36,16 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import {
+  decodeTaskExecutionGrant,
+  type TaskExecutionGrantRecord,
+  type TaskGrantClosureReason,
+} from '@maka/core/task-execution-grant';
+import {
+  insertTaskExecutionGrant,
+  readTaskExecutionGrants,
+  closeTaskExecutionGrant,
+} from './sqlite-task-execution-grants.js';
 import { isCanonicalReadOnlyPermissionProfile } from '@maka/core/permission-profile';
 import type { DatabaseSync } from 'node:sqlite';
 import {
@@ -720,6 +730,21 @@ export class SqliteSessionMetadataStore {
     return denied;
   }
 
+  async listTaskExecutionGrants(rootSessionId?: string): Promise<TaskExecutionGrantRecord[]> {
+    this.assertOpen();
+    if (rootSessionId !== undefined) assertSafeSessionId(rootSessionId);
+    return readTaskExecutionGrants(this.db, rootSessionId);
+  }
+
+  async closeTaskExecutionGrant(
+    grantId: string,
+    reason: TaskGrantClosureReason,
+    closedAt: number,
+  ): Promise<void> {
+    this.assertOpen();
+    this.transaction(() => closeTaskExecutionGrant(this.db, grantId, reason, closedAt));
+  }
+
   async settleSandboxBoundaryRequest(
     input: SettleSandboxBoundaryRequest,
   ): Promise<SandboxBoundarySettlement> {
@@ -747,6 +772,48 @@ export class SqliteSessionMetadataStore {
       }
 
       const settledAt = this.now();
+      if (input.taskGrant) {
+        const grant = decodeTaskExecutionGrant(input.taskGrant);
+        if (
+          input.decision !== 'allow' ||
+          grant.sourceRequestId !== request.requestId ||
+          grant.sourceSessionId !== request.sessionId ||
+          grant.sourceTurnId !== request.turnId ||
+          grant.sourceRunId !== request.runId ||
+          grant.resource.kind !== 'sandbox' ||
+          !isDeepStrictEqual(grant.resource.expansion, request.expansion) ||
+          grant.expiresAt <= settledAt
+        )
+          throw new Error('Task grant does not match the original sandbox request');
+        if (
+          current.kind !== 'managed' ||
+          current.revision !== grant.sourceBoundaryRevision ||
+          this.readCurrentExecutionBoundarySync(grant.rootSessionId).revision !==
+            grant.rootBoundaryRevision
+        )
+          throw new Error('Task sandbox grants require the original managed boundary');
+        const assessment = assessSandboxBoundaryExpansion(current.profile, request.expansion, {
+          root: record.header.cwd,
+          workspaceRoots: [record.header.cwd],
+          tmpdir: tmpdir(),
+          slashTmp: '/tmp',
+        });
+        if (assessment.outcome === 'conflict')
+          throw new Error('Task grant conflicts with the current boundary');
+        insertTaskExecutionGrant(this.db, grant);
+        this.settleSandboxBoundaryRequestRow({
+          sessionId: input.sessionId,
+          requestId: input.requestId,
+          status: 'approved',
+          outcomeReason: 'task_grant',
+          settledAt,
+        });
+        return {
+          request: this.requireSandboxBoundaryRequestSync(input.sessionId, input.requestId),
+          boundary: current,
+          changed: false,
+        };
+      }
       if (input.decision === 'deny') {
         this.settleSandboxBoundaryRequestRow({
           sessionId: input.sessionId,

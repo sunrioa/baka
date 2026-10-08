@@ -388,6 +388,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.coordination.resolve',
   'workhub.interactions.query',
   'workhub.interactions.answer',
+  'workhub.interactions.revoke',
 ] as const satisfies readonly OperationKey[]);
 
 const REMOTE_OWNER_OPERATION_GRANT_SET = new Set<OperationKey>(REMOTE_OWNER_OPERATION_GRANTS);

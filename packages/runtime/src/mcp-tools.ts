@@ -83,6 +83,7 @@ export interface McpToolCallOptions {
 export interface McpToolInvocationContext {
   readonly sessionId: string;
   readonly runId?: string;
+  readonly invocationId?: string;
   readonly turnId: string;
   readonly toolCallId: string;
   readonly cwd: string;
@@ -153,6 +154,7 @@ export function buildMcpToolsWithIdentities(
                   context: {
                     sessionId: context.sessionId,
                     runId: context.runId,
+                    invocationId: context.invocationId,
                     turnId: context.turnId,
                     toolCallId: context.toolCallId,
                     cwd: context.cwd,

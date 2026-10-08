@@ -29,6 +29,7 @@ import type {
   SandboxBoundaryRequestEvent,
   UserQuestionRequestEvent,
 } from '@maka/core/events';
+import type { TaskExecutionGrant } from '@maka/core/task-execution-grant';
 import {
   isInteractionAnswerValidForRequest,
   projectInteractionClientCapabilityRequest,
@@ -914,6 +915,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
   answerAdmitted(
     input: InteractionAnswerInput,
     lease: SessionAdmissionLease,
+    taskGrant?: TaskExecutionGrant,
   ): ReturnType<InteractionOperationHandlerMap['interaction.answer']> {
     return observed(
       this.#sessionAdmission
@@ -927,7 +929,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
           if (record) {
             if (record.request.sessionId !== input.sessionId) return interactionNotFound();
             return record.request.request.kind === 'client_capability'
-              ? this.#answerClientCapability(record, input.answer, admission)
+              ? this.#answerClientCapability(record, input.answer, admission, taskGrant)
               : this.#answerStoredInteraction(record, input.answer, admission);
           }
           const sandboxBoundary = await this.#readSandboxBoundary(
@@ -935,7 +937,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
             input.interactionId,
           );
           return sandboxBoundary
-            ? this.#answerSandboxBoundary(sandboxBoundary, input.answer, admission)
+            ? this.#answerSandboxBoundary(sandboxBoundary, input.answer, admission, taskGrant)
             : interactionNotFound();
         })
         .catch((error: unknown) => {
@@ -1040,6 +1042,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     request: SandboxBoundaryRequest,
     answer: InteractionAnswerInput['answer'],
     admission: SessionAdmissionLease,
+    taskGrant?: TaskExecutionGrant,
   ) {
     const snapshot = projectSandboxBoundaryInteraction(request);
     if (snapshot.status !== 'pending') {
@@ -1061,6 +1064,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       sessionId: request.sessionId,
       requestId: request.requestId,
       decision: answer.decision,
+      ...(taskGrant ? { taskGrant } : {}),
     });
     await this.#refreshCanonicalContinuity(request.sessionId, admission);
     this.#throwIfPoisoned();
@@ -1100,6 +1104,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     record: InteractionRecord,
     answer: InteractionAnswerInput['answer'],
     admission: SessionAdmissionLease,
+    taskGrant?: TaskExecutionGrant,
   ) {
     if (record.outcome) return answerOutcome(recordWithOutcome(record), answer);
     if (
@@ -1114,7 +1119,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     const entry = this.#requireLiveClientCapability(record.request);
     const canonical = clientCapabilityCanonicalOutcome(answer, this.#now());
     const grant: ClientCapabilitySessionGrant | undefined =
-      answer.decision === 'allow'
+      answer.decision === 'allow' && !taskGrant
         ? {
             version: 1,
             sessionId: record.request.sessionId,
@@ -1122,7 +1127,12 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
             grantedAt: canonical.committedAt,
           }
         : undefined;
-    const outcome = await this.#commitClientCapabilityOutcome(entry.request, canonical, grant);
+    const outcome = await this.#commitClientCapabilityOutcome(
+      entry.request,
+      canonical,
+      grant,
+      taskGrant ? { ...taskGrant, grantedAt: canonical.committedAt } : undefined,
+    );
     await this.#refreshCanonicalContinuity(entry.request.sessionId, admission);
     this.#throwIfPoisoned();
     await this.#applyAndDelete(entry, outcome);
@@ -1498,11 +1508,17 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       { kind: 'client_capability_decision' | 'closure' }
     >,
     grant?: ClientCapabilitySessionGrant,
+    taskGrant?: TaskExecutionGrant,
   ): Promise<StoredInteractionOutcome> {
     this.#throwIfPoisoned();
     let result: CommitInteractionOutcomeResult;
     try {
-      result = await this.#store.commitClientCapabilityOutcome(request.requestId, candidate, grant);
+      result = await this.#store.commitClientCapabilityOutcome(
+        request.requestId,
+        candidate,
+        grant,
+        taskGrant,
+      );
     } catch (error) {
       throw this.#poison(error);
     }

@@ -2271,6 +2271,164 @@ for (const restart of [false, true]) {
   });
 }
 
+test('WorkHub native task approval and revocation leave Session defaults untouched', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const release = deferred<void>();
+    let childTask: Promise<unknown> | undefined;
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            for await (const event of super.send(input)) {
+              if (input.text === '__e2e_ask_sandbox_boundary__' && event.type === 'complete')
+                continue;
+              yield event;
+            }
+            if (input.text === '__e2e_ask_sandbox_boundary__') await release.promise;
+          }
+          override async stop() {
+            release.resolve();
+            await super.stop();
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'task-grant-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      await composition.handlers['workhub.coordination.resolve']({}, context);
+      const assigned = await actWorkHub(
+        composition,
+        {
+          actionId: 'task-grant-action',
+          userText: '__e2e_ask_sandbox_boundary__',
+          proposal: { disposition: 'create_new', title: 'Task grant' },
+          create: { workspace: { kind: 'host_path', path: root } },
+          newWorkDefaults: {
+            model: {
+              llmConnectionId: connectionId,
+              llmConnectionSlug: 'fake',
+              model: 'fake-model',
+            },
+          },
+        },
+        context,
+      );
+      assert.ok(assigned.ok, JSON.stringify(assigned));
+      if (!assigned.ok || assigned.result.disposition !== 'create_new') return;
+      const target = assigned.result.targetSessionId;
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      await waitFor(
+        async () =>
+          (await stores.sessionStore.listPendingSandboxBoundaryRequests(target)).length === 1,
+      );
+      const before = await stores.sessionStore.readExecutionBoundary(target);
+      const inbox = await composition.handlers['workhub.interactions.query']({}, context);
+      assert.ok(inbox.ok);
+      const original = inbox.result.requests[0]!.interaction;
+      const approved = await composition.handlers['workhub.interactions.answer'](
+        {
+          actionId: 'task-grant-action',
+          interactionId: original.interactionId,
+          expectedTurnId: original.turnId,
+          expectedRunId: original.runId,
+          answer: { kind: 'sandbox_boundary', decision: 'allow' },
+          grantScope: 'task',
+        },
+        context,
+      );
+      assert.ok(approved.ok, JSON.stringify(approved));
+      assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
+      const grants = await composition.handlers['workhub.interactions.query']({}, context);
+      assert.ok(grants.ok);
+      assert.equal(grants.result.grants!.length, 1);
+      const grantId = grants.result.grants![0]!.grant.grantId;
+      const childReady = deferred<{ childSessionId: string; turnId: string; runId: string }>();
+      childTask = manager.spawnChildSession(target, {
+        agentProfile: 'local_read',
+        prompt: '__e2e_ask_sandbox_boundary__',
+        spawnedBy: {
+          parentTurnId: original.turnId,
+          parentRunId: original.runId,
+          toolCallId: 'task-child-spawn',
+        },
+        onReady: async (identity) => {
+          childReady.resolve(identity);
+        },
+      });
+      void childTask.catch(() => {});
+      const child = await childReady.promise;
+      await waitFor(
+        async () =>
+          (await stores.sessionStore.listPendingSandboxBoundaryRequests(child.childSessionId))
+            .length === 1,
+      );
+      const childInbox = await composition.handlers['workhub.interactions.query']({}, context);
+      assert.ok(childInbox.ok);
+      const childRequest = childInbox.result.requests.find(
+        (p) => p.interaction.sessionId === child.childSessionId,
+      );
+      assert.ok(
+        childRequest,
+        'the production linked child (without cross-Session Run lineage) reaches its task inbox',
+      );
+      const childBefore = await stores.sessionStore.readExecutionBoundary(child.childSessionId);
+      const childApproval = await composition.handlers['workhub.interactions.answer'](
+        {
+          actionId: 'task-grant-action',
+          interactionId: childRequest.interaction.interactionId,
+          expectedTurnId: child.turnId,
+          expectedRunId: child.runId,
+          answer: { kind: 'sandbox_boundary', decision: 'allow' },
+          grantScope: 'task',
+        },
+        context,
+      );
+      assert.ok(childApproval.ok, JSON.stringify(childApproval));
+      assert.deepEqual(
+        await stores.sessionStore.readExecutionBoundary(child.childSessionId),
+        childBefore,
+      );
+      assert.equal(
+        (
+          await composition.handlers['workhub.interactions.revoke'](
+            { actionId: 'unrelated', grantId },
+            context,
+          )
+        ).ok,
+        false,
+      );
+      assert.ok(
+        (
+          await composition.handlers['workhub.interactions.revoke'](
+            { actionId: 'task-grant-action', grantId },
+            context,
+          )
+        ).ok,
+      );
+      assert.equal(
+        (await stores.sessionStore.listTaskExecutionGrants(target)).length,
+        1,
+        'revocation targets one grant, not another approved resource',
+      );
+      await composition.handlers['workhub.interactions.revoke'](
+        { actionId: 'task-grant-action', grantId: childRequest.interaction.interactionId },
+        context,
+      );
+      assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(target), []);
+      assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
+    } finally {
+      release.resolve();
+      await composition.close();
+      await childTask?.catch(() => {});
+    }
+  });
+});
+
 test('WorkHub receives a pending question and then the result after the target resumes', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);

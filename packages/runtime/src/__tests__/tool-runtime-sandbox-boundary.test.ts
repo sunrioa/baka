@@ -50,6 +50,135 @@ import { SandboxCommandError } from '../sandbox/errors.js';
 import { ToolRuntime, type MakaTool, type ToolRuntimeInput } from '../tool-runtime.js';
 
 describe('ToolRuntime session sandbox boundary', () => {
+  test('a task grant approved inside a call updates its boundary and fences the current resource', async () => {
+    const events: SessionEvent[] = [];
+    const base: ExecutionBoundary = {
+      kind: 'managed',
+      profile: createWorkspaceWritePermissionProfile(),
+      revision: 4,
+    };
+    const effective: ExecutionBoundary = {
+      ...base,
+      profile: applySandboxBoundaryExpansion(base.profile, { network: { enabled: true } }),
+    };
+    const grant = new AbortController();
+    const cleanup = new Set<() => void | Promise<void>>();
+    const started = deferred<void>();
+    let active = false;
+    let captured: HostedSandboxBoundarySettlement | undefined;
+    const runtime = createRuntime({
+      turnId: 'turn-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      invocationId: 'inv-1',
+      header: header(),
+      connection: { providerType: 'openai', slug: 'test' } as never,
+      modelId: 'test',
+      newId: nextId(),
+      now: () => 1,
+      getPermissionPauseTarget: () => null,
+      readExecutionBoundary: async () => base,
+      readTaskAuthority: async (scope) => {
+        assert.deepEqual(scope, {
+          sessionId: 'session-1',
+          turnId: 'turn-1',
+          runId: 'run-1',
+          invocationId: 'inv-1',
+        });
+        return active
+          ? {
+              boundary: effective,
+              signal: grant.signal,
+              registerCleanup: (fn) => {
+                cleanup.add(fn);
+                return () => {
+                  cleanup.delete(fn);
+                };
+              },
+            }
+          : { boundary: base };
+      },
+      hostedInteraction: {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        runId: 'run-1',
+        admitUserQuestionRequest: async () => {
+          throw new Error('Unexpected question');
+        },
+        admitFormRequest: async () => {
+          throw new Error('Unexpected form');
+        },
+        withdrawFormRequest: async () => {},
+        admitSandboxBoundaryRequest: async ({ settlement }) => {
+          captured = settlement;
+        },
+      },
+    });
+    const pending = runtime.settleToolCall({
+      tool: {
+        name: 'network_task',
+        description: 'Use task-scoped network',
+        parameters: {},
+        impl: async (_args, context) => {
+          assert.deepEqual(context.executionBoundary, base);
+          await context.requestSandboxBoundary!(
+            { network: { enabled: true } },
+            'Connect for this task',
+          );
+          assert.deepEqual(context.executionBoundary, effective);
+          assert.equal(context.authoritySignal?.aborted, false);
+          started.resolve();
+          await new Promise<void>((resolve) =>
+            context.abortSignal.addEventListener('abort', () => resolve(), { once: true }),
+          );
+          context.abortSignal.throwIfAborted();
+        },
+      },
+      turnId: 'turn-1',
+      toolCallId: 'tool-1',
+      input: {},
+      abortSignal: new AbortController().signal,
+      eventSink: {
+        push: (event) => events.push(event),
+        pushAndWaitUntilConsumed: async (event) => {
+          events.push(event);
+        },
+      },
+    });
+    try {
+      const request = await waitForBoundaryRequest(events);
+      active = true;
+      await captured!.applyDecision({
+        request: {
+          sessionId: 'session-1',
+          requestId: request.requestId,
+          turnId: 'turn-1',
+          runId: 'run-1',
+          status: 'approved',
+          baseRevision: 4,
+          createdAt: 1,
+          settledAt: 2,
+          expansion: request.expansion,
+          justification: request.justification,
+          outcomeReason: 'task_grant',
+        },
+        boundary: base,
+        changed: false,
+      });
+      await started.promise;
+      assert.equal(cleanup.size, 1);
+      grant.abort(new Error('Task grant revoked'));
+      await Promise.all([...cleanup].map((fn) => fn()));
+      assert.match(JSON.stringify((await pending).result), /Task grant revoked/);
+      assert.equal(cleanup.size, 0);
+      assert.equal(base.revision, 4);
+    } finally {
+      grant.abort();
+      await runtime.endTurn('aborted');
+      await pending;
+    }
+  });
+
   test('inherits explicit denial without inheriting correction budgets or replacing live authority', async () => {
     let reads = 0;
     const create = (inheritedSandboxBoundaryDenied = false): ToolRuntime =>

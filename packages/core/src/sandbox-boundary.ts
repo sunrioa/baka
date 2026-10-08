@@ -18,6 +18,7 @@
  */
 
 import type { PermissionMode } from './permission.js';
+import type { TaskExecutionGrant } from './task-execution-grant.js';
 import {
   isNormalizedAbsolutePath,
   pathWithinRoot,
@@ -128,6 +129,8 @@ export interface SettleSandboxBoundaryRequest {
   readonly decision: SandboxBoundaryDecision;
   /** Internal fail-closed settlement used when a live request owner cannot continue. */
   readonly closureReason?: SandboxBoundaryClosureReason;
+  /** Host-admitted supplemental authority; does not change the Session boundary. */
+  readonly taskGrant?: TaskExecutionGrant;
 }
 
 /**

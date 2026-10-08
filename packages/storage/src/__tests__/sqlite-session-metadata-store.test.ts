@@ -58,6 +58,85 @@ import {
 import { SQLITE_AGENT_GRAPH_CONTROL_TABLES } from '../sqlite-session-metadata-schema.js';
 
 describe('SqliteSessionMetadataStore', () => {
+  test('migrates version 41 and preserves task grant closure across reopen without changing defaults', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-task-grant-migration-'));
+    const path = join(root, 'state.sqlite');
+    try {
+      const setup = createSqliteSessionMetadataStore(path);
+      const session = await setup.create(
+        fullHeader({ cwd: root, workspaceRoot: root, permissionMode: 'ask' }),
+      );
+      const before = await setup.readExecutionBoundary(session.header.id);
+      await setup.close();
+      const previous = new DatabaseSync(path);
+      try {
+        previous.exec(
+          "DROP TABLE task_execution_grants; UPDATE session_metadata_schema SET version = 41 WHERE scope = 'session_metadata'",
+        );
+      } finally {
+        previous.close();
+      }
+      const migrated = createSqliteSessionMetadataStore(path);
+      let grant: import('@maka/core/task-execution-grant').TaskExecutionGrant;
+      try {
+        assert.deepEqual(await migrated.listTaskExecutionGrants(), []);
+        assert.deepEqual(await migrated.readExecutionBoundary(session.header.id), before);
+        const request = await migrated.createSandboxBoundaryRequest({
+          sessionId: session.header.id,
+          requestId: 'migration-task-request',
+          turnId: 'task-turn',
+          runId: 'task-run',
+          justification: 'Temporary task network',
+          expansion: { network: { enabled: true } },
+        });
+        assert.ok(request.turnId && request.runId);
+        const now = Date.now();
+        grant = {
+          version: 1,
+          grantId: request.requestId,
+          sourceRequestId: request.requestId,
+          rootSessionId: session.header.id,
+          sourceSessionId: session.header.id,
+          rootTurnId: request.turnId,
+          sourceTurnId: request.turnId,
+          rootRunId: request.runId,
+          sourceRunId: request.runId,
+          delegationId: 'delegation',
+          rootBoundaryRevision: before.revision,
+          sourceBoundaryRevision: before.revision,
+          grantedAt: now,
+          expiresAt: now + 3600000,
+          resource: { kind: 'sandbox', expansion: request.expansion },
+        };
+        await migrated.settleSandboxBoundaryRequest({
+          sessionId: session.header.id,
+          requestId: request.requestId,
+          decision: 'allow',
+          taskGrant: grant,
+        });
+      } finally {
+        await migrated.close();
+      }
+      const reopened = createSqliteSessionMetadataStore(path);
+      try {
+        assert.deepEqual(await reopened.listTaskExecutionGrants(), [{ grant }]);
+        assert.deepEqual(await reopened.readExecutionBoundary(session.header.id), before);
+        await reopened.closeTaskExecutionGrant(grant.grantId, 'revoked', Date.now());
+      } finally {
+        await reopened.close();
+      }
+      const revoked = createSqliteSessionMetadataStore(path);
+      try {
+        assert.deepEqual(await revoked.listTaskExecutionGrants(), []);
+        assert.deepEqual(await revoked.readExecutionBoundary(session.header.id), before);
+      } finally {
+        await revoked.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('migrates version 38 and resumes the body-free Coordination index idempotently', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-coordination-index-migration-'));
     const path = join(root, 'state.sqlite');

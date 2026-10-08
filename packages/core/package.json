@@ -72,6 +72,7 @@
     "./capabilities": "./dist/capabilities.js",
     "./capability-audit": "./dist/capability-audit.js",
     "./client-capability-grant": "./dist/client-capability-grant.js",
+    "./task-execution-grant": "./dist/task-execution-grant.js",
     "./client-plugin-bridge": "./dist/client-plugin-bridge.js",
     "./health": "./dist/health.js",
     "./search": "./dist/search.js",

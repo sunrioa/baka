@@ -19,6 +19,8 @@
 
 import { resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { decodeTaskExecutionGrant, type TaskExecutionGrant } from '@maka/core/task-execution-grant';
+import { insertTaskExecutionGrant } from './sqlite-task-execution-grants.js';
 import {
   clientCapabilityScopeIdentity,
   type ClientCapabilitySessionGrant,
@@ -217,7 +219,8 @@ export async function openSqliteInteractiveInteractionStoreForWrite(
           { kind: 'client_capability_decision' | 'closure' }
         >,
         grant?: ClientCapabilitySessionGrant,
-      ) => run(() => store.commitClientCapabilityOutcome(requestId, outcome, grant)),
+        taskGrant?: TaskExecutionGrant,
+      ) => run(() => store.commitClientCapabilityOutcome(requestId, outcome, grant, taskGrant)),
     });
     writers.add(facade);
     sqliteWritersByLease.set(lease, facade);
@@ -365,6 +368,7 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       { kind: 'client_capability_decision' | 'closure' }
     >,
     grant?: ClientCapabilitySessionGrant,
+    taskGrant?: TaskExecutionGrant,
   ): Promise<CommitInteractionOutcomeResult> {
     assertId(requestId);
     return this.#lease.transaction('write', () => {
@@ -388,12 +392,31 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       const candidateGrant = grant === undefined ? undefined : decodeGrant(grant, 'input');
       const shouldGrant =
         canonical.kind === 'client_capability_decision' && canonical.decision === 'allow';
-      if (shouldGrant !== (candidateGrant !== undefined)) {
+      const candidateTaskGrant =
+        taskGrant === undefined ? undefined : decodeTaskExecutionGrant(taskGrant);
+      if (
+        shouldGrant !== (candidateGrant !== undefined || candidateTaskGrant !== undefined) ||
+        (candidateGrant && candidateTaskGrant)
+      ) {
         throw new InteractionStoreError(
           'invalid_input',
-          'Allowed Client Capability outcome requires exactly one Session Grant',
+          'Allowed Client Capability outcome requires exactly one Session or task grant',
         );
       }
+      if (
+        candidateTaskGrant &&
+        (candidateTaskGrant.sourceSessionId !== record.request.sessionId ||
+          candidateTaskGrant.sourceRequestId !== requestId ||
+          candidateTaskGrant.sourceTurnId !== record.request.turnId ||
+          candidateTaskGrant.sourceRunId !== record.request.runId ||
+          candidateTaskGrant.resource.kind !== 'client_capability' ||
+          !isDeepStrictEqual(candidateTaskGrant.resource.target, record.request.request.target) ||
+          candidateTaskGrant.grantedAt !== canonical.committedAt)
+      )
+        throw new InteractionStoreError(
+          'invalid_input',
+          'Task grant does not match the original Client Capability request',
+        );
       if (
         candidateGrant &&
         (!isDeepStrictEqual(decodeGrantKey(candidateGrant, 'input'), {
@@ -426,6 +449,8 @@ class SqliteInteractionStore implements InteractionStoreWriter {
       }
       const matches = interactionCanonicalOutcomesEquivalent(settled.outcome.outcome, canonical);
       if (matches && candidateGrant) this.#commitClientCapabilitySessionGrant(candidateGrant);
+      if (matches && candidateTaskGrant)
+        insertTaskExecutionGrant(this.#lease.database, candidateTaskGrant);
       return {
         status: 'stable',
         matches,

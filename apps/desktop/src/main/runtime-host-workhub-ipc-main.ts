@@ -52,6 +52,7 @@ type RuntimeHostWorkHubClient = Pick<
   | 'getWorkHubSession'
   | 'queryWorkHubInteractions'
   | 'answerWorkHubInteraction'
+  | 'revokeWorkHubTaskGrant'
   | 'queryTurn'
   | 'queryRuntimePolicy'
   | 'updateRuntimePolicy'
@@ -140,6 +141,7 @@ export function registerRuntimeHostWorkHubIpc(
   // Never blindly replay an approval after a lost acknowledgement. The inbox
   // refreshes canonical pending requests before the user can try again.
   ipcMain.handle('workhub:answerInteraction', (_event, input) => client.answerWorkHubInteraction(input));
+  ipcMain.handle('workhub:revokeTaskGrant', (_event, input) => client.revokeWorkHubTaskGrant(input));
   ipcMain.handle('workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client.hostId));
   ipcMain.handle('workhub:setNewWorkDefaults', (_event, value: unknown) => {
     if (!isWorkHubCreateDefaults(value) || value.permissionMode !== undefined) {

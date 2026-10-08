@@ -35,6 +35,7 @@ import type { HostMessageCoordinator } from './message-coordinator.js';
 import type { HostInteractionCoordinator } from './interaction-coordinator.js';
 import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admission-gate.js';
 import { projectSessionInteractions } from './interaction-projection.js';
+import type { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import {
   HostWorkHubResultCoordinator,
   type WorkHubResultObservation,
@@ -45,6 +46,7 @@ export function createWorkHubResultRuntime(options: {
   executions: RootTurnCoordinator;
   messages: HostMessageCoordinator;
   interactions: HostInteractionCoordinator;
+  taskGrants?: HostTaskGrantCoordinator;
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
   acquireResidency(): { release(): void };
@@ -192,6 +194,7 @@ export function createWorkHubResultRuntime(options: {
   async function taskRequests(
     assignment: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
+    lanes: readonly string[] = [],
   ) {
     if (!(await isActive(assignment))) return [];
     const disposition = await messages.readMessageExecutionDispositionAdmitted(
@@ -208,45 +211,89 @@ export function createWorkHubResultRuntime(options: {
     });
     const snapshot = await executions.read(identity);
     if (snapshot.status !== 'waiting_for_user' && snapshot.status !== 'running') return [];
-    return (await pending(assignment.targetSessionId)).filter(
+    const requests = (await pending(assignment.targetSessionId)).filter(
       (p) =>
         p.sessionId === identity.sessionId &&
         p.turnId === identity.turnId &&
         p.runId === identity.runId,
     );
+    if (options.taskGrants)
+      for (const header of await stores.sessionStore.listHeaders()) {
+        if (!header.subagentParent || header.isArchived || !lanes.includes(header.id)) continue;
+        for (const request of await pending(header.id)) {
+          if (requests.length > WORKHUB_INBOX_MAX_ITEMS) break;
+          if (
+            await options.taskGrants.belongsToRoot(
+              { sessionId: request.sessionId, turnId: request.turnId, runId: request.runId },
+              identity,
+            )
+          )
+            requests.push(request);
+        }
+      }
+    return requests;
+  }
+  async function taskLanes(assignment: WorkHubDelegationAssignedMessage) {
+    // Child Sessions are immutable links, not names supplied by the caller.
+    const lanes = new Set([WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId]);
+    const headers = await stores.sessionStore.listHeaders();
+    for (let depth = 0; depth < 32; depth++) {
+      const before = lanes.size;
+      for (const h of headers)
+        if (h.subagentParent && !h.isArchived && lanes.has(h.subagentParent.parentSessionId))
+          lanes.add(h.id);
+      if (lanes.size === before) break;
+    }
+    return [...lanes];
   }
   const handlers: Pick<
     OperationHandlerMap,
-    'workhub.interactions.query' | 'workhub.interactions.answer'
+    'workhub.interactions.query' | 'workhub.interactions.answer' | 'workhub.interactions.revoke'
   > = {
     'workhub.interactions.query': async () => {
       const requests: WorkHubPendingInteraction[] = [];
       const seen = new Set<string>();
+      const grants: import('../protocol/workhub-interactions.js').WorkHubTaskGrant[] = [];
+      let truncated = false;
+      await options.taskGrants?.reconcile();
       for (const assignment of await listAssignments()) {
-        const items = await admission.runMany(
-          [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
-          async (lease) => {
-            const pendingRequests = await taskRequests(assignment, lease);
-            if (!pendingRequests.length) return [];
-            const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
-            return pendingRequests.map((interaction) => ({
-              actionId: assignment.actionId,
-              delegationId: assignment.delegationId,
-              targetSessionName: truncateUtf8(header.name || assignment.targetSessionId, 512, '…'),
-              interaction,
-            }));
-          },
-        );
+        if (options.taskGrants && (await isActive(assignment))) {
+          const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
+          for (const { grant } of await stores.sessionStore.listTaskExecutionGrants(
+            assignment.targetSessionId,
+          )) {
+            if (grant.delegationId !== assignment.delegationId) continue;
+            if (grants.length === WORKHUB_INBOX_MAX_ITEMS) truncated = true;
+            else
+              grants.push({
+                actionId: assignment.actionId,
+                targetSessionName: truncateUtf8(header.name || header.id, 512, '…'),
+                grant,
+              });
+          }
+        }
+        const lanes = await taskLanes(assignment);
+        const items = await admission.runMany(lanes, async (lease) => {
+          const pendingRequests = await taskRequests(assignment, lease, lanes);
+          if (!pendingRequests.length) return [];
+          const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
+          return pendingRequests.map((interaction) => ({
+            actionId: assignment.actionId,
+            delegationId: assignment.delegationId,
+            targetSessionName: truncateUtf8(header.name || assignment.targetSessionId, 512, '…'),
+            interaction,
+          }));
+        });
         for (const item of items) {
           const key = JSON.stringify([item.interaction.sessionId, item.interaction.interactionId]);
           if (seen.has(key)) continue;
           if (requests.length === WORKHUB_INBOX_MAX_ITEMS)
-            return { ok: true, result: { requests, truncated: true } };
+            return { ok: true, result: { requests, grants, truncated: true } };
           seen.add(key);
           requests.push(item);
         }
       }
-      return { ok: true, result: { requests, truncated: false } };
+      return { ok: true, result: { requests, grants, truncated } };
     },
     'workhub.interactions.answer': async (input) => {
       const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
@@ -258,43 +305,100 @@ export function createWorkHubResultRuntime(options: {
         },
       };
       if (!assignment?.returnResults) return notFound;
-      return admission.runMany(
-        [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
-        async (lease) => {
-          const request = (await taskRequests(assignment, lease)).find(
-            (p) =>
-              p.interactionId === input.interactionId &&
-              p.turnId === input.expectedTurnId &&
-              p.runId === input.expectedRunId,
-          );
-          if (!request) return notFound;
+      const lanes = await taskLanes(assignment);
+      return admission.runMany(lanes, async (lease) => {
+        const request = (await taskRequests(assignment, lease, lanes)).find(
+          (p) =>
+            p.interactionId === input.interactionId &&
+            p.turnId === input.expectedTurnId &&
+            p.runId === input.expectedRunId,
+        );
+        if (!request) return notFound;
+        if (
+          request.request.kind !== input.answer.kind ||
+          input.answer.kind === 'permission' ||
+          ((input.answer.kind === 'sandbox_boundary' ||
+            input.answer.kind === 'client_capability') &&
+            input.answer.decision !== 'deny' &&
+            (input.grantScope !== 'task' || !options.taskGrants))
+        )
+          return {
+            ok: false,
+            error: {
+              code: 'operation_conflict',
+              message:
+                'WorkHub cannot grant Session-wide permissions or bypass the original approval authority',
+            },
+          };
+        let taskGrant: import('@maka/core/task-execution-grant').TaskExecutionGrant | undefined;
+        if (input.grantScope === 'task' && options.taskGrants) {
           if (
-            request.request.kind !== input.answer.kind ||
-            input.answer.kind === 'permission' ||
-            ((input.answer.kind === 'sandbox_boundary' ||
-              input.answer.kind === 'client_capability') &&
-              input.answer.decision !== 'deny')
+            (request.request.kind !== 'sandbox_boundary' &&
+              request.request.kind !== 'client_capability') ||
+            (input.answer.kind !== 'sandbox_boundary' &&
+              input.answer.kind !== 'client_capability') ||
+            input.answer.decision !== 'allow'
           )
             return {
               ok: false,
-              error: {
-                code: 'operation_conflict',
-                message:
-                  'WorkHub cannot grant Session-wide permissions or bypass the original approval authority',
-              },
+              error: { code: 'operation_conflict', message: 'Invalid task grant decision' },
             };
-          const outcome = await options.interactions.answerAdmitted(
-            {
-              sessionId: request.sessionId,
-              interactionId: request.interactionId,
-              answer: input.answer,
-            },
+          const disposition = await messages.readMessageExecutionDispositionAdmitted(
+            assignment.targetSessionId,
+            assignment.targetMessageId,
             lease,
           );
-          if (outcome.ok) notify(assignment.targetSessionId);
-          return outcome;
-        },
+          if (disposition.kind !== 'owned_root') return notFound;
+          taskGrant = await options.taskGrants.create(
+            assignment,
+            {
+              sessionId: assignment.targetSessionId,
+              turnId: disposition.turnId,
+              runId: disposition.runId,
+            },
+            {
+              sessionId: request.sessionId,
+              turnId: request.turnId,
+              runId: request.runId,
+              requestId: request.interactionId,
+            },
+            request.request.kind === 'sandbox_boundary'
+              ? { kind: 'sandbox', expansion: request.request.expansion }
+              : { kind: 'client_capability', target: request.request.target },
+          );
+        }
+        const outcome = await options.interactions.answerAdmitted(
+          {
+            sessionId: request.sessionId,
+            interactionId: request.interactionId,
+            answer: input.answer,
+          },
+          lease,
+          taskGrant,
+        );
+        if (outcome.ok) {
+          notify(assignment.targetSessionId);
+          options.taskGrants?.notify();
+        }
+        return outcome;
+      });
+    },
+    'workhub.interactions.revoke': async (input) => {
+      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      if (!assignment?.returnResults || !options.taskGrants)
+        return { ok: false, error: { code: 'not_found', message: 'Task grant unavailable' } };
+      const grant = (
+        await stores.sessionStore.listTaskExecutionGrants(assignment.targetSessionId)
+      ).find(
+        (r) =>
+          r.grant.grantId === input.grantId && r.grant.delegationId === assignment.delegationId,
       );
+      if (!grant)
+        return { ok: false, error: { code: 'not_found', message: 'Task grant unavailable' } };
+      // Do not hold Session admission while waiting for resource settlement.
+      await options.taskGrants.revoke(input.grantId);
+      notify(assignment.targetSessionId);
+      return { ok: true, result: { grantId: input.grantId } };
     },
   };
   const coordinator = new HostWorkHubResultCoordinator({

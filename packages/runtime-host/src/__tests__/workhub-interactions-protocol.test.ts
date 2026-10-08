@@ -47,6 +47,7 @@ test('WorkHub inbox is bounded, closed, pending-only and deduplicated by origina
   assert.throws(() => spec.decodeInput({ hostId: 'injected' }));
   assert.deepEqual(spec.decodeOutput({ requests: [item], truncated: false }), {
     requests: [item],
+    grants: [],
     truncated: false,
   });
   for (const requests of [
@@ -84,6 +85,17 @@ test('WorkHub answers cannot retarget a Session and receipts must match the exac
   assert.deepEqual(decoded, input);
   assert.throws(() => spec.decodeInput({ ...input, sessionId: 'another-task' }));
   assert.throws(() => spec.decodeInput({ ...input, expectedRunId: '' }));
+  assert.throws(() => spec.decodeInput({ ...input, grantScope: 'task' }));
+  const grantAnswer = {
+    ...input,
+    answer: { kind: 'sandbox_boundary', decision: 'allow' },
+    grantScope: 'task',
+  };
+  assert.deepEqual(spec.decodeInput(grantAnswer), grantAnswer);
+  assert.throws(() => spec.decodeInput({ ...grantAnswer, grantScope: 'session' }));
+  assert.throws(() =>
+    spec.decodeInput({ ...grantAnswer, answer: { kind: 'sandbox_boundary', decision: 'deny' } }),
+  );
   const output = spec.decodeOutput({
     ...interaction,
     status: 'answered',

@@ -612,6 +612,10 @@ async function createExecutionStoresForWrite(
         run(() => sessionStore.hasExplicitSandboxBoundaryDenial(identities)),
       settleSandboxBoundaryRequest: (input) =>
         run(() => sessionStore.settleSandboxBoundaryRequest(input)),
+      listTaskExecutionGrants: (rootSessionId) =>
+        run(() => sessionStore.listTaskExecutionGrants(rootSessionId)),
+      closeTaskExecutionGrant: (grantId, reason, closedAt) =>
+        run(() => sessionStore.closeTaskExecutionGrant(grantId, reason, closedAt)),
       setExecutionBoundaryKind: (sessionId, boundaryKind, projection) =>
         run(() => sessionStore.setExecutionBoundaryKind(sessionId, boundaryKind, projection)),
       list: (filter) => run(() => sessionStore.list(filter)),

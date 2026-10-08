@@ -122,6 +122,47 @@ describe('ClientCapabilityInvocationBroker', () => {
     );
     broker.close();
   });
+
+  test('task revocation cancels admitted calls without claiming their effects were rolled back', async () => {
+    const sent: ClientCapabilityHostFrame[] = [];
+    const broker = new ClientCapabilityInvocationBroker<Registration>({
+      senderFor: () => ({
+        send: async (frame) => {
+          sent.push(frame);
+        },
+      }),
+      onRegistrationIdle: () => {},
+    });
+    try {
+      const prepared = broker.prepare(registration, binding, {}, context, undefined, 1000);
+      broker.accept('connection-a', {
+        kind: 'client.capability.accepted',
+        invocationId: prepared.invocationId,
+        admissionEvidence: { kind: 'none' },
+      });
+      await prepared.waitUntilAccepted();
+      const result = prepared.admit();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.ok(sent.some((frame) => frame.kind === 'client.capability.admitted'));
+      prepared.cancel();
+      await prepared.settled;
+      await assert.rejects(
+        result,
+        (error: unknown) => error instanceof Error && error.name === 'ToolOutcomeUnknownError',
+      );
+      assert.deepEqual(
+        sent.map((frame) => frame.kind),
+        [
+          'client.capability.call',
+          'client.capability.admitted',
+          'client.capability.cancel',
+          'client.capability.release',
+        ],
+      );
+    } finally {
+      broker.close();
+    }
+  });
 });
 
 function delay(ms: number): Promise<void> {

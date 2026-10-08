@@ -21,6 +21,12 @@ import { createHash } from 'node:crypto';
 import { isCanonicalReadOnlyPermissionProfile as isReadOnlyProfile } from '@maka/core/permission-profile';
 import { tmpdir } from 'node:os';
 import {
+  decodeTaskExecutionGrant,
+  TASK_GRANT_MAX_ACTIVE_PER_ROOT,
+  type TaskExecutionGrantRecord,
+} from '@maka/core/task-execution-grant';
+import { isDeepStrictEqual } from 'node:util';
+import {
   decodeCanonicalMessage,
   deriveTurnRecords,
   WORKHUB_COORDINATION_SESSION_ID as HUB,
@@ -396,6 +402,8 @@ function remove(s: MemoryState, id: string, group: Set<string>): void {
   rows(s, 'goals').delete(id);
   rows(s, 'boundaries').delete(id);
   rows(s, 'autoBoundaryProfiles').delete(id);
+  for (const [key, record] of rows<TaskExecutionGrantRecord>(s, 'taskGrants'))
+    if (record.grant.rootSessionId === id) rows(s, 'taskGrants').delete(key);
   for (const [k, a] of admissions(s)) if (a.sessionId === id) admissions(s).delete(k);
 }
 function spawn(s: MemoryState, header: SessionHeader, initial?: ExecutionBoundary) {
@@ -1228,6 +1236,29 @@ export function createMemorySessionStore(
             ),
         ),
       ),
+    listTaskExecutionGrants: async (rootSessionId) =>
+      read((s) =>
+        [...rows<TaskExecutionGrantRecord>(s, 'taskGrants').values()].filter(
+          (r) =>
+            !r.closure && (rootSessionId === undefined || r.grant.rootSessionId === rootSessionId),
+        ),
+      ),
+    closeTaskExecutionGrant: async (grantId, reason, closedAt) =>
+      write('session.taskGrantClose', (s) => {
+        if (
+          !/^[A-Za-z0-9_-]{1,128}$/.test(grantId) ||
+          !['revoked', 'expired', 'task_terminal', 'task_cancelled', 'authority_changed'].includes(
+            reason,
+          ) ||
+          !Number.isSafeInteger(closedAt) ||
+          closedAt < 0
+        )
+          throw new Error('Invalid task grant closure');
+        const table = rows<TaskExecutionGrantRecord>(s, 'taskGrants'),
+          record = table.get(grantId);
+        if (record && !record.closure)
+          table.set(grantId, { ...record, closure: { reason, closedAt } });
+      }),
     settleSandboxBoundaryRequest: async (input) =>
       write('session.boundarySettle', (s) => {
         const k = key(input.sessionId, input.requestId),
@@ -1237,6 +1268,57 @@ export function createMemorySessionStore(
         let current = boundary(s, input.sessionId),
           changed = false;
         if (request!.status !== 'pending') return { request: request!, boundary: current, changed };
+        if (input.taskGrant) {
+          const grant = decodeTaskExecutionGrant(input.taskGrant);
+          if (
+            input.decision !== 'allow' ||
+            current.kind !== 'managed' ||
+            grant.sourceRequestId !== request!.requestId ||
+            grant.sourceSessionId !== request!.sessionId ||
+            grant.sourceTurnId !== request!.turnId ||
+            grant.sourceRunId !== request!.runId ||
+            grant.resource.kind !== 'sandbox' ||
+            !isDeepStrictEqual(grant.resource.expansion, request!.expansion) ||
+            grant.expiresAt <= Date.now()
+          )
+            conflict('Invalid task grant');
+          const header = requireHeader(s, input.sessionId).header;
+          if (
+            current.kind !== 'managed' ||
+            current.revision !== grant.sourceBoundaryRevision ||
+            boundary(s, grant.rootSessionId).revision !== grant.rootBoundaryRevision ||
+            assessSandboxBoundaryExpansion(current.profile, request!.expansion, {
+              root: header.cwd,
+              workspaceRoots: [header.cwd],
+              tmpdir: tmpdir(),
+              slashTmp: '/tmp',
+            }).outcome === 'conflict'
+          )
+            conflict('Invalid task grant boundary');
+          const grants = rows<TaskExecutionGrantRecord>(s, 'taskGrants'),
+            prior = grants.get(grant.grantId);
+          if (prior && !isDeepStrictEqual(prior.grant, grant))
+            conflict('Task grant identity conflict');
+          if (
+            !prior &&
+            [...grants.values()].filter(
+              (r) =>
+                !r.closure &&
+                r.grant.rootSessionId === grant.rootSessionId &&
+                r.grant.rootTurnId === grant.rootTurnId,
+            ).length >= TASK_GRANT_MAX_ACTIVE_PER_ROOT
+          )
+            conflict('Task grant capacity exceeded');
+          if (!prior) grants.set(grant.grantId, { grant });
+          const settled = {
+            ...request!,
+            status: 'approved' as const,
+            outcomeReason: 'task_grant',
+            settledAt: Date.now(),
+          };
+          table.set(k, settled);
+          return { request: settled, boundary: current, changed: false };
+        }
         let settled: SandboxBoundaryRequest;
         if (input.decision === 'deny')
           settled = {

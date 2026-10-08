@@ -203,6 +203,7 @@ interface LiveShellRunBase {
   finished: CompletionLatch<ShellRunRecord>;
   onCompletion?: (outcome: { successful: boolean }) => void;
   completionNotified: boolean;
+  releaseAuthority?: () => void;
 }
 
 interface ShellRunSlotReservation {
@@ -714,6 +715,7 @@ export class ShellRunProcessManager
     forwardLive: boolean,
     onLiveAdmission?: (live: LiveShellRun) => void,
   ): Promise<LiveShellRun> {
+    input.authoritySignal?.throwIfAborted();
     const sessionEpoch = this.sessionTerminationEpoch(input.sessionId);
     this.assertStartAllowed(input.sessionId, sessionEpoch);
     if (mode === 'pty' && (input.argv || input.fdInputs)) {
@@ -819,6 +821,7 @@ export class ShellRunProcessManager
         emitOutput: input.emitOutput,
       };
       this.live.set(shellRunId, live);
+      this.bindAuthority(input, live);
       for (const callback of pending) callback(live);
       driver.writeInputs();
       await racePromiseWithAbort(driver.ready, input.abortSignal);
@@ -926,6 +929,7 @@ export class ShellRunProcessManager
     };
     this.live.set(shellRunId, live);
     try {
+      this.bindAuthority(input, live);
       this.armTimeout(live);
       for (const callback of pending) callback(live);
       this.assertLiveStartupAllowed(live, sessionEpoch, input.abortSignal);
@@ -1330,6 +1334,7 @@ export class ShellRunProcessManager
   private notifyCompletionOwner(live: LiveShellRun, successful: boolean): void {
     if (live.completionNotified) return;
     live.completionNotified = true;
+    live.releaseAuthority?.();
     try {
       live.onCompletion?.({ successful });
     } catch {
@@ -1548,6 +1553,19 @@ export class ShellRunProcessManager
     this.requestForcedTermination(live, cause);
     await live.startupSettled.join();
     await live.finished.join();
+  }
+
+  private bindAuthority(input: ShellRunBashInput, live: LiveShellRun): void {
+    const signal = input.authoritySignal;
+    if (!signal) return;
+    const unregister = input.registerAuthorityCleanup?.(() => this.terminateLive(live, 'cancel'));
+    const cancel = () => this.requestForcedTermination(live, 'cancel');
+    signal.addEventListener('abort', cancel, { once: true });
+    live.releaseAuthority = () => {
+      signal.removeEventListener('abort', cancel);
+      unregister?.();
+    };
+    if (signal.aborted) cancel();
   }
 
   private async terminateLives(lives: LiveShellRun[], cause: LifecycleCause): Promise<void> {

@@ -63,6 +63,59 @@ after(async () => {
 });
 
 describe('ShellRunProcessManager', () => {
+  test('task grant revocation drains its real background resource without terminating another task', async () => {
+    const store = sqliteShellRunStore(await workspace());
+    const manager = createManager(store);
+    const authority = new AbortController(),
+      invocation = new AbortController();
+    const cleanups = new Set<() => void | Promise<void>>();
+    const cwd = await workspace();
+    try {
+      await manager.runBackgroundBash({
+        ...shellInput({
+          cwd,
+          command: 'task-owned process',
+          argv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+          abortSignal: invocation.signal,
+        }),
+        authoritySignal: authority.signal,
+        registerAuthorityCleanup: (cleanup) => {
+          cleanups.add(cleanup);
+          return () => {
+            cleanups.delete(cleanup);
+          };
+        },
+      });
+      await manager.runBackgroundBash(
+        shellInput({
+          cwd,
+          command: 'independent process',
+          argv: [process.execPath, '-e', 'setInterval(() => {}, 1000)'],
+        }),
+      );
+      invocation.abort();
+      assert.equal(manager.liveCount(), 2, 'foreground lifetime does not own background resources');
+      authority.abort();
+      await Promise.all([...cleanups].map((cleanup) => cleanup()));
+      assert.equal((await store.readShellRun('session-1', 'shell-run-1')).status, 'cancelled');
+      assert.equal((await store.readShellRun('session-1', 'shell-run-2')).status, 'running');
+      assert.equal(cleanups.size, 0);
+      assert.equal(manager.liveCount(), 1);
+      await assert.rejects(
+        manager.runBackgroundBash({
+          ...shellInput({
+            cwd,
+            command: 'stale grant',
+            argv: [process.execPath, '-e', 'process.exit(0)'],
+          }),
+          authoritySignal: authority.signal,
+        }),
+      );
+      assert.equal(manager.liveCount(), 1);
+    } finally {
+      await manager.terminateAll();
+    }
+  });
   test('rejects a model Read of a user-owned resource while preserving client inspection', async () => {
     const store = createSqliteShellRunStore(await workspace());
     await store.createShellRun({

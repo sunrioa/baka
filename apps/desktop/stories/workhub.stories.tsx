@@ -96,6 +96,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
         request: { kind: 'client_capability', toolUseId: 'browser', target: { providerId: 'browser-provider', contractId: 'browser-contract', serverId: 'browser-server', toolName: 'navigate', capability: 'browser', scope: { kind: 'browser_origin', origin: 'https://example.com' } } } } },
   ] : [];
   let updateExecution: Parameters<WorkHubServices['observe']>[4];
+  let taskGrants: import('@maka/runtime-host/protocol').WorkHubTaskGrant[] = [];
   let questionPending = question;
   let pendingForm: import('@maka/core/events').FormRequestEvent | undefined;
   let newWorkDefaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'> = {};
@@ -133,7 +134,8 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     readAttachmentBytes: async () => { throw new Error('Not an image'); },
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
-    queryTaskInteractions: async () => ({ requests: taskRequests, truncated: false }),
+    queryTaskInteractions: async () => ({ requests: taskRequests, grants: taskGrants, truncated: false }),
+    revokeTaskGrant: async (_id, input) => {taskGrants = taskGrants.filter((item) => item.grant.grantId !== input.grantId); updateSessions(); return {grantId: input.grantId};},
     answerTaskInteraction: async (id, input) => {
       writes.taskAnswer(id, input);
       const item = taskRequests.find((item) => item.interaction.interactionId === input.interactionId)!;
@@ -148,9 +150,17 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
         settle();
         return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'form_answer', ...answer, committedAt: 1 } };
       }
-      if (input.answer.kind === 'client_capability' && request.kind === 'client_capability' && input.answer.decision === 'deny') {
+      if (input.answer.kind === 'client_capability' && request.kind === 'client_capability') {
+        if (input.answer.decision === 'allow' && input.grantScope === 'task') taskGrants.push({actionId: item.actionId, targetSessionName: item.targetSessionName, grant: {
+          version: 1, grantId: input.interactionId, delegationId: item.delegationId,
+          rootSessionId: item.interaction.sessionId, rootTurnId: item.interaction.turnId, rootRunId: item.interaction.runId,
+          sourceSessionId: item.interaction.sessionId, sourceRequestId: item.interaction.interactionId,
+          sourceTurnId: item.interaction.turnId, sourceRunId: item.interaction.runId,
+          rootBoundaryRevision: 0, sourceBoundaryRevision: 0, grantedAt: Date.now(), expiresAt: Date.now() + 3600000,
+          resource: {kind: 'client_capability', target: request.target},
+        }});
         settle();
-        return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'client_capability_decision', decision: 'deny', committedAt: 1 } };
+        return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'client_capability_decision', decision: input.answer.decision, committedAt: 1 } };
       }
       throw new Error('No supported original request answer');
     },
@@ -299,18 +309,21 @@ export const TaskInbox: Story = {
     }));
     await waitFor(() => expect(within(inbox).queryByRole('button', { name: '支付回调幂等性 · 问题' })).toBeNull());
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 权限' }));
-    expect(within(inbox).getByText(/持久扩展整个 Session/)).toBeVisible();
-    expect(within(inbox).queryByRole('button', { name: /允许/ })).toBeNull();
+    expect(within(inbox).getByText(/Session 默认权限不变/)).toBeVisible();
+    expect(within(inbox).getByRole('button', { name: '允许此任务' })).toBeEnabled();
     expect(within(inbox).getByRole('button', { name: '拒绝请求' })).toBeEnabled();
     const composerBounds = editor.getBoundingClientRect();
     const inboxBounds = inbox.getBoundingClientRect();
     expect(inboxBounds.bottom).toBeLessThanOrEqual(composerBounds.top);
     expect(composerBounds.bottom).toBeLessThanOrEqual(window.innerHeight);
-    await userEvent.click(within(inbox).getByRole('button', { name: '拒绝请求' }));
+    await userEvent.click(within(inbox).getByRole('button', { name: '允许此任务' }));
     await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
       actionId: 'task-capability-action', interactionId: 'task-capability', expectedTurnId: 'form-turn', expectedRunId: 'form-run',
-      answer: { kind: 'client_capability', decision: 'deny' },
+      answer: { kind: 'client_capability', decision: 'allow' }, grantScope: 'task',
     }));
+    await waitFor(() => expect(within(inbox).getByText('有效任务授权')).toBeVisible());
+    await userEvent.click(within(inbox).getByRole('button', {name: '撤销授权'}));
+    await waitFor(() => expect(within(inbox).queryByText('有效任务授权')).toBeNull());
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 表单' }));
     await userEvent.type(within(inbox).getByRole('textbox'), '发布说明已确认');
     await userEvent.click(within(inbox).getByRole('button', { name: '提交' }));

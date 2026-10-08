@@ -18,6 +18,7 @@
  */
 
 import { isDeepStrictEqual } from 'node:util';
+import type { TaskExecutionGrant } from '@maka/core/task-execution-grant';
 import {
   clientCapabilityScopeIdentity,
   decodeClientCapabilitySessionGrant,
@@ -137,6 +138,7 @@ export interface InteractionStoreWriter extends InteractionStoreReader {
       { kind: 'client_capability_decision' | 'closure' }
     >,
     grant?: ClientCapabilitySessionGrant,
+    taskGrant?: TaskExecutionGrant,
   ): Promise<CommitInteractionOutcomeResult>;
 }
 
