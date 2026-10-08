@@ -40,7 +40,7 @@ import { getConversationCopy } from './conversation-copy.js';
 export function UserQuestionPrompt(props: {
   request: UserQuestionRequestEvent;
   onRespond(response: UserQuestionResponse): void | Promise<void>;
-  onStop(): void | Promise<void>;
+  onStop?(): void | Promise<void>;
   stopPending?: boolean;
 }) {
   const copy = getConversationCopy(useUiLocale()).questions;
@@ -180,12 +180,12 @@ export function UserQuestionPrompt(props: {
           </div>
         }
         footerActions={<>
-          <Button
+          {props.onStop && <Button
             variant="ghost"
             isDisabled={props.stopPending}
-            onClick={() => void props.onStop()}
+            onClick={() => void props.onStop?.()}
             label={props.stopPending ? copy.stopping : copy.stop}
-          />
+          />}
           {questionIndex > 0 ? (
             <Button
               variant="ghost"

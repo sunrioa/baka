@@ -129,6 +129,7 @@ apps/desktop/src/renderer/features/workhub/ui/workhub-dock.tsx
 apps/desktop/src/renderer/features/workhub/ui/workhub-progress-card.tsx
 apps/desktop/src/renderer/features/workhub/ui/workhub-root.tsx
 apps/desktop/src/renderer/features/workhub/ui/workhub-surface-switch.tsx
+apps/desktop/src/renderer/features/workhub/ui/workhub-task-inbox.tsx
 apps/desktop/src/renderer/features/workhub/ui/workhub-work-identity.tsx
 apps/desktop/src/renderer/maka-tokens.css
 apps/desktop/src/renderer/onboarding-hero.tsx

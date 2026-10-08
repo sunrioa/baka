@@ -34,7 +34,7 @@ function fixture() {
     stopped = false;
   let requests = true;
   let status = 'waiting_for_user';
-  let disposition: 'owned_root' | 'cancelled' = 'owned_root';
+  let disposition: 'owned_root' | 'cancelled' | 'shared_turn' | 'pending' = 'owned_root';
   let resultReads = 0;
   let rejectRelay: ((reason: Error) => void) | undefined;
   const closedRelays: unknown[] = [];
@@ -56,7 +56,7 @@ function fixture() {
     sessionId: 'target',
     turnId: 'target-turn',
     runId: 'target-run',
-    request: { kind: 'question', questions },
+    request: { kind: 'question', toolUseId: 'question-tool', questions },
     createdAt: 1,
   };
   const admission = new SessionAdmissionGate();
@@ -96,9 +96,15 @@ function fixture() {
       readMessageExecutionDispositionAdmitted: async () =>
         disposition === 'cancelled'
           ? { kind: 'cancelled' }
-          : { kind: 'owned_root', turnId: 'target-turn', runId: 'target-run' },
+          : { kind: disposition, turnId: 'target-turn', runId: 'target-run' },
     } as unknown as Options['messages'],
     interactions: {
+      answerAdmitted: async (input, lease) =>
+        admission.runAdmitted('target', lease, async () => {
+          forwarded.push(input);
+          requests = false;
+          return { ok: true, result: { status: 'answered' } };
+        }),
       closeRelayedQuestion: async (turnId, toolCallId) => {
         closedRelays.push({ turnId, toolCallId });
         rejectRelay?.(new Error('Relay closed after original question settled'));
@@ -135,6 +141,7 @@ function fixture() {
     runtime.tool.impl(input as never, ctx);
   return {
     call,
+    handlers: runtime.handlers,
     context,
     questions,
     forwarded,
@@ -270,6 +277,17 @@ test('WorkHubResult cannot relay a permission decision', async () => {
   assert.equal(f.forwarded.length, 0);
 });
 
+test('WorkHubResult ignores a pending question from an older Run of the same Turn', async () => {
+  const f = fixture();
+  f.record.runId = 'previous-run';
+  assert.deepEqual(await f.call({ actionId: 'action' }), {
+    status: 'pending',
+    targetSessionId: 'target',
+    message:
+      'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
+  });
+});
+
 test('a stopped WorkHub turn cannot forward an answer after cancellation', async () => {
   const f = fixture();
   const abort = new AbortController();
@@ -356,4 +374,97 @@ test('answering the original task closes the copied WorkHub question', async () 
   });
   assert.deepEqual(f.closedRelays, [{ turnId: 'feedback-turn', toolCallId: 'relay' }]);
   assert.equal(f.forwarded.length, 0);
+});
+const inboxContext = {} as import('../server/operation-dispatcher.js').ConnectionContext;
+const inboxAnswer = {
+  actionId: 'action',
+  interactionId: 'question',
+  expectedTurnId: 'target-turn',
+  expectedRunId: 'target-run',
+  answer: { kind: 'question' as const, answers: ['Monday'] },
+};
+test('WorkHub inbox derives and answers the original request without a coordinator question', async () => {
+  const f = fixture();
+  const queried = await f.handlers['workhub.interactions.query']({}, inboxContext);
+  assert.ok(queried.ok);
+  assert.equal(queried.result.requests.length, 1);
+  assert.equal(queried.result.requests[0]!.interaction.sessionId, 'target');
+  assert.deepEqual(queried.result.requests[0]!.interaction.request, f.record.request);
+  assert.ok((await f.handlers['workhub.interactions.answer'](inboxAnswer, inboxContext)).ok);
+  assert.deepEqual(f.forwarded, [
+    { sessionId: 'target', interactionId: 'question', answer: inboxAnswer.answer },
+  ]);
+  assert.equal(f.closedRelays.length, 0);
+  assert.equal(
+    (await f.handlers['workhub.interactions.answer'](inboxAnswer, inboxContext)).ok,
+    false,
+  );
+  assert.equal(f.forwarded.length, 1);
+});
+test('WorkHub inbox rejects old Runs, unrelated Turns, unowned messages, Stop and replacement', async () => {
+  for (const retire of [
+    (f: ReturnType<typeof fixture>) => {
+      f.record.runId = 'old-run';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.record.turnId = 'manual-turn';
+    },
+    (f: ReturnType<typeof fixture>) => f.setDisposition('shared_turn'),
+    (f: ReturnType<typeof fixture>) => f.setDisposition('pending'),
+    (f: ReturnType<typeof fixture>) => f.setDisposition('cancelled'),
+    (f: ReturnType<typeof fixture>) => f.setActive(false),
+    (f: ReturnType<typeof fixture>) => f.setStopped(),
+    (f: ReturnType<typeof fixture>) => f.setCompleted(),
+  ]) {
+    const f = fixture();
+    retire(f);
+    const queried = await f.handlers['workhub.interactions.query']({}, inboxContext);
+    assert.ok(queried.ok);
+    assert.deepEqual(queried.result.requests, []);
+    assert.equal(
+      (await f.handlers['workhub.interactions.answer'](inboxAnswer, inboxContext)).ok,
+      false,
+    );
+    assert.equal(f.forwarded.length, 0);
+  }
+});
+test('WorkHub inbox rechecks the exact execution and kind instead of trusting a stale card', async () => {
+  const f = fixture();
+  assert.ok((await f.handlers['workhub.interactions.query']({}, inboxContext)).ok);
+  for (const patch of [
+    { expectedRunId: 'other-host-run' },
+    { expectedTurnId: 'old-turn' },
+    { interactionId: 'another-question' },
+    { answer: { kind: 'sandbox_boundary' as const, decision: 'deny' as const } },
+  ])
+    assert.equal(
+      (await f.handlers['workhub.interactions.answer']({ ...inboxAnswer, ...patch }, inboxContext))
+        .ok,
+      false,
+    );
+  f.setStopped();
+  assert.equal(
+    (await f.handlers['workhub.interactions.answer'](inboxAnswer, inboxContext)).ok,
+    false,
+  );
+  assert.equal(f.forwarded.length, 0);
+});
+test('WorkHub inbox cannot widen Session grants or replace the permission reviewer', async () => {
+  for (const kind of ['sandbox_boundary', 'client_capability', 'permission'] as const) {
+    const f = fixture();
+    f.record.request.kind = kind;
+    const answer: import('../protocol/interaction.js').InteractionAnswer =
+      kind === 'permission'
+        ? { kind, decision: 'allow', rememberForTurn: false }
+        : kind === 'sandbox_boundary'
+          ? { kind, decision: 'allow' }
+          : { kind, decision: 'allow' };
+    const outcome = await f.handlers['workhub.interactions.answer'](
+      { ...inboxAnswer, answer },
+      inboxContext,
+    );
+    assert.equal(outcome.ok, false);
+    if (!outcome.ok) assert.equal(outcome.error.code, 'operation_conflict');
+    assert.equal(f.forwarded.length, 0);
+  }
 });

@@ -61,6 +61,11 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
           if (channel === 'runtime-host:awaitReady') return { ready: true };
           assert.ok(modes.has(scope.hostId));
           calls.push(`${channel}:${scope.hostId}`);
+          if (channel === 'workhub:queryInteractions') return { requests: [{
+            actionId: 'action', delegationId: 'delegation', targetSessionName: 'Task',
+            interaction: { sessionId: 'original-task', interactionId: 'question', turnId: 'turn', runId: 'run' },
+          }], truncated: false };
+          if (channel === 'workhub:answerInteraction') return { sessionId: 'original-task', interactionId: 'question', turnId: 'turn', runId: 'run', status: 'answered' };
           if (channel === 'workhub:getExecutionConcurrency') return 3;
           if (channel === 'workhub:setExecutionConcurrency') return mode;
           if (channel === 'workhub:setNewWorkPermissionMode') modes.set(scope.hostId, mode as 'ask' | 'bypass');
@@ -76,11 +81,23 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   assert.equal(await bridge.workHub.getNewWorkPermissionMode(session('host-a')), 'ask');
   assert.equal(await bridge.workHub.getExecutionConcurrency(session('host-b')), 3);
   assert.equal(await bridge.workHub.setExecutionConcurrency(session('host-b'), 1), 1);
+  const inbox = await bridge.workHub.queryInteractions(session('host-b'));
+  assert.equal(inbox.requests[0]!.interaction.sessionId, session('host-b', 'original-task'));
+  const answered = await bridge.workHub.answerInteraction(session('host-b'), {
+    actionId: 'action', interactionId: 'question', expectedTurnId: 'turn', expectedRunId: 'run',
+    answer: { kind: 'question', answers: ['Yes'] },
+  });
+  assert.equal(answered.sessionId, session('host-b', 'original-task'));
   const before = calls.length;
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('host-b', 'ordinary-session'), 'bypass'), /Invalid WorkHub Coordination Session identity/u);
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('unknown-host'), 'bypass'));
   await assert.rejects(bridge.workHub.setExecutionConcurrency(session('host-b', 'ordinary-session'), 1));
   await assert.rejects(bridge.workHub.getExecutionConcurrency(session('unknown-host')));
+  await assert.rejects(bridge.workHub.queryInteractions(session('host-b', 'ordinary-session')));
+  await assert.rejects(bridge.workHub.answerInteraction(session('unknown-host'), {
+    actionId: 'action', interactionId: 'question', expectedTurnId: 'turn', expectedRunId: 'run',
+    answer: { kind: 'question', answers: ['Yes'] },
+  }));
   assert.equal(calls.length, before, 'invalid identities never reach the mutation IPC');
   let notifications = 0;
   const unsubscribe = bridge.workHub.subscribeNewWorkPermissionMode(session('host-b'), () => { notifications++; });

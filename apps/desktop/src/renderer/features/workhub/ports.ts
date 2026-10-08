@@ -60,6 +60,8 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   readAttachmentBytes(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
   prepareAttachments(sessionId: string, items: Array<{ approvalId: string; name: string; mimeType?: string } | { file: File }>): Promise<AttachmentRef[]>;
   listActiveInteractions(sessionId: string): Promise<import('@maka/core/events').ActiveInteractionRequestEvent[]>;
+  queryTaskInteractions(sessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
+  answerTaskInteraction(sessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
   subscribeActiveInteractions(handler: (event: { sessionId: string; interactions: import('@maka/core/events').ActiveInteractionRequestEvent[] }) => void): () => void;
   respondToUserForm(sessionId: string, response: import('@maka/core/interaction').InteractionFormResponse): Promise<void>;
   respondToUserQuestion(sessionId: string, response: import('@maka/core/user-question').UserQuestionResponse): Promise<void>;

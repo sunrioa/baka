@@ -2993,7 +2993,7 @@ export async function createExecutionRuntimeHostComposition(
       }),
       createRuntimeHostDomainModule({
         id: 'workhub',
-        handlers: [workHubCoordination.handlers],
+        handlers: [workHubCoordination.handlers, workHubResults.handlers],
       }),
       createRuntimeHostDomainModule({
         id: 'configuration',

@@ -49,6 +49,7 @@ import {
   WorkHubModelConfigurationRequiredError,
 } from '../../../application/contracts/workhub-workspace/coordination-lifecycle.js';
 import { useWorkHubServices } from '../services.js';
+import { useWorkHubTaskInbox } from './use-workhub-task-inbox.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
 
@@ -77,6 +78,7 @@ export function useWorkHubController(
   const localeRef = useRef(locale);
   localeRef.current = locale;
   const [sessionId, setSessionId] = useState<string>();
+  const taskInbox = useWorkHubTaskInbox(services, sessionId);
   const [sessions, setSessions] = useState<Awaited<ReturnType<WorkHubServices['listSessions']>>>(
     [],
   );
@@ -556,6 +558,7 @@ export function useWorkHubController(
         observationPhase = phase;
         handle?.observationChanged(phase);
         if (phase === 'ready') {
+          void taskInbox.refresh();
           refreshInteractions.current();
           void recoverSend();
           void resolvePendingQueued();
@@ -845,6 +848,7 @@ export function useWorkHubController(
     : undefined;
   return {
     services,
+    taskInbox,
     sessionId,
     session,
     sessions,
