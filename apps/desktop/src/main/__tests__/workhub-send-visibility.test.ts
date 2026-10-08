@@ -131,6 +131,8 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
       return { resolutions: executionResolutions };
     },
     listActiveInteractions: async () => [],
+    queryTaskInteractions: async () => ({ requests: [], truncated: false }),
+    answerTaskInteraction: async () => { throw new Error('No task request in this fixture'); },
     subscribeActiveInteractions: () => () => {},
     respondToUserForm: async () => {},
     respondToUserQuestion: async () => {},
@@ -984,4 +986,94 @@ test('Stop retires only Host-confirmed queued messages even without retraction e
     assert.equal(h.controller.stopPending, false);
     cleanupFakeDom();
   }
+});
+test('WorkHub task inbox keeps coordinator input independent and answers the original request', async () => {
+  const item: import('@maka/runtime-host/protocol').WorkHubPendingInteraction = {
+    actionId: 'action', delegationId: 'delegation', targetSessionName: 'Release',
+    interaction: { schemaVersion: 1, interactionId: 'question', sessionId: 'original-task',
+      turnId: 'task-turn', runId: 'task-run', revision: 1, status: 'pending', outcome: null,
+      request: { kind: 'question', toolUseId: 'ask', questions: [{ question: 'When?', options: [{ label: 'Monday' }] }] } },
+  };
+  let requests = [item];
+  const answers: unknown[] = [];
+  const h = await mountController(false, {
+    queryTaskInteractions: async () => ({ requests, truncated: false }),
+    answerTaskInteraction: async (owner, input) => {
+      answers.push([owner, input]);
+      requests = [];
+      return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'question_answer', answers: ['Monday'], committedAt: 1 } };
+    },
+  });
+  assert.equal(h.controller.taskInbox.requests.length, 1);
+  assert.equal(h.controller.activeInteraction, undefined, 'worker input never becomes a coordinator modal');
+  let sent!: Promise<boolean>;
+  await act(async () => { sent = h.controller.send('Also inspect the docs', []); });
+  assert.equal(h.requests[0]!.text, 'Also inspect the docs');
+  await act(async () => { h.admission.resolve({ turnId: h.requests[0]!.turnId }); await sent; });
+  await act(async () => { await h.controller.taskInbox.respond(item, { kind: 'question', answers: ['Monday'] }); });
+  assert.deepEqual(answers, [[h.sessionId, {
+    actionId: 'action', interactionId: 'question', expectedTurnId: 'task-turn', expectedRunId: 'task-run',
+    answer: { kind: 'question', answers: ['Monday'] },
+  }]]);
+  assert.equal(h.controller.taskInbox.requests.length, 0);
+  assert.equal(h.requests.length, 1, 'no blocking relay prompt is added');
+});
+
+test('WorkHub task inbox drops old Host reads and rebuilds a lost answer acknowledgement', async () => {
+  const first = JSON.stringify(['host-1', 'workhub-coordination']);
+  const second = JSON.stringify(['host-2', 'workhub-coordination']);
+  let selected = first;
+  let hostChange!: Parameters<WorkHubServices['subscribeHosts']>[0];
+  const oldRead = deferred<import('@maka/runtime-host/protocol').WorkHubInteractionsQueryResult>();
+  const pending: import('@maka/runtime-host/protocol').WorkHubPendingInteraction = {
+    actionId: 'action', delegationId: 'delegation', targetSessionName: 'Task',
+    interaction: { schemaVersion: 1, interactionId: 'question', sessionId: 'host-2-task', turnId: 'turn', runId: 'run',
+      revision: 1, status: 'pending', outcome: null,
+      request: { kind: 'question', toolUseId: 'ask', questions: [{ question: 'Go?', options: [{ label: 'Yes' }] }] } },
+  };
+  let current = [pending];
+  let calls = 0;
+  const h = await mountController(false, {
+    resolve: async () => selected,
+    subscribeHosts: (listener) => { hostChange = listener; return () => {}; },
+    queryTaskInteractions: async (owner) => owner === first ? oldRead.promise : { requests: current, truncated: false },
+    answerTaskInteraction: async () => { calls++; current = []; throw new Error('Acknowledgement lost'); },
+  });
+  selected = second;
+  await act(async () => { hostChange({ hostId: 'host-2', isDefault: true, readiness: 'ready' }); });
+  assert.equal(h.controller.taskInbox.requests[0], pending);
+  await act(async () => { oldRead.resolve({ requests: [{ ...pending, targetSessionName: 'Wrong Host' }], truncated: false }); });
+  assert.equal(h.controller.taskInbox.requests[0]!.targetSessionName, 'Task');
+  await act(async () => { await assert.rejects(h.controller.taskInbox.respond(pending, { kind: 'question', answers: ['Yes'] }), /Acknowledgement lost/); });
+  assert.equal(calls, 1);
+  assert.deepEqual(h.controller.taskInbox.requests, [], 'canonical completion wins over a lost receipt');
+  await assert.rejects(h.controller.taskInbox.respond(pending, { kind: 'question', answers: ['Yes'] }), /unavailable/);
+  assert.equal(calls, 1);
+});
+
+test('WorkHub task inbox coalesces catalog bursts and ignores the invalidated read', async () => {
+  const firstRead = deferred<import('@maka/runtime-host/protocol').WorkHubInteractionsQueryResult>();
+  const listeners = new Set<() => void>();
+  let calls = 0;
+  let active = 0;
+  let maximum = 0;
+  const h = await mountController(false, {
+    subscribeSessions: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    queryTaskInteractions: async () => {
+      calls++;
+      maximum = Math.max(maximum, ++active);
+      try {
+        return calls === 1 ? await firstRead.promise : { requests: [], truncated: true };
+      } finally { active--; }
+    },
+  });
+  assert.equal(calls, 1);
+  await act(async () => {
+    for (let i = 0; i < 10; i++) for (const listener of listeners) listener();
+  });
+  assert.equal(calls, 1, 'events do not fan out parallel Host reads');
+  await act(async () => { firstRead.resolve({ requests: [], truncated: false }); });
+  assert.equal(calls, 2, 'one fresh read drains all invalidations');
+  assert.equal(maximum, 1);
+  assert.equal(h.controller.taskInbox.truncated, true, 'only the canonical post-burst result is rendered');
 });

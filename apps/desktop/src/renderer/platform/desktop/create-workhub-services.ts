@@ -99,6 +99,8 @@ export function createDesktopWorkHubServices(
       return result.attachments;
     },
     listActiveInteractions: (sessionId) => bridge.sessions.listActiveInteractions(sessionId),
+    queryTaskInteractions: (sessionId) => bridge.workHub.queryInteractions(sessionId),
+    answerTaskInteraction: (sessionId, input) => bridge.workHub.answerInteraction(sessionId, input),
     subscribeActiveInteractions: (handler) => bridge.sessions.subscribeActiveInteractions(handler),
     respondToUserForm: (sessionId, response) => bridge.sessions.respondToUserForm(sessionId, response),
     respondToUserQuestion: (sessionId, response) => bridge.sessions.respondToUserQuestion(sessionId, response),

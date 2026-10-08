@@ -900,7 +900,25 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     return observed(
       (async () => {
         this.#throwIfPoisoned();
-        return this.#sessionAdmission.run(input.sessionId, async (admission) => {
+        return this.#sessionAdmission.run(input.sessionId, (admission) =>
+          this.answerAdmitted(input, admission),
+        );
+      })().catch((error: unknown) => {
+        if (isExpectedRuntimeError(error)) throw error;
+        throw this.#poison(error);
+      }),
+    );
+  }
+
+  /** Native WorkHub controls revalidate task ownership while holding both lanes. */
+  answerAdmitted(
+    input: InteractionAnswerInput,
+    lease: SessionAdmissionLease,
+  ): ReturnType<InteractionOperationHandlerMap['interaction.answer']> {
+    return observed(
+      this.#sessionAdmission
+        .runAdmitted(input.sessionId, lease, async () => {
+          const admission = lease;
           this.#throwIfPoisoned();
           if ((await this.#sessions.probeSessionRemoval(input.sessionId)).kind !== 'present') {
             return interactionNotFound();
@@ -919,11 +937,11 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
           return sandboxBoundary
             ? this.#answerSandboxBoundary(sandboxBoundary, input.answer, admission)
             : interactionNotFound();
-        });
-      })().catch((error: unknown) => {
-        if (isExpectedRuntimeError(error)) throw error;
-        throw this.#poison(error);
-      }),
+        })
+        .catch((error: unknown) => {
+          if (isExpectedRuntimeError(error)) throw error;
+          throw this.#poison(error);
+        }),
     );
   }
 

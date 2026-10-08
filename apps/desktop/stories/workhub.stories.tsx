@@ -30,7 +30,7 @@ import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn() };
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -47,7 +47,7 @@ const repairChoices = [
   providerType: 'openai' as const, providerLabel: connectionName, model, label,
   contextWindow: 100_000, isDefault: index === 0, thinkingLevels: [] as ThinkingLevel[],
 }));
-function makeServices(failFirst: boolean, withHistory: boolean | 'usage', coloredHistory: boolean, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false): WorkHubServices {
+function makeServices(failFirst: boolean, withHistory: boolean | 'usage', coloredHistory: boolean, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false): WorkHubServices {
   let failures = failFirst ? 1 : 0;
   let session: SessionSummary & { revision: number } = {
     id: sessionId, name: 'WorkHub', revision: 1, isFlagged: false, isArchived: false, labels: [], hasUnread: false,
@@ -79,9 +79,22 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   };
   if (question) session = { ...session, runningTurnIds: ['question-turn'] };
   if (question) messages = [{ type: 'user', id: 'question-user', turnId: 'question-turn', ts: 1, text: '帮我安排发布。' }, { type: 'turn_state', id: 'question-running', turnId: 'question-turn', ts: 2, status: 'running' }];
-  let interactionUpdate: Parameters<WorkHubServices['subscribeActiveInteractions']>[0] | undefined;
+  const interactionListeners = new Set<Parameters<WorkHubServices['subscribeActiveInteractions']>[0]>();
+  const interactionUpdate = (event: Parameters<Parameters<WorkHubServices['subscribeActiveInteractions']>[0]>[0]) => { for (const listener of interactionListeners) listener(event); };
   let updateTranscript: ((snapshot: WorkHubTranscriptSnapshot) => void) | undefined;
-  let updateSessions: (() => void) | undefined;
+  const sessionListeners = new Set<() => void>();
+  const updateSessions = () => { for (const listener of sessionListeners) listener(); };
+  let taskRequests: import('@maka/runtime-host/protocol').WorkHubPendingInteraction[] = taskInbox ? [
+    { actionId: 'task-question-action', delegationId: 'task-question-delegation', targetSessionName: target.name,
+      interaction: { schemaVersion: 1, interactionId: 'task-question', sessionId: targetId, turnId: 'task-turn', runId: 'task-run', revision: 1, status: 'pending', outcome: null,
+        request: { kind: 'question', toolUseId: 'task-ask', questions: questionRequest.questions } } },
+    { actionId: 'task-form-action', delegationId: 'task-form-delegation', targetSessionName: secondTarget.name,
+      interaction: { schemaVersion: 1, interactionId: 'task-form', sessionId: secondTarget.id, turnId: 'form-turn', runId: 'form-run', revision: 1, status: 'pending', outcome: null,
+        request: { kind: 'form', toolUseId: 'task-form-tool', message: '补充发布说明', requester: { name: 'Release task' }, fields: [{ kind: 'string', name: 'notes', label: '发布说明', required: true }] } } },
+    { actionId: 'task-capability-action', delegationId: 'task-capability-delegation', targetSessionName: secondTarget.name,
+      interaction: { schemaVersion: 1, interactionId: 'task-capability', sessionId: secondTarget.id, turnId: 'form-turn', runId: 'form-run', revision: 1, status: 'pending', outcome: null,
+        request: { kind: 'client_capability', toolUseId: 'browser', target: { providerId: 'browser-provider', contractId: 'browser-contract', serverId: 'browser-server', toolName: 'navigate', capability: 'browser', scope: { kind: 'browser_origin', origin: 'https://example.com' } } } } },
+  ] : [];
   let updateExecution: Parameters<WorkHubServices['observe']>[4];
   let questionPending = question;
   let pendingForm: import('@maka/core/events').FormRequestEvent | undefined;
@@ -114,13 +127,34 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     bindBrowserSession: () => {},
     resolve: async () => sessionId, subscribeHosts: () => () => {}, subscribeAvailability: () => () => {},
     getSession: async () => session,
-    listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { updateSessions = handler; return () => { updateSessions = undefined; }; }, modelChoices: async () => repairModel ? repairChoices : choices,
+    listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? repairChoices : choices,
     setDefaultModel: async () => {},
     attachments: { pickFiles: async () => ({ ok: true, files: [{ approvalId: 'file-1', name: 'requirements.txt', size: 12, mimeType: 'text/plain' }] }), previewApproval: async () => ({ ok: false, reason: 'not-image' }) },
     readAttachmentBytes: async () => { throw new Error('Not an image'); },
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
-    subscribeActiveInteractions: (handler) => { interactionUpdate = handler; return () => { interactionUpdate = undefined; }; },
+    queryTaskInteractions: async () => ({ requests: taskRequests, truncated: false }),
+    answerTaskInteraction: async (id, input) => {
+      writes.taskAnswer(id, input);
+      const item = taskRequests.find((item) => item.interaction.interactionId === input.interactionId)!;
+      const request = item.interaction.request;
+      const settle = () => { taskRequests = taskRequests.filter((candidate) => candidate !== item); updateSessions(); };
+      if (input.answer.kind === 'question' && request.kind === 'question') {
+        settle();
+        return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'question_answer', answers: input.answer.answers, committedAt: 1 } };
+      }
+      if (input.answer.kind === 'form' && request.kind === 'form') {
+        const { kind: _kind, ...answer } = input.answer;
+        settle();
+        return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'form_answer', ...answer, committedAt: 1 } };
+      }
+      if (input.answer.kind === 'client_capability' && request.kind === 'client_capability' && input.answer.decision === 'deny') {
+        settle();
+        return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'client_capability_decision', decision: 'deny', committedAt: 1 } };
+      }
+      throw new Error('No supported original request answer');
+    },
+    subscribeActiveInteractions: (handler) => { interactionListeners.add(handler); return () => { interactionListeners.delete(handler); }; },
     respondToUserForm: async (id, response) => {
       writes.form(id, response);
       if (failures-- > 0) throw new Error('Temporary Host failure');
@@ -193,10 +227,10 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
 
   };
 }
-function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean }) {
+function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean }) {
   const [progressHeight, setProgressHeight] = useState(112);
   const [services] = useState(() => {
-    const services = makeServices(failFirst, history, colors, selectTarget, question, progress, repairModel, suggestions);
+    const services = makeServices(failFirst, history, colors, selectTarget, question, progress, repairModel, suggestions, taskInbox);
     // Storybook has no BrowserWindow: honor the production renderer's native
     // height request and use the native progress card's 360px width.
     if (progress) services.presentation.resizeProgress = async (_request, height) => { setProgressHeight(height); };
@@ -233,6 +267,64 @@ export const FullConversationAndWorkIdentity: Story = {
   },
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
+// Real path: delegated task roots wait on questions/forms/grants; WorkHub's
+// native task inbox and normal composer remain in the same production frame.
+export const TaskInbox: Story = {
+  render: () => <Surface taskInbox />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const inbox = await canvas.findByRole('region', { name: '待你处理' });
+    expect(inbox).toHaveAttribute('data-maka-assistant-exclude');
+    const editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.click(editor);
+    await userEvent.type(editor, '再检查文档。');
+    expect(editor).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(writes.answer).toHaveBeenCalledWith(sessionId, expect.objectContaining({ text: '再检查文档。' })));
+    expect(inbox).toBeVisible();
+    await userEvent.click(within(inbox).getByRole('button', { name: '支付回调幂等性 · 问题' }));
+    expect(editor.closest('[hidden]')).toBeNull();
+    expect(within(inbox).queryByRole('button', { name: '停止' })).toBeNull();
+    const questionEditor = inbox.querySelector('[contenteditable="true"]') as HTMLElement;
+    await userEvent.type(questionEditor, '保留这段回答');
+    await userEvent.click(within(inbox).getByRole('button', { name: '重试' }));
+    await waitFor(() => expect(questionEditor).toHaveTextContent('保留这段回答'));
+    await userEvent.clear(questionEditor);
+    await userEvent.click(within(inbox).getByRole('option', { name: '公开测试' }));
+    const confirm = within(inbox).getByRole('button', { name: '提交答案' });
+    await userEvent.click(confirm);
+    await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
+      actionId: 'task-question-action', interactionId: 'task-question', expectedTurnId: 'task-turn', expectedRunId: 'task-run',
+      answer: { kind: 'question', answers: ['公开测试'] },
+    }));
+    await waitFor(() => expect(within(inbox).queryByRole('button', { name: '支付回调幂等性 · 问题' })).toBeNull());
+    await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 权限' }));
+    expect(within(inbox).getByText(/持久扩展整个 Session/)).toBeVisible();
+    expect(within(inbox).queryByRole('button', { name: /允许/ })).toBeNull();
+    expect(within(inbox).getByRole('button', { name: '拒绝请求' })).toBeEnabled();
+    const composerBounds = editor.getBoundingClientRect();
+    const inboxBounds = inbox.getBoundingClientRect();
+    expect(inboxBounds.bottom).toBeLessThanOrEqual(composerBounds.top);
+    expect(composerBounds.bottom).toBeLessThanOrEqual(window.innerHeight);
+    await userEvent.click(within(inbox).getByRole('button', { name: '拒绝请求' }));
+    await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
+      actionId: 'task-capability-action', interactionId: 'task-capability', expectedTurnId: 'form-turn', expectedRunId: 'form-run',
+      answer: { kind: 'client_capability', decision: 'deny' },
+    }));
+    await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 表单' }));
+    await userEvent.type(within(inbox).getByRole('textbox'), '发布说明已确认');
+    await userEvent.click(within(inbox).getByRole('button', { name: '提交' }));
+    await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
+      actionId: 'task-form-action', interactionId: 'task-form', expectedTurnId: 'form-turn', expectedRunId: 'form-run',
+      answer: { kind: 'form', action: 'accept', values: { notes: '发布说明已确认' } },
+    }));
+    await waitFor(() => expect(canvas.queryByRole('region', { name: '待你处理' })).toBeNull());
+    await userEvent.click(editor);
+    await userEvent.type(editor, '还可以继续输入');
+    expect(editor).toHaveFocus();
+    expect(editor).toHaveTextContent('还可以继续输入');
+  },
+};
 // Real path: WorkHub composer usage → the same Workbar used by ordinary sessions.
 export const UsageInspector: Story = {
   render: () => <Surface history="usage" />,

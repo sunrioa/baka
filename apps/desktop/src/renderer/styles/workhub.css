@@ -219,3 +219,34 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
 }
 .workhub-conversation-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 8px 16px; }
 .workhub-conversation-filter > span { overflow-wrap: anywhere; }
+.workHubTaskInbox {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  margin: 8px;
+  padding: 8px;
+  font-size: 13px;
+}
+.workHubTaskInbox header,
+.workHubTaskInboxHeading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.workHubTaskInboxItems {
+  max-height: min(42vh, 360px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.workHubTaskInboxExpand {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.workHubTaskInbox p { margin: 8px; }
+.workHubTaskPermission pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  padding: 8px;
+}

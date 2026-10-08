@@ -33,6 +33,31 @@ See the [current domain language](../workhub-domain-language.md).
 
 ## Context
 
+### baka Step 5A: native task inbox
+
+The Desktop WorkHub inbox is a bounded Host projection of original pending
+Interactions, not a copy of questions into the Coordination Turn. Each item must
+still belong to an active delegation's Message-owned root and current Turn/Run.
+Queued Messages, historical shared Turns, replaced/stopped assignments and later
+unrelated manual work confer no inbox response authority. Responses revalidate
+that identity under both Session admission lanes and settle the original request.
+Coordinator input and unrelated tasks do not wait on a relay model call.
+
+The native inbox is excluded from the WorkHub window-control surface; answering
+it is not a coordinator model tool. Questions and forms use the existing
+Interaction authority. Existing Session-persistent sandbox/client-capability
+grants may be inspected or denied there, but allowed only at the original task.
+Tool permission decisions retain their original reviewer authority. Step 5A
+does not introduce task grants, expiry/revocation, new permission defaults or a
+second database. Those execution-scope/lifecycle contracts are a separate Step
+5B prerequisite, not a UI label or restoration of an old Session snapshot.
+
+Reload/reconnect queries canonical pending facts; late reads/receipts cannot
+retarget a different Host. A lost response never automatically replays an
+approval. The projection returns at most 32 requests and explicitly reports
+truncation; handling them exposes the remaining requests, and original tasks
+remain accessible.
+
 WorkHub is intended to be one persistent conversational place where a user can ask
 an ordinary question, clarify intent, continue existing work, or create new work.
 R2.4 is a deterministic routing and context-continuity baseline that may also serve

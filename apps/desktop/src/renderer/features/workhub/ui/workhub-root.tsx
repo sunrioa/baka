@@ -33,6 +33,7 @@ import { getShellCopy } from '../../../locales/shell-copy.js';
 import { WorkbarEdgeToggle } from '../../../application/contracts/workbar-edge-toggle.js';
 import { useWorkHubHighlightState, WorkHubHighlightContext, WorkHubHueProvider } from './workhub-work-identity.js';
 import { useWorkHubController } from '../controller/use-workhub-controller.js';
+import { WorkHubTaskInbox } from './workhub-task-inbox.js';
 import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.js';
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
@@ -174,7 +175,7 @@ export function WorkHubRoot() {
     if (!composerSurface.current) return;
     const resize = () => {
       surface.current?.style.setProperty('--workhub-composer-height', `${compactHeight()}px`);
-      void services.presentation.setConversationLayout({ expanded: conversationExpanded, compactHeight: compactHeight(), interactionPending: Boolean(controller.activeInteraction) }).catch(controller.report);
+      void services.presentation.setConversationLayout({ expanded: conversationExpanded, compactHeight: compactHeight(), interactionPending: Boolean(controller.activeInteraction) || controller.taskInbox.requests.length > 0 }).catch(controller.report);
       if (progress) {
         const height = Math.ceil(progressHeader.current?.getBoundingClientRect().height ?? 80) + compactHeight() + 2;
         void services.presentation.resizeProgress(presentation.progressRequest!, height).catch(controller.report);
@@ -186,7 +187,7 @@ export function WorkHubRoot() {
     if (progressHeader.current) observer.observe(progressHeader.current);
     resize();
     return () => observer.disconnect();
-  }, [services, floating, conversationExpanded, presentation?.progressRequest, editingProgress, controller.activeInteraction]);
+  }, [services, floating, conversationExpanded, presentation?.progressRequest, editingProgress, controller.activeInteraction, controller.taskInbox.requests.length]);
   const previousInteraction = useRef<string | undefined>(undefined);
   useLayoutEffect(() => {
     const id = controller.activeInteraction?.requestId;
@@ -293,6 +294,7 @@ export function WorkHubRoot() {
                 )}
               </div>
             )}
+            <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
             {controller.activeForm && (
               <FormInteractionPrompt
                 request={controller.activeForm}

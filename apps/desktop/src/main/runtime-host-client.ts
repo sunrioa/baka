@@ -1393,6 +1393,14 @@ export class DesktopRuntimeHostClient {
     return this.request("interaction.query", input);
   }
 
+  queryWorkHubInteractions(): Promise<OperationOutput<"workhub.interactions.query">> {
+    return this.request("workhub.interactions.query", {});
+  }
+
+  answerWorkHubInteraction(input: OperationInput<"workhub.interactions.answer">): Promise<OperationOutput<"workhub.interactions.answer">> {
+    return this.request("workhub.interactions.answer", input);
+  }
+
   testNetworkProxy(
     input: OperationInput<"network-proxy.test">,
   ): Promise<OperationOutput<"network-proxy.test">> {

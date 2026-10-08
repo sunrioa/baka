@@ -50,6 +50,8 @@ type RuntimeHostWorkHubClient = Pick<
   | 'configureWorkHubModel'
   | 'resolveWorkHubCoordinationSession'
   | 'getWorkHubSession'
+  | 'queryWorkHubInteractions'
+  | 'answerWorkHubInteraction'
   | 'queryTurn'
   | 'queryRuntimePolicy'
   | 'updateRuntimePolicy'
@@ -134,6 +136,10 @@ export function registerRuntimeHostWorkHubIpc(
     reconciliationUnavailable: async (attempt) => unknown(attempt),
   });
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
+  handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
+  // Never blindly replay an approval after a lost acknowledgement. The inbox
+  // refreshes canonical pending requests before the user can try again.
+  ipcMain.handle('workhub:answerInteraction', (_event, input) => client.answerWorkHubInteraction(input));
   ipcMain.handle('workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client.hostId));
   ipcMain.handle('workhub:setNewWorkDefaults', (_event, value: unknown) => {
     if (!isWorkHubCreateDefaults(value) || value.permissionMode !== undefined) {

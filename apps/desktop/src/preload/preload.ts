@@ -2191,6 +2191,18 @@ const makaBridge = {
     },
   },
   workHub: {
+    async queryInteractions(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:queryInteractions', scope) as OperationOutput<'workhub.interactions.query'>;
+      return { ...result, requests: result.requests.map((item) => ({
+        ...item, interaction: { ...item.interaction, sessionId: observeRuntimeHostSessionScope(scope, item.interaction.sessionId).sessionId },
+      })) };
+    },
+    async answerInteraction(coordinationSessionId: string, input: OperationInput<'workhub.interactions.answer'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:answerInteraction', scope, input) as OperationOutput<'workhub.interactions.answer'>;
+      return { ...result, sessionId: observeRuntimeHostSessionScope(scope, result.sessionId).sessionId };
+    },
     async getSession(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       return projectSessionSummary(scope, await invokeWhenReady('workhub:getSession', scope));

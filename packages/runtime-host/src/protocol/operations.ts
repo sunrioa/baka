@@ -70,6 +70,7 @@ import { USAGE_PRICING_OPERATION_SPECS } from './usage-pricing.js';
 import { WEB_SEARCH_OPERATION_SPECS } from './web-search.js';
 import { RECALL_OPERATION_SPECS } from './recall.js';
 import { WORKHUB_COORDINATION_OPERATION_SPECS } from './workhub-coordination.js';
+import { WORKHUB_INTERACTION_OPERATION_SPECS } from './workhub-interactions.js';
 
 export type {
   HostDiagnosticsInput,
@@ -243,6 +244,7 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
   RECALL_OPERATION_SPECS,
   CONFIGURATION_OPERATION_SPECS,
   WORKHUB_COORDINATION_OPERATION_SPECS,
+  WORKHUB_INTERACTION_OPERATION_SPECS,
   PLUGIN_PLATFORM_OPERATION_SPECS,
 );
 
@@ -384,6 +386,8 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.coordination.configureModel',
   'workhub.coordination.query',
   'workhub.coordination.resolve',
+  'workhub.interactions.query',
+  'workhub.interactions.answer',
 ] as const satisfies readonly OperationKey[]);
 
 const REMOTE_OWNER_OPERATION_GRANT_SET = new Set<OperationKey>(REMOTE_OWNER_OPERATION_GRANTS);

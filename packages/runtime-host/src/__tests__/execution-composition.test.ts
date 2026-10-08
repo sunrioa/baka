@@ -2276,7 +2276,20 @@ test('WorkHub receives a pending question and then the result after the target r
     const connectionId = await configureFakeDefaultTarget(owner);
     const received: BackendSendInput[] = [];
     const { composition, manager } = await createCapturedExecutionComposition(owner, {
-      onWorkHubResult: (input) => received.push(input),
+      coordinationBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            const notification = input.text.startsWith('Host notification:');
+            if (notification) received.push(input);
+            yield* super.send({
+              ...input,
+              text:
+                notification || input.text === 'A separate user request while the task needs input'
+                  ? 'The independent request was received.'
+                  : FAKE_HOLD_OPEN_PROMPT,
+            });
+          }
+        })(context),
     });
     const context: ConnectionContext = {
       hostEpoch: 'execution-composition-test',
@@ -2326,7 +2339,49 @@ test('WorkHub receives a pending question and then the result after the target r
       assert.match(received[0]!.text, /"status":"waiting_for_user"/u);
       const pending = (await stores.interactionStore.listPending({ sessionId: target }))[0]!;
       assert.ok(received[0]!.text.includes(pending.requestId));
-      const answered = await composition.handlers['interaction.answer'](
+      const inbox = await composition.handlers['workhub.interactions.query']({}, context);
+      assert.ok(inbox.ok, JSON.stringify(inbox));
+      assert.equal(inbox.result.requests.length, 1);
+      assert.equal(inbox.result.requests[0]!.interaction.interactionId, pending.requestId);
+      assert.equal(inbox.result.requests[0]!.interaction.sessionId, target);
+      const answerInput = {
+        actionId: 'question-assignment',
+        interactionId: pending.requestId,
+        expectedTurnId: pending.turnId,
+        expectedRunId: pending.runId,
+        answer: { kind: 'question' as const, answers: ['邀请制', '本周', '是'] },
+      };
+      const stale = await composition.handlers['workhub.interactions.answer'](
+        { ...answerInput, expectedRunId: 'another-host-run' },
+        context,
+      );
+      assert.ok(!stale.ok);
+      assert.equal((await stores.interactionStore.listPending({ sessionId: target })).length, 1);
+      const queuedInput = await composition.handlers['turn.message.submit'](
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          originHostEpoch: context.hostEpoch,
+          messageId: randomUUID(),
+          placement: 'next_turn',
+          content: { text: 'A separate user request while the task needs input' },
+        },
+        context,
+      );
+      assert.ok(queuedInput.ok, JSON.stringify(queuedInput));
+      const answered = await composition.handlers['workhub.interactions.answer'](
+        answerInput,
+        context,
+      );
+      assert.ok(answered.ok, JSON.stringify(answered));
+      assert.equal(
+        (await composition.handlers['workhub.interactions.answer'](answerInput, context)).ok,
+        false,
+      );
+      const remaining = await composition.handlers['workhub.interactions.query']({}, context);
+      assert.ok(remaining.ok);
+      assert.deepEqual(remaining.result.requests, []);
+      /* The same original authority remains compatible with ordinary clients. */
+      const replayed = await composition.handlers['interaction.answer'](
         {
           sessionId: target,
           interactionId: pending.requestId,
@@ -2334,7 +2389,7 @@ test('WorkHub receives a pending question and then the result after the target r
         },
         context,
       );
-      assert.ok(answered.ok, JSON.stringify(answered));
+      assert.ok(replayed.ok, JSON.stringify(replayed));
       await waitFor(async () => received.length === 2, 12000);
       assert.match(received[1]!.text, /"status":"completed"/u);
       assert.equal(
