@@ -123,6 +123,26 @@ test('WorkHub model actions cannot supply user authority or attachment locators'
   assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.coordination.actFromTurn'), true);
 });
 
+test('WorkHub isolated creation carries no caller path and advances the compatibility boundary', () => {
+  const input = {
+    turnId: 'active-turn',
+    actionId: 'isolated-action',
+    proposal: { disposition: 'create_new', title: 'Research' },
+    create: { workspace: { kind: 'isolated' } },
+  };
+  assert.deepEqual(decodeWorkHubCoordinationActFromTurnInput(input), input);
+  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 207);
+  for (const workspace of [
+    { kind: 'isolated', path: '/caller' },
+    { kind: 'isolated', projectId: 'caller' },
+    { kind: 'unknown' },
+  ])
+    assert.throws(
+      () => decodeWorkHubCoordinationActFromTurnInput({ ...input, create: { workspace } }),
+      RuntimeHostProtocolError,
+    );
+});
+
 test('WorkHub new Sessions accept a plugin executor as their creation default', () => {
   const input = {
     turnId: 'active-model-turn',

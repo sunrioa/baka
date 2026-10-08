@@ -749,14 +749,11 @@ const isCurrentWorkHubTarget = (scope: DesktopTargetScope): boolean => {
 const workHubRuntime = createWorkHubRuntime({
   client: (scope) => requireWorkHubTarget(scope).client,
   isCurrent: isCurrentWorkHubTarget,
-  createContext: async (scope) => {
+  createDefaults: async (scope) => {
     const target = requireWorkHubTarget(scope);
     return {
-      workspace: await currentDesktopWorkspaceTarget(target.policy),
-      defaults: {
-        permissionMode: await readWorkHubNewWorkPermissionMode(target.client),
-        ...readWorkHubNewWorkDefaults(target.client.hostId),
-      },
+      permissionMode: await readWorkHubNewWorkPermissionMode(target.client),
+      ...readWorkHubNewWorkDefaults(target.client.hostId),
     };
   },
   changed: emitSessionsChanged,

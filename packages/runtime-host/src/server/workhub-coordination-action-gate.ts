@@ -57,7 +57,9 @@ import type {
 } from './workhub-target-execution-authority.js';
 
 /** User content is read from the active Host Turn before reaching this gate. */
-export interface WorkHubAdmittedAction extends Omit<WorkHubCoordinationActFromTurnInput, 'turnId'> {
+export interface WorkHubAdmittedAction
+  extends Omit<WorkHubCoordinationActFromTurnInput, 'turnId' | 'create'> {
+  readonly create?: { readonly workspace: WorkspaceTarget };
   readonly userText: string;
   readonly attachments?: AttachmentRef[];
   /** Active Coordination Run that owns any repair Form opened before admission. */
@@ -1213,7 +1215,7 @@ function delegationAssignment(
   };
 }
 
-function workHubCreatedSessionId(actionId: string): string {
+export function workHubCreatedSessionId(actionId: string): string {
   return `whs_${hash(`create\0${actionId}`).slice(0, 48)}`;
 }
 

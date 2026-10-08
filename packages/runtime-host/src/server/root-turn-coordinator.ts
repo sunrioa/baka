@@ -21,6 +21,7 @@ import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
 import type { WorkHubActionReceipt } from '@maka/core/workhub-action-result';
 import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import { createHash, randomUUID } from 'node:crypto';
+import { realpath, stat } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import type { BackendStopMode } from '@maka/core/backend-types';
 import {
@@ -2913,6 +2914,21 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
 
     const isWorkHubWorker =
       this.workHubExecutionSlots && (await this.isDirectWorkHubExecution(admission));
+    let workHubWorkspace: string | undefined;
+    let workHubWorkspaceIdentity: string | undefined;
+    let unresolvedWorkHubWorkspace = false;
+    if (isWorkHubWorker) {
+      try {
+        workHubWorkspace = await realpath(session.cwd);
+        const metadata = await stat(workHubWorkspace, { bigint: true });
+        if (metadata.ino !== 0n) workHubWorkspaceIdentity = `${metadata.dev}:${metadata.ino}`;
+      } catch (error) {
+        if (!(error instanceof Error) || !('syscall' in error)) throw error;
+        // Missing/inaccessible cwd is runtime availability, not ledger corruption.
+        // Without a proven directory identity, serialize all direct workers.
+        unresolvedWorkHubWorkspace = true;
+      }
+    }
     const residency = acquireResidency();
     const messageIdentity = {
       sessionId: input.sessionId,
@@ -2975,7 +2991,13 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         );
       }
     }
-    if (isWorkHubWorker) entry.workHubSlot = this.workHubExecutionSlots!.acquire();
+    if (isWorkHubWorker) {
+      entry.workHubSlot = this.workHubExecutionSlots!.acquire(
+        workHubWorkspace,
+        workHubWorkspaceIdentity,
+        unresolvedWorkHubWorkspace,
+      );
+    }
     this.#executions.activate(entry, replacing);
     entry.done = this.sessionAdmission.detach(() => this.drainTurn(input, entry, startSettled));
     void entry.done.catch(() => undefined);

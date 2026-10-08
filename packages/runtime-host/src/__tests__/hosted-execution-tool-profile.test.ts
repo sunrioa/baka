@@ -258,7 +258,12 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   const prompt = hostedExecutionRunProfile('workhub-coordination-v2')?.systemPrompt ?? '';
   assert.match(prompt, /Intent never selects a target/u);
   assert.match(prompt, /call the tasks candidates operation before choosing/u);
-  assert.match(prompt, /only when the user explicitly asks to create new work/u);
+  assert.match(prompt, /clearly independent execution goal/u);
+  assert.match(prompt, /without requiring the user to say create a Session/u);
+  assert.match(prompt, /continuation lookup requires clarification; it never implies create_new/u);
+  assert.match(prompt, /Admit all clear goals before asking about an ambiguous remainder/u);
+  assert.match(prompt, /private task workspace, not the selected project/u);
+  assert.match(prompt, /exact returned projectRef/u);
   assert.match(prompt, /never implies create_new/u);
   assert.match(prompt, /ordinary request to continue work is routing, not a linked resume/u);
 

@@ -20,15 +20,15 @@
 import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
 import type { WorkHubActionResult } from '@maka/core/workhub-action-result';
 import { clientCapabilityEntityId } from '@maka/runtime-host/client-capability-entity-id';
-import type { WorkHubCoordinationProposal, WorkspaceTarget } from '@maka/runtime-host/protocol';
+import type { WorkHubCoordinationProposal, ProjectCatalogProjectDetails } from '@maka/runtime-host/protocol';
 import { desktopSessionKey, type DesktopTargetScope } from '../shared/runtime-host-identity.js';
 import type { WorkHubTasksInput } from '../shared/workhub-tool-schema.js';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 interface WorkHubRuntimeDeps {
-  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'queryMessageExecutions' | 'stopTurn' | 'listWorkHubCoordinationCandidates' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
+  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'queryMessageExecutions' | 'stopTurn' | 'listProjects' | 'listWorkHubCoordinationCandidates' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
   isCurrent(scope: DesktopTargetScope): boolean;
-  createContext(scope: DesktopTargetScope): Promise<{ workspace: WorkspaceTarget; defaults: WorkHubCreateDefaults }>;
+  createDefaults(scope: DesktopTargetScope): Promise<WorkHubCreateDefaults>;
   changed(scope: DesktopTargetScope, reason: 'created' | 'status-change', sessionId: string): void;
 }
 
@@ -38,7 +38,7 @@ function executionEvidence(result: WorkHubActionResult) {
     : {};
 }
 
-/** Keep task authority in the Host; Desktop supplies only its selected workspace and preferences. */
+/** Keep task authority in the Host; Desktop supplies scoped project references and preferences. */
 export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
   const requireCurrent = (scope: DesktopTargetScope) => {
     if (!deps.isCurrent(scope)) throw new Error('Runtime Host changed');
@@ -50,6 +50,16 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
   };
   const isLive = (turn: Awaited<ReturnType<typeof queryTurn>>) =>
     turn.status !== 'completed' && turn.status !== 'failed' && turn.status !== 'cancelled';
+  const projects = async (scope: DesktopTargetScope, client: ReturnType<WorkHubRuntimeDeps['client']>) => {
+    const records = await client.listProjects();
+    requireCurrent(scope);
+    return records.filter((project): project is ProjectCatalogProjectDetails =>
+      project.archivedAt === null && project.available && 'preferredPath' in project && !!project.preferredPath,
+    ).map((project) => ({
+      projectRef: clientCapabilityEntityId(JSON.stringify(['workhub-project', scope.hostId, project.id, project.preferredPath])),
+      project,
+    }));
+  };
 
   return {
     async assertTurn(scope: DesktopTargetScope, turnId: string): Promise<void> {
@@ -66,6 +76,14 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
     async actTasks(scope: DesktopTargetScope, turnId: string, toolCallId: string, input: WorkHubTasksInput) {
       requireCurrent(scope);
       const client = deps.client(scope);
+      if (input.operation === 'projects') {
+        const matches = (await projects(scope, client)).filter(({ project }) =>
+          !input.query || project.name.toLowerCase().includes(input.query.toLowerCase()),
+        );
+        return { operation: 'projects' as const, projects: matches.slice(0, 32).map(({ projectRef, project }) => ({
+          projectRef, name: Array.from(project.name).slice(0, 512).join(''),
+        })), truncated: matches.length > 32 };
+      }
       if (input.operation === 'candidates') {
         const candidates = await client.listWorkHubCoordinationCandidates();
         requireCurrent(scope);
@@ -120,7 +138,8 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
       switch (input.operation) {
         case 'delegate_existing': proposal = { disposition: 'delegate_existing', candidateRef: input.candidateRef }; break;
         case 'create_new': proposal = { disposition: 'create_new', title: input.title }; break;
-        case 'correct': proposal = { operation: 'correct', replacesActionId: input.replacesActionId, target: input.target }; break;
+        case 'correct': proposal = { operation: 'correct', replacesActionId: input.replacesActionId, target: input.target.disposition === 'create_new'
+          ? { disposition: 'create_new', title: input.target.title } : input.target }; break;
         case 'stop': proposal = { operation: 'stop', expects: { targetSessionId: input.targetSessionId } }; break;
         case 'resume': proposal = { operation: 'resume', resumesActionId: input.resumesActionId, expects: { targetSessionId: input.targetSessionId } }; break;
       }
@@ -129,7 +148,15 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
         ('operation' in proposal &&
           proposal.operation === 'correct' &&
           proposal.target.disposition === 'create_new');
-      const context = createsTarget ? await deps.createContext(scope) : undefined;
+      let context;
+      if (createsTarget) {
+        const projectRef = input.operation === 'create_new' ? input.projectRef
+          : input.operation === 'correct' && input.target.disposition === 'create_new' ? input.target.projectRef : undefined;
+        const project = projectRef ? (await projects(scope, client)).find((item) => item.projectRef === projectRef)?.project : undefined;
+        if (projectRef && !project) throw new Error('WorkHub project reference is unavailable; discover projects again');
+        context = { workspace: project ? { kind: 'project' as const, projectId: project.id } : { kind: 'isolated' as const },
+          defaults: await deps.createDefaults(scope) };
+      }
       requireCurrent(scope);
       const result = await client.actWorkHubCoordinationFromTurn({
         turnId, actionId, proposal,
