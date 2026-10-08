@@ -79,7 +79,7 @@ It never acquires authority over an ordinary Session's execution or lifecycle.
 
 ## Routing dispositions, linked operations, and admission
 
-Every ordinary routing input resolves to exactly one proposed **routing disposition**:
+Each routing objective resolves to one proposed **routing disposition**:
 
 - `answer_here`: answer in the Coordination Session.
 - `delegate_existing`: delegate concrete work to one bounded, valid ordinary
@@ -424,3 +424,53 @@ Host recovery closes orphaned continuations. A stale offer cannot silently choos
 another work. Successful assignment replay uses the durable action identity. The
 former `answer -> targetSelection -> answer` pre-admission protocol and renderer
 Promise are removed rather than retained as a second selection implementation.
+
+## Baka single-entry asynchronous delegation
+
+The default, unbound Coordination model can accept several unrelated objectives
+in one user input. It answers ordinary questions directly, discovers existing
+Sessions for continuation, and may propose `create_new` for an explicitly
+requested independent execution objective without requiring the phrase "new
+Session". Failed, stale or ambiguous continuation is not permission to create
+replacement work. Bound experimental routing decisions remain binding.
+
+Clear objectives receive separate, bounded `tasks` actions before clarification
+of an ambiguous remainder. No batch entity, new queue, mandatory routing-model
+pipeline or authority owner is added. Each action retains the original admitted
+user input and its own delegated text. Existing durable action claims, Message
+admission, next-Turn FIFO and Host-owned result delivery remain authoritative.
+After acknowledging accepted or queued work, the Coordination Turn ends without
+waiting for workers. Another user input and later per-task notifications enter
+the existing Coordination admission path; acceptance is not execution or success.
+
+New work defaults to a Host-created directory under
+`StateRoot/workhub-tasks/<Host-derived-Session-id>`, stable for the action identity.
+The Host rejects substituted task directories rather than following links.
+It persists the resolved ordinary workspace, so recovery reuses the same Session
+and directory. The selected Desktop project is not an implicit default.
+`tasks.projects` exposes at most 32 current, available, registered project names
+and opaque references per query. Desktop revalidates a reference against the
+current Host catalog before supplying an ordinary project target; the existing
+Host workspace resolver revalidates project availability during admission.
+The model cannot supply a new arbitrary path, register or clone a project through
+this tool. Unknown or ambiguous coding targets require clarification. Reused
+Sessions retain their cwd, model and current permissions; new Sessions use the
+WorkHub creation defaults.
+
+Direct delegated roots resolve cwd aliases and acquire their existing concurrency
+slot together with a same-directory/ancestor-directory conflict reservation.
+Conflicting roots retain FIFO; unrelated roots can bypass a blocked conflict
+when budget is available. If filesystem availability prevents resolving a cwd
+identity, that root conservatively serializes all direct workers; this does not
+turn an ordinary runtime availability problem into a ledger failure or grant
+extra filesystem access. A live question or approval retains the original slot
+until the owning root retires. Cancellation and terminal cleanup release it;
+restart reconstructs reservations from durable admissions instead of replaying
+already dispatched work.
+
+This is a direct-WorkHub-worker collision guard, not a global filesystem lock or
+new sandbox boundary. Manual Turns, subagents, extra approved paths and detached
+processes are not brought into this budget. Private task directories do not
+override existing permission profiles, OS temporary grants or full-access mode.
+Dependency-aware worker yielding, cross-Session evidence exchange, aggregated
+task UI and new Windows execution backends remain subsequent steps.

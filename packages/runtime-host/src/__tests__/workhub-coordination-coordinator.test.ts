@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -49,6 +49,7 @@ import {
 } from '../server/session-catalog-coordinator.js';
 import {
   WorkHubActionEffectFailure,
+  workHubCreatedSessionId,
   type WorkHubActionGateEffects,
   type WorkHubAdmittedAction,
 } from '../server/workhub-coordination-action-gate.js';
@@ -68,6 +69,70 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('Host WorkHub Coordination coordinator', () => {
+  test('isolated task creation rejects substituted directory roots before any assignment effect', async () => {
+    for (const replaceRoot of [true, false]) {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-isolated-')));
+      const store = createSessionStore(root);
+      let assignments = 0;
+      const host = coordinator(
+        root,
+        store,
+        undefined,
+        undefined,
+        {
+          readActiveWorkHubRoutingRequest: async () => ({
+            content: { text: 'Research an independent goal' },
+            runId: 'active-run',
+          }),
+          startWorkHubCoordinationMessage: async () => ({
+            ok: false,
+            error: { code: 'operation_unavailable', message: 'Unused' },
+          }),
+          isSessionExecutionIdle: () => true,
+        },
+        undefined,
+        {
+          assign: async () => {
+            assignments++;
+            return { turnId: 'unused' };
+          },
+        },
+      );
+      try {
+        assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+        const taskRoot = join(root, 'workhub-tasks');
+        const outside = join(root, 'substituted-target');
+        await mkdir(outside);
+        if (!replaceRoot) await mkdir(taskRoot);
+        await symlink(
+          outside,
+          replaceRoot ? taskRoot : join(taskRoot, workHubCreatedSessionId('isolated-action')),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        const result = await host.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'active-turn',
+            actionId: 'isolated-action',
+            proposal: { disposition: 'create_new', title: 'Research' },
+            create: { workspace: { kind: 'isolated' } },
+          },
+          CONTEXT,
+        );
+        assert.equal(result.ok, false);
+        if (!result.ok) assert.equal(result.error.code, 'operation_conflict');
+        assert.equal(assignments, 0);
+        assert.deepEqual(
+          await readdir(outside),
+          [],
+          'no child directory is created through the substituted root',
+        );
+      } finally {
+        store.close?.();
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   test('reads bounded recent history when preparing a routing decision', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-workhub-routing-history-'));
     const store = createSessionStore(root);

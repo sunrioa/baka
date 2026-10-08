@@ -47,6 +47,7 @@ import {
 import { RuntimeHostOperationError, type RuntimeHostConnection } from '../client/index.js';
 import type {
   WorkHubCoordinationActResult,
+  WorkHubCoordinationActFromTurnInput,
   WorkHubCoordinationCandidatesResult,
 } from '../protocol/index.js';
 import type { WorkHubAdmittedAction } from '../server/workhub-coordination-action-gate.js';
@@ -75,149 +76,152 @@ type Notice =
 const TIMEOUT = 15_000;
 const ATTACHMENT_TEXT = 'Durable requirements: resume exactly this submitted message.';
 const clientHosts = new WeakMap<RuntimeHostConnection, HostProcess>();
+type WorkHubTestAction = Omit<WorkHubAdmittedAction, 'create'> &
+  Pick<WorkHubCoordinationActFromTurnInput, 'create'>;
 
-test('WorkHub concurrency recovers queued durable roots after process death without replaying a dispatched root', {
-  timeout: 60_000,
-}, async () => {
-  const base = await mkdtemp(join(tmpdir(), 'maka-workhub-pool-crash-'));
-  const root = join(base, 'root');
-  const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
-  const children: HostProcess[] = [];
-  const clients: RuntimeHostConnection[] = [];
-  const turns: string[] = [];
-  try {
-    await withStores(capability, async (stores) => {
-      await configureDefaultTarget(stores);
-      const current = await stores.runtimePolicy.runtimePolicy.getSnapshot();
-      const saved = await stores.runtimePolicy.runtimePolicy.mutate({
-        expectedRevision: current.revision,
-        operation: {
-          kind: 'set_chat_defaults',
-          value: { ...current.policy.chatDefaults, workHubMaxConcurrentSessions: 1 },
-        },
+for (const limit of [1, 3])
+  test(`WorkHub concurrency ${limit} recovers same-workspace queued roots after process death without replaying a dispatched root`, {
+    timeout: 60_000,
+  }, async () => {
+    const base = await mkdtemp(join(tmpdir(), 'maka-workhub-pool-crash-'));
+    const root = join(base, 'root');
+    const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
+    const children: HostProcess[] = [];
+    const clients: RuntimeHostConnection[] = [];
+    const turns: string[] = [];
+    try {
+      await withStores(capability, async (stores) => {
+        await configureDefaultTarget(stores);
+        const current = await stores.runtimePolicy.runtimePolicy.getSnapshot();
+        const saved = await stores.runtimePolicy.runtimePolicy.mutate({
+          expectedRevision: current.revision,
+          operation: {
+            kind: 'set_chat_defaults',
+            value: { ...current.policy.chatDefaults, workHubMaxConcurrentSessions: limit },
+          },
+        });
+        assert.equal(saved.kind, 'committed');
       });
-      assert.equal(saved.kind, 'committed');
-    });
-    const first = new HostProcess(root, capability.rootId, 'recover');
-    children.push(first);
-    await first.wait('ready');
-    const client = await connectFixtureClient(root, first);
-    clients.push(client);
-    await client.request('workhub.coordination.resolve', {});
-    for (let index = 0; index < 3; index++) {
-      const sessionId = `pool-target-${index}`;
-      await client.request('session.create', {
-        sessionId,
-        name: sessionId,
-        workspace: { kind: 'host_path', path: root },
-        modelTarget: { kind: 'default' },
+      const first = new HostProcess(root, capability.rootId, 'recover');
+      children.push(first);
+      await first.wait('ready');
+      const client = await connectFixtureClient(root, first);
+      clients.push(client);
+      await client.request('workhub.coordination.resolve', {});
+      for (let index = 0; index < 3; index++) {
+        const sessionId = `pool-target-${index}`;
+        await client.request('session.create', {
+          sessionId,
+          name: sessionId,
+          workspace: { kind: 'host_path', path: root },
+          modelTarget: { kind: 'default' },
+        });
+        const candidates = await client.request('workhub.coordination.candidates', {});
+        const candidate = candidates.candidates.find((item) => item.sessionId === sessionId);
+        assert.ok(candidate);
+        const result = await actWorkHub(client, {
+          actionId: `pool-action-${index}`,
+          userText: FAKE_HOLD_OPEN_PROMPT,
+          candidateSetId: candidates.candidateSetId,
+          proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+        });
+        assert.equal(result.disposition, 'delegate_existing');
+        if (result.disposition !== 'delegate_existing') throw new Error('Missing delegation');
+        assert.ok(result.targetTurnId);
+        turns.push(result.targetTurnId);
+      }
+      await first.wait('dispatch', (notice) => notice.sessionId === 'pool-target-0');
+      assert.deepEqual(
+        first.notices
+          .filter((notice) => notice.type === 'dispatch')
+          .map((notice) => notice.sessionId),
+        ['pool-target-0'],
+      );
+      for (const index of [1, 2])
+        assert.equal(
+          (
+            await client.request('turn.query', {
+              sessionId: `pool-target-${index}`,
+              turnId: turns[index]!,
+            })
+          ).status,
+          'admitted',
+        );
+      await first.stop('SIGKILL');
+      await client.close();
+      await withStores(capability, async ({ execution }) => {
+        for (const index of [1, 2]) {
+          assert.ok(
+            await execution.agentRunStore.readRootTurnAdmission(
+              `pool-target-${index}`,
+              turns[index]!,
+            ),
+          );
+          assert.deepEqual(
+            await execution.runtimeEventStore.listSessionInvocations(`pool-target-${index}`),
+            [],
+          );
+        }
       });
-      const candidates = await client.request('workhub.coordination.candidates', {});
-      const candidate = candidates.candidates.find((item) => item.sessionId === sessionId);
-      assert.ok(candidate);
-      const result = await actWorkHub(client, {
-        actionId: `pool-action-${index}`,
-        userText: FAKE_HOLD_OPEN_PROMPT,
-        candidateSetId: candidates.candidateSetId,
-        proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
-      });
-      assert.equal(result.disposition, 'delegate_existing');
-      if (result.disposition !== 'delegate_existing') throw new Error('Missing delegation');
-      assert.ok(result.targetTurnId);
-      turns.push(result.targetTurnId);
-    }
-    await first.wait('dispatch', (notice) => notice.sessionId === 'pool-target-0');
-    assert.deepEqual(
-      first.notices
-        .filter((notice) => notice.type === 'dispatch')
-        .map((notice) => notice.sessionId),
-      ['pool-target-0'],
-    );
-    for (const index of [1, 2])
+      const second = new HostProcess(root, capability.rootId, 'recover');
+      children.push(second);
+      await second.wait('ready');
+      const restored = await connectFixtureClient(root, second);
+      clients.push(restored);
+      await second.wait('dispatch', (notice) => notice.sessionId === 'pool-target-1');
+      assert.deepEqual(
+        second.notices
+          .filter((notice) => notice.type === 'dispatch')
+          .map((notice) => notice.sessionId),
+        ['pool-target-1'],
+      );
       assert.equal(
-        (
-          await client.request('turn.query', {
-            sessionId: `pool-target-${index}`,
-            turnId: turns[index]!,
-          })
-        ).status,
+        (await restored.request('runtime.policy.query', {})).policy.chatDefaults
+          .workHubMaxConcurrentSessions,
+        limit,
+      );
+      // Strict startup recovery records the interrupted known Run as failed;
+      // it must not silently dispatch that already-started work again.
+      assert.equal(
+        (await restored.request('turn.query', { sessionId: 'pool-target-0', turnId: turns[0]! }))
+          .status,
+        'failed',
+      );
+      assert.equal(
+        (await restored.request('turn.query', { sessionId: 'pool-target-2', turnId: turns[2]! }))
+          .status,
         'admitted',
       );
-    await first.stop('SIGKILL');
-    await client.close();
-    await withStores(capability, async ({ execution }) => {
-      for (const index of [1, 2]) {
-        assert.ok(
-          await execution.agentRunStore.readRootTurnAdmission(
-            `pool-target-${index}`,
-            turns[index]!,
-          ),
-        );
-        assert.deepEqual(
-          await execution.runtimeEventStore.listSessionInvocations(`pool-target-${index}`),
-          [],
-        );
-      }
-    });
-    const second = new HostProcess(root, capability.rootId, 'recover');
-    children.push(second);
-    await second.wait('ready');
-    const restored = await connectFixtureClient(root, second);
-    clients.push(restored);
-    await second.wait('dispatch', (notice) => notice.sessionId === 'pool-target-1');
-    assert.deepEqual(
-      second.notices
-        .filter((notice) => notice.type === 'dispatch')
-        .map((notice) => notice.sessionId),
-      ['pool-target-1'],
-    );
-    assert.equal(
-      (await restored.request('runtime.policy.query', {})).policy.chatDefaults
-        .workHubMaxConcurrentSessions,
-      1,
-    );
-    // Strict startup recovery records the interrupted known Run as failed;
-    // it must not silently dispatch that already-started work again.
-    assert.equal(
-      (await restored.request('turn.query', { sessionId: 'pool-target-0', turnId: turns[0]! }))
-        .status,
-      'failed',
-    );
-    assert.equal(
-      (await restored.request('turn.query', { sessionId: 'pool-target-2', turnId: turns[2]! }))
-        .status,
-      'admitted',
-    );
-    const running = await restored.request('turn.query', {
-      sessionId: 'pool-target-1',
-      turnId: turns[1]!,
-    });
-    await restored.request('turn.stop', {
-      sessionId: running.sessionId,
-      turnId: running.turnId,
-      runId: running.runId,
-    });
-    await second.wait('dispatch', (notice) => notice.sessionId === 'pool-target-2');
-    assert.deepEqual(
-      second.notices
-        .filter((notice) => notice.type === 'dispatch')
-        .map((notice) => notice.sessionId),
-      ['pool-target-1', 'pool-target-2'],
-    );
-    await restored.close();
-    await second.stop();
-  } finally {
-    for (const client of clients) await client.close().catch(() => undefined);
-    for (const child of children) await child.stop('SIGKILL');
-    await removePosixEndpointDirectories(capability.rootId);
-    await rm(join(resolveRootControlNamespace(), capability.rootId), {
-      recursive: true,
-      force: true,
-    });
-    await rm(join(resolveRootOwnershipNamespace(), capability.rootId + '.lock'), { force: true });
-    await rm(base, { recursive: true, force: true });
-  }
-});
+      const running = await restored.request('turn.query', {
+        sessionId: 'pool-target-1',
+        turnId: turns[1]!,
+      });
+      await restored.request('turn.stop', {
+        sessionId: running.sessionId,
+        turnId: running.turnId,
+        runId: running.runId,
+      });
+      await second.wait('dispatch', (notice) => notice.sessionId === 'pool-target-2');
+      assert.deepEqual(
+        second.notices
+          .filter((notice) => notice.type === 'dispatch')
+          .map((notice) => notice.sessionId),
+        ['pool-target-1', 'pool-target-2'],
+      );
+      await restored.close();
+      await second.stop();
+    } finally {
+      for (const client of clients) await client.close().catch(() => undefined);
+      for (const child of children) await child.stop('SIGKILL');
+      await removePosixEndpointDirectories(capability.rootId);
+      await rm(join(resolveRootControlNamespace(), capability.rootId), {
+        recursive: true,
+        force: true,
+      });
+      await rm(join(resolveRootOwnershipNamespace(), capability.rootId + '.lock'), { force: true });
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 
 // This is a real process loss at a precise durable boundary, not a close/reopen
 // simulation. A fresh Host acquires a fresh lease and runs production recovery.
@@ -241,14 +245,14 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         const client = await connectFixtureClient(root, first);
         clients.push(client);
         await client.request('workhub.coordination.resolve', {});
-        const action: WorkHubAdmittedAction = {
+        const action: WorkHubTestAction = {
           actionId: 'durable-delegation',
           userText:
             disposition === 'create_new'
               ? 'Create a new task to review the durable requirements'
               : 'Review the durable requirements',
           proposal: { disposition: 'create_new', title: 'Requirements' },
-          create: { workspace: { kind: 'host_path', path: root } },
+          create: { workspace: { kind: 'isolated' } },
         };
         if (disposition === 'delegate_existing') {
           await client.request('session.create', {
@@ -291,6 +295,11 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         await first.stop('SIGKILL');
         await assert.rejects(request);
         const { assignment, admission } = committed;
+        if (disposition === 'create_new')
+          assert.deepEqual(assignment.create?.workspace, {
+            kind: 'host_path',
+            path: join(capability.canonicalPath, 'workhub-tasks', assignment.targetSessionId),
+          });
         assert.equal(admission.disposition, busy ? 'followup' : 'steering');
         assert.equal(admission.placement, busy ? 'next_turn' : 'current_turn');
         assert.equal(assignment.steered, undefined);
@@ -298,6 +307,11 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         // Open brand-new handles after death. These observations prove we hit
         // the intended window, before any Root admission or first dispatch.
         await withStores(capability, async ({ execution: stores }) => {
+          if (disposition === 'create_new')
+            assert.equal(
+              (await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId)).cwd,
+              join(capability.canonicalPath, 'workhub-tasks', assignment.targetSessionId),
+            );
           assert.deepEqual(
             await stores.sessionStore.readWorkHubAssignment(action.actionId),
             assignment,
@@ -696,7 +710,7 @@ async function connectFixtureClient(
 // admission and action validation remain production code, including on replay.
 async function actWorkHub(
   client: RuntimeHostConnection,
-  input: WorkHubAdmittedAction,
+  input: WorkHubTestAction,
 ): Promise<WorkHubCoordinationActResult> {
   const { userText, attachments, ...action } = input;
   const turnId = randomUUID();

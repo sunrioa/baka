@@ -221,8 +221,8 @@ export interface WorkHubCoordinationLinkedTargetPreconditions {
 }
 
 export interface WorkHubCoordinationCreateContext {
-  /** Trusted desktop context. Model/strategy output never contains a workspace or identity. */
-  readonly workspace: WorkspaceTarget;
+  /** The Host materializes isolated work; explicit targets still pass its workspace resolver. */
+  readonly workspace: WorkspaceTarget | { readonly kind: 'isolated' };
 }
 
 /** A model action can name its active Turn, never supply user-originated authority. */
@@ -694,6 +694,10 @@ function decodeWorkHubCoordinationLinkedTargetPreconditions(
 
 function decodeWorkHubCoordinationCreateContext(value: unknown): WorkHubCoordinationCreateContext {
   const context = requireExactRecord(value, 'WorkHub creation context', ['workspace']);
+  if (requireRecord(context.workspace, 'WorkHub creation workspace').kind === 'isolated') {
+    requireExactRecord(context.workspace, 'Isolated WorkHub workspace', ['kind']);
+    return { workspace: { kind: 'isolated' } };
+  }
   return {
     workspace: decodeWorkspaceTarget(context.workspace),
   };

@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import type { ProjectCatalogProjectDetails } from '@maka/runtime-host/protocol';
 import { decodeWorkHubCoordinationActFromTurnInput, decodeWorkHubCoordinationSelectAndDelegateInput } from '@maka/runtime-host/protocol';
 import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { createWorkHubRuntime } from '../workhub-runtime.js';
@@ -33,10 +34,11 @@ function fixture() {
   const deps: Parameters<typeof createWorkHubRuntime>[0] = {
     isCurrent: () => current,
     client: () => client,
-    createContext: async () => ({ workspace: { kind: 'project', projectId: 'project' }, defaults: { permissionMode: 'ask' } }),
+    createDefaults: async () => ({ permissionMode: 'ask' }),
     changed: (...args) => { changes.push(args); },
   };
   const client = {
+    listProjects: async () => [],
     queryTurn: async () => ({ sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: 'turn', runId: 'run', status: 'running' as const }),
     stopTurn: async (input: unknown) => { stops.push(input); },
     listWorkHubCoordinationCandidates: async () => ({ candidateSetId: 'set', candidates: [] }),
@@ -53,7 +55,7 @@ test('task delegation binds the tool action to the Host turn and trusted creatio
   const result = await f.runtime.actTasks(scope, 'turn', 'tool-call', { operation: 'create_new', title: 'Fix login', text: 'Implement and test the login fix' });
   assert.deepEqual(f.requests, [{
     turnId: 'turn', actionId: 'tool-call', proposal: { disposition: 'create_new', title: 'Fix login' },
-    delegationText: 'Implement and test the login fix', create: { workspace: { kind: 'project', projectId: 'project' } },
+    delegationText: 'Implement and test the login fix', create: { workspace: { kind: 'isolated' } },
     newWorkDefaults: { permissionMode: 'ask' },
   }]);
   assert.ok('actionId' in result);
@@ -155,12 +157,76 @@ test('the task tool exposes correction as a linked operation, not a disposition'
   );
 });
 
-test('a Host switch while resolving the workspace prevents delegation', async () => {
+test('a Host switch while resolving creation defaults prevents delegation', async () => {
   const f = fixture();
-  const original = f.deps.createContext;
-  f.deps.createContext = async (target) => { const context = await original(target); f.retire(); return context; };
+  const original = f.deps.createDefaults;
+  f.deps.createDefaults = async (target) => { const defaults = await original(target); f.retire(); return defaults; };
   await assert.rejects(f.runtime.actTasks(scope, 'turn', 'tool-call', { operation: 'create_new', title: 'Work', text: 'Do work' }), /Runtime Host changed/);
   assert.deepEqual(f.requests, []);
+});
+
+function project(index: number, overrides: Partial<ProjectCatalogProjectDetails> = {}): ProjectCatalogProjectDetails {
+  return { id: `project-${index}`, name: `Project ${index}`, aliases: [], locationCount: 1,
+    archivedAt: null, available: true, preferredPath: `/project-${index}`, locations: [], ...overrides };
+}
+
+test('project discovery is bounded, read-only and hides unavailable catalog entries and paths', async () => {
+  const f = fixture();
+  f.client.listProjects = async () => [
+    ...Array.from({ length: 33 }, (_, index) => project(index)),
+    project(90, { archivedAt: 1 }), project(91, { available: false }), project(92, { preferredPath: null }),
+  ];
+  const all = await f.runtime.actTasks(scope, 'turn', 'projects', { operation: 'projects' });
+  assert.ok('projects' in all);
+  assert.ok(all.projects);
+  assert.equal(all.projects.length, 32);
+  assert.equal(all.truncated, true);
+  assert.deepEqual(Object.keys(all.projects[0]!).sort(), ['name', 'projectRef']);
+  const filtered = await f.runtime.actTasks(scope, 'turn', 'query', { operation: 'projects', query: 'PROJECT 32' });
+  assert.ok('projects' in filtered);
+  assert.ok(filtered.projects);
+  assert.equal(filtered.projects[0]?.name, 'Project 32');
+  assert.equal(filtered.truncated, false);
+  assert.deepEqual(f.requests, []);
+  assert.deepEqual(f.changes, []);
+});
+
+test('project references bind creation to the current Host catalog and preferred path', async () => {
+  const f = fixture();
+  let available = project(1);
+  f.client.listProjects = async () => [available];
+  const discovered = await f.runtime.actTasks(scope, 'turn', 'projects', { operation: 'projects' });
+  assert.ok('projects' in discovered);
+  assert.ok(discovered.projects);
+  const projectRef = discovered.projects[0]!.projectRef;
+  for (const request of [
+    { operation: 'create_new' as const, title: 'Fix', text: 'Fix the registered project', projectRef },
+    { operation: 'correct' as const, replacesActionId: 'previous', text: 'Fix the registered project',
+      target: { disposition: 'create_new' as const, title: 'Fix', projectRef } },
+  ]) {
+    await f.runtime.actTasks(scope, 'turn', `tool-${request.operation}`, request);
+    const input = decodeWorkHubCoordinationActFromTurnInput(f.requests.at(-1));
+    assert.deepEqual(input.create, { workspace: { kind: 'project', projectId: 'project-1' } });
+    assert.deepEqual(input.newWorkDefaults, { permissionMode: 'ask' });
+    assert.equal(JSON.stringify(input.proposal).includes(projectRef), false);
+  }
+  f.requests.length = 0;
+  const create = { operation: 'create_new' as const, title: 'Fix', text: 'Fix', projectRef };
+  for (const next of [project(1, { archivedAt: 1 }), project(1, { available: false }), project(1, { preferredPath: '/relinked' })]) {
+    available = next;
+    await assert.rejects(f.runtime.actTasks(scope, 'turn', 'stale', create), /reference is unavailable/);
+  }
+  available = project(1);
+  await assert.rejects(f.runtime.actTasks({ ...scope, hostId: 'foreign' }, 'turn', 'foreign', create), /reference is unavailable/);
+  assert.deepEqual(f.requests, []);
+  f.client.listProjects = async () => { f.retire(); return [available]; };
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'changed', { operation: 'projects' }), /Runtime Host changed/);
+});
+
+test('task creation never accepts a model-provided workspace or permission override', () => {
+  const create = { operation: 'create_new', title: 'Work', text: 'Do work' };
+  for (const extra of [{ path: '/arbitrary' }, { workspace: { kind: 'host_path', path: '/arbitrary' } }, { permissionMode: 'bypass' }])
+    assert.equal(workHubTasksSchema.safeParse({ ...create, ...extra }).success, false);
 });
 
 test('takeover stops the exact old turn and run even after selecting another Host', async () => {

@@ -18,6 +18,25 @@
  */
 
 import { isWorkHubMaxConcurrentSessions } from '@maka/core/settings';
+import { isAbsolute, normalize, relative, sep } from 'node:path';
+
+interface WorkspaceSlot {
+  readonly workspace?: string;
+  readonly identity?: string;
+  readonly unresolvedWorkspace: boolean;
+  grant(): void;
+}
+
+function overlaps(left: WorkspaceSlot, right: WorkspaceSlot): boolean {
+  if (left.unresolvedWorkspace || right.unresolvedWorkspace) return true;
+  if (left.identity && right.identity && left.identity === right.identity) return true;
+  if (!left.workspace || !right.workspace) return false;
+  const contains = (parent: string, child: string) => {
+    const path = relative(parent, child);
+    return path === '' || (!isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
+  };
+  return contains(left.workspace, right.workspace) || contains(right.workspace, left.workspace);
+}
 
 export interface WorkHubExecutionSlot {
   readonly ready: Promise<void>;
@@ -29,8 +48,8 @@ export interface WorkHubExecutionSlot {
 /** Epoch-local dispatch gate, not a queue or execution authority. Durable roots own the work. */
 export class WorkHubExecutionSlots {
   #limit: number;
-  #running = 0;
-  readonly #pending: Array<() => void> = [];
+  readonly #running = new Set<WorkspaceSlot>();
+  readonly #pending: WorkspaceSlot[] = [];
 
   constructor(limit: number) {
     this.#limit = limit;
@@ -43,24 +62,43 @@ export class WorkHubExecutionSlots {
     this.flush();
   }
 
-  acquire(): WorkHubExecutionSlot {
+  /** The Host supplies a realpath-resolved cwd and, when available, its directory identity. */
+  acquire(
+    workspace?: string,
+    identity?: string,
+    unresolvedWorkspace = false,
+  ): WorkHubExecutionSlot {
+    if (workspace !== undefined && !isAbsolute(workspace))
+      throw new Error('Invalid WorkHub workspace');
     let state: 'waiting' | 'running' | 'released' = 'waiting';
     let settle!: () => void;
     const ready = new Promise<void>((resolve) => {
       settle = resolve;
     });
-    const grant = () => {
-      state = 'running';
-      this.#running += 1;
-      settle();
+    const slot: WorkspaceSlot = {
+      unresolvedWorkspace,
+      ...(workspace
+        ? {
+            workspace:
+              process.platform === 'win32'
+                ? normalize(workspace).toLowerCase()
+                : normalize(workspace),
+          }
+        : {}),
+      ...(identity ? { identity } : {}),
+      grant: () => {
+        state = 'running';
+        this.#running.add(slot);
+        settle();
+      },
     };
     const removePending = () => {
-      const index = this.#pending.indexOf(grant);
+      const index = this.#pending.indexOf(slot);
       if (index >= 0) this.#pending.splice(index, 1);
       state = 'released';
       settle();
     };
-    this.#pending.push(grant);
+    this.#pending.push(slot);
     this.flush();
     return {
       ready,
@@ -68,14 +106,17 @@ export class WorkHubExecutionSlots {
         return state === 'waiting';
       },
       cancelWaiting: () => {
-        if (state === 'waiting') removePending();
+        if (state === 'waiting') {
+          removePending();
+          this.flush();
+        }
       },
       release: () => {
         if (state === 'released') return;
         if (state === 'waiting') removePending();
         else {
           state = 'released';
-          this.#running -= 1;
+          this.#running.delete(slot);
         }
         this.flush();
       },
@@ -83,6 +124,17 @@ export class WorkHubExecutionSlots {
   }
 
   private flush(): void {
-    while (this.#running < this.#limit && this.#pending.length > 0) this.#pending.shift()!();
+    for (let index = 0; index < this.#pending.length && this.#running.size < this.#limit; ) {
+      const slot = this.#pending[index]!;
+      if (
+        [...this.#running].some((running) => overlaps(running, slot)) ||
+        this.#pending.slice(0, index).some((earlier) => overlaps(earlier, slot))
+      ) {
+        index++;
+        continue;
+      }
+      this.#pending.splice(index, 1);
+      slot.grant();
+    }
   }
 }

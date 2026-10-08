@@ -18,7 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { mkdir } from 'node:fs/promises';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeMessageContent } from '@maka/core/events';
@@ -81,6 +81,7 @@ import {
   WorkHubCoordinationActionGate,
   type WorkHubActionGateEffects,
   type WorkHubAdmittedAction,
+  workHubCreatedSessionId,
 } from './workhub-coordination-action-gate.js';
 
 const CREATE_FINGERPRINT = `sha256:${createHash('sha256')
@@ -194,6 +195,7 @@ export class HostWorkHubCoordinationCoordinator {
   readonly #transitionConfiguration: HostWorkHubCoordinationCoordinatorOptions['transitionConfiguration'];
   readonly #configureModel: HostWorkHubCoordinationCoordinatorOptions['configureModel'];
   readonly #coordinationCwd: string;
+  readonly #taskCwdRoot: string;
   readonly #stores: CoordinationStores;
   readonly #admission: SessionAdmissionGate;
   readonly #continuity: Pick<SessionContinuityCoordinator, 'refreshCanonical'>;
@@ -210,6 +212,7 @@ export class HostWorkHubCoordinationCoordinator {
     this.#routingModel = options.routingModel;
     this.#transitionConfiguration = options.transitionConfiguration;
     this.#coordinationCwd = join(options.stateRoot, COORDINATION_CWD_DIRECTORY);
+    this.#taskCwdRoot = join(options.stateRoot, 'workhub-tasks');
     this.#stores = options.stores;
     this.#readDelegationRetirement = options.sessionActions.readDelegationRetirement;
     this.#admission = options.admission;
@@ -792,7 +795,7 @@ export class HostWorkHubCoordinationCoordinator {
         },
       };
     }
-    const { turnId: _turnId, ...action } = input;
+    const { turnId: _turnId, create, ...action } = input;
     if (request.decision && !routingDecisionAllowsProposal(request.decision, action)) {
       return {
         ok: false,
@@ -806,11 +809,21 @@ export class HostWorkHubCoordinationCoordinator {
       'disposition' in action.proposal ||
       ('operation' in action.proposal && action.proposal.operation === 'correct');
     try {
+      const resolvedCreate =
+        create === undefined
+          ? undefined
+          : {
+              workspace:
+                create.workspace.kind === 'isolated'
+                  ? await this.#isolatedTaskWorkspace(input.actionId)
+                  : create.workspace,
+            };
       return {
         ok: true,
         result: await this.#actionGate.act(
           {
             ...action,
+            ...(resolvedCreate ? { create: resolvedCreate } : {}),
             ...(selectedTarget ? { selectedTarget } : {}),
             coordinationRunId: request.runId,
             userText: request.content.text,
@@ -854,6 +867,23 @@ export class HostWorkHubCoordinationCoordinator {
         },
       };
     }
+  }
+
+  async #isolatedTaskWorkspace(actionId: string) {
+    // Names are Host-derived, not model paths. Do not follow a substituted
+    // directory into another workspace or grant access to sibling tasks.
+    const directory = join(this.#taskCwdRoot, workHubCreatedSessionId(actionId));
+    for (const path of [this.#taskCwdRoot, directory]) {
+      await mkdir(path, { recursive: true });
+      const metadata = await lstat(path);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink() || (await realpath(path)) !== path) {
+        throw new WorkHubActionEffectFailure(
+          'operation_conflict',
+          'WorkHub task workspace is unavailable',
+        );
+      }
+    }
+    return { kind: 'host_path' as const, path: directory };
   }
 
   async #query(): Promise<OperationOutcome<'workhub.coordination.query'>> {

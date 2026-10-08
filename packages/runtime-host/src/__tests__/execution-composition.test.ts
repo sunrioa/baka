@@ -44,8 +44,8 @@ import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-
 import { RuntimeInteractionAdmissionRejectedError } from '@maka/runtime/interaction-authority';
 import { parseNoRealConnectionError } from '@maka/core/connection-error-copy';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -68,6 +68,12 @@ import {
 } from '@maka/runtime/test-only/fake-backend';
 import { LOCAL_READ_AGENT_DEFINITION } from '@maka/runtime/agent-catalog';
 import { SessionManager, type BackendFactory } from '@maka/runtime/session-manager';
+import {
+  FilesystemWorkerClient,
+  FilesystemWorkerClientError,
+  createFilesystemWorkerLaunchSpecProvider,
+} from '@maka/runtime/filesystem-worker';
+import { createDefaultSandboxManager } from '@maka/runtime/sandbox';
 import { testInvocationOpening } from '@maka/runtime/test-only/invocation-fixture';
 import { workHubDirectStopAbortSource } from '@maka/runtime/session-manager';
 import { fingerprintAgentGraphRunnableIntent } from '@maka/runtime/stream-graph-admission';
@@ -110,9 +116,11 @@ import {
   MESSAGE_QUEUE_MAX_ENTRIES,
   RUNTIME_HOST_PROTOCOL_VERSION,
   type ClientCapabilityHostFrame,
+  type WorkHubCoordinationActFromTurnInput,
 } from '../protocol/index.js';
 import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import { HostWorkHubResultCoordinator } from '../server/workhub-result-coordinator.js';
+import { WorkHubExecutionSlots } from '../server/workhub-execution-slots.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
@@ -120,6 +128,63 @@ import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const CONTEXT_OFFLOAD_DATABASE_NAME = 'context-offload.sqlite';
+
+test('WorkHub workspace slots do not dispatch conflicting directories or block unrelated work', () => {
+  const slots = new WorkHubExecutionSlots(3);
+  const first = slots.acquire(join(tmpdir(), 'project'));
+  const second = slots.acquire(join(tmpdir(), 'project', 'src'));
+  const unrelated = slots.acquire(join(tmpdir(), 'research'));
+  assert.equal(first.waiting, false);
+  assert.equal(second.waiting, true, 'a child directory shares its parent write resource');
+  assert.equal(unrelated.waiting, false, 'a blocked project must not consume an unrelated slot');
+  first.release();
+  assert.equal(second.waiting, false);
+  second.release();
+  unrelated.release();
+});
+
+test('WorkHub workspace slots retain conflict FIFO, inode aliases and cancellation fairness', async () => {
+  const slots = new WorkHubExecutionSlots(3);
+  const path = join(tmpdir(), 'slot-project');
+  const first = slots.acquire(path, 'dev:1');
+  const alias = slots.acquire(path, 'dev:1');
+  const child = slots.acquire(join(path, 'src'));
+  const parent = slots.acquire(tmpdir());
+  const sibling = slots.acquire(join(path, 'docs'));
+  assert.deepEqual(
+    [alias.waiting, child.waiting, parent.waiting, sibling.waiting],
+    [true, true, true, true],
+  );
+  first.release();
+  assert.deepEqual(
+    [alias.waiting, child.waiting, parent.waiting, sibling.waiting],
+    [false, true, true, true],
+  );
+  alias.release();
+  assert.equal(child.waiting, false);
+  parent.cancelWaiting();
+  await parent.ready;
+  assert.equal(
+    sibling.waiting,
+    false,
+    'a cancelled ancestor no longer reserves unrelated descendants',
+  );
+  for (const slot of [first, alias, child, parent, sibling]) {
+    slot.release();
+    slot.release();
+  }
+  slots.setLimit(1);
+  const final = slots.acquire(path);
+  assert.equal(final.waiting, false, 'releases are idempotent and do not leak budget');
+  final.release();
+  const inodeRoot = slots.acquire(path, 'dev:2');
+  const inodeAlias = slots.acquire(join(tmpdir(), 'slot-alias'), 'dev:2');
+  assert.equal(inodeAlias.waiting, true, 'matching root identities supplement canonical paths');
+  inodeRoot.release();
+  assert.equal(inodeAlias.waiting, false);
+  inodeAlias.release();
+  assert.throws(() => slots.acquire('relative'), /Invalid WorkHub workspace/);
+});
 const workHubRoutingDecisions = new WeakMap<
   ExecutionRuntimeHostComposition,
   Map<string, WorkHubRoutingDecision>
@@ -2965,6 +3030,429 @@ for (const scenario of ['running', 'waiting_for_user'] as const) {
   });
 }
 
+test('one WorkHub Turn admits independent goals in private or registered workspaces and remains responsive', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const coordinatorRelease = deferred<void>();
+    const workerRelease = deferred<void>();
+    const workerInputs: Array<{ sessionId: string; cwd: string; input: BackendSendInput }> = [];
+    const coordinationInputs: BackendSendInput[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      defaultWorkHubRouting: true,
+      coordinationBackendFactory: (backendContext) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            coordinationInputs.push(input);
+            if (input.turnId === 'independent-goals') await coordinatorRelease.promise;
+            yield* super.send({
+              ...input,
+              text: 'The accepted goals are delegated; I can take the next request.',
+            });
+          }
+        })(backendContext),
+      primaryBackendFactory: (backendContext) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            workerInputs.push({ sessionId: this.sessionId, cwd: backendContext.header.cwd, input });
+            await Promise.race([
+              workerRelease.promise,
+              new Promise<void>((resolve) => {
+                backendContext.abortSignal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              }),
+            ]);
+            yield* super.send(input);
+          }
+        })(backendContext),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'batch-workhub-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const desktop = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(context.connectionId),
+      { send: async () => {} },
+    );
+    try {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+            context,
+          )
+        ).ok,
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const projectPath = join(root, 'registered-code');
+      await mkdir(projectPath);
+      const registered = await composition.handlers['project.catalog.mutate'](
+        { kind: 'register', path: projectPath },
+        context,
+      );
+      assert.ok(registered.ok, JSON.stringify(registered));
+      const userText = 'Research A, draft B, and fix code C. These are independent goals.';
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId: 'independent-goals', text: userText },
+            context,
+          )
+        ).ok,
+      );
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const ids: string[] = [];
+      for (const [index, text] of ['Research A', 'Draft B', 'Fix code C'].entries()) {
+        const input: WorkHubCoordinationActFromTurnInput = {
+          turnId: 'independent-goals',
+          actionId: `independent-${index}`,
+          delegationText: text,
+          proposal: { disposition: 'create_new' as const, title: text },
+          create: {
+            workspace:
+              index === 2
+                ? { kind: 'project' as const, projectId: registered.result.project.id }
+                : { kind: 'isolated' as const },
+          },
+          newWorkDefaults: { permissionMode: 'ask' as const },
+        };
+        const accepted = await composition.handlers['workhub.coordination.actFromTurn'](
+          input,
+          context,
+        );
+        assert.ok(accepted.ok, JSON.stringify(accepted));
+        assert.equal(accepted.result.disposition, 'create_new');
+        if (accepted.result.disposition !== 'create_new') throw new Error('Missing created target');
+        ids.push(accepted.result.targetSessionId);
+        assert.deepEqual(
+          await composition.handlers['workhub.coordination.actFromTurn'](input, context),
+          accepted,
+          'exact replay converges without a second Session or Message',
+        );
+        const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
+        assert.equal(assignment?.coordinationTurnId, input.turnId);
+        assert.equal(assignment?.userText, userText);
+      }
+      await waitFor(async () => workerInputs.length === 3);
+      assert.deepEqual(
+        workerInputs.map(({ input }) => input.text),
+        ['Research A', 'Draft B', 'Fix code C'],
+      );
+      const cwds = workerInputs.map(({ cwd }) => cwd);
+      assert.equal(new Set(cwds).size, 3);
+      for (const [index, id] of ids.entries()) {
+        assert.equal(
+          cwds[index],
+          index === 2 ? await realpath(projectPath) : join(root, 'workhub-tasks', id),
+        );
+        const header = await stores.sessionStore.readHeaderSnapshot(id);
+        assert.equal(header.permissionMode, 'ask');
+        assert.equal(header.model, 'fake-model');
+      }
+      // StateRoot is deliberately outside the OS temporary grant. Check the
+      // unchanged managed file-tool policy against the real Seatbelt worker.
+      if (process.platform === 'darwin') {
+        const worker = new FilesystemWorkerClient({
+          sandboxManager: createDefaultSandboxManager(),
+          getLaunchSpec: createFilesystemWorkerLaunchSpecProvider({
+            runtime: 'node',
+            resourceLocation: { kind: 'runtime' },
+          }),
+        });
+        const path = join(cwds[0]!, 'result.txt');
+        await worker.execute({
+          cwd: cwds[0]!,
+          mode: 'ask',
+          operation: { kind: 'write', path, content: 'private result' },
+          expectedIdentity: 'missing',
+        });
+        assert.equal(await readFile(path, 'utf8'), 'private result');
+        const read = await worker.execute({
+          cwd: cwds[0]!,
+          mode: 'ask',
+          operation: { kind: 'read', path },
+        });
+        assert.equal(read.kind, 'read');
+        for (const access of ['read', 'write'] as const)
+          await assert.rejects(
+            worker.execute({
+              cwd: cwds[1]!,
+              mode: 'ask',
+              operation:
+                access === 'read'
+                  ? { kind: 'read', path }
+                  : { kind: 'write', path, content: 'must not overwrite' },
+              expectedIdentity: 'unchecked',
+            }),
+            (error: unknown) =>
+              error instanceof FilesystemWorkerClientError && error.reason === 'path_denied',
+          );
+        assert.equal(await readFile(path, 'utf8'), 'private result');
+      }
+      const queuedText = 'What can I ask while you delegate?';
+      const queued = await composition.handlers['turn.message.submit'](
+        {
+          originHostEpoch: context.hostEpoch,
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          messageId: 'input-during-delegation',
+          content: { text: queuedText },
+          placement: 'next_turn',
+        },
+        context,
+      );
+      assert.ok(queued.ok, JSON.stringify(queued));
+      assert.equal(
+        coordinationInputs.some((input) => input.text === queuedText),
+        false,
+      );
+      coordinatorRelease.resolve();
+      await waitFor(async () =>
+        (await manager.listTurns(WORKHUB_COORDINATION_SESSION_ID)).some(
+          (turn) => turn.turnId === 'independent-goals' && turn.status === 'completed',
+        ),
+      );
+      await waitFor(async () => {
+        const queuedInput = coordinationInputs.find((input) => input.text === queuedText);
+        return (
+          queuedInput !== undefined &&
+          (await manager.listTurns(WORKHUB_COORDINATION_SESSION_ID)).some(
+            (turn) => turn.turnId === queuedInput.turnId && turn.status === 'completed',
+          )
+        );
+      });
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId: 'while-workers-run', text: 'What can I ask next?' },
+            context,
+          )
+        ).ok,
+      );
+      await waitFor(async () =>
+        (await manager.listTurns(WORKHUB_COORDINATION_SESSION_ID)).some(
+          (turn) => turn.turnId === 'while-workers-run' && turn.status === 'completed',
+        ),
+      );
+      assert.equal(
+        (await stores.sessionStore.listHeaders()).length,
+        4,
+        'Q&A does not create a task',
+      );
+      assert.equal(
+        coordinationInputs.filter((input) => input.text.startsWith('Host notification:')).length,
+        0,
+      );
+      workerRelease.resolve();
+      await waitFor(
+        async () =>
+          coordinationInputs.filter((input) => input.text.startsWith('Host notification:'))
+            .length === 3,
+        12000,
+      );
+      const notifications = (await manager.getMessages(WORKHUB_COORDINATION_SESSION_ID)).filter(
+        (message) => message.type === 'user' && message.origin?.kind === 'workhub_result',
+      );
+      assert.equal(notifications.length, 3);
+      for (const [index, id] of ids.entries()) {
+        const matched = notifications.filter(
+          (message) =>
+            message.type === 'user' &&
+            message.origin?.kind === 'workhub_result' &&
+            message.origin.targetSessionId === id,
+        );
+        assert.equal(matched.length, 1);
+        const notification = matched[0];
+        assert.ok(notification?.type === 'user');
+        assert.match(notification.text, new RegExp(`independent-${index}`));
+        const users = (await manager.getMessages(id)).filter((message) => message.type === 'user');
+        assert.equal(users.length, 1);
+      }
+    } finally {
+      coordinatorRelease.resolve();
+      workerRelease.resolve();
+      await desktop.close();
+      await composition.close();
+    }
+  }, homedir());
+});
+
+test('WorkHub unavailable cwd retains conservative serialization without failing Host admission', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    let drains = 0;
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      context: {
+        retainUntilProcessExit: () => undefined,
+        requestDrain: () => {
+          drains++;
+        },
+      },
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(this.sessionId);
+            yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'missing-cwd-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const targets: Array<Awaited<ReturnType<SessionManager['createSession']>>> = [];
+      for (const name of ['Removed', 'Available']) {
+        const cwd = join(root, name);
+        await mkdir(cwd);
+        targets.push(
+          await manager.createSession({
+            cwd,
+            name,
+            llmConnectionId: connectionId,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode: 'ask',
+          }),
+        );
+      }
+      await rm(join(root, 'Removed'), { recursive: true });
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      for (const [index, target] of targets.entries())
+        await delegateWorkHubTarget(
+          composition,
+          context,
+          target.id,
+          `missing-${index}`,
+          'Continue',
+        );
+      await waitFor(async () => sends.length === 1);
+      assert.deepEqual(sends, [targets[0]!.id]);
+      assert.equal(drains, 0, 'filesystem availability must not become an authority failure');
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const assignment = await stores.sessionStore.readWorkHubAssignment('missing-0');
+      assert.ok(assignment);
+      const snapshot = await composition.handlers['turn.query'](
+        { sessionId: targets[0]!.id, turnId: assignment.targetTurnId },
+        context,
+      );
+      assert.ok(snapshot.ok);
+      assert.ok(
+        (
+          await composition.handlers['turn.stop'](
+            {
+              sessionId: targets[0]!.id,
+              turnId: assignment.targetTurnId,
+              runId: snapshot.result.runId,
+            },
+            context,
+          )
+        ).ok,
+      );
+      await waitFor(async () => sends.length === 2);
+      assert.deepEqual(
+        sends,
+        targets.map(({ id }) => id),
+      );
+      assert.equal(drains, 0);
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub direct worker directory aliases serialize while unrelated roots bypass the conflict', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const project = join(root, 'project');
+    const child = join(project, 'src');
+    const unrelated = join(root, 'research');
+    const alias = join(root, 'project-alias');
+    await mkdir(child, { recursive: true });
+    await mkdir(unrelated);
+    await symlink(project, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const sends: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(this.sessionId);
+            yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'directory-slot-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const targets: Array<Awaited<ReturnType<SessionManager['createSession']>>> = [];
+      for (const cwd of [project, alias, child, unrelated])
+        targets.push(
+          await manager.createSession({
+            cwd,
+            name: `Resource worker ${targets.length}`,
+            llmConnectionId: connectionId,
+            llmConnectionSlug: 'fake',
+            model: 'fake-model',
+            permissionMode: 'ask',
+          }),
+        );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      for (const [index, target] of targets.entries())
+        await delegateWorkHubTarget(
+          composition,
+          context,
+          target.id,
+          `directory-${index}`,
+          `worker-${index}`,
+        );
+      await waitFor(async () => sends.length === 2);
+      assert.deepEqual(sends, [targets[0]!.id, targets[3]!.id]);
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const stop = async (index: number) => {
+        const assignment = await stores.sessionStore.readWorkHubAssignment(`directory-${index}`);
+        assert.ok(assignment);
+        const snapshot = await composition.handlers['turn.query'](
+          { sessionId: targets[index]!.id, turnId: assignment.targetTurnId },
+          context,
+        );
+        assert.ok(snapshot.ok);
+        assert.ok(
+          (
+            await composition.handlers['turn.stop'](
+              {
+                sessionId: targets[index]!.id,
+                turnId: assignment.targetTurnId,
+                runId: snapshot.result.runId,
+              },
+              context,
+            )
+          ).ok,
+        );
+      };
+      await stop(0);
+      await waitFor(async () => sends.length === 3);
+      assert.equal(
+        sends[2],
+        targets[1]!.id,
+        'the alias queued first owns the resource before its descendant',
+      );
+      await stop(1);
+      await waitFor(async () => sends.length === 4);
+      assert.equal(sends[3], targets[2]!.id);
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('WorkHub default concurrency admits three direct workers without blocking coordination', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
@@ -2993,15 +3481,18 @@ test('WorkHub default concurrency admits three direct workers without blocking c
     };
     try {
       const targets = await Promise.all(
-        Array.from({ length: 4 }, () =>
-          manager.createSession({
-            cwd: root,
+        Array.from({ length: 4 }, async (_, index) => {
+          const cwd = join(root, `worker-${index}`);
+          await mkdir(cwd);
+          return manager.createSession({
+            cwd,
+            name: `Default worker ${index}`,
             llmConnectionId: connectionId,
             llmConnectionSlug: 'fake',
             model: 'fake-model',
             permissionMode: 'ask',
-          }),
-        ),
+          });
+        }),
       );
       assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
       for (const [index, target] of targets.entries()) {
@@ -3080,15 +3571,18 @@ for (const limit of [1, 2, 8]) {
       try {
         await setWorkHubConcurrency(composition, context, limit);
         const targets = await Promise.all(
-          Array.from({ length: limit + 1 }, () =>
-            manager.createSession({
-              cwd: root,
+          Array.from({ length: limit + 1 }, async (_, index) => {
+            const cwd = join(root, `worker-${index}`);
+            await mkdir(cwd);
+            return manager.createSession({
+              cwd,
+              name: `Pool worker ${index}`,
               llmConnectionId: connectionId,
               llmConnectionSlug: 'fake',
               model: 'fake-model',
               permissionMode: 'ask',
-            }),
-          ),
+            });
+          }),
         );
         assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
         for (const [index, target] of targets.entries())
@@ -3171,15 +3665,18 @@ test('WorkHub concurrency raises immediately, lowers without killing and release
     try {
       await setWorkHubConcurrency(composition, context, 1);
       const targets = await Promise.all(
-        Array.from({ length: 3 }, () =>
-          manager.createSession({
-            cwd: root,
+        Array.from({ length: 3 }, async (_, index) => {
+          const cwd = join(root, `worker-${index}`);
+          await mkdir(cwd);
+          return manager.createSession({
+            cwd,
+            name: `Resize worker ${index}`,
             llmConnectionId: connectionId,
             llmConnectionSlug: 'fake',
             model: 'fake-model',
             permissionMode: 'ask',
-          }),
-        ),
+          });
+        }),
       );
       assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
       for (const [index, target] of targets.entries())
@@ -5400,6 +5897,7 @@ async function createCapturedExecutionComposition(
     readonly defaultWorkHubRouting?: boolean;
     readonly onWorkHubResult?: (input: BackendSendInput) => void;
     readonly primaryBackendFactory?: BackendFactory;
+    readonly coordinationBackendFactory?: BackendFactory;
     readonly generateSessionTitle?: ExecutionRuntimeHostCompositionDependencies['generateSessionTitle'];
     readonly residencies?: HostResidencyRegistry;
   } = {},
@@ -5442,7 +5940,8 @@ async function createCapturedExecutionComposition(
         generateSessionTitle: options.generateSessionTitle,
         primaryBackendFactory: (context) =>
           context.sessionId === WORKHUB_COORDINATION_SESSION_ID
-            ? new (class extends FakeBackend {
+            ? (options.coordinationBackendFactory?.(context) ??
+              new (class extends FakeBackend {
                 override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
                   if (input.text.startsWith('Host notification:')) {
                     options.onWorkHubResult?.(input);
@@ -5451,7 +5950,7 @@ async function createCapturedExecutionComposition(
                     yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
                   }
                 }
-              })(context)
+              })(context))
             : primaryBackendFactory(context),
         workHubRoutingModel: options.defaultWorkHubRouting
           ? undefined
@@ -5634,8 +6133,9 @@ async function withCompositionRoot(
     root: string;
     owner: NonNullable<Awaited<ReturnType<typeof tryAcquireInteractiveRootOwner>>>;
   }) => Promise<void>,
+  parent = tmpdir(),
 ): Promise<void> {
-  const base = await mkdtemp(join(tmpdir(), 'maka-execution-composition-'));
+  const base = await mkdtemp(join(parent, 'maka-execution-composition-'));
   const root = join(base, 'interactive');
   const capability = await resolveStorageRoot({ path: root, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
