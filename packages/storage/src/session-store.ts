@@ -22,6 +22,10 @@ import {
   buildSessionHeader,
   toSummary,
 } from './session-store-values.js';
+import type {
+  TaskExecutionGrantRecord,
+  TaskGrantClosureReason,
+} from '@maka/core/task-execution-grant';
 export {
   normalizeSessionHeader,
   decodePersistedSessionHeader,
@@ -589,6 +593,20 @@ class SqliteSessionStore implements SessionAuthorityStore {
   ): Promise<SandboxBoundarySettlement> {
     await this.ensureReady();
     return this.metadata.settleSandboxBoundaryRequest(input);
+  }
+
+  async listTaskExecutionGrants(rootSessionId?: string): Promise<TaskExecutionGrantRecord[]> {
+    await this.ensureReady();
+    return this.metadata.listTaskExecutionGrants(rootSessionId);
+  }
+
+  async closeTaskExecutionGrant(
+    grantId: string,
+    reason: TaskGrantClosureReason,
+    closedAt: number,
+  ): Promise<void> {
+    await this.ensureReady();
+    return this.metadata.closeTaskExecutionGrant(grantId, reason, closedAt);
   }
 
   async setExecutionBoundaryKind(

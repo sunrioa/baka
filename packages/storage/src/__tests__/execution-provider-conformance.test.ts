@@ -80,6 +80,175 @@ for (const backend of ['Local', 'Memory'] as const) {
     backend === 'Local'
       ? localExecutionPersistenceProvider
       : createMemoryExecutionPersistenceProvider();
+  test(
+    backend + ': task sandbox approval is atomic, supplemental and cannot be revived by replay',
+    async () => {
+      await withProvider(make(), async ({ sessionStore: s }, root) => {
+        const session = await s.create(sessionInput(root));
+        const before = await s.readExecutionBoundary(session.id);
+        const request = await s.createSandboxBoundaryRequest({
+          sessionId: session.id,
+          requestId: 'task-request',
+          turnId: 'turn',
+          runId: 'run',
+          justification: 'Task input',
+          expansion: {
+            filesystem: {
+              entries: [
+                { path: join(tmpdir(), 'outside-task-input'), scope: 'subtree', access: 'read' },
+              ],
+            },
+            network: { enabled: true },
+          },
+        });
+        const now = Date.now();
+        const grant: import('@maka/core/task-execution-grant').TaskExecutionGrant = {
+          version: 1,
+          grantId: request.requestId,
+          rootSessionId: session.id,
+          rootTurnId: 'turn',
+          rootRunId: 'run',
+          delegationId: 'delegation',
+          sourceSessionId: session.id,
+          sourceRequestId: request.requestId,
+          sourceTurnId: 'turn',
+          sourceRunId: 'run',
+          rootBoundaryRevision: before.revision,
+          sourceBoundaryRevision: before.revision,
+          grantedAt: now,
+          expiresAt: now + 3600000,
+          resource: { kind: 'sandbox', expansion: request.expansion },
+        };
+        await assert.rejects(
+          s.settleSandboxBoundaryRequest({
+            sessionId: session.id,
+            requestId: request.requestId,
+            decision: 'allow',
+            taskGrant: { ...grant, sourceRunId: 'wrong-run' },
+          }),
+        );
+        assert.equal((await s.listPendingSandboxBoundaryRequests(session.id)).length, 1);
+        assert.deepEqual(await s.listTaskExecutionGrants(), []);
+        const approved = await s.settleSandboxBoundaryRequest({
+          sessionId: session.id,
+          requestId: request.requestId,
+          decision: 'allow',
+          taskGrant: grant,
+        });
+        assert.equal(approved.request.status, 'approved');
+        assert.equal(approved.changed, false);
+        assert.deepEqual(await s.readExecutionBoundary(session.id), before);
+        assert.deepEqual(await s.listTaskExecutionGrants(session.id), [{ grant }]);
+        await assert.rejects(s.closeTaskExecutionGrant(grant.grantId, 'revoked', -1));
+        assert.deepEqual(await s.listTaskExecutionGrants(session.id), [{ grant }]);
+        await s.closeTaskExecutionGrant(grant.grantId, 'revoked', now + 1);
+        await s.settleSandboxBoundaryRequest({
+          sessionId: session.id,
+          requestId: request.requestId,
+          decision: 'allow',
+          taskGrant: grant,
+        });
+        assert.deepEqual(await s.listTaskExecutionGrants(), []);
+        assert.deepEqual(await s.readExecutionBoundary(session.id), before);
+      });
+    },
+  );
+  test(
+    backend + ': client capability task grants settle atomically without a Session grant',
+    async () => {
+      await withProvider(
+        make(),
+        async ({ sessionStore: s, interactionStore: interactions }, root) => {
+          const session = await s.create(sessionInput(root)),
+            now = Date.now();
+          const target = {
+            providerId: 'provider',
+            contractId: 'contract',
+            serverId: 'server',
+            toolName: 'navigate',
+            capability: 'browser' as const,
+            scope: { kind: 'browser_origin' as const, origin: 'https://example.com' },
+          };
+          await interactions.establishRequest({
+            sessionId: session.id,
+            turnId: 'turn',
+            runId: 'run',
+            requestId: 'cap-request',
+            createdAt: now,
+            request: { kind: 'client_capability', toolUseId: 'call', target },
+          });
+          const grant: import('@maka/core/task-execution-grant').TaskExecutionGrant = {
+            version: 1,
+            grantId: 'cap-request',
+            sourceRequestId: 'cap-request',
+            rootSessionId: session.id,
+            sourceSessionId: session.id,
+            rootTurnId: 'turn',
+            rootRunId: 'run',
+            sourceTurnId: 'turn',
+            sourceRunId: 'run',
+            delegationId: 'delegation',
+            rootBoundaryRevision: 0,
+            sourceBoundaryRevision: 0,
+            grantedAt: now,
+            expiresAt: now + 3600000,
+            resource: { kind: 'client_capability', target },
+          };
+          const outcome = {
+            kind: 'client_capability_decision' as const,
+            decision: 'allow' as const,
+            committedAt: now,
+          };
+          await assert.rejects(
+            interactions.commitClientCapabilityOutcome('cap-request', outcome, undefined, {
+              ...grant,
+              sourceRunId: 'other-run',
+            }),
+          );
+          assert.equal((await interactions.listSessionPending(session.id)).length, 1);
+          assert.deepEqual(await s.listTaskExecutionGrants(), []);
+          const committed = await interactions.commitClientCapabilityOutcome(
+            'cap-request',
+            outcome,
+            undefined,
+            grant,
+          );
+          assert.equal(committed.status, 'stable');
+          assert.deepEqual(await s.listTaskExecutionGrants(session.id), [{ grant }]);
+          assert.equal(
+            await interactions.readClientCapabilitySessionGrant({
+              sessionId: session.id,
+              ...target,
+            }),
+            undefined,
+          );
+          await assert.rejects(
+            interactions.commitClientCapabilityOutcome(
+              'cap-request',
+              outcome,
+              { version: 1, sessionId: session.id, ...target, grantedAt: now },
+              grant,
+            ),
+          );
+          await s.closeTaskExecutionGrant(grant.grantId, 'revoked', now + 1);
+          await interactions.commitClientCapabilityOutcome(
+            'cap-request',
+            outcome,
+            undefined,
+            grant,
+          );
+          assert.deepEqual(await s.listTaskExecutionGrants(), []);
+          assert.equal(
+            await interactions.readClientCapabilitySessionGrant({
+              sessionId: session.id,
+              ...target,
+            }),
+            undefined,
+          );
+        },
+      );
+    },
+  );
   test(backend + ': graph wake exhaustion passes through the execution facade', async () => {
     await withProvider(make(), async ({ graphControlStore: graph }) => {
       await graph.claimAgentGraphSupervisorWake({

@@ -130,6 +130,8 @@ export interface PreparedClientCapabilityInvocation {
   cancel(): void;
   /** Aborts when the provider connection disappears before this call is admitted. */
   readonly providerSignal: AbortSignal;
+  /** Local invocation and any pending producer interaction have settled. */
+  readonly settled: Promise<void>;
 }
 
 export interface ClientCapabilityInvocationBrokerOptions<
@@ -393,6 +395,10 @@ export class ClientCapabilityInvocationBroker<
         }
         return result;
       },
+      settled: result.then(
+        () => {},
+        () => {},
+      ),
       cancel: () => {
         const invocation = this.#invocations.get(invocationId);
         if (!invocation) return;
@@ -400,15 +406,17 @@ export class ClientCapabilityInvocationBroker<
         void currentSender
           ?.send({ kind: 'client.capability.cancel', invocationId })
           .catch(() => {});
-        this.#settle(
-          invocation,
-          undefined,
-          new ClientCapabilityInvocationError(
-            'provider_rejected',
-            'Client Capability invocation was cancelled before admission',
-          ),
-          true,
-        );
+        const error =
+          invocation.phase === 'dispatched' || invocation.phase === 'accepted'
+            ? new ClientCapabilityInvocationError(
+                'provider_rejected',
+                'Client Capability invocation was cancelled before admission',
+              )
+            : new ToolOutcomeUnknownError(
+                'Client Capability invocation was cancelled after admission',
+              );
+        if (invocation.interaction) this.#terminateInteraction(invocation, error, true, true);
+        else this.#settle(invocation, undefined, error, true);
       },
     };
   }

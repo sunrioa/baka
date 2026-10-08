@@ -1400,6 +1400,9 @@ export class DesktopRuntimeHostClient {
   answerWorkHubInteraction(input: OperationInput<"workhub.interactions.answer">): Promise<OperationOutput<"workhub.interactions.answer">> {
     return this.request("workhub.interactions.answer", input);
   }
+  revokeWorkHubTaskGrant(input: OperationInput<"workhub.interactions.revoke">): Promise<OperationOutput<"workhub.interactions.revoke">> {
+    return this.request("workhub.interactions.revoke", input);
+  }
 
   testNetworkProxy(
     input: OperationInput<"network-proxy.test">,

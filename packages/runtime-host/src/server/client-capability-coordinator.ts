@@ -186,6 +186,13 @@ type ClientCapabilityBoundTool = ReturnType<McpToolProvider['toolSnapshot']>['to
 type ClientCapabilityToolBinding = ClientCapabilityBoundTool['binding'];
 
 export interface HostClientCapabilityCoordinatorOptions {
+  readonly taskGrants?: {
+    permitsCapability(
+      scope: import('@maka/runtime/tool-runtime').ToolExecutionScope,
+      target: ClientCapabilityGrantTarget,
+      cancel: () => void | Promise<void>,
+    ): Promise<(() => void) | undefined>;
+  };
   readonly activation: RuntimePolicyActivationGate;
   readonly isSessionRetired: (sessionId: string) => Promise<boolean>;
   readonly isSessionTurnBusy?: (sessionId: string) => boolean;
@@ -230,6 +237,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
   readonly #onModelToolsChanged: () => void;
   readonly #interactions: HostClientCapabilityCoordinatorOptions['interactions'];
   readonly #grants: HostClientCapabilityCoordinatorOptions['grants'];
+  readonly #taskGrants: HostClientCapabilityCoordinatorOptions['taskGrants'];
   readonly #providers = new Map<string, ClientProviderState>();
   readonly #connections = new Map<string, ClientProviderConnection>();
   readonly #sessions = new Map<string, SessionCapabilityState>();
@@ -247,6 +255,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
     this.#onModelToolsChanged = options.onModelToolsChanged;
     this.#interactions = options.interactions;
     this.#grants = options.grants;
+    this.#taskGrants = options.taskGrants;
     this.#invocations = new ClientCapabilityInvocationBroker({
       senderFor: (registration) => this.#registrationConnection(registration)?.sender,
       onRegistrationIdle: (registration) => this.#releaseRegistrationIfUnused(registration),
@@ -1326,6 +1335,7 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
           options.signal,
           options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
         );
+        let releaseTaskGrant: (() => void) | undefined;
         try {
           const evidence = await prepared.waitUntilAccepted();
           const boundary = options.context.executionBoundary;
@@ -1349,7 +1359,15 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
               };
             }
             const key = { sessionId: options.context.sessionId, ...target };
-            if (!(await this.#grants.readClientCapabilitySessionGrant(key))) {
+            const readTaskGrant = () =>
+              this.#taskGrants?.permitsCapability(options.context, target, () => {
+                prepared.cancel();
+                return prepared.settled;
+              });
+            if (
+              !(await this.#grants.readClientCapabilitySessionGrant(key)) &&
+              !(releaseTaskGrant = await readTaskGrant())
+            ) {
               const decision = await this.#requestApprovalOnce({
                 ...key,
                 turnId: options.context.turnId,
@@ -1359,18 +1377,32 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
                 callerSignal: options.signal,
               });
               if (decision !== 'allow') throw new Error('Client Capability request was denied');
-              if (!(await this.#grants.readClientCapabilitySessionGrant(key))) {
-                throw new Error('Client Capability approval did not publish its Session Grant');
+              if (
+                !(await this.#grants.readClientCapabilitySessionGrant(key)) &&
+                !(releaseTaskGrant = await readTaskGrant())
+              ) {
+                throw new Error(
+                  'Client Capability approval did not publish valid execution authority',
+                );
               }
             }
           }
           return {
-            execute: ({ emitProgress, requestInteraction } = {}) =>
-              prepared.admit(emitProgress, requestInteraction),
-            cancel: () => prepared.cancel(),
+            execute: async ({ emitProgress, requestInteraction } = {}) => {
+              try {
+                return await prepared.admit(emitProgress, requestInteraction);
+              } finally {
+                releaseTaskGrant?.();
+              }
+            },
+            cancel: () => {
+              prepared.cancel();
+              releaseTaskGrant?.();
+            },
           };
         } catch (error) {
           prepared.cancel();
+          releaseTaskGrant?.();
           throw error;
         }
       },
@@ -1415,8 +1447,13 @@ export class HostClientCapabilityCoordinator implements ClientCapabilityService 
     };
     const key = [
       input.sessionId,
+      input.turnId,
+      input.runId,
+      input.toolCallId,
       target.providerId,
       target.contractId,
+      target.serverId,
+      target.toolName,
       target.capability,
       clientCapabilityScopeIdentity(target.scope),
     ].join('\0');

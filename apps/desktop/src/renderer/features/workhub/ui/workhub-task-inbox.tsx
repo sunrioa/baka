@@ -33,7 +33,7 @@ export function WorkHubTaskInbox({ inbox }: { inbox: Inbox }) {
   const copy = workHubLiveCopy[useUiLocale()];
   const [expanded, setExpanded] = useState<string>();
   const [openError, setOpenError] = useState<string>();
-  if (!inbox.requests.length && !inbox.error) return null;
+  if (!inbox.requests.length && !inbox.grants?.length && !inbox.error) return null;
   return <section className="workHubTaskInbox" data-maka-assistant-exclude aria-label={copy.taskInbox}>
     <header><strong>{copy.taskInbox} · {inbox.requests.length}</strong>
       <Button variant="ghost" size="sm" label={copy.retry} onClick={() => { void inbox.refresh(); }} />
@@ -56,6 +56,15 @@ export function WorkHubTaskInbox({ inbox }: { inbox: Inbox }) {
         </article>;
       })}
     </div>
+    {!!inbox.grants?.length && <div className="workHubTaskInboxItems">
+      <strong>{copy.taskGrants}</strong>
+      {inbox.grants.map((item) => <article key={item.grant.grantId}>
+        <p>{item.targetSessionName} · {copy.taskGrantExpires} {new Date(item.grant.expiresAt).toLocaleString()}</p>
+        <pre>{JSON.stringify(item.grant.resource, null, 2)}</pre>
+        <Button variant="ghost" size="sm" label={copy.taskRevoke} isDisabled={!inbox.ready || inbox.isRevoking(item)}
+          onClick={async () => {setOpenError(undefined); try {await inbox.revoke(item);} catch (reason) {setOpenError(reason instanceof Error ? reason.message : String(reason));}}} />
+      </article>)}
+    </div>}
     {inbox.truncated && <p>{copy.taskInboxTruncated}</p>}
   </section>;
 }
@@ -107,12 +116,18 @@ function TaskRequest({ item, inbox }: { item: WorkHubPendingInteraction; inbox: 
       }}
     />}
   </>;
-  // These are persistent Session grants, not task-scoped temporary permissions.
-  // Tool permission decisions keep their existing reviewer authority.
+  // Only explicit sandbox/client requests may receive supplemental task authority.
+  // Ordinary tool decisions keep their existing reviewer authority.
   return <div className="workHubTaskPermission">
-    <p>{request.kind === 'permission' ? copy.taskOriginalAuthority : copy.taskSessionGrant}</p>
+    <p>{request.kind === 'permission' ? copy.taskOriginalAuthority : copy.taskGrantScope}</p>
     <pre>{JSON.stringify(request, null, 2)}</pre>
     {error && <p role="alert">{error}</p>}
+    {(request.kind === 'sandbox_boundary' || request.kind === 'client_capability') &&
+      <Button label={copy.taskAllow} isDisabled={disabled} onClick={async () => {
+        setError(undefined);
+        try {await inbox.respond(item, {kind: request.kind, decision: 'allow'}, 'task');}
+        catch (reason) {setError(reason instanceof Error ? reason.message : String(reason));}
+      }} />}
     {(request.kind === 'sandbox_boundary' || request.kind === 'client_capability') &&
       <Button variant="ghost" label={copy.taskDeny} isDisabled={disabled} onClick={async () => {
         setError(undefined);

@@ -49,8 +49,39 @@ Interaction authority. Existing Session-persistent sandbox/client-capability
 grants may be inspected or denied there, but allowed only at the original task.
 Tool permission decisions retain their original reviewer authority. Step 5A
 does not introduce task grants, expiry/revocation, new permission defaults or a
-second database. Those execution-scope/lifecycle contracts are a separate Step
-5B prerequisite, not a UI label or restoration of an old Session snapshot.
+second database. Those execution-scope/lifecycle contracts are implemented by
+Step 5B below, not by restoring an old Session snapshot.
+
+### baka Step 5B: supplemental task execution grants
+
+The native inbox can approve an original sandbox-boundary or client-capability
+request **for the assigned task**, list its active grants, and revoke them.
+Ordinary tool permissions still use their original reviewer. Neither the model
+nor a caller-supplied Session ID can create or redirect a task grant.
+
+Each grant is an additive record in the existing `runtime.sqlite`, committed
+atomically with the original request outcome. It names the delegation, original
+Message-owned root Session/Turn/Run, requesting Session/Turn/Run, and boundary
+revisions. Session defaults, model and working directory are not overwritten.
+Client grants preserve the original provider/capability/evidence scope; path and
+network grants reuse the existing sandbox expansion validation and OS backend.
+
+Every tool reads authority with its fixed Session/Turn/Run/invocation identity.
+Only the original logical root and authenticated child invocations with matching
+immutable spawn lineage may use the supplement. Queued/manual work and later
+tasks in the same Session do not inherit it. Existing child tool ceilings and
+protected paths continue to apply.
+
+Grants last at most one hour and end on revocation, expiry, cancellation,
+completion, retirement, replacement, or a changed boundary revision. Closure is
+durable before resource cancellation. Foreground calls and capability invocations
+are fenced; task-authorized background shell resources retain their own lifetime
+fence after the foreground tool returns. Revocation waits for their cleanup and
+does not terminate unrelated Session resources. Cleanup failure drains the Host.
+
+Reload/restart rebuilds only still-valid original scope from canonical execution
+facts; closure cannot be replayed into fresh permission. This does not add a
+Windows command backend or relax unsupported sandbox behavior.
 
 Reload/reconnect queries canonical pending facts; late reads/receipts cannot
 retarget a different Host. A lost response never automatically replays an

@@ -25,7 +25,7 @@ import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { ModelCallCommit } from '@maka/core/agent-run';
 import type { PermissionMode } from '@maka/core/permission';
 import { resolveCollaborationPermissionMode } from '@maka/core/collaboration';
-import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
+import { AiSdkBackend, type AiSdkBackendInput } from '@maka/runtime/ai-sdk-backend';
 import {
   buildDefaultContextBudgetPolicy,
   resolveSelectedModelContextWindow,
@@ -76,6 +76,7 @@ import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import type { HostRunComposer, HostRunComposerFactory } from './host-run-composer.js';
 
 export interface HostAiSdkBackendInput {
+  readonly readTaskAuthority?: AiSdkBackendInput['readTaskAuthority'];
   readonly context: BackendFactoryContext;
   readonly runtimePolicy: HostExecutionRuntimePolicyAuthority;
   readonly oauthCredentials: HostOAuthExecutionAuthority;
@@ -372,6 +373,7 @@ async function buildHostAiSdkBackend(
           : {}),
         readExecutionBoundary: () =>
           input.context.store.readExecutionBoundary(input.context.sessionId),
+        ...(input.readTaskAuthority ? { readTaskAuthority: input.readTaskAuthority } : {}),
         readPermissionMode: async () =>
           (await input.context.store.readHeader(input.context.sessionId)).permissionMode,
         ...(input.context.store.createSandboxBoundaryRequest

@@ -18,6 +18,11 @@
  */
 
 import {
+  decodeTaskExecutionGrant,
+  TASK_GRANT_MAX_ACTIVE_PER_ROOT,
+  type TaskExecutionGrantRecord,
+} from '@maka/core/task-execution-grant';
+import {
   decodeInteractionCanonicalOutcome,
   isInteractionCanonicalOutcomeValidForRequest,
   interactionCanonicalOutcomesEquivalent,
@@ -161,7 +166,7 @@ export function createMemoryInteractionStore(
       a.write('interaction.outcome', (s) => outcome(s, requestId, input)),
     commitClientCapabilitySessionGrant: async (input) =>
       a.write('interaction.grant', (s) => grant(s, input)),
-    commitClientCapabilityOutcome: async (requestId, input, grantInput) =>
+    commitClientCapabilityOutcome: async (requestId, input, grantInput, taskGrantInput) =>
       a.write('interaction.capabilityOutcome', (s) => {
         const record = required(s, requestId);
         if (record.request.request.kind !== 'client_capability')
@@ -171,10 +176,12 @@ export function createMemoryInteractionStore(
           grantInput === undefined ? undefined : decodeGrant(copy(grantInput), 'input');
         const shouldGrant =
           canonical.kind === 'client_capability_decision' && canonical.decision === 'allow';
-        if (shouldGrant !== (candidate !== undefined))
+        const task =
+          taskGrantInput === undefined ? undefined : decodeTaskExecutionGrant(taskGrantInput);
+        if (shouldGrant !== (candidate !== undefined || task !== undefined) || (candidate && task))
           throw new InteractionStoreError(
             'invalid_input',
-            'Allow requires exactly one Session Grant',
+            'Allow requires exactly one Session or task grant',
           );
         if (
           candidate &&
@@ -187,6 +194,33 @@ export function createMemoryInteractionStore(
           throw new InteractionStoreError('invalid_input', 'Grant does not match request');
         const result = outcome(s, requestId, canonical);
         if (result.matches && candidate) grant(s, candidate);
+        if (task) {
+          if (
+            task.sourceSessionId !== record.request.sessionId ||
+            task.sourceRequestId !== requestId ||
+            task.sourceTurnId !== record.request.turnId ||
+            task.sourceRunId !== record.request.runId ||
+            task.resource.kind !== 'client_capability' ||
+            !equal(task.resource.target, record.request.request.target) ||
+            task.grantedAt !== canonical.committedAt
+          )
+            throw new InteractionStoreError('invalid_input', 'Task grant does not match request');
+          const table = rows<TaskExecutionGrantRecord>(s, 'taskGrants'),
+            prior = table.get(task.grantId);
+          if (prior && !equal(prior.grant, task))
+            throw new InteractionStoreError('invalid_input', 'Task grant identity conflict');
+          if (
+            !prior &&
+            [...table.values()].filter(
+              (r) =>
+                !r.closure &&
+                r.grant.rootSessionId === task.rootSessionId &&
+                r.grant.rootTurnId === task.rootTurnId,
+            ).length >= TASK_GRANT_MAX_ACTIVE_PER_ROOT
+          )
+            throw new InteractionStoreError('invalid_input', 'Task grant capacity exceeded');
+          if (result.matches && !prior) table.set(task.grantId, { grant: task });
+        }
         return result;
       }),
   };

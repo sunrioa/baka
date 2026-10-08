@@ -45,6 +45,8 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(reconnectable.has('workhub:queryInteractions'), true);
   assert.equal(ordinary.has('workhub:answerInteraction'), true);
   assert.equal(reconnectable.has('workhub:answerInteraction'), false, 'lost approvals are not automatically replayed');
+  assert.equal(ordinary.has('workhub:revokeTaskGrant'), true);
+  assert.equal(reconnectable.has('workhub:revokeTaskGrant'), false, 'revocation receipts are rebuilt, never replayed');
 });
 
 test('stores new-work execution defaults separately from the coordination Session', async () => {

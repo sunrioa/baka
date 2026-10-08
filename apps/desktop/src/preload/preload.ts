@@ -2191,6 +2191,10 @@ const makaBridge = {
     },
   },
   workHub: {
+    async revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return await invokeWhenReady('workhub:revokeTaskGrant', scope, input) as OperationOutput<'workhub.interactions.revoke'>;
+    },
     async queryInteractions(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       const result = await invokeWhenReady('workhub:queryInteractions', scope) as OperationOutput<'workhub.interactions.query'>;

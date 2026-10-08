@@ -158,6 +158,7 @@ export type MakaToolPreparationContext = Pick<
   MakaToolContext,
   | 'sessionId'
   | 'runId'
+  | 'invocationId'
   | 'turnId'
   | 'cwd'
   | 'executionBoundary'
@@ -241,6 +242,7 @@ export interface MakaTool<P = any, R = unknown> {
 export interface MakaToolContext {
   sessionId: string;
   runId?: string;
+  invocationId?: string;
   orchestrationMode?: OrchestrationMode;
   turnId: string;
   /** Session working directory. */
@@ -252,6 +254,9 @@ export interface MakaToolContext {
   /** Runtime-owned durable identity of this tool operation, when enabled. */
   operationId?: string;
   abortSignal: AbortSignal;
+  /** Supplemental authority lifetime, independent of the foreground invocation. */
+  authoritySignal?: AbortSignal;
+  registerAuthorityCleanup?: (cleanup: () => void | Promise<void>) => () => void;
   emitOutput: (stream: ToolOutputStream, chunk: string) => void;
   /** Live-only bounded progress for multi-step tools. */
   emitProgress?: (current: number, total: number) => void;
@@ -361,6 +366,20 @@ function composeChildAbortSignal(
   return AbortSignal.any([invocationSignal, childSignal]);
 }
 
+/** Trusted dispatch identity; never a model argument or an authorization proof. */
+export interface ToolExecutionScope {
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly runId?: string;
+  readonly invocationId?: string;
+}
+
+export interface ToolExecutionAuthority {
+  readonly boundary: ExecutionBoundary;
+  readonly signal?: AbortSignal;
+  readonly registerCleanup?: (cleanup: () => void | Promise<void>) => () => void;
+}
+
 export interface ToolRuntimeInput {
   /** Runtime-owned projection of explicit denials in authenticated continuation ancestors. */
   inheritedSandboxBoundaryDenied?: boolean;
@@ -368,7 +387,8 @@ export interface ToolRuntimeInput {
   header: SessionHeader;
   connection: RuntimeExecutionConnection;
   modelId: string;
-  readExecutionBoundary: () => Promise<ExecutionBoundary>;
+  readExecutionBoundary: (scope: ToolExecutionScope) => Promise<ExecutionBoundary>;
+  readTaskAuthority?: (scope: ToolExecutionScope) => Promise<ToolExecutionAuthority>;
   readPermissionMode: () => Promise<PermissionMode>;
   createSandboxBoundaryRequest?: (
     input: CreateSandboxBoundaryRequest,
@@ -526,7 +546,8 @@ export class ToolRuntime {
   private sandboxBoundaryFinalizationRequested = false;
   private readonly durableToolAttempts = new Map<string, DurableToolAttempt>();
   private readonly activeToolSettlements = new Set<Promise<unknown>>();
-  private readonly readExecutionBoundary: NonNullable<ToolRuntimeInput['readExecutionBoundary']>;
+  private readonly readExecutionBoundary: () => Promise<ExecutionBoundary>;
+  private readonly readExecutionAuthority: () => Promise<ToolExecutionAuthority>;
   private readonly readPermissionMode: NonNullable<ToolRuntimeInput['readPermissionMode']>;
   private readonly stepAdmissions = new Map<
     string,
@@ -547,7 +568,18 @@ export class ToolRuntime {
     }
     this.turnId = input.turnId;
     this.hostedInteraction = hosted;
-    this.readExecutionBoundary = input.readExecutionBoundary;
+    const executionScope: ToolExecutionScope = Object.freeze({
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      ...(input.runId ? { runId: input.runId } : {}),
+      ...(input.invocationId ? { invocationId: input.invocationId } : {}),
+    });
+    const readBoundary = input.readExecutionBoundary;
+    this.readExecutionBoundary = () => readBoundary(executionScope);
+    this.readExecutionAuthority = () =>
+      input.readTaskAuthority
+        ? input.readTaskAuthority(executionScope)
+        : this.readExecutionBoundary().then((boundary) => ({ boundary }));
     this.sandboxBoundaryDenied = input.inheritedSandboxBoundaryDenied === true;
     this.readPermissionMode = input.readPermissionMode;
   }
@@ -1401,11 +1433,13 @@ export class ToolRuntime {
     }
 
     let clientCapabilityBoundary: ExecutionBoundary | undefined;
+    let clientCapabilityAuthority: ToolExecutionAuthority | undefined;
     let clientCapabilityPermissionMode: PermissionMode | undefined;
     let preparedExecution: PreparedMakaToolExecution | undefined;
     if (tool.hostAdmission === 'client_capability') {
       try {
-        clientCapabilityBoundary = await this.readExecutionBoundary();
+        clientCapabilityAuthority = await this.readExecutionAuthority();
+        clientCapabilityBoundary = clientCapabilityAuthority.boundary;
         clientCapabilityPermissionMode = await this.livePermissionMode(clientCapabilityBoundary);
       } catch (error) {
         const reason = formatSyntheticToolErrorText(error);
@@ -1448,11 +1482,14 @@ export class ToolRuntime {
           sessionId: this.input.sessionId,
           turnId,
           ...(runId ? { runId } : {}),
+          ...(this.input.invocationId ? { invocationId: this.input.invocationId } : {}),
           cwd: this.input.header.cwd,
           executionBoundary: clientCapabilityBoundary,
           permissionMode: clientCapabilityPermissionMode,
           toolCallId: toolUseId,
-          abortSignal: ctx.abortSignal,
+          abortSignal: clientCapabilityAuthority?.signal
+            ? AbortSignal.any([ctx.abortSignal, clientCapabilityAuthority.signal])
+            : ctx.abortSignal,
         });
       } catch (error) {
         const reason = formatSyntheticToolErrorText(error);
@@ -1534,13 +1571,40 @@ export class ToolRuntime {
       pauseTarget?.pause();
       try {
         const runId = this.input.runId;
-        const executionBoundary = clientCapabilityBoundary ?? (await this.readExecutionBoundary());
+        const authority = clientCapabilityAuthority ?? (await this.readExecutionAuthority());
+        const executionBoundary = authority.boundary;
+        const supplementalAbort = new AbortController();
+        const executionSignal = AbortSignal.any([
+          ctx.abortSignal,
+          supplementalAbort.signal,
+          ...(authority.signal ? [authority.signal] : []),
+        ]);
+        const authorities = [authority];
+        const releases: Array<() => void> = [];
+        let settleTool!: () => void;
+        const toolSettlement = new Promise<void>((resolve) => {
+          settleTool = resolve;
+        });
+        const registerCleanup = (cleanup: () => void | Promise<void>) => {
+          const unregister: Array<(() => void) | undefined> = [];
+          try {
+            for (const a of authorities) unregister.push(a.registerCleanup?.(cleanup));
+          } catch (error) {
+            for (const release of unregister) release?.();
+            throw error;
+          }
+          return () => {
+            for (const release of unregister) release?.();
+          };
+        };
+        executionSignal.throwIfAborted();
         const permissionMode =
           clientCapabilityPermissionMode ?? (await this.livePermissionMode(executionBoundary));
         const toolContext: MakaToolContext = {
           sessionId: this.input.sessionId,
           turnId,
           ...(runId ? { runId } : {}),
+          ...(this.input.invocationId ? { invocationId: this.input.invocationId } : {}),
           ...(this.input.orchestrationMode
             ? { orchestrationMode: this.input.orchestrationMode }
             : {}),
@@ -1551,7 +1615,9 @@ export class ToolRuntime {
           // The id the call event actually carries, not the candidate: by here
           // `prepareDurableToolAttempt` has pushed it on the dispatch lane.
           ...(callEvent?.operationId ? { operationId: callEvent.operationId } : {}),
-          abortSignal: ctx.abortSignal,
+          abortSignal: executionSignal,
+          ...(authority.signal ? { authoritySignal: authority.signal } : {}),
+          registerAuthorityCleanup: registerCleanup,
           emitOutput: output.emit,
           emitProgress: (current, total) => {
             const chunk = encodeToolStepProgress({ current, total });
@@ -1593,7 +1659,7 @@ export class ToolRuntime {
             : {}),
           ...this.buildChildAgentContext({
             turnId,
-            abortSignal: ctx.abortSignal,
+            abortSignal: executionSignal,
             trace,
             toolUseId,
             toolName: tool.name,
@@ -1601,30 +1667,62 @@ export class ToolRuntime {
             activityIdentity,
           }),
           askUserQuestion: (questions) =>
-            this.askUserQuestion(turnId, toolUseId, questions, ctx.abortSignal, queue),
+            this.askUserQuestion(turnId, toolUseId, questions, executionSignal, queue),
           requestUserForm: (form, options) =>
             this.requestUserForm(
               turnId,
               toolUseId,
               form,
-              ctx.abortSignal,
+              executionSignal,
               queue,
               options?.cancellationSignal,
             ),
-          requestSandboxBoundary: (expansion, justification) =>
-            this.requestSandboxBoundary(
+          requestSandboxBoundary: async (expansion, justification) => {
+            const settlement = await this.requestSandboxBoundary(
               turnId,
               toolUseId,
               expansion,
               justification,
-              ctx.abortSignal,
+              executionSignal,
               queue,
-            ),
+            );
+            if (settlement.request.status === 'approved') {
+              const next = await this.readExecutionAuthority();
+              if (settlement.request.outcomeReason === 'task_grant' && !next.signal)
+                throw new Error('Task grant is no longer valid');
+              authorities.push(next);
+              toolContext.executionBoundary = next.boundary;
+              if (next.signal) {
+                const signal = next.signal;
+                const abort = () => supplementalAbort.abort(signal.reason);
+                signal.addEventListener('abort', abort, { once: true });
+                releases.push(() => signal.removeEventListener('abort', abort));
+                if (signal.aborted) abort();
+                toolContext.authoritySignal = AbortSignal.any(
+                  authorities.flatMap((a) => (a.signal ? [a.signal] : [])),
+                );
+              }
+              const release = next.registerCleanup?.(() => toolSettlement);
+              if (release) releases.push(release);
+              executionSignal.throwIfAborted();
+            }
+            return settlement;
+          },
         };
-        const invokeTool = () =>
-          preparedExecution
-            ? preparedExecution.execute(toolContext)
-            : tool.impl(structuredClone(executionArgs) as never, toolContext);
+        const invokeTool = async () => {
+          let release: (() => void) | undefined;
+          try {
+            release = registerCleanup(() => toolSettlement);
+            executionSignal.throwIfAborted();
+            return await (preparedExecution
+              ? preparedExecution.execute(toolContext)
+              : tool.impl(structuredClone(executionArgs) as never, toolContext));
+          } finally {
+            settleTool();
+            release?.();
+            for (const release of releases) release();
+          }
+        };
         const prepareOperationValue = async () => {
           const result = await invokeTool();
           if (

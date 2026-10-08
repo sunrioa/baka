@@ -18,6 +18,7 @@
  */
 
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
+import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
@@ -364,6 +365,7 @@ export async function createExecutionRuntimeHostComposition(
   let sessionEffects: HostSessionEffectCoordinator | undefined;
   let promptSuggestions: HostPromptSuggestionCoordinator | undefined;
   let memoryExtraction: HostMemoryExtractionCoordinator | undefined;
+  let taskGrants: HostTaskGrantCoordinator | undefined;
   let unsubscribeTranscriptChanges: (() => void) | undefined;
   let unsubscribeRuntimeEventCommits: (() => void) | undefined;
   let transcriptReader: SessionTranscriptReader | undefined;
@@ -1028,11 +1030,13 @@ export async function createExecutionRuntimeHostComposition(
     unsubscribeTranscriptChanges = stores.sessionStore.subscribeTranscriptChanges((sessionId) => {
       continuityCoordinator.enqueueCanonicalRefresh(sessionId);
       sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+      if (rootRecoveryCompleted) taskGrants?.notify();
     });
     unsubscribeRuntimeEventCommits = stores.runtimeEventStore.subscribeRuntimeEventCommits(
       (sessionId) => {
         continuityCoordinator.enqueueTranscriptAdvanced(sessionId);
         sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+        if (rootRecoveryCompleted) taskGrants?.notify();
         sessionAdmission.detach(() => promptSuggestions?.reconcile(sessionId));
       },
     );
@@ -1143,6 +1147,10 @@ export async function createExecutionRuntimeHostComposition(
     });
     const hostAiSdkBackendInput = <T extends BackendPreparationContext>(backendContext: T) => ({
       context: backendContext,
+      readTaskAuthority: (scope: import('@maka/runtime/tool-runtime').ToolExecutionScope) => {
+        if (!taskGrants) throw new Error('Task authority is unavailable');
+        return taskGrants.read(scope);
+      },
       runtimePolicy: runtimePolicyStores,
       oauthCredentials,
       createRunComposer: createInteractiveRunComposerFactory({
@@ -1679,6 +1687,12 @@ export async function createExecutionRuntimeHostComposition(
       onModelToolsChanged: registerBackendInvalidation,
       interactions,
       grants: stores.interactionStore,
+      taskGrants: {
+        permitsCapability: (scope, target, cancel) => {
+          if (!taskGrants) throw new Error('Task authority is unavailable');
+          return taskGrants.permitsCapability(scope, target, cancel);
+        },
+      },
     });
     externalAgentSetup = new HostExternalAgentSetupCoordinator({
       install: async (input) => {
@@ -1766,7 +1780,15 @@ export async function createExecutionRuntimeHostComposition(
       () => context.acquireResidency('hosted-execution'),
       context.requestDrain,
       clientCapabilities,
-      () => requireGoal(goal),
+      () => ({
+        begin: (input) => {
+          const observer = requireGoal(goal).begin(input);
+          return async (completion) => {
+            await taskGrants?.reconcile();
+            await observer?.(completion);
+          };
+        },
+      }),
       (admission, state) =>
         requireScheduledTasks(scheduledTasks).assertRecoveryAdmission(admission, state),
       artifacts,
@@ -1835,6 +1857,17 @@ export async function createExecutionRuntimeHostComposition(
       workHubExecutionSlots,
     );
     const coordinator = rootCoordinator;
+    taskGrants = new HostTaskGrantCoordinator({
+      stores,
+      executions: coordinator,
+      onError: (error) => {
+        console.error(
+          `[runtime-host] Task grant cleanup failed: ${boundedFailureDiagnostic(error)}`,
+        );
+        context.retainUntilProcessExit();
+        context.requestDrain();
+      },
+    });
     const pluginModel = createHostPluginModel({
       runtimePolicy: runtimePolicyStores,
       oauthCredentials,
@@ -2747,6 +2780,7 @@ export async function createExecutionRuntimeHostComposition(
     });
     workHubResults = createWorkHubResultRuntime({
       stores,
+      taskGrants,
       executions: coordinator,
       messages,
       interactions,
@@ -3146,6 +3180,7 @@ export async function createExecutionRuntimeHostComposition(
             );
             await turnAccessRequests?.recover();
             rootRecoveryCompleted = true;
+            await taskGrants?.reconcile();
           },
         },
         drain: [
@@ -3160,6 +3195,7 @@ export async function createExecutionRuntimeHostComposition(
           () => promptSuggestions?.beginDrain(),
         ],
         close: [
+          () => taskGrants?.close(),
           async () => {
             if (!rootRecoveryCompleted || poisonFailure) return;
             await clientBoundRecovery.catch(() => undefined);

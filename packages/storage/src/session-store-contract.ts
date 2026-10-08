@@ -18,6 +18,10 @@
  */
 
 import type { ExecutorConfiguration } from '@maka/core/executor-catalog';
+import type {
+  TaskExecutionGrantRecord,
+  TaskGrantClosureReason,
+} from '@maka/core/task-execution-grant';
 
 import type {
   AgentGraphOperatorProvisionRequest,
@@ -445,6 +449,12 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     initialBoundary?: ExecutionBoundary,
   ): Promise<{ header: SessionHeader } & AgentGraphOperatorProvisionResult>;
   readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary>;
+  listTaskExecutionGrants(rootSessionId?: string): Promise<TaskExecutionGrantRecord[]>;
+  closeTaskExecutionGrant(
+    grantId: string,
+    reason: TaskGrantClosureReason,
+    closedAt: number,
+  ): Promise<void>;
   createSandboxBoundaryRequest(
     input: CreateSandboxBoundaryRequest,
   ): Promise<SandboxBoundaryRequest>;

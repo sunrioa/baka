@@ -101,6 +101,8 @@ export interface ShellRunBashInput {
   pty?: boolean;
   timeoutMs?: number;
   abortSignal?: AbortSignal;
+  authoritySignal?: AbortSignal;
+  registerAuthorityCleanup?: (cleanup: () => void | Promise<void>) => () => void;
   emitOutput: (stream: 'stdout' | 'stderr', chunk: string) => void;
   shell?: ShellPlan;
   /** Effective command sandbox selected before process launch. */

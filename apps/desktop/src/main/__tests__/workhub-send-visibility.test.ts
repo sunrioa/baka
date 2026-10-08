@@ -132,6 +132,7 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
     },
     listActiveInteractions: async () => [],
     queryTaskInteractions: async () => ({ requests: [], truncated: false }),
+    revokeTaskGrant: async () => {throw new Error('No task grant in this fixture');},
     answerTaskInteraction: async () => { throw new Error('No task request in this fixture'); },
     subscribeActiveInteractions: () => () => {},
     respondToUserForm: async () => {},
@@ -1017,6 +1018,45 @@ test('WorkHub task inbox keeps coordinator input independent and answers the ori
   }]]);
   assert.equal(h.controller.taskInbox.requests.length, 0);
   assert.equal(h.requests.length, 1, 'no blocking relay prompt is added');
+});
+
+test('native task approval uses task scope and a lost revoke receipt cannot replay or keep its grant', async () => {
+  const item: import('@maka/runtime-host/protocol').WorkHubPendingInteraction = {
+    actionId: 'action', delegationId: 'delegation', targetSessionName: 'Task',
+    interaction: {schemaVersion: 1, interactionId: 'boundary', sessionId: 'original-task', turnId: 'task-turn', runId: 'task-run', revision: 1, status: 'pending', outcome: null,
+      request: {kind: 'sandbox_boundary', justification: 'Read this task input', expansion: {network: {enabled: true}}}},
+  };
+  const grant: import('@maka/runtime-host/protocol').WorkHubTaskGrant = {actionId: 'action', targetSessionName: 'Task', grant: {
+    version: 1, grantId: 'boundary', delegationId: 'delegation', rootSessionId: 'original-task', rootTurnId: 'task-turn', rootRunId: 'task-run',
+    sourceSessionId: 'original-task', sourceTurnId: 'task-turn', sourceRunId: 'task-run', sourceRequestId: 'boundary',
+    rootBoundaryRevision: 0, sourceBoundaryRevision: 0, grantedAt: 1, expiresAt: 3600001,
+    resource: {kind: 'sandbox', expansion: {network: {enabled: true}}},
+  }};
+  let requests = [item];
+  let grants: typeof grant[] = [];
+  const writes: unknown[] = [];
+  const receipt = deferred<void>();
+  const h = await mountController(false, {
+    queryTaskInteractions: async () => ({requests, grants, truncated: false}),
+    answerTaskInteraction: async (owner, input) => {
+      writes.push([owner, input]); requests = []; grants = [grant];
+      return {...item.interaction, revision: 2, status: 'answered', outcome: {kind: 'sandbox_boundary_decision', decision: 'allow', status: 'approved', committedAt: 1}};
+    },
+    revokeTaskGrant: async (owner, input) => {writes.push([owner, input]); grants = []; await receipt.promise; throw new Error('Acknowledgement lost');},
+  });
+  await act(async () => {await h.controller.taskInbox.respond(item, {kind: 'sandbox_boundary', decision: 'allow'}, 'task');});
+  assert.deepEqual(writes[0], [h.sessionId, {actionId: 'action', interactionId: 'boundary', expectedTurnId: 'task-turn', expectedRunId: 'task-run', answer: {kind: 'sandbox_boundary', decision: 'allow'}, grantScope: 'task'}]);
+  assert.equal(h.controller.taskInbox.grants?.[0], grant);
+  let revocation!: Promise<void>;
+  await act(async () => {revocation = h.controller.taskInbox.revoke(grant);});
+  assert.equal(h.controller.taskInbox.isRevoking(grant), true);
+  await act(async () => {await h.controller.taskInbox.revoke(grant);});
+  assert.equal(writes.length, 2, 'duplicate clicks never replay native mutations');
+  await act(async () => {receipt.resolve(); await assert.rejects(revocation, /Acknowledgement lost/);});
+  assert.deepEqual(writes[1], [h.sessionId, {actionId: 'action', grantId: 'boundary'}]);
+  assert.deepEqual(h.controller.taskInbox.grants, []);
+  assert.equal(h.controller.taskInbox.isRevoking(grant), false);
+  await assert.rejects(h.controller.taskInbox.revoke(grant), /unavailable/);
 });
 
 test('WorkHub task inbox drops old Host reads and rebuilds a lost answer acknowledgement', async () => {

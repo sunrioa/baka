@@ -797,6 +797,58 @@ describe('Host Client Capability coordinator', () => {
     await connection.close();
     await coordinator.close();
   });
+  test('managed capability admission accepts only the current task grant and releases completed calls', async () => {
+    let granted = false,
+      reads = 0,
+      releases = 0;
+    const coordinator = createCoordinator(() => undefined, {
+      grants: { readClientCapabilitySessionGrant: async () => undefined },
+      interactions: {
+        requestClientCapabilityApproval: async () => {
+          granted = true;
+          return 'allow';
+        },
+      },
+      taskGrants: {
+        permitsCapability: async (scope, target) => {
+          reads++;
+          assert.equal(scope.runId, 'run-a');
+          assert.equal(scope.turnId, 'turn-a');
+          assert.equal(target.scope.kind, 'browser_origin');
+          return granted
+            ? () => {
+                releases++;
+              }
+            : undefined;
+        },
+      },
+    });
+    const connection = attachAutoAdmittingConnection(
+      coordinator,
+      'connection-a',
+      () => ({ kind: 'browser_url', url: 'https://example.com' }),
+      'done',
+    );
+    await registerSessionTools(
+      coordinator,
+      'connection-a',
+      'registration-task',
+      'desktop_browser',
+      ['browser_snapshot'],
+    );
+    await coordinator.bindSession('session-a', 'connection-a');
+    const snapshot = coordinator.snapshotForSession('session-a')!;
+    try {
+      const prepared = await prepare(snapshot.tools[0], {}, 'task-call');
+      assert.equal(reads, 2);
+      assert.deepEqual(await prepared.execute(managedContext('task-call')), textResult('done'));
+      assert.equal(releases, 1);
+    } finally {
+      snapshot.release();
+      await connection.close();
+      await coordinator.close();
+    }
+  });
 
   test('passes trusted Desktop Settings through managed admission without a Session Grant', async () => {
     const coordinator = createCoordinator();
@@ -2183,7 +2235,7 @@ function createCoordinator(
   onModelToolsChanged: () => void = () => undefined,
   admission: Pick<
     HostClientCapabilityCoordinatorOptions,
-    'interactions' | 'grants'
+    'interactions' | 'grants' | 'taskGrants'
   > = clientCapabilityCoordinatorTestAdmission(),
 ): HostClientCapabilityCoordinator {
   return new HostClientCapabilityCoordinator({
