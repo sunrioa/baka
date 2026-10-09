@@ -7,7 +7,7 @@
   "specs": {
     "workhub-evidence.spec.ts": {
       "tests": 1,
-      "electron": "native Desktop task capabilities admit two independent workers; evidence starts a fresh worker Turn whose exact question is answered through the contextBridge task inbox after renderer replacement, detecting stale native offer or old-Run response routing"
+      "electron": "native Desktop task capabilities admit two independent workers; evidence starts a fresh worker Turn whose exact question is answered through the contextBridge task inbox after renderer replacement, then its owned delivery and native continuation cross the task preload/main IPC, detecting stale native offers, old-Run response routing or lost task identity"
     },
     "composer-directory-reference.spec.ts": {
       "tests": 1,

@@ -43,6 +43,10 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(reconnectable.has('workhub:getSession'), true);
   assert.equal(ordinary.has('workhub:getSession'), false);
   assert.equal(reconnectable.has('workhub:queryInteractions'), true);
+  assert.equal(reconnectable.has('workhub:queryTasks'), true);
+  assert.equal(reconnectable.has('workhub:readTask'), true);
+  assert.equal(ordinary.has('workhub:continueTask'), true);
+  assert.equal(reconnectable.has('workhub:continueTask'), false, 'a lost task continuation is not automatically replayed');
   assert.equal(ordinary.has('workhub:answerInteraction'), true);
   assert.equal(reconnectable.has('workhub:answerInteraction'), false, 'lost approvals are not automatically replayed');
   assert.equal(ordinary.has('workhub:revokeTaskGrant'), true);

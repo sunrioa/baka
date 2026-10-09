@@ -65,7 +65,11 @@ export interface WorkHubAdmittedAction
   /** Active Coordination Run that owns any repair Form opened before admission. */
   readonly coordinationRunId?: string;
   /** Only supplied by the Host after accepting an exact durable form option. Never a wire proposal. */
-  readonly selectedTarget?: { readonly sessionId: string; readonly workspaceDigest: string };
+  readonly selectedTarget?: {
+    readonly sessionId: string;
+    readonly workspaceDigest: string;
+    readonly sourceTask?: { readonly actionId: string; readonly delegationId: string };
+  };
 }
 
 type AdmittedWorkHubAction = WorkHubAdmittedAction & { readonly coordinationTurnId?: string };
@@ -305,6 +309,13 @@ export class WorkHubCoordinationActionGate {
 
   async candidates(): Promise<WorkHubCoordinationCandidatesResult> {
     return candidateSet(await this.#effects.listSessions());
+  }
+
+  /** An exact native task reference is not limited by the model discovery page. */
+  async nativeTaskCandidate(sessionId: string): Promise<WorkHubCoordinationCandidate | undefined> {
+    return candidateSet(
+      (await this.#effects.listSessions()).filter((session) => session.id === sessionId),
+    ).candidates[0];
   }
 
   act(
@@ -587,11 +598,16 @@ export class WorkHubCoordinationActionGate {
         'WorkHub Session candidates changed; refresh before delegating',
       );
     }
-    const target = candidates.candidates.find((candidate) =>
-      input.selectedTarget
-        ? candidate.sessionId === input.selectedTarget.sessionId &&
-          digest(candidate.workspace) === input.selectedTarget.workspaceDigest
-        : candidate.candidateRef === proposal.candidateRef,
+    const offered = input.selectedTarget?.sourceTask
+      ? [await this.nativeTaskCandidate(input.selectedTarget.sessionId)]
+      : candidates.candidates;
+    const target = offered.find(
+      (candidate) =>
+        candidate &&
+        (input.selectedTarget
+          ? candidate.sessionId === input.selectedTarget.sessionId &&
+            digest(candidate.workspace) === input.selectedTarget.workspaceDigest
+          : candidate.candidateRef === proposal.candidateRef),
     );
     if (!target) {
       throw new WorkHubActionGateFailure(
@@ -600,6 +616,27 @@ export class WorkHubCoordinationActionGate {
       );
     }
     this.#assertTarget(target);
+    const validateSource = async () => {
+      const ref = input.selectedTarget?.sourceTask;
+      if (!ref) return;
+      const source = await this.#effects.readAssignment(ref.actionId);
+      if (
+        !source ||
+        source.delegationId !== ref.delegationId ||
+        source.targetSessionId !== target.sessionId ||
+        !(await this.#effects.listActiveAssignments(target.sessionId)).some(
+          (link) => link.actionId === ref.actionId && link.delegationId === ref.delegationId,
+        ) ||
+        (await this.#effects.readReplacement(source.delegationId)) ||
+        ((await this.#effects.readStopRequest(source.delegationId)) &&
+          (await this.#effects.readStopResolution(source.delegationId))?.outcome !== 'not_owned')
+      )
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'The selected task was retired or changed before continuation',
+        );
+    };
+    await validateSource();
 
     return this.#assign(
       {
@@ -608,9 +645,13 @@ export class WorkHubCoordinationActionGate {
         ...(input.selectedTarget
           ? {
               validateFreshTarget: async () => {
-                const fresh = (await this.candidates()).candidates.find(
+                await validateSource();
+                const offered = input.selectedTarget!.sourceTask
+                  ? [await this.nativeTaskCandidate(input.selectedTarget!.sessionId)]
+                  : (await this.candidates()).candidates;
+                const fresh = offered.find(
                   (candidate) =>
-                    candidate.sessionId === input.selectedTarget!.sessionId &&
+                    candidate?.sessionId === input.selectedTarget!.sessionId &&
                     digest(candidate.workspace) === input.selectedTarget!.workspaceDigest,
                 );
                 if (!fresh)

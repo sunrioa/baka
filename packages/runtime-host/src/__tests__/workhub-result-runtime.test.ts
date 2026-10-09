@@ -29,16 +29,138 @@ import {
 } from '../server/session-admission-gate.js';
 
 type Options = Parameters<typeof createWorkHubResultRuntime>[0];
-function fixture() {
+
+test('task overview follows the owned continuation and separates queue, resources, dependency and user waiting without reading delivery', async () => {
+  const f = fixture();
+  const query = async () => {
+    const result = await f.handlers['workhub.tasks.query']({}, {} as never);
+    assert.ok(result.ok);
+    return result.result.tasks[0]!;
+  };
+  f.setDisposition('pending');
+  assert.equal((await query()).status, 'queued');
+  f.setDisposition('owned_root');
+  f.setRunning();
+  f.setWaitReason('workspace');
+  assert.equal((await query()).waitReason, 'workspace');
+  f.setWaitReason('concurrency');
+  assert.equal((await query()).waitReason, 'concurrency');
+  f.setWaitReason(undefined);
+  assert.equal((await query()).status, 'running');
+  f.setTip({ sessionId: 'target', turnId: 'evidence-turn', runId: 'evidence-run' });
+  f.setDependency({
+    turnId: 'evidence-turn',
+    runId: 'evidence-run',
+    sharedTurn: false,
+    eventKey: 'request',
+    status: 'waiting_for_dependency',
+    result: '',
+    details: { requestId: 'request', question: 'Need proof', sourceActionId: 'producer' },
+  });
+  assert.deepEqual((await query()).dependency, {
+    requestId: 'request',
+    question: 'Need proof',
+    sourceActionId: 'producer',
+  });
+  f.setDependency(undefined);
+  f.setCompleted();
+  const ended = await query();
+  assert.equal(ended.status, 'pending_acceptance');
+  assert.equal(ended.execution!.turnId, 'evidence-turn');
+  assert.equal(f.resultReads(), 0, 'overview never scans unrelated transcript or reads a delivery');
+  const detail = await f.handlers['workhub.tasks.read'](
+    { actionId: 'action', delegationId: 'delegation' },
+    {} as never,
+  );
+  assert.ok(detail.ok);
+  assert.equal(detail.result.task.execution!.runId, 'evidence-run');
+  assert.ok(detail.result.delivery!.truncated);
+  assert.ok(Buffer.byteLength(detail.result.delivery!.text) <= 16 * 1024);
+});
+test('task detail revalidates the delegation, retirement and shared-Turn ownership', async () => {
+  const f = fixture();
+  f.setOriginalAnswered();
+  assert.equal(
+    (
+      await f.handlers['workhub.tasks.read'](
+        { actionId: 'action', delegationId: 'foreign' },
+        {} as never,
+      )
+    ).ok,
+    false,
+  );
+  f.setDisposition('shared_turn');
+  const shared = await f.handlers['workhub.tasks.read'](
+    { actionId: 'action', delegationId: 'delegation' },
+    {} as never,
+  );
+  assert.ok(shared.ok);
+  assert.equal(shared.result.delivery, undefined);
+  f.setDisposition('owned_root');
+  f.setStopped();
+  const stopped = await f.handlers['workhub.tasks.read'](
+    { actionId: 'action', delegationId: 'delegation' },
+    {} as never,
+  );
+  assert.ok(stopped.ok);
+  assert.equal(stopped.result.task.status, 'stopping');
+  assert.equal(stopped.result.delivery, undefined);
+  f.setStopResolved();
+  const resolved = await f.handlers['workhub.tasks.read'](
+    { actionId: 'action', delegationId: 'delegation' },
+    {} as never,
+  );
+  assert.ok(resolved.ok);
+  assert.equal(resolved.result.task.status, 'stopped');
+  assert.equal(resolved.result.delivery, undefined);
+  f.setActive(false);
+  assert.equal(
+    (
+      await f.handlers['workhub.tasks.read'](
+        { actionId: 'action', delegationId: 'delegation' },
+        {} as never,
+      )
+    ).ok,
+    false,
+  );
+  assert.equal(f.resultReads(), 0);
+});
+
+test('task overview includes only a linked child question belonging to the exact owned root', async () => {
+  const f = fixture(true);
+  f.setStatus('running');
+  const query = async () => {
+    const result = await f.handlers['workhub.tasks.query']({}, {} as never);
+    assert.ok(result.ok);
+    return result.result.tasks[0]!;
+  };
+  assert.equal((await query()).status, 'waiting_for_user');
+  f.setChildOwned(false);
+  assert.equal((await query()).status, 'running');
+  assert.equal(f.resultReads(), 0);
+});
+
+function fixture(childRequest = false) {
   let active = true,
     stopped = false;
+  let stopResolved = false;
   let requests = true;
+  let childOwned = true;
   let status = 'waiting_for_user';
   let disposition: 'owned_root' | 'cancelled' | 'shared_turn' | 'pending' = 'owned_root';
   let resultReads = 0;
+  let waitReason: 'concurrency' | 'workspace' | undefined;
+  let tip = { sessionId: 'target', turnId: 'target-turn', runId: 'target-run' };
+  let dependency:
+    | import('../server/workhub-result-coordinator.js').WorkHubResultObservation
+    | undefined;
   let rejectRelay: ((reason: Error) => void) | undefined;
   const closedRelays: unknown[] = [];
   const assignment = {
+    ts: 1,
+    userText: 'Release task',
+    targetSessionName: 'Release',
+    targetTurnId: 'target-turn',
     actionId: 'action',
     delegationId: 'delegation',
     targetSessionId: 'target',
@@ -53,7 +175,7 @@ function fixture() {
   ];
   const record = {
     requestId: 'question',
-    sessionId: 'target',
+    sessionId: childRequest ? 'child' : 'target',
     turnId: 'target-turn',
     runId: 'target-run',
     request: { kind: 'question', toolUseId: 'question-tool', questions },
@@ -69,21 +191,50 @@ function fixture() {
     return 'delivered';
   };
   const runtime = createWorkHubResultRuntime({
+    ...(childRequest
+      ? {
+          taskGrants: {
+            belongsToRoot: async (identity: { sessionId: string }) =>
+              childOwned && identity.sessionId === 'child',
+          } as unknown as NonNullable<Options['taskGrants']>,
+        }
+      : {}),
+    evidence: {
+      taskExecution: async () => ({ ...tip, round: 0 }),
+      waitingObservation: async () => dependency,
+    },
     // Each stub is an external authority; use the real admission gate and tool.
     stores: {
       sessionStore: {
-        listHeaders: async () => [{ id: 'target', isArchived: false }],
+        listHeaders: async () => [
+          { id: 'target', isArchived: false, labels: [] },
+          ...(childRequest
+            ? [
+                {
+                  id: 'child',
+                  isArchived: false,
+                  labels: [],
+                  subagentParent: { parentSessionId: 'target' },
+                },
+              ]
+            : []),
+        ],
         readWorkHubAssignment: async () => assignment,
-        readHeaderSnapshot: async () => ({ isArchived: false }),
+        readHeaderSnapshot: async () => ({ id: 'target', name: 'Release', isArchived: false }),
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async () => undefined,
         readWorkHubStopRequest: async () => (stopped ? {} : undefined),
-        readWorkHubStopResolution: async () => undefined,
+        readWorkHubStopResolution: async () =>
+          stopResolved ? { outcome: 'stop_delivered' } : undefined,
         listPendingSandboxBoundaryRequests: async () => [],
       },
-      interactionStore: { listSessionPending: async () => (requests ? [record] : []) },
+      interactionStore: {
+        listSessionPending: async (sessionId: string) =>
+          requests && record.sessionId === sessionId ? [record] : [],
+      },
     } as unknown as Options['stores'],
     executions: {
+      readWorkHubDispatchWait: () => waitReason,
       startWorkHubResult,
       readLatestRootTurnLineage: async () => ({
         sessionId: 'target',
@@ -118,7 +269,7 @@ function fixture() {
     } as Options['interactions'],
     readTurnResult: async (sessionId, turnId) => {
       assert.equal(sessionId, 'target');
-      assert.equal(turnId, 'target-turn');
+      assert.equal(turnId, tip.turnId);
       resultReads++;
       return '😀'.repeat(16001);
     },
@@ -140,6 +291,18 @@ function fixture() {
   const call = (input: Record<string, unknown>, ctx = context) =>
     runtime.tool.impl(input as never, ctx);
   return {
+    setChildOwned: (value: boolean) => {
+      childOwned = value;
+    },
+    setWaitReason: (value: typeof waitReason) => {
+      waitReason = value;
+    },
+    setTip: (value: typeof tip) => {
+      tip = value;
+    },
+    setDependency: (value: typeof dependency) => {
+      dependency = value;
+    },
     call,
     handlers: runtime.handlers,
     context,
@@ -164,6 +327,9 @@ function fixture() {
     },
     setStopped: () => {
       stopped = true;
+    },
+    setStopResolved: () => {
+      stopResolved = true;
     },
     setRunning: () => {
       status = 'running';

@@ -2191,6 +2191,21 @@ const makaBridge = {
     },
   },
   workHub: {
+    async queryTasks(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:queryTasks', scope) as OperationOutput<'workhub.tasks.query'>;
+      return { ...result, tasks: result.tasks.map(task => ({ ...task, targetSessionId: observeRuntimeHostSessionScope(scope, task.targetSessionId).sessionId })) };
+    },
+    async readTask(coordinationSessionId: string, input: OperationInput<'workhub.tasks.read'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:readTask', scope, input) as OperationOutput<'workhub.tasks.read'>;
+      return { ...result, task: { ...result.task, targetSessionId: observeRuntimeHostSessionScope(scope, result.task.targetSessionId).sessionId } };
+    },
+    async continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:continueTask', scope, input) as OperationOutput<'workhub.coordination.continue'>;
+      return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId };
+    },
     async revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       return await invokeWhenReady('workhub:revokeTaskGrant', scope, input) as OperationOutput<'workhub.interactions.revoke'>;

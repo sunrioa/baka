@@ -61,6 +61,9 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   prepareAttachments(sessionId: string, items: Array<{ approvalId: string; name: string; mimeType?: string } | { file: File }>): Promise<AttachmentRef[]>;
   listActiveInteractions(sessionId: string): Promise<import('@maka/core/events').ActiveInteractionRequestEvent[]>;
   queryTaskInteractions(sessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
+  queryTasks(sessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
+  readTask(sessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
+  continueTask(sessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
   answerTaskInteraction(sessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
   revokeTaskGrant(sessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
   subscribeActiveInteractions(handler: (event: { sessionId: string; interactions: import('@maka/core/events').ActiveInteractionRequestEvent[] }) => void): () => void;

@@ -18,6 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { describe, test } from 'node:test';
 import type {
   WorkHubActionClaim,
@@ -55,6 +56,63 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('WorkHub Coordination Action Gate', () => {
+  test('native continuation uses the exact task outside discovery and revalidates its source at admission', async () => {
+    for (const retireBeforeAdmission of [false, true]) {
+      const effects = fakeEffects([
+        session('original', { name: 'Same name', lastMessageAt: 1 }),
+        ...Array.from({ length: 40 }, (_, index) =>
+          session(`other-${index}`, { name: 'Same name', lastMessageAt: 100 + index }),
+        ),
+      ]);
+      const source = assignmentRecord(
+        {
+          actionId: 'source',
+          actionFingerprint: `sha256:${'a'.repeat(64)}`,
+          targetSessionId: 'original',
+          targetSessionName: 'Same name',
+          disposition: 'delegate_existing',
+          userText: 'Original instruction',
+        },
+        'original-turn',
+      );
+      effects.assignmentRecords.set(source.actionId, source);
+      const gate = new WorkHubCoordinationActionGate(effects);
+      assert.equal(
+        (await gate.candidates()).candidates.some(
+          (candidate) => candidate.sessionId === 'original',
+        ),
+        false,
+      );
+      const target = await gate.nativeTaskCandidate('original');
+      assert.ok(target);
+      const originalAssign = effects.assign;
+      effects.assign = async (input) => {
+        if (retireBeforeAdmission) effects.assignmentRecords.delete(source.actionId);
+        await input.validateFreshTarget?.();
+        return originalAssign.call(effects, input);
+      };
+      const operation = gate.act(
+        {
+          actionId: 'native-continue',
+          userText: 'Fresh user instruction',
+          proposal: { disposition: 'delegate_existing', candidateRef: 'native-ref' },
+          selectedTarget: {
+            sessionId: source.targetSessionId,
+            workspaceDigest: `sha256:${createHash('sha256').update(JSON.stringify(target.workspace)).digest('hex')}`,
+            sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+          },
+        },
+        CONTEXT,
+      );
+      if (retireBeforeAdmission) {
+        await assert.rejects(operation, /task was retired/);
+        assert.equal(effects.assignments.length, 0);
+      } else {
+        assert.equal((await operation).targetSessionId, 'original');
+        assert.equal(effects.assignments.length, 1);
+      }
+    }
+  });
   test('claims before target repair and rechecks it at final admission', async () => {
     const effects = fakeEffects([session('payments', { name: 'Payments' })]);
     const calls: string[] = [];

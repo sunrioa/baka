@@ -21,6 +21,7 @@ import { useMemo, useState } from 'react';
 import { ComposerPromptSuggestionProvider, ToastProvider, LocaleProvider, AstryxLocaleProvider, ChatSurfaceLayout } from '@maka/ui';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { StoredMessage, SessionSummary } from '@maka/core/session';
+import type { WorkHubTask } from '@maka/runtime-host/protocol';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within, waitFor } from 'storybook/test';
 import { WorkHubRoot, WorkHubServicesProvider, type WorkHubServices, type WorkHubTranscriptSnapshot } from '../src/renderer/features/workhub/index.js';
@@ -30,7 +31,8 @@ import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskContinue: fn() };
+const overviewHostListeners = new Set<Parameters<WorkHubServices['subscribeHosts']>[0]>();
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -47,7 +49,7 @@ const repairChoices = [
   providerType: 'openai' as const, providerLabel: connectionName, model, label,
   contextWindow: 100_000, isDefault: index === 0, thinkingLevels: [] as ThinkingLevel[],
 }));
-function makeServices(failFirst: boolean, withHistory: boolean | 'usage', coloredHistory: boolean, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false): WorkHubServices {
+function makeServices(failFirst: boolean, withHistory: boolean | 'usage', coloredHistory: boolean, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false, taskOverview = false): WorkHubServices {
   let failures = failFirst ? 1 : 0;
   let session: SessionSummary & { revision: number } = {
     id: sessionId, name: 'WorkHub', revision: 1, isFlagged: false, isArchived: false, labels: [], hasUnread: false,
@@ -61,6 +63,17 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     { type: 'workhub_coordination', kind: 'delegation_assigned', id: 'link-1', turnId: 'turn-1', coordinationTurnId: 'turn-1', ts: 3, schemaVersion: 1, actionId: 'action-1', actionFingerprint: `sha256:${'0'.repeat(64)}`, disposition: 'delegate_existing', userText: '继续支付回调幂等性，补充重复投递测试点。', targetSessionId: targetId, targetSessionName: target.name, targetTurnId: 'target-turn', targetMessageId: 'target-message', delegationId: 'delegation-1' },
   ] : [];
   const secondTarget = { ...target, id: desktopSessionKey({ hostId: 'story-host', sessionId: 'release' }), name: '发布检查清单', cwd: '/projects/desktop' };
+  // These are external Host responses, not a story-owned task classifier.
+  let tasks: WorkHubTask[] = taskOverview ? [
+    { actionId: 'overview-user', delegationId: 'overview-user-delegation', targetSessionId: targetId, targetSessionName: target.name, targetMessageId: 'overview-user-message', text: '确认首批发布范围', createdAt: 7, status: 'waiting_for_user', execution: { turnId: 'task-turn', runId: 'task-run', sharedTurn: false } },
+    { actionId: 'overview-running', delegationId: 'overview-running-delegation', targetSessionId: secondTarget.id, targetSessionName: secondTarget.name, targetMessageId: 'overview-running-message', text: '核对打包依赖', createdAt: 6, status: 'running', execution: { turnId: 'running-turn', runId: 'running-run', sharedTurn: false } },
+    { actionId: 'overview-evidence', delegationId: 'overview-evidence-delegation', targetSessionId: targetId, targetSessionName: '研究证据', targetMessageId: 'overview-evidence-message', text: '比对回调规范', createdAt: 5, status: 'waiting_for_dependency', execution: { turnId: 'evidence-tip-turn', runId: 'evidence-tip-run', sharedTurn: false }, dependency: { requestId: 'evidence-request', question: '需要发布检查中的协议版本证据', sourceActionId: 'overview-running' } },
+    { actionId: 'overview-resource', delegationId: 'overview-resource-delegation', targetSessionId: secondTarget.id, targetSessionName: '并行检查', targetMessageId: 'overview-resource-message', text: '执行并发回归', createdAt: 4, status: 'waiting_resource', waitReason: 'concurrency', execution: { turnId: 'resource-turn', runId: 'resource-run', sharedTurn: false } },
+    { actionId: 'overview-done', delegationId: 'overview-done-delegation', targetSessionId: secondTarget.id, targetSessionName: target.name, targetMessageId: 'overview-done-message', text: '补充重复投递用例', createdAt: 3, status: 'pending_acceptance', execution: { turnId: 'done-turn', runId: 'done-run', sharedTurn: false } },
+    { actionId: 'overview-failed', delegationId: 'overview-failed-delegation', targetSessionId: targetId, targetSessionName: '文档整理', targetMessageId: 'overview-failed-message', text: '整理联调记录', createdAt: 2, status: 'failed', failure: '供应商连接中断；没有验证产物', execution: { turnId: 'failed-turn', runId: 'failed-run', sharedTurn: false } },
+  ] : [];
+  const availabilityListeners = new Set<() => void>();
+  let disconnectedRead = false;
   if (coloredHistory) {
     const link = messages.find((message) => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned')!;
     messages = [target, secondTarget, target].flatMap((work, index): StoredMessage[] => {
@@ -126,7 +139,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => ({ placement: progress ? 'floating' : 'docked', floatingVisible: progress, progressRequest: progress ? 1 : undefined, shortcutRegistered: true, rendererCrashed: false, workbar: { collapsed: true, placement: 'right', togglePosition: 'edge' } }), setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openSession: async (id) => { writes.open(id); }, openSettings: async () => {}, subscribe: () => () => {}, onViewportInset: () => () => {}, onFocusComposer: () => () => {}, onOpenMain: () => () => {} },
     control: { getSnapshot: async () => ({ revision: 0, phase: 'idle', canUndo: false }), subscribe: () => () => {}, stop: async () => {}, undo: async () => {} },
     bindBrowserSession: () => {},
-    resolve: async () => sessionId, subscribeHosts: () => () => {}, subscribeAvailability: () => () => {},
+    resolve: async () => sessionId, subscribeHosts: listener => { if (taskOverview) overviewHostListeners.add(listener); return () => { overviewHostListeners.delete(listener); }; }, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
     getSession: async () => session,
     listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? repairChoices : choices,
     setDefaultModel: async () => {},
@@ -135,6 +148,25 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
     queryTaskInteractions: async () => ({ requests: taskRequests, grants: taskGrants, truncated: false }),
+    queryTasks: async () => { if (disconnectedRead) { disconnectedRead = false; throw new Error('Host disconnected'); } return { tasks, truncated: taskOverview }; },
+    readTask: async (_id, ref) => {
+      const task = tasks.find(task => task.actionId === ref.actionId && task.delegationId === ref.delegationId);
+      if (!task) throw new Error('Original task unavailable');
+      return { task, ...(task.status === 'pending_acceptance' ? { delivery: { text: '报告路径：/projects/maka/report.md\n助手声称测试通过；此处没有独立验证证据。', truncated: false, terminalEventId: 'done-terminal' } } : {}) };
+    },
+    continueTask: async (id, input) => {
+      writes.taskContinue(id, input);
+      const task = tasks.find(task => task.actionId === input.actionId && task.delegationId === input.delegationId);
+      if (!task) throw new Error('Original task unavailable');
+      if (writes.taskContinue.mock.calls.length === 1) {
+        disconnectedRead = true;
+        for (const listener of availabilityListeners) listener();
+        throw new Error('Lost continuation receipt');
+      }
+      tasks = [...tasks, { ...task, actionId: 'overview-followup', delegationId: 'overview-followup-delegation', targetMessageId: 'followup-message', text: input.text, createdAt: 8, status: 'queued', execution: undefined }];
+      updateSessions();
+      return { disposition: 'delegate_existing', targetSessionId: task.targetSessionId };
+    },
     revokeTaskGrant: async (_id, input) => {taskGrants = taskGrants.filter((item) => item.grant.grantId !== input.grantId); updateSessions(); return {grantId: input.grantId};},
     answerTaskInteraction: async (id, input) => {
       writes.taskAnswer(id, input);
@@ -237,10 +269,10 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
 
   };
 }
-function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean }) {
+function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false, taskOverview = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean; taskOverview?: boolean }) {
   const [progressHeight, setProgressHeight] = useState(112);
   const [services] = useState(() => {
-    const services = makeServices(failFirst, history, colors, selectTarget, question, progress, repairModel, suggestions, taskInbox);
+    const services = makeServices(failFirst, history, colors, selectTarget, question, progress, repairModel, suggestions, taskInbox, taskOverview);
     // Storybook has no BrowserWindow: honor the production renderer's native
     // height request and use the native progress card's 360px width.
     if (progress) services.presentation.resizeProgress = async (_request, height) => { setProgressHeight(height); };
@@ -255,6 +287,7 @@ function Surface({ failFirst = false, history = false, colors = false, selectTar
 }
 const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, beforeEach: () => {
   Object.values(writes).forEach((spy) => spy.mockClear());
+  overviewHostListeners.clear();
 } } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -277,6 +310,78 @@ export const FullConversationAndWorkIdentity: Story = {
   },
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
+// Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
+// continuation retains unsent drafts across same-Host re-resolution and keeps
+// its exact submission after a lost receipt and reconnect.
+export const TaskOverviewAndContinuation: Story = {
+  render: () => <Surface history="usage" taskInbox taskOverview />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
+    let overview = canvas.getByLabelText('近期任务');
+    const inbox = await canvas.findByRole('region', { name: '待你处理' });
+    expect(overview).toHaveAttribute('data-maka-assistant-exclude');
+    expect(within(overview).getByText('执行结束不代表目标或产物已验证完成。')).toBeVisible();
+    expect(within(overview).getByText('等待证据')).toBeInTheDocument();
+    expect(within(overview).getByText('等待直接 worker 名额')).toBeInTheDocument();
+    expect(within(overview).getByText('供应商连接中断；没有验证产物')).toBeInTheDocument();
+    let editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.click(editor);
+    expect(editor).toHaveFocus();
+    expect(inbox.getBoundingClientRect().top).toBeLessThan(overview.getBoundingClientRect().top);
+    const panels = canvasElement.querySelector('.workHubTaskPanels')!;
+    expect(panels.getBoundingClientRect().bottom).toBeLessThanOrEqual(editor.getBoundingClientRect().top);
+    expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+    let done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
+    done.focus(); await userEvent.keyboard('{Enter}');
+    let card = done.closest('article')!;
+    await waitFor(() => expect(within(card).getByText(/done-turn \/ done-run/)).toBeVisible());
+    expect(within(card).getByText('下方路径和测试结论来自助手输出，不是独立核验的产物或测试证据。')).toBeVisible();
+    expect(within(card).getByText('报告路径：/projects/maka/report.md', { exact: false }).tagName).toBe('PRE');
+    expect(within(card).queryByRole('link', { name: /report.md/ })).toBeNull();
+    let instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
+    await userEvent.type(instruction, '请核验报告，不要改变原会话权限');
+    await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
+    expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    expect(overviewHostListeners.size).toBeGreaterThan(0);
+    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'unavailable' });
+    await waitFor(() => expect(overview.isConnected).toBe(false));
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'ready' });
+    await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
+    overview = canvas.getByLabelText('近期任务');
+    done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
+    await userEvent.click(done);
+    card = done.closest('article')!;
+    instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
+    await waitFor(() => expect(instruction).toHaveValue('请核验报告，不要改变原会话权限'));
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    expect(instruction).not.toHaveAttribute('readonly');
+    editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.click(editor); await userEvent.type(editor, '另安排一个独立任务');
+    await userEvent.click(within(card).getByRole('button', { name: '发送到此任务' }));
+    await waitFor(() => expect(within(card).getByRole('alert')).toHaveTextContent('操作尚未确认'));
+    expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
+    expect(instruction).toHaveAttribute('readonly');
+    expect(within(card).getByRole('button', { name: '重试原续办' })).toBeDisabled();
+    await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
+    await waitFor(() => expect(within(card).getByRole('button', { name: '重试原续办' })).toBeEnabled());
+    await userEvent.click(within(card).getByRole('button', { name: '重试原续办' }));
+    await waitFor(() => expect(within(card).getByText('续办已进入原任务会话的 FIFO 队列。')).toBeVisible());
+    expect(writes.taskContinue.mock.calls).toHaveLength(2);
+    expect(writes.taskContinue.mock.calls[1]).toEqual(writes.taskContinue.mock.calls[0]);
+    expect(writes.taskContinue.mock.calls[0]).toEqual([sessionId, expect.objectContaining({ actionId: 'overview-done', delegationId: 'overview-done-delegation', text: '请核验报告，不要改变原会话权限' })]);
+    expect(writes.taskAnswer).not.toHaveBeenCalled();
+    expect(editor).toHaveTextContent('另安排一个独立任务');
+    await userEvent.click(within(card).getByRole('button', { name: '打开底层会话' }));
+    expect(writes.open).toHaveBeenCalledWith(desktopSessionKey({ hostId: 'story-host', sessionId: 'release' }));
+    await userEvent.click(done);
+    // Restore the reachable top-of-list view for the visual evidence.
+    overview.querySelector('.workHubTaskRows')!.scrollTo({ top: 0 });
+    panels.scrollTo({ top: 0 });
+  },
+};
 // Real path: delegated task roots wait on questions/forms/grants; WorkHub's
 // native task inbox and normal composer remain in the same production frame.
 export const TaskInbox: Story = {

@@ -34,6 +34,7 @@ import { WorkbarEdgeToggle } from '../../../application/contracts/workbar-edge-t
 import { useWorkHubHighlightState, WorkHubHighlightContext, WorkHubHueProvider } from './workhub-work-identity.js';
 import { useWorkHubController } from '../controller/use-workhub-controller.js';
 import { WorkHubTaskInbox } from './workhub-task-inbox.js';
+import { WorkHubTaskOverview } from './workhub-task-overview.js';
 import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.js';
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
@@ -294,7 +295,10 @@ export function WorkHubRoot() {
                 )}
               </div>
             )}
-            <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
+            <div className="workHubTaskPanels">
+              <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
+              {!progress && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))} />}
+            </div>
             {controller.activeForm && (
               <FormInteractionPrompt
                 request={controller.activeForm}

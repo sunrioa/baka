@@ -141,9 +141,11 @@ test('WorkHub workspace slots do not dispatch conflicting directories or block u
   const unrelated = slots.acquire(join(tmpdir(), 'research'));
   assert.equal(first.waiting, false);
   assert.equal(second.waiting, true, 'a child directory shares its parent write resource');
+  assert.equal(second.waitReason, 'workspace');
   assert.equal(unrelated.waiting, false, 'a blocked project must not consume an unrelated slot');
   first.release();
   assert.equal(second.waiting, false);
+  assert.equal(second.waitReason, undefined);
   second.release();
   unrelated.release();
 });
@@ -180,6 +182,10 @@ test('WorkHub workspace slots retain conflict FIFO, inode aliases and cancellati
   }
   slots.setLimit(1);
   const final = slots.acquire(path);
+  const limited = slots.acquire(join(tmpdir(), 'unrelated-slot'));
+  assert.equal(limited.waitReason, 'concurrency');
+  limited.cancelWaiting();
+  assert.equal(limited.waitReason, undefined);
   assert.equal(final.waiting, false, 'releases are idempotent and do not leak budget');
   final.release();
   const inodeRoot = slots.acquire(path, 'dev:2');
@@ -4597,6 +4603,192 @@ test('WorkHub concurrency releases failed roots and places same-Session successo
       releases.get('next-first')!.resolve();
     } finally {
       for (const release of releases.values()) release.resolve();
+      await composition.close();
+    }
+  });
+});
+
+test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const release = deferred<void>();
+    const notificationStarted = deferred<void>();
+    const finishNotifications = deferred<void>();
+    const notifications: string[] = [];
+    const sends: Array<{ sessionId: string; text: string }> = [];
+    let { composition, manager } = await createCapturedExecutionComposition(owner, {
+      coordinationBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            const notification = input.text.startsWith('Host notification:');
+            if (notification) {
+              notificationStarted.resolve();
+              await finishNotifications.promise;
+            }
+            yield* super.send({ ...input, text: 'Task update acknowledged.' });
+            if (notification) notifications.push(input.turnId);
+          }
+        })(context),
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push({ sessionId: context.sessionId, text: input.text });
+            if (input.text === 'original-task') await release.promise;
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'task-overview-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    let desktop:
+      | ReturnType<NonNullable<typeof composition.clientCapabilities>['attachConnection']>
+      | undefined;
+    try {
+      const target = await manager.createSession({
+        cwd: root,
+        name: 'Same task name',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      await manager.createSession({
+        cwd: root,
+        name: 'Same task name',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        target.id,
+        'overview-source',
+        'original-task',
+      );
+      const source = await stores.sessionStore.readWorkHubAssignment('overview-source');
+      assert.ok(source);
+      const query = async () => {
+        const page = await composition.handlers['workhub.tasks.query']({}, context);
+        assert.ok(page.ok, JSON.stringify(page));
+        return page.result;
+      };
+      assert.equal((await query()).tasks.length, 1, 'unrelated same-name Session is not a task');
+      assert.equal((await query()).tasks[0]!.status, 'running');
+      desktop = composition.clientCapabilities!.attachConnection(
+        clientCapabilityConnectionIdentity(context.connectionId),
+        { send: async () => {} },
+      );
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+            context,
+          )
+        ).ok,
+      );
+      const input = {
+        turnId: 'overview-followup',
+        actionId: source.actionId,
+        delegationId: source.delegationId,
+        text: 'followup-task',
+      };
+      const first = await composition.handlers['workhub.coordination.continue'](input, context);
+      assert.ok(first.ok, JSON.stringify(first));
+      assert.equal(first.result.targetSessionId, target.id);
+      assert.deepEqual(
+        sends.map((s) => s.text),
+        ['original-task'],
+        'continuation never Steers or interrupts busy work',
+      );
+      assert.deepEqual((await query()).tasks.map((t) => t.status).sort(), ['queued', 'running']);
+      const replay = await composition.handlers['workhub.coordination.continue'](input, context);
+      assert.deepEqual(replay, first, 'same native receipt cannot append a second FIFO admission');
+      assert.equal((await query()).tasks.length, 2);
+      assert.equal(
+        (
+          await composition.handlers['workhub.coordination.continue'](
+            { ...input, text: 'changed instruction' },
+            context,
+          )
+        ).ok,
+        false,
+      );
+      assert.equal(
+        (
+          await composition.handlers['workhub.coordination.continue'](
+            { ...input, turnId: 'foreign-attempt', delegationId: 'foreign' },
+            context,
+          )
+        ).ok,
+        false,
+      );
+      const header = await stores.sessionStore.readHeaderSnapshot(target.id);
+      assert.equal(header.cwd, root);
+      assert.equal(header.permissionMode, 'ask');
+      assert.equal(header.model, 'fake-model');
+      release.resolve();
+      await waitFor(async () =>
+        (await query()).tasks.every((t) => t.status === 'pending_acceptance'),
+      );
+      const detail = await composition.handlers['workhub.tasks.read'](
+        { actionId: source.actionId, delegationId: source.delegationId },
+        context,
+      );
+      assert.ok(detail.ok, JSON.stringify(detail));
+      assert.match(detail.result.delivery!.text, /original-task/);
+      assert.doesNotMatch(detail.result.delivery!.text, /followup-task/);
+      assert.equal(sends.filter((s) => s.text === 'followup-task').length, 1);
+      assert.equal(sends.find((s) => s.text === 'followup-task')!.sessionId, target.id);
+      await notificationStarted.promise;
+      const afterEndInput = { ...input, turnId: 'overview-after-end', text: 'verify-the-delivery' };
+      const busy = await composition.handlers['workhub.coordination.continue'](
+        afterEndInput,
+        context,
+      );
+      assert.ok(!busy.ok);
+      assert.equal(busy.error.code, 'session_busy');
+      assert.equal((await query()).tasks.length, 2, 'busy coordination never appends a new task');
+      finishNotifications.resolve();
+      await waitFor(async () => {
+        return (
+          notifications.length === 2 &&
+          manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID).length === 0
+        );
+      });
+      const afterEnd = await composition.handlers['workhub.coordination.continue'](
+        afterEndInput,
+        context,
+      );
+      assert.ok(afterEnd.ok, JSON.stringify(afterEnd));
+      assert.equal(
+        afterEnd.result.targetSessionId,
+        target.id,
+        'completed execution is not a retired task or verified goal',
+      );
+      await waitFor(
+        async () =>
+          (await query()).tasks.length === 3 &&
+          (await query()).tasks.every((task) => task.status === 'pending_acceptance'),
+      );
+      await desktop.close();
+      desktop = undefined;
+      await composition.close();
+      ({ composition, manager } = await createCapturedExecutionComposition(owner));
+      const restored = await query();
+      assert.equal(restored.tasks.length, 3);
+      assert.ok(restored.tasks.every((t) => t.status === 'pending_acceptance'));
+    } finally {
+      release.resolve();
+      finishNotifications.resolve();
+      await desktop?.close();
       await composition.close();
     }
   });

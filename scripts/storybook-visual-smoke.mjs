@@ -192,7 +192,10 @@ export function catalogJobs(
           })),
         );
       }
-      if (entry.id === 'product-workhub--next-prompt-suggestion') {
+      if (
+        entry.id === 'product-workhub--next-prompt-suggestion' ||
+        entry.id === 'product-workhub--task-overview-and-continuation'
+      ) {
         return COLOR_SCHEMES.flatMap((colorScheme) =>
           [RENDER_VIEWPORT, NARROW_RENDER_VIEWPORT].map((viewport) => ({
             storyId: entry.id,

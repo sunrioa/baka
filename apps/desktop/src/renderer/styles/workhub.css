@@ -244,6 +244,26 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
   overflow-wrap: anywhere;
 }
 .workHubTaskInbox p { margin: 8px; }
+
+.workHubTaskOverview { margin: 8px 0; border: 1px solid color-mix(in oklch, var(--foreground) 12%, transparent); border-radius: 12px; padding: 8px 12px; font-size: 12px; }
+.workHubTaskOverview > summary { cursor: pointer; font-weight: 600; }
+.workHubTaskRows { max-height: 240px; overflow-y: auto; scrollbar-gutter: stable; }
+.workHubTaskRows h3, .workHubTaskDetails h4 { margin: 10px 0 6px; font-size: 12px; }
+.workHubTaskCard { border-top: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); padding: 8px 0; }
+.workHubTaskHeading { justify-content: space-between; height: auto; text-align: start; white-space: normal; }
+.workHubTaskHeadingContent { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 8px; width: 100%; }
+.workHubTaskName { font-weight: 600; overflow-wrap: anywhere; }
+.workHubTaskStatus { color: var(--muted-foreground); flex-shrink: 0; }
+.workHubTaskText { margin: 4px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.workHubTaskHint { margin: 4px 0; color: var(--muted-foreground); }
+.workHubTaskFailure { color: var(--destructive); overflow-wrap: anywhere; }
+.workHubTaskDetails { min-width: 0; }
+.workHubTaskDetails dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 8px; }
+.workHubTaskDetails dd { margin: 0; overflow-wrap: anywhere; }
+.workHubTaskDetails pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.workHubTaskDetails form { display: grid; gap: 6px; padding-top: 8px; }
+@media (max-width: 420px) { .workHubTaskHeadingContent { align-items: flex-start; flex-direction: column; gap: 2px; } .workHubTaskDetails dl { display: block; } .workHubTaskDetails dd { margin-bottom: 6px; } }
+.workHubTaskPanels { max-width: var(--maka-reading-measure); margin-inline: auto; max-height: min(52vh, 460px); overflow-y: auto; overscroll-behavior: contain; }
 .workHubTaskPermission pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

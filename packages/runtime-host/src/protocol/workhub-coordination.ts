@@ -140,6 +140,12 @@ export interface WorkHubCoordinationAnswerInput {
 export interface WorkHubCoordinationTurnResult {
   readonly turnId: string;
 }
+export interface WorkHubTaskContinueInput {
+  readonly turnId: string;
+  readonly actionId: string;
+  readonly delegationId: string;
+  readonly text: string;
+}
 
 export type WorkHubCoordinationCandidateState =
   | 'active'
@@ -255,6 +261,30 @@ export type WorkHubCoordinationActResult = Exclude<
 >;
 
 export const WORKHUB_COORDINATION_OPERATION_SPECS = {
+  'workhub.coordination.continue': defineOperation({
+    mode: 'command',
+    availability: 'ready',
+    errors: [...TURN_ERRORS, 'candidate_set_stale'],
+    decodeInput(value: unknown): WorkHubTaskContinueInput {
+      const input = requireExactRecord(value, 'WorkHub task continuation', [
+        'turnId',
+        'actionId',
+        'delegationId',
+        'text',
+      ]);
+      return {
+        turnId: requireEntityId(input.turnId, 'WorkHub continuation Turn'),
+        actionId: requireEntityId(input.actionId, 'WorkHub source action'),
+        delegationId: requireEntityId(input.delegationId, 'WorkHub source delegation'),
+        text: requireUtf8String(
+          input.text,
+          'WorkHub continuation text',
+          WORKHUB_COORDINATION_TEXT_MAX_BYTES,
+        ),
+      };
+    },
+    decodeOutput: decodeWorkHubCoordinationActResult,
+  }),
   'workhub.coordination.configureModel': defineOperation<
     WorkHubCoordinationConfigureModelInput,
     SessionUpdateResult,

@@ -51,6 +51,9 @@ type RuntimeHostWorkHubClient = Pick<
   | 'resolveWorkHubCoordinationSession'
   | 'getWorkHubSession'
   | 'queryWorkHubInteractions'
+  | 'queryWorkHubTasks'
+  | 'readWorkHubTask'
+  | 'continueWorkHubTask'
   | 'answerWorkHubInteraction'
   | 'revokeWorkHubTaskGrant'
   | 'queryTurn'
@@ -138,6 +141,10 @@ export function registerRuntimeHostWorkHubIpc(
   });
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
   handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
+  handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
+  handleReconnectableRead(ipcMain, 'workhub:readTask', (_event, input) => client.readWorkHubTask(input));
+  // A lost continuation receipt is never automatically replayed with a new identity.
+  ipcMain.handle('workhub:continueTask', (_event, input) => client.continueWorkHubTask(input));
   // Never blindly replay an approval after a lost acknowledgement. The inbox
   // refreshes canonical pending requests before the user can try again.
   ipcMain.handle('workhub:answerInteraction', (_event, input) => client.answerWorkHubInteraction(input));

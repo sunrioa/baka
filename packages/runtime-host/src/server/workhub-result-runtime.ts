@@ -41,6 +41,13 @@ import {
   type WorkHubResultObservation,
 } from './workhub-result-coordinator.js';
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
+import {
+  WORKHUB_TASK_MAX_ITEMS,
+  WORKHUB_TASK_TEXT_MAX_BYTES,
+  WORKHUB_DELIVERY_MAX_BYTES,
+  type WorkHubTask,
+  type WorkHubTaskDetail,
+} from '../protocol/workhub-tasks.js';
 
 export function createWorkHubResultRuntime(options: {
   stores: ExecutionStoresWriter<'interactive'>;
@@ -260,10 +267,248 @@ export function createWorkHubResultRuntime(options: {
     }
     return [...lanes];
   }
+  async function taskProjection(
+    assignment: WorkHubDelegationAssignedMessage,
+    lease: SessionAdmissionLease,
+    detail = false,
+    lanes: readonly string[] = [],
+  ): Promise<WorkHubTaskDetail | undefined> {
+    try {
+      return await taskProjectionLocked(assignment, lease, detail, lanes);
+    } catch (error) {
+      if (isSessionNotFoundError(error)) return undefined;
+      throw error;
+    }
+  }
+  async function taskProjectionLocked(
+    assignment: WorkHubDelegationAssignedMessage,
+    lease: SessionAdmissionLease,
+    detail: boolean,
+    lanes: readonly string[],
+  ): Promise<WorkHubTaskDetail | undefined> {
+    const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
+    if (
+      header.isArchived ||
+      header.subagentParent ||
+      header.role !== undefined ||
+      header.labels?.includes('mode:side_conversation') ||
+      header.id === WORKHUB_COORDINATION_SESSION_ID
+    )
+      return undefined;
+    const visible = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+      [assignment.targetSessionId],
+      undefined,
+      true,
+    );
+    if (
+      !visible.some(
+        (a) => a.actionId === assignment.actionId && a.delegationId === assignment.delegationId,
+      )
+    )
+      return undefined;
+    if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return undefined;
+    const task: WorkHubTask = {
+      actionId: assignment.actionId,
+      delegationId: assignment.delegationId,
+      targetSessionId: assignment.targetSessionId,
+      targetSessionName: truncateUtf8(
+        header.name || assignment.targetSessionName || header.id,
+        512,
+        '…',
+      ),
+      targetMessageId: assignment.targetMessageId,
+      text: truncateUtf8(
+        assignment.delegationText || assignment.userText,
+        WORKHUB_TASK_TEXT_MAX_BYTES,
+        '…',
+      ),
+      createdAt: assignment.ts,
+      status: 'queued',
+    };
+    const stopped = await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId);
+    if (stopped) {
+      const resolution = await stores.sessionStore.readWorkHubStopResolution(
+        assignment.delegationId,
+      );
+      if (resolution?.outcome !== 'not_owned')
+        return { task: { ...task, status: resolution ? 'stopped' : 'stopping' } };
+    }
+    const disposition = await messages.readMessageExecutionDispositionAdmitted(
+      assignment.targetSessionId,
+      assignment.targetMessageId,
+      lease,
+    );
+    if (disposition.kind === 'cancelled') return { task: { ...task, status: 'cancelled' } };
+    if (disposition.kind === 'pending') return { task };
+    if (disposition.kind !== 'owned_root' && disposition.kind !== 'shared_turn')
+      return { task: { ...task, status: 'unavailable' } };
+    const original = {
+      sessionId: assignment.targetSessionId,
+      turnId: disposition.turnId,
+      runId: disposition.runId,
+    };
+    const identity =
+      options.evidence && disposition.kind === 'owned_root'
+        ? await options.evidence.taskExecution(assignment, original)
+        : await executions.readLatestRootTurnLineage(original);
+    const execution = {
+      turnId: identity.turnId,
+      runId: identity.runId,
+      sharedTurn: disposition.kind === 'shared_turn',
+    };
+    const waiting = await options.evidence?.waitingObservation(assignment, identity);
+    if (waiting) {
+      const data = waiting.details as {
+        requestId: string;
+        question: string;
+        sourceActionId: string | null;
+      };
+      return {
+        task: {
+          ...task,
+          execution,
+          status: 'waiting_for_dependency',
+          dependency: {
+            requestId: data.requestId,
+            question: truncateUtf8(data.question, 2048, '…'),
+            ...(data.sourceActionId ? { sourceActionId: data.sourceActionId } : {}),
+          },
+        },
+      };
+    }
+    const waitReason = executions.readWorkHubDispatchWait(identity);
+    if (waitReason) return { task: { ...task, execution, status: 'waiting_resource', waitReason } };
+    const snapshot = await executions.read(identity);
+    const requests = await taskRequests(assignment, lease, lanes);
+    const status: WorkHubTask['status'] =
+      snapshot.status === 'completed'
+        ? 'pending_acceptance'
+        : snapshot.status === 'created' || snapshot.status === 'admitted'
+          ? 'queued'
+          : requests.length &&
+              (snapshot.status === 'running' || snapshot.status === 'waiting_for_user')
+            ? 'waiting_for_user'
+            : snapshot.status;
+    const projected = {
+      ...task,
+      execution,
+      status,
+      ...(snapshot.status === 'failed'
+        ? {
+            failure: truncateUtf8(
+              snapshot.failureMessage || snapshot.failureClass || 'Execution failed',
+              2048,
+              '…',
+            ),
+          }
+        : {}),
+    };
+    if (
+      !detail ||
+      !assignment.returnResults ||
+      execution.sharedTurn ||
+      (snapshot.status !== 'completed' &&
+        snapshot.status !== 'failed' &&
+        snapshot.status !== 'cancelled')
+    )
+      return { task: projected };
+    const text = await readTurnResult(assignment.targetSessionId, identity.turnId);
+    return {
+      task: projected,
+      ...(text
+        ? {
+            delivery: {
+              text: truncateUtf8(text, WORKHUB_DELIVERY_MAX_BYTES, '…'),
+              truncated: Buffer.byteLength(text, 'utf8') > WORKHUB_DELIVERY_MAX_BYTES,
+              terminalEventId: snapshot.terminalEventId,
+            },
+          }
+        : {}),
+    };
+  }
   const handlers: Pick<
     OperationHandlerMap,
-    'workhub.interactions.query' | 'workhub.interactions.answer' | 'workhub.interactions.revoke'
+    | 'workhub.interactions.query'
+    | 'workhub.interactions.answer'
+    | 'workhub.interactions.revoke'
+    | 'workhub.tasks.query'
+    | 'workhub.tasks.read'
   > = {
+    'workhub.tasks.query': async () => {
+      const targets = (await stores.sessionStore.listHeaders())
+        .filter(
+          (h) =>
+            !h.isArchived &&
+            !h.subagentParent &&
+            h.role === undefined &&
+            !h.labels.includes('mode:side_conversation') &&
+            h.id !== WORKHUB_COORDINATION_SESSION_ID,
+        )
+        .map((h) => h.id);
+      const candidates: WorkHubDelegationAssignedMessage[] = [];
+      let truncated = false;
+      for (let i = 0; i < targets.length; i += 256) {
+        const page = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+          targets.slice(i, i + 256),
+          WORKHUB_TASK_MAX_ITEMS + 1,
+          true,
+        );
+        candidates.push(...page);
+        if (page.length > WORKHUB_TASK_MAX_ITEMS) truncated = true;
+      }
+      candidates.sort((a, b) => b.ts - a.ts || a.actionId.localeCompare(b.actionId));
+      const tasks: WorkHubTask[] = [];
+      // Bound the number of locked projections as well as the wire page. This is
+      // explicitly a recent-task window, never a total count of all active work.
+      if (candidates.length > 128) truncated = true;
+      for (const assignment of candidates.slice(0, 128)) {
+        const lanes = await taskLanes(assignment);
+        const projected = await admission.runMany(lanes, (lease) =>
+          taskProjection(assignment, lease, false, lanes),
+        );
+        if (projected) tasks.push(projected.task);
+      }
+      const priority = (task: WorkHubTask) =>
+        [
+          'waiting_for_user',
+          'stopping',
+          'failed',
+          'waiting_for_dependency',
+          'waiting_resource',
+          'running',
+          'queued',
+          'pending_acceptance',
+          'cancelled',
+          'stopped',
+          'unavailable',
+        ].indexOf(task.status);
+      tasks.sort(
+        (a, b) =>
+          priority(a) - priority(b) ||
+          b.createdAt - a.createdAt ||
+          a.actionId.localeCompare(b.actionId),
+      );
+      return {
+        ok: true,
+        result: {
+          tasks: tasks.slice(0, WORKHUB_TASK_MAX_ITEMS),
+          truncated: truncated || tasks.length > WORKHUB_TASK_MAX_ITEMS,
+        },
+      };
+    },
+    'workhub.tasks.read': async (input) => {
+      const missing = {
+        ok: false as const,
+        error: { code: 'not_found' as const, message: 'The original WorkHub task is unavailable' },
+      };
+      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      if (!assignment || assignment.delegationId !== input.delegationId) return missing;
+      const lanes = await taskLanes(assignment);
+      return admission.runMany(lanes, async (lease) => {
+        const result = await taskProjection(assignment, lease, true, lanes);
+        return result ? { ok: true, result } : missing;
+      });
+    },
     'workhub.interactions.query': async () => {
       const requests: WorkHubPendingInteraction[] = [];
       const seen = new Set<string>();

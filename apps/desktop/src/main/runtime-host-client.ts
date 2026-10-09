@@ -1396,6 +1396,9 @@ export class DesktopRuntimeHostClient {
   queryWorkHubInteractions(): Promise<OperationOutput<"workhub.interactions.query">> {
     return this.request("workhub.interactions.query", {});
   }
+  queryWorkHubTasks(): Promise<OperationOutput<'workhub.tasks.query'>> { return this.request('workhub.tasks.query', {}); }
+  readWorkHubTask(input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>> { return this.request('workhub.tasks.read', input); }
+  continueWorkHubTask(input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>> { return this.request('workhub.coordination.continue', input); }
 
   answerWorkHubInteraction(input: OperationInput<"workhub.interactions.answer">): Promise<OperationOutput<"workhub.interactions.answer">> {
     return this.request("workhub.interactions.answer", input);

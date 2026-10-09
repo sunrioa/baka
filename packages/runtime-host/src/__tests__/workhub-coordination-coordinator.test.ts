@@ -88,6 +88,7 @@ describe('Host WorkHub Coordination coordinator', () => {
             ok: false,
             error: { code: 'operation_unavailable', message: 'Unused' },
           }),
+          runWorkHubCoordinationOperation: unusedCoordinationOperation,
           isSessionExecutionIdle: () => true,
         },
         undefined,
@@ -211,6 +212,7 @@ describe('Host WorkHub Coordination coordinator', () => {
           ok: false,
           error: { code: 'operation_unavailable', message: 'not used' },
         }),
+        runWorkHubCoordinationOperation: unusedCoordinationOperation,
         isSessionExecutionIdle: () => true,
         readActiveWorkHubRoutingRequest: async () => ({
           runId: 'active-run',
@@ -2303,8 +2305,16 @@ describe('Host WorkHub Coordination coordinator', () => {
 
 type CoordinationExecutions = Pick<
   RootTurnCoordinator,
-  'startWorkHubCoordinationMessage' | 'isSessionExecutionIdle' | 'readActiveWorkHubRoutingRequest'
+  | 'startWorkHubCoordinationMessage'
+  | 'runWorkHubCoordinationOperation'
+  | 'isSessionExecutionIdle'
+  | 'readActiveWorkHubRoutingRequest'
 >;
+const unusedCoordinationOperation: CoordinationExecutions['runWorkHubCoordinationOperation'] =
+  async () => ({
+    ok: false,
+    error: { code: 'operation_unavailable', message: 'Unused in this fixture' },
+  });
 
 /**
  * Stands in for the root admission ledger: answers claim their Turn identity
@@ -2316,6 +2326,7 @@ function coordinationExecutions(admission: SessionAdmissionGate) {
   const starts: Parameters<RootTurnCoordinator['startWorkHubCoordinationMessage']>[0][] = [];
   const prepared: MessageContent[] = [];
   const executions: CoordinationExecutions = {
+    runWorkHubCoordinationOperation: unusedCoordinationOperation,
     readActiveWorkHubRoutingRequest: async () => undefined,
     startWorkHubCoordinationMessage: async (request) => {
       starts.push(request);
@@ -2346,6 +2357,7 @@ function coordinator(
   requestDrain: () => void = () => undefined,
   resolveCreateTarget: (() => Promise<CoordinationCreateTarget>) | undefined = undefined,
   executions: CoordinationExecutions = {
+    runWorkHubCoordinationOperation: unusedCoordinationOperation,
     readActiveWorkHubRoutingRequest: async () => undefined,
     startWorkHubCoordinationMessage: async () => ({
       ok: false,
