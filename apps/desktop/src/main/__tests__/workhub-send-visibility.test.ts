@@ -48,17 +48,63 @@ test('WorkHub task overview stays independent of coordinator input and retries a
   });
   assert.equal(h.controller.activeTurn, undefined, 'a worker wait never blocks the coordinator composer');
   assert.equal(h.controller.taskOverview.tasks[0]!.status, 'waiting_for_dependency');
+  await act(() => { h.controller.taskOverview.setContinuationDraft(task, 'New user instruction'); });
   await act(async () => { await assert.rejects(h.controller.taskOverview.continue(task, 'New user instruction'), /Lost receipt/); });
   await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'unavailable' }); });
   assert.equal(h.controller.taskOverview.ready, false);
   await assert.rejects(h.controller.taskOverview.continue(task, 'New user instruction'), /unavailable/);
   await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'ready' }); });
   assert.deepEqual(h.controller.taskOverview.pendingContinuation(task), attempts[0]);
+  await act(() => { h.controller.taskOverview.setContinuationDraft(task, 'Changed instruction'); });
+  assert.equal(h.controller.taskOverview.continuationDraft(task), 'New user instruction');
   await assert.rejects(h.controller.taskOverview.continue(task, 'Changed instruction'), /original continuation/);
   await act(async () => { assert.equal(await h.controller.taskOverview.continue(task, 'New user instruction'), true); });
   assert.equal(attempts.length, 2);
   assert.deepEqual(attempts[1], attempts[0], 'an explicit retry cannot create a second native root identity');
+  assert.equal(h.controller.taskOverview.continuationDraft(task), '', 'confirmed admission clears the draft');
   assert.deepEqual(h.queueMutations, []);
+});
+test('unsent task continuation drafts survive same-Host re-resolution but not a real Host switch', async () => {
+  const first = JSON.stringify(['host-1', 'workhub-coordination']);
+  const second = JSON.stringify(['host-2', 'workhub-coordination']);
+  let selected = first;
+  let hostChange!: Parameters<WorkHubServices['subscribeHosts']>[0];
+  const task: import('@maka/runtime-host/protocol').WorkHubTask = { actionId: 'action', delegationId: 'delegation', targetSessionId: 'target', targetSessionName: 'Task', targetMessageId: 'message', text: 'Original', createdAt: 1, status: 'running' };
+  const other = { ...task, delegationId: 'another-delegation' };
+  let submissions = 0;
+  const h = await mountController(false, {
+    resolve: async () => selected,
+    subscribeHosts: listener => { hostChange = listener; return () => {}; },
+    queryTasks: async () => ({ tasks: [task, other], truncated: false }),
+    continueTask: async () => { submissions++; return { disposition: 'delegate_existing', targetSessionId: task.targetSessionId }; },
+  });
+  await act(() => {
+    h.controller.taskOverview.setContinuationDraft(task, 'Unsent task draft');
+    h.controller.taskOverview.setContinuationDraft(other, 'Separate delegation draft');
+  });
+  await act(async () => { await h.controller.taskOverview.refresh(); });
+  assert.equal(h.controller.taskOverview.continuationDraft(task), 'Unsent task draft');
+  assert.equal(h.controller.taskOverview.continuationDraft(other), 'Separate delegation draft');
+  assert.equal(h.controller.taskOverview.pendingContinuation(task), undefined);
+  const oldSetter = h.controller.taskOverview.setContinuationDraft;
+  await act(() => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'unavailable' }); });
+  assert.equal(h.controller.sessionId, undefined, 'the real lifecycle revokes the resolved Session');
+  assert.equal(h.controller.taskOverview.ready, false);
+  await act(() => { oldSetter(task, 'Stale offline edit'); });
+  await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'ready' }); });
+  assert.equal(h.controller.sessionId, first);
+  assert.equal(h.controller.taskOverview.continuationDraft(task), 'Unsent task draft');
+  assert.equal(h.controller.taskOverview.continuationDraft(other), 'Separate delegation draft');
+  assert.equal(submissions, 0, 'reconnect never submits a draft');
+  selected = second;
+  await act(async () => { hostChange({ hostId: 'host-2', isDefault: true, readiness: 'ready' }); });
+  await act(() => { oldSetter(task, 'Stale old-Host edit'); });
+  assert.equal(h.controller.taskOverview.continuationDraft(task), '', 'identical task IDs on another Host cannot inherit text');
+  assert.equal(h.controller.taskOverview.continuationDraft(other), '');
+  selected = first;
+  await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'ready' }); });
+  assert.equal(h.controller.taskOverview.continuationDraft(task), '', 'switching away really cleared the old drafts');
+  assert.equal(submissions, 0);
 });
 test('task overview drops old Host projections and detail reads after a Host switch', async () => {
   const first = JSON.stringify(['host-1', 'workhub-coordination']);

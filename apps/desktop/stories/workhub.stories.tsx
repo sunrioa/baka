@@ -32,6 +32,7 @@ import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
 const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskContinue: fn() };
+const overviewHostListeners = new Set<Parameters<WorkHubServices['subscribeHosts']>[0]>();
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -138,7 +139,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => ({ placement: progress ? 'floating' : 'docked', floatingVisible: progress, progressRequest: progress ? 1 : undefined, shortcutRegistered: true, rendererCrashed: false, workbar: { collapsed: true, placement: 'right', togglePosition: 'edge' } }), setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openSession: async (id) => { writes.open(id); }, openSettings: async () => {}, subscribe: () => () => {}, onViewportInset: () => () => {}, onFocusComposer: () => () => {}, onOpenMain: () => () => {} },
     control: { getSnapshot: async () => ({ revision: 0, phase: 'idle', canUndo: false }), subscribe: () => () => {}, stop: async () => {}, undo: async () => {} },
     bindBrowserSession: () => {},
-    resolve: async () => sessionId, subscribeHosts: () => () => {}, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
+    resolve: async () => sessionId, subscribeHosts: listener => { if (taskOverview) overviewHostListeners.add(listener); return () => { overviewHostListeners.delete(listener); }; }, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
     getSession: async () => session,
     listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? repairChoices : choices,
     setDefaultModel: async () => {},
@@ -286,6 +287,7 @@ function Surface({ failFirst = false, history = false, colors = false, selectTar
 }
 const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, beforeEach: () => {
   Object.values(writes).forEach((spy) => spy.mockClear());
+  overviewHostListeners.clear();
 } } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -309,35 +311,55 @@ export const FullConversationAndWorkIdentity: Story = {
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
 // Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
-// continuation keeps its exact submission after a lost receipt and reconnect.
+// continuation retains unsent drafts across same-Host re-resolution and keeps
+// its exact submission after a lost receipt and reconnect.
 export const TaskOverviewAndContinuation: Story = {
   render: () => <Surface history="usage" taskInbox taskOverview />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
-    const overview = canvas.getByLabelText('近期任务');
+    let overview = canvas.getByLabelText('近期任务');
     const inbox = await canvas.findByRole('region', { name: '待你处理' });
     expect(overview).toHaveAttribute('data-maka-assistant-exclude');
     expect(within(overview).getByText('执行结束不代表目标或产物已验证完成。')).toBeVisible();
     expect(within(overview).getByText('等待证据')).toBeInTheDocument();
     expect(within(overview).getByText('等待直接 worker 名额')).toBeInTheDocument();
     expect(within(overview).getByText('供应商连接中断；没有验证产物')).toBeInTheDocument();
-    const editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
-    await userEvent.click(editor); await userEvent.type(editor, '另安排一个独立任务');
+    let editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.click(editor);
     expect(editor).toHaveFocus();
     expect(inbox.getBoundingClientRect().top).toBeLessThan(overview.getBoundingClientRect().top);
     const panels = canvasElement.querySelector('.workHubTaskPanels')!;
     expect(panels.getBoundingClientRect().bottom).toBeLessThanOrEqual(editor.getBoundingClientRect().top);
     expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
-    const done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
+    let done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
     done.focus(); await userEvent.keyboard('{Enter}');
-    const card = done.closest('article')!;
+    let card = done.closest('article')!;
     await waitFor(() => expect(within(card).getByText(/done-turn \/ done-run/)).toBeVisible());
     expect(within(card).getByText('下方路径和测试结论来自助手输出，不是独立核验的产物或测试证据。')).toBeVisible();
     expect(within(card).getByText('报告路径：/projects/maka/report.md', { exact: false }).tagName).toBe('PRE');
     expect(within(card).queryByRole('link', { name: /report.md/ })).toBeNull();
-    const instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
+    let instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
     await userEvent.type(instruction, '请核验报告，不要改变原会话权限');
+    await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
+    expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    expect(overviewHostListeners.size).toBeGreaterThan(0);
+    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'unavailable' });
+    await waitFor(() => expect(overview.isConnected).toBe(false));
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'ready' });
+    await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
+    overview = canvas.getByLabelText('近期任务');
+    done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
+    await userEvent.click(done);
+    card = done.closest('article')!;
+    instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
+    await waitFor(() => expect(instruction).toHaveValue('请核验报告，不要改变原会话权限'));
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    expect(instruction).not.toHaveAttribute('readonly');
+    editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.click(editor); await userEvent.type(editor, '另安排一个独立任务');
     await userEvent.click(within(card).getByRole('button', { name: '发送到此任务' }));
     await waitFor(() => expect(within(card).getByRole('alert')).toHaveTextContent('操作尚未确认'));
     expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');

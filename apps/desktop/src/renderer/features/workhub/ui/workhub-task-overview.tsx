@@ -52,7 +52,7 @@ function TaskCard({ task, overview, onOpen }: { task: WorkHubTask; overview: Ove
   const [detail, setDetail] = useState<WorkHubTaskDetail>();
   const [readError, setReadError] = useState<string>();
   const [sendError, setSendError] = useState<string>();
-  const [text, setText] = useState(() => overview.pendingContinuation(task)?.text ?? '');
+  const text = overview.continuationDraft(task);
   const [sending, setSending] = useState(false);
   const [unknown, setUnknown] = useState(() => Boolean(overview.pendingContinuation(task)));
   const [sent, setSent] = useState(false);
@@ -94,11 +94,11 @@ function TaskCard({ task, overview, onOpen }: { task: WorkHubTask; overview: Ove
         event.preventDefault(); if (sending || !text.trim()) return;
         setSending(true); setSendError(undefined); setSent(false);
         void overview.continue(shown, text).then(accepted => {
-          if (accepted) { setText(''); setUnknown(false); setSent(true); }
+          if (accepted) { setUnknown(false); setSent(true); }
           else { setUnknown(true); setSendError(t.error); }
         }, () => { setUnknown(true); setSendError(t.error); }).finally(() => setSending(false));
       }}>
-        <TextArea label={t.continuation} value={text} isReadOnly={sending || unknown || !overview.ready} onChange={value => setText(value.slice(0, 8000))} rows={2} />
+        <TextArea label={t.continuation} value={text} isReadOnly={sending || unknown || !overview.ready} onChange={value => overview.setContinuationDraft(task, value.slice(0, 8000))} rows={2} />
         <Button type="submit" size="sm" variant="ghost" label={unknown ? t.retry : t.submit} isDisabled={sending || !overview.ready || !text.trim()} />
         {sent && <p role="status">{t.sent}</p>}
       </form>}
