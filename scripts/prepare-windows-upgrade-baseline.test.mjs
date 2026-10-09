@@ -34,16 +34,17 @@ import test from 'node:test';
 import { prepareWindowsUpgradeBaseline } from './prepare-windows-upgrade-baseline.mjs';
 
 const MANIFEST = {
+  repository: 'apache/maka',
   version: '0.1.0',
   tag: 'v0.1.0',
   assetName: 'Maka-0.1.0-win-x64.exe',
   sha256: 'a'.repeat(64),
 };
 
-function scenario({ cached, digest = async () => MANIFEST.sha256 }) {
+function scenario({ cached, digest = async () => MANIFEST.sha256, manifest = MANIFEST }) {
   const root = mkdtempSync(join(tmpdir(), 'upgrade-baseline-'));
   const manifestPath = join(root, 'baseline.json');
-  writeFileSync(manifestPath, JSON.stringify(MANIFEST));
+  writeFileSync(manifestPath, JSON.stringify(manifest));
   const directory = join(root, 'artifacts');
   const installer = join(directory, MANIFEST.assetName);
   if (cached !== undefined) {
@@ -86,6 +87,32 @@ test('an absent installer is downloaded and verified', async () => {
     assert.equal(await prepare(), installer);
     assert.equal(downloads.length, 1);
     assert.equal(downloads[0][0], 'gh');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a fork downloads the pinned predecessor from its source repository, not the candidate repository', async (t) => {
+  t.mock.property(process, 'env', { ...process.env, GITHUB_REPOSITORY: 'sunrioa/baka' });
+  const { installer, downloads, prepare, root } = scenario({ cached: undefined });
+  try {
+    assert.equal(await prepare(), installer);
+    assert.equal(downloads.length, 1);
+    const args = downloads[0][1];
+    assert.equal(args[args.indexOf('--repo') + 1], MANIFEST.repository);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an invalid predecessor repository is rejected before downloading', async () => {
+  const { downloads, prepare, root } = scenario({
+    cached: undefined,
+    manifest: { ...MANIFEST, repository: 'apache/maka/another' },
+  });
+  try {
+    await assert.rejects(prepare(), /repository/u);
+    assert.deepEqual(downloads, []);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
