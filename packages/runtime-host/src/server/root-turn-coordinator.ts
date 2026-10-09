@@ -3457,7 +3457,12 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     if (active.observedCompletion) return;
     active.observedCompletion = completion;
     const settlement = active.completionObserver?.(completion);
-    if (settlement) active.observationSettled = Promise.resolve(settlement);
+    if (settlement) {
+      active.observationSettled = Promise.resolve(settlement);
+      // Catch now, not only after terminal persistence/transition awaits. Keep
+      // the original rejected promise for the fail-closed cleanup in finally.
+      void active.observationSettled.catch(() => undefined);
+    }
   }
 
   private async settlePlanAfterTerminalTurn(

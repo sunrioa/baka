@@ -566,10 +566,13 @@ worker-budget accounting, but not part of the old execution/grant lineage.
 Existing task-scoped grants never flow into it; current Session defaults and
 normal native approval apply. No Session-wide permission override/restore,
 cheap same-Turn suspension or scheduler/subagent budget redesign is introduced.
-An active/waiting autonomous Goal must first be paused through its normal Goal
-control; the relay does not manipulate Goal state or let its automatic scheduler
-bypass the dependency wait. The entire encoded response also fits the existing
-root-admission budget, with explicit truncation of excerpts or repeated task text.
+An active/waiting Goal carried by this Turn or already driving autonomously must
+first be paused through its normal Goal control. A user Goal armed for the next
+Turn is not a leftover resource of the old fragment: it remains armed and binds
+normally when the fresh Turn starts. The relay does not manipulate Goal state or
+let its automatic scheduler bypass the dependency wait. The entire encoded
+response also fits the existing root-admission budget, with explicit truncation
+of excerpts or repeated task text.
 
 Restart reconstructs waiting state from committed requests, owned execution
 proofs and admissions, without a second task database. Duplicate delivery or

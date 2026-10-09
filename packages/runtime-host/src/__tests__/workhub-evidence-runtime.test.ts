@@ -160,6 +160,7 @@ function fixture() {
       }),
     },
     hasLiveResources: async (sid) => resources.has(sid),
+    hasBlockingGoal: () => false,
     acquireResidency: () => ({ release() {} }),
     onError: (error) => {
       throw error;

@@ -35,6 +35,7 @@ import { NO_REAL_CONNECTION_CODE } from '@maka/core/connection-error-copy';
 import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
+import { isDrivingGoal } from '@maka/core/goal';
 import { readLogicalRuntimeExecutionForRun } from '@maka/core/runtime-logical-execution';
 import { foldForMatch } from '@maka/core/transcript-search';
 import type { PermissionMode } from '@maka/core/permission';
@@ -2812,13 +2813,21 @@ export async function createExecutionRuntimeHostComposition(
       messages,
       admission: sessionAdmission,
       reader: requireTranscriptReader(transcriptReader),
+      hasBlockingGoal: ({ sessionId, turnId }) => {
+        const goals = requireGoal(goal);
+        const current = goals.manager.get(sessionId);
+        // A future user-armed Goal is not this fragment's resource. It blocks
+        // only after this Turn carries it, or once it already drives itself.
+        return (
+          (current?.status === 'active' || current?.status === 'waiting') &&
+          (isDrivingGoal(current) ||
+            goals.continuation.mutationStanding(sessionId, turnId).kind === 'held')
+        );
+      },
       hasLiveResources: async (sessionId) => {
         const graph = requireGraphCoordinator(graphCoordinator);
         const wake = requireGraphSupervisorWake(graphSupervisorWake);
-        const currentGoal = requireGoal(goal).manager.get(sessionId);
         return (
-          currentGoal?.status === 'active' ||
-          currentGoal?.status === 'waiting' ||
           (await runtimeResources!.hasLiveSessionResources(sessionId)) ||
           (await graph.hasLiveSessionState(sessionId)) ||
           wake.hasLiveSessionState(sessionId) ||

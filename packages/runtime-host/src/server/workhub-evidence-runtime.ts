@@ -38,8 +38,11 @@ import {
   type WorkHubEvidenceOrigin,
 } from '@maka/core/workhub-evidence';
 import type { MakaTool, MakaToolContext } from '@maka/runtime/tool-runtime';
-import { isSessionNotFoundError, type ExecutionStoresWriter } from '@maka/storage/execution-stores';
-import { ROOT_TURN_ADMISSION_MAX_CONTENT_BYTES } from '@maka/storage/agent-run-store';
+import {
+  isSessionNotFoundError,
+  ROOT_TURN_ADMISSION_MAX_CONTENT_BYTES,
+  type ExecutionStoresWriter,
+} from '@maka/storage/execution-stores';
 import type { HostedExecutionRef } from './hosted-execution-authority.js';
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
 import type { HostMessageCoordinator } from './message-coordinator.js';
@@ -129,6 +132,7 @@ export function createWorkHubEvidenceRuntime(options: {
   admission: SessionAdmissionGate;
   reader: Pick<SessionTranscriptReader, 'readDurableHighWater' | 'readDurableRecords'>;
   hasLiveResources(sessionId: string): Promise<boolean>;
+  hasBlockingGoal(ref: Pick<HostedExecutionRef, 'sessionId' | 'turnId'>): boolean;
   acquireResidency(): { release(): void };
   onError(error: unknown): void;
   now?: () => number;
@@ -469,7 +473,7 @@ export function createWorkHubEvidenceRuntime(options: {
           if (!sender) throw new Error('WorkHub cannot suspend its coordination Turn for evidence');
           if (sender.tip.round >= WORKHUB_EVIDENCE_MAX_ROUNDS)
             throw new Error('Evidence communication round limit reached');
-          if (await options.hasLiveResources(ctx.sessionId))
+          if (options.hasBlockingGoal(ctx) || (await options.hasLiveResources(ctx.sessionId)))
             throw new Error(
               'Stop live background resources/children and pause any active Goal before waiting for evidence',
             );
@@ -556,6 +560,7 @@ export function createWorkHubEvidenceRuntime(options: {
     const tip = await owned(assignment, lease);
     if (
       tip?.request?.id !== request.id ||
+      options.hasBlockingGoal(tip) ||
       (await options.hasLiveResources(assignment.targetSessionId))
     )
       return undefined;

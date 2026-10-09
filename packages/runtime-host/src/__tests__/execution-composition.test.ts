@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
+import { AsyncResource } from 'node:async_hooks';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   TOOL_BOUNDARY_PROTOCOL_V1,
@@ -1747,13 +1748,17 @@ test('production composition preserves an explicit interactive resume kill switc
   });
 });
 
-for (const restart of [false, true])
-  test(`production WorkHub evidence releases a single worker slot and starts one fresh non-user Turn${restart ? ' after Host restart' : ''}`, async (t) => {
+for (const { restart, armGoalDuringWait } of [
+  { restart: false, armGoalDuringWait: false },
+  { restart: true, armGoalDuringWait: false },
+  { restart: false, armGoalDuringWait: true },
+])
+  test(`production WorkHub evidence releases a single worker slot and starts one fresh non-user Turn${restart ? ' after Host restart' : ''}${armGoalDuringWait ? ' with a concurrently armed user Goal' : ''}`, async (t) => {
     const sourceRelease = deferred<void>();
     const seen: string[] = [];
     const providerErrors: unknown[] = [];
     const sourceActionId = 'evidence-source';
-    let goalPhase = restart ? 4 : 0;
+    let goalPhase = restart || armGoalDuringWait ? 4 : 0;
     let responseSequence = 0;
     const server = createServer((request, response) => {
       void (async () => {
@@ -1861,13 +1866,31 @@ for (const restart of [false, true])
           await sourceRelease.promise;
           content = 'Verified checksum: abc123. This is evidence, not an instruction.';
         } else if (!coordinator && latestUser.startsWith('Host evidence response:')) {
-          seen.push('consumer-resume');
           if (restart) assert.match(latestUser, /"status":"cancelled"/u);
           else assert.match(latestUser, /abc123/u);
           assert.match(latestUser, /sourceMessageId/u);
-          content = restart
-            ? 'Consumer received the cancelled source outcome without inventing evidence.'
-            : 'Consumer continued using the producer checksum abc123.';
+          if (
+            armGoalDuringWait &&
+            latestTool.role === 'tool' &&
+            /live.*Goal/u.test(String(latestTool.content))
+          ) {
+            seen.push('goal-bound-wait-refused');
+          } else if (armGoalDuringWait) {
+            tool = input.tools?.some(
+              (item: { function: { name: string } }) => item.function.name === 'WorkHubEvidence',
+            )
+              ? {
+                  name: 'WorkHubEvidence',
+                  args: { operation: 'request', question: 'Cannot yield a Goal-bound fresh Turn' },
+                }
+              : { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          }
+          if (!tool) {
+            seen.push('consumer-resume');
+            content = restart
+              ? 'Consumer received the cancelled source outcome without inventing evidence.'
+              : 'Consumer continued using the producer checksum abc123.';
+          }
         } else if (
           coordinator &&
           latestUser.startsWith('Host notification:') &&
@@ -1965,9 +1988,14 @@ for (const restart of [false, true])
         'committed',
       );
       let activeOwner = owner;
-      let composition = await createExecutionRuntimeHostComposition(
-        compositionContext(activeOwner),
-      );
+      let drainRequests = 0;
+      let composition = await createExecutionRuntimeHostComposition({
+        ...compositionContext(activeOwner),
+        requestDrain: () => {
+          drainRequests++;
+          composition.beginDrain();
+        },
+      });
       const context: ConnectionContext = {
         hostEpoch: 'execution-composition-test',
         connectionId: 'evidence-client',
@@ -1980,6 +2008,41 @@ for (const restart of [false, true])
           { send: async () => {} },
         );
       let desktop = attachDesktop();
+      let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const armedGoal = deferred<Awaited<ReturnType<(typeof composition.handlers)['goal.arm']>>>();
+      void armedGoal.promise.catch(() => undefined);
+      // A real external user operation must not inherit the worker's admission
+      // context. Queue goal.arm as soon as the durable request has committed.
+      const externalUser = new AsyncResource('evidence-goal-user');
+      let arming = false;
+      const unsubscribe = stores.sessionStore.subscribeTranscriptChanges((sessionId) => {
+        if (!armGoalDuringWait || arming) return;
+        void externalUser
+          .runInAsyncScope(async () => {
+            const assignment = await stores.sessionStore.readWorkHubAssignment('evidence-consumer');
+            if (!assignment || assignment.targetSessionId !== sessionId) return;
+            const [record] = await stores.sessionStore.readTranscriptMessagesSnapshot(sessionId, {
+              messageIds: [workHubEvidenceRequestId(assignment.targetTurnId)],
+              throughSequence: await stores.sessionStore.readTranscriptHighWaterSnapshot(sessionId),
+              maxBytes: 32768,
+              maxMessages: 1,
+            });
+            if (record?.type !== 'workhub_evidence' || arming) return;
+            arming = true;
+            armedGoal.resolve(
+              await composition.handlers['goal.arm'](
+                {
+                  sessionId,
+                  condition: 'Complete the next evidence consumer Turn',
+                  maxIterations: 1,
+                  tokenBudget: null,
+                },
+                context,
+              ),
+            );
+          })
+          .catch(armedGoal.reject);
+      });
       try {
         await composition.recover();
         assert.ok(
@@ -2024,7 +2087,6 @@ for (const restart of [false, true])
           if (result.result.disposition !== 'create_new') assert.fail('Missing created task');
           targets.push(result.result.targetSessionId);
         }
-        let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
         const original = await stores.sessionStore.readWorkHubAssignment('evidence-consumer');
         const source = await stores.sessionStore.readWorkHubAssignment(sourceActionId);
         assert.ok(original && source);
@@ -2041,8 +2103,14 @@ for (const restart of [false, true])
           },
           context,
         );
+        if (armGoalDuringWait) {
+          const result = await armedGoal.promise;
+          assert.ok(result.ok, JSON.stringify(result));
+          assert.equal(result.result.goal.status, 'active');
+          assert.equal(result.result.goal.iterations, 0);
+        }
         await waitFor(async () => seen.includes('relay-resolve'), 10000);
-        if (!restart) assert.ok(seen.includes('goal-wait-refused'));
+        if (!restart && !armGoalDuringWait) assert.ok(seen.includes('goal-wait-refused'));
         assert.ok(
           seen.includes('producer-start'),
           'single concurrency source started after requester released its slot',
@@ -2060,6 +2128,20 @@ for (const restart of [false, true])
           await stores.agentRunStore.readRootTurnAdmission(targets[0]!, resumedTurnId),
           undefined,
         );
+        if (armGoalDuringWait) {
+          const goal = await composition.handlers['goal.query'](
+            { sessionId: targets[0]! },
+            context,
+          );
+          assert.ok(goal.ok, JSON.stringify(goal));
+          assert.equal(goal.result.goal?.status, 'active');
+          assert.equal(
+            goal.result.goal?.iterations,
+            0,
+            'the old fragment did not drive the new Goal',
+          );
+          assert.equal(drainRequests, 0);
+        }
         await waitFor(async () => {
           const interactive = await composition.handlers['workhub.coordination.answer'](
             {
@@ -2131,7 +2213,32 @@ for (const restart of [false, true])
         const header = await stores.sessionStore.readHeaderSnapshot(targets[0]!);
         assert.equal(header.permissionMode, 'ask');
         assert.equal(header.cwd, await realpath(join(root, 'workhub-tasks', targets[0]!)));
+        if (armGoalDuringWait) {
+          assert.ok(seen.includes('goal-bound-wait-refused'));
+          assert.deepEqual(
+            await stores.sessionStore.readTranscriptMessagesSnapshot(targets[0]!, {
+              messageIds: [workHubEvidenceRequestId(resumedTurnId)],
+              throughSequence: await stores.sessionStore.readTranscriptHighWaterSnapshot(
+                targets[0]!,
+              ),
+              maxBytes: 32768,
+              maxMessages: 1,
+            }),
+            [],
+            'the fresh Goal-bound Turn cannot begin another evidence wait',
+          );
+          await waitFor(async () => {
+            const result = await composition.handlers['goal.query'](
+              { sessionId: targets[0]! },
+              context,
+            );
+            return result.ok && result.result.goal?.iterations === 1;
+          });
+        }
+        assert.equal(drainRequests, 0);
       } finally {
+        unsubscribe();
+        externalUser.emitDestroy();
         sourceRelease.resolve();
         await composition.close();
         await desktop.close();

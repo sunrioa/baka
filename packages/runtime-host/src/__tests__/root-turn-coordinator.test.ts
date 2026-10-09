@@ -136,6 +136,52 @@ const NO_EXECUTION_OBSERVER: HostedExecutionObserver = {
   begin: () => undefined,
 };
 
+test('terminal observer rejection is handled while terminal publication is pending', async (t) => {
+  const publishing = deferred<void>();
+  const release = deferred<void>();
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) =>
+      backends.register('ai-sdk', (context) => new FakeBackend(context)),
+    executionObserver: {
+      begin: () => async () => {
+        throw new Error('Unsafe terminal resource boundary');
+      },
+    },
+  });
+  const continuity = fixture.currentContinuity();
+  const publish = continuity.publishTerminalProjection.bind(continuity);
+  t.mock.method(
+    continuity,
+    'publishTerminalProjection',
+    async (...args: Parameters<typeof publish>) => {
+      publishing.resolve();
+      await release.promise;
+      return publish(...args);
+    },
+  );
+  try {
+    const started = await fixture.interactiveTurns.handlers['turn.start'](
+      {
+        sessionId: fixture.sessionId,
+        turnId: 'observer-rejection',
+        content: { text: 'Finish normally' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+    assert.ok(started.ok, JSON.stringify(started));
+    await publishing.promise;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fixture.drainRequested(), false);
+    release.resolve();
+    await waitUntil(() => fixture.drainRequested());
+  } finally {
+    release.resolve();
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.dispose();
+  }
+});
+
 type StartedTurnOutcome = {
   ok: true;
   result: {
@@ -6648,6 +6694,7 @@ async function createFailureFixture(options: {
   withArtifacts?: boolean;
   beforeInteractionPreflight?(): Promise<void>;
   clientCapabilities?: HostClientCapabilityCoordinator;
+  executionObserver?: HostedExecutionObserver;
   continuationSafety?: {
     workspaceIdentity: string;
     backgroundOperationsSettled?: boolean;
@@ -6870,7 +6917,7 @@ async function createFailureFixture(options: {
       acquireResidency,
       requestDrain,
       options.clientCapabilities,
-      () => NO_EXECUTION_OBSERVER,
+      () => options.executionObserver ?? NO_EXECUTION_OBSERVER,
       options.assertScheduledTaskRecoveryAdmission,
       artifactAuthority,
       options.prepareSkillInvocation,
