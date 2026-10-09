@@ -2100,6 +2100,18 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     };
   }
 
+  /** Read-only dispatch waiting evidence for this exact live root. */
+  readWorkHubDispatchWait(identity: {
+    sessionId: string;
+    turnId: string;
+    runId: string;
+  }): 'concurrency' | 'workspace' | undefined {
+    const active = this.#executions.get(identity.sessionId);
+    return active?.turnId === identity.turnId && active.runId === identity.runId
+      ? active.workHubSlot?.waitReason
+      : undefined;
+  }
+
   /** Accepts a model action against the exact live WorkHub root and its durable user input. */
   async readActiveWorkHubRequest(turnId: string): Promise<MessageContent | undefined> {
     return (await this.readActiveWorkHubRoutingRequest(turnId))?.content;

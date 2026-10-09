@@ -41,6 +41,7 @@ function overlaps(left: WorkspaceSlot, right: WorkspaceSlot): boolean {
 export interface WorkHubExecutionSlot {
   readonly ready: Promise<void>;
   readonly waiting: boolean;
+  readonly waitReason: 'concurrency' | 'workspace' | undefined;
   cancelWaiting(): void;
   release(): void;
 }
@@ -100,8 +101,20 @@ export class WorkHubExecutionSlots {
     };
     this.#pending.push(slot);
     this.flush();
+    const waitReason = () => {
+      if (state !== 'waiting') return undefined;
+      const index = this.#pending.indexOf(slot);
+      return [...this.#running, ...this.#pending.slice(0, index)].some((other) =>
+        overlaps(other, slot),
+      )
+        ? ('workspace' as const)
+        : ('concurrency' as const);
+    };
     return {
       ready,
+      get waitReason() {
+        return waitReason();
+      },
       get waiting() {
         return state === 'waiting';
       },

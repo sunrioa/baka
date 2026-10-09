@@ -36,6 +36,92 @@ import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
 
 afterEach(cleanupFakeDom);
 
+test('WorkHub task overview stays independent of coordinator input and retries a lost continuation with the same identity', async () => {
+  const task: import('@maka/runtime-host/protocol').WorkHubTask = { actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'task-session', targetSessionName: 'Same name', targetMessageId: 'message', text: 'Task', createdAt: 1, status: 'waiting_for_dependency' };
+  const attempts: Parameters<WorkHubServices['continueTask']>[1][] = [];
+  let hostChange!: Parameters<WorkHubServices['subscribeHosts']>[0];
+  const h = await mountController(false, {
+    subscribeHosts: listener => { hostChange = listener; return () => {}; },
+    queryTasks: async () => ({ tasks: [task], truncated: false }),
+    readTask: async () => ({ task }),
+    continueTask: async (_owner, input) => { attempts.push(input); if (attempts.length === 1) throw new Error('Lost receipt'); return { disposition: 'delegate_existing', targetSessionId: task.targetSessionId }; },
+  });
+  assert.equal(h.controller.activeTurn, undefined, 'a worker wait never blocks the coordinator composer');
+  assert.equal(h.controller.taskOverview.tasks[0]!.status, 'waiting_for_dependency');
+  await act(async () => { await assert.rejects(h.controller.taskOverview.continue(task, 'New user instruction'), /Lost receipt/); });
+  await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'unavailable' }); });
+  assert.equal(h.controller.taskOverview.ready, false);
+  await assert.rejects(h.controller.taskOverview.continue(task, 'New user instruction'), /unavailable/);
+  await act(async () => { hostChange({ hostId: 'host-1', isDefault: true, readiness: 'ready' }); });
+  assert.deepEqual(h.controller.taskOverview.pendingContinuation(task), attempts[0]);
+  await assert.rejects(h.controller.taskOverview.continue(task, 'Changed instruction'), /original continuation/);
+  await act(async () => { assert.equal(await h.controller.taskOverview.continue(task, 'New user instruction'), true); });
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[1], attempts[0], 'an explicit retry cannot create a second native root identity');
+  assert.deepEqual(h.queueMutations, []);
+});
+test('task overview drops old Host projections and detail reads after a Host switch', async () => {
+  const first = JSON.stringify(['host-1', 'workhub-coordination']);
+  const second = JSON.stringify(['host-2', 'workhub-coordination']);
+  let selected = first;
+  let hostChange!: Parameters<WorkHubServices['subscribeHosts']>[0];
+  const task: import('@maka/runtime-host/protocol').WorkHubTask = { actionId: 'action', delegationId: 'delegation', targetSessionId: 'first-task', targetSessionName: 'Old task', targetMessageId: 'message', text: 'Task', createdAt: 1, status: 'running' };
+  const delayed = deferred<import('@maka/runtime-host/protocol').WorkHubTaskDetail>();
+  const h = await mountController(false, {
+    resolve: async () => selected,
+    subscribeHosts: listener => { hostChange = listener; return () => {}; },
+    queryTasks: async owner => ({ tasks: owner === first ? [task] : [{ ...task, targetSessionId: 'second-task', targetSessionName: 'New task' }], truncated: false }),
+    readTask: async () => delayed.promise,
+  });
+  let read!: ReturnType<typeof h.controller.taskOverview.read>;
+  await act(() => { read = h.controller.taskOverview.read(task); });
+  selected = second;
+  await act(async () => { hostChange({ hostId: 'host-2', isDefault: true, readiness: 'ready' }); });
+  await act(async () => { delayed.resolve({ task }); });
+  assert.equal(await read, undefined);
+  assert.equal(h.controller.taskOverview.tasks[0]!.targetSessionName, 'New task');
+  await assert.rejects(h.controller.taskOverview.continue(task, 'Continue'), /unavailable/);
+});
+test('a confirmed continuation does not wait for refresh or regain uncertainty when that read fails', async () => {
+  const task: import('@maka/runtime-host/protocol').WorkHubTask = { actionId: 'action', delegationId: 'delegation', targetSessionId: 'target', targetSessionName: 'Task', targetMessageId: 'message', text: 'Original', createdAt: 1, status: 'pending_acceptance' };
+  const refresh = deferred<import('@maka/runtime-host/protocol').WorkHubTasksQueryResult>();
+  let reads = 0;
+  const availability = new Set<() => void>();
+  const h = await mountController(false, {
+    queryTasks: async () => ++reads === 1 ? { tasks: [task], truncated: false } : refresh.promise,
+    subscribeAvailability: listener => { availability.add(listener); return () => { availability.delete(listener); }; },
+    continueTask: async () => ({ disposition: 'delegate_existing', targetSessionId: task.targetSessionId }),
+  });
+  const staleRead = h.controller.taskOverview.read;
+  await act(async () => { assert.equal(await h.controller.taskOverview.continue(task, 'New instruction'), true); });
+  assert.equal(h.controller.taskOverview.pendingContinuation(task), undefined);
+  await act(() => { for (const listener of availability) listener(); });
+  await assert.rejects(staleRead(task), /unavailable/);
+  await act(async () => { refresh.reject(new Error('Read disconnected after confirmed send')); });
+  assert.equal(h.controller.taskOverview.pendingContinuation(task), undefined);
+  assert.equal(h.controller.taskOverview.ready, false);
+});
+test('task overview coalesces notification bursts and rebuilds disconnected authority', async () => {
+  const delayed = deferred<import('@maka/runtime-host/protocol').WorkHubTasksQueryResult>();
+  const changes = new Set<() => void>();
+  const unavailable = new Set<() => void>();
+  let calls = 0;
+  let maximum = 0;
+  let running = 0;
+  const h = await mountController(false, {
+    subscribeSessions: listener => { changes.add(listener); return () => { changes.delete(listener); }; },
+    subscribeAvailability: listener => { unavailable.add(listener); return () => { unavailable.delete(listener); }; },
+    queryTasks: async () => { calls++; maximum = Math.max(maximum, ++running); try { return calls === 1 ? await delayed.promise : { tasks: [], truncated: true }; } finally { running--; } },
+  });
+  await act(() => { for (let i = 0; i < 10; i++) for (const change of changes) change(); });
+  assert.equal(calls, 1);
+  await act(async () => { delayed.resolve({ tasks: [], truncated: false }); });
+  assert.equal(calls, 2); assert.equal(maximum, 1); assert.equal(h.controller.taskOverview.truncated, true);
+  await act(async () => { for (const listener of unavailable) listener(); });
+  assert.equal(h.controller.taskOverview.ready, true, 'reconnect rebuilds the canonical bounded projection');
+});
+
+
 async function mountController(failFirstRead = false, overrides: Partial<WorkHubServices> = {}) {
   let hostEpoch = 'host-epoch-1';
   let openCount = 0;
@@ -132,6 +218,9 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
     },
     listActiveInteractions: async () => [],
     queryTaskInteractions: async () => ({ requests: [], truncated: false }),
+    queryTasks: async () => ({ tasks: [], truncated: false }),
+    readTask: async () => { throw new Error('No task in this fixture'); },
+    continueTask: async () => { throw new Error('No task in this fixture'); },
     revokeTaskGrant: async () => {throw new Error('No task grant in this fixture');},
     answerTaskInteraction: async () => { throw new Error('No task request in this fixture'); },
     subscribeActiveInteractions: () => () => {},

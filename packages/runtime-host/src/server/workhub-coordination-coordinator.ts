@@ -52,6 +52,7 @@ import { WORKHUB_COORDINATION_TEXT_MAX_BYTES } from '../protocol/index.js';
 import {
   WORKHUB_COORDINATION_DEFAULT_MODEL_REQUIRED_MESSAGE,
   type WorkHubCoordinationSelectAndDelegateInput,
+  type WorkHubTaskContinueInput,
 } from '../protocol/workhub-coordination.js';
 import type {
   ConnectionContext,
@@ -130,7 +131,10 @@ type CoordinationStores = Pick<
 
 type CoordinationExecutions = Pick<
   RootTurnCoordinator,
-  'startWorkHubCoordinationMessage' | 'isSessionExecutionIdle' | 'readActiveWorkHubRoutingRequest'
+  | 'startWorkHubCoordinationMessage'
+  | 'runWorkHubCoordinationOperation'
+  | 'isSessionExecutionIdle'
+  | 'readActiveWorkHubRoutingRequest'
 >;
 
 type WorkHubResumeResult =
@@ -180,6 +184,7 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
 export class HostWorkHubCoordinationCoordinator {
   readonly #requestForm: HostWorkHubCoordinationCoordinatorOptions['requestForm'];
   readonly handlers: WorkHubCoordinationOperationHandlerMap = {
+    'workhub.coordination.continue': (input, context) => this.#continueTask(input, context),
     'workhub.coordination.selectAndDelegate': (input, context) =>
       this.#selectAndDelegate(input, context),
     'workhub.coordination.resolve': () => this.#resolve(),
@@ -977,6 +982,89 @@ export class HostWorkHubCoordinationCoordinator {
         );
       }
     });
+  }
+
+  async #continueTask(
+    input: WorkHubTaskContinueInput,
+    context: ConnectionContext,
+  ): Promise<OperationOutcome<'workhub.coordination.continue'>> {
+    const reject = (code: 'operation_conflict' | 'persistence_failed', message: string) => ({
+      ok: false as const,
+      error: { code, message },
+    });
+    if (!input.text.trim())
+      return reject('operation_conflict', 'WorkHub continuation text is empty');
+    const actionId = `whcontinue_${createHash('sha256').update(input.turnId).digest('hex').slice(0, 48)}`;
+    try {
+      const source = await this.#stores.readWorkHubAssignment(input.actionId);
+      if (!source || source.delegationId !== input.delegationId)
+        return reject('operation_conflict', 'The original task identity changed');
+      const header = await this.#stores.readHeaderSnapshot(source.targetSessionId);
+      if (header.isArchived || header.subagentParent)
+        return reject('operation_conflict', 'The original task is unavailable');
+      const target = await this.#actionGate.nativeTaskCandidate(source.targetSessionId);
+      if (!target)
+        return reject('operation_conflict', 'The original task is no longer eligible for WorkHub');
+      // This is an explicit native user command, not agent output or an approval.
+      // The existing root owner binds retries to the same text and source. The
+      // Gate persists the new delegation and keeps busy targets on their FIFO.
+      const outcome = await this.#executions.runWorkHubCoordinationOperation(
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          turnId: input.turnId,
+          execution: {
+            kind: 'workhub_coordination',
+            operation: 'action',
+            actionId,
+            inputDigest: digest({
+              ...input,
+              targetSessionId: target.sessionId,
+              workspaceDigest: digest(target.workspace),
+            }),
+          },
+          archivedMessage: 'WorkHub Coordination Session is unavailable',
+          prepareFreshContent: async () => ({
+            kind: 'ready',
+            content: normalizeMessageContent({ text: input.text }),
+          }),
+          operation: async (turnId) => ({
+            actionId,
+            userText: input.text,
+            result: await this.#actionGate.act(
+              {
+                actionId,
+                userText: input.text,
+                delegationText: input.text,
+                // Native selection is fixed by selectedTarget, not the mutable candidate
+                // set. A stable opaque ref also keeps partial-effect retries identical.
+                proposal: {
+                  disposition: 'delegate_existing',
+                  candidateRef: `native_${createHash('sha256').update(target.sessionId).digest('hex').slice(0, 48)}`,
+                },
+                selectedTarget: {
+                  sessionId: target.sessionId,
+                  workspaceDigest: digest(target.workspace),
+                  sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+                },
+              },
+              context,
+              turnId,
+            ),
+          }),
+        },
+        context,
+      );
+      return outcome.ok && outcome.result.result.disposition === 'delegate_existing'
+        ? { ok: true, result: outcome.result.result }
+        : outcome.ok
+          ? reject('operation_conflict', 'The continuation did not delegate to its original task')
+          : outcome;
+    } catch (error) {
+      return reject(
+        error instanceof WorkHubActionGateFailure ? 'operation_conflict' : 'persistence_failed',
+        error instanceof Error ? error.message : 'Task continuation is unavailable',
+      );
+    }
   }
 
   async #answer(

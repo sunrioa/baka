@@ -33,6 +33,8 @@ import {
 // fresh worker Turn, its real question can still be answered through WorkHub's
 // native Desktop binding (including a replaced renderer). Host-only tests
 // cannot detect a stale Electron offer or preload response routing to the old Run.
+// The same native journey also reads that task's owned delivery and sends a
+// continuation through the production task IPC after renderer replacement.
 test('evidence continuation retains a live Desktop question binding after WorkHub reload', async ({}, testInfo) => {
   const producerRelease = deferred<void>();
   const seen: string[] = [];
@@ -157,6 +159,9 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
             },
           };
         }
+      } else if (user === 'CHECK_MORE_EVIDENCE') {
+        seen.push('continued');
+        content = 'Additional evidence checked in the original task conversation.';
       } else content = 'WorkHub can handle unrelated input without waiting.';
       const chunk = (delta: unknown, finish: string | null) =>
         'data: ' +
@@ -251,6 +256,14 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
           .toEqual({ finished: 1, errors: [] });
         expect(seen.filter((value) => value === 'resumed')).toHaveLength(1);
         await expect(inbox).toBeHidden();
+        const consumer = hub.locator('.workHubTaskCard').filter({ hasText: 'EVIDENCE_CONSUMER' });
+        await expect(consumer).toHaveAttribute('data-status', 'pending_acceptance');
+        await consumer.locator('.workHubTaskHeading').click();
+        await expect(consumer.locator('pre')).toContainText('Consumer finished using abc123');
+        await consumer.getByRole('textbox', { name: 'New instruction for this task' }).fill('CHECK_MORE_EVIDENCE');
+        await consumer.getByRole('button', { name: 'Send to this task', exact: true }).click();
+        await expect.poll(() => ({ continued: seen.filter(value => value === 'continued').length, errors })).toEqual({ continued: 1, errors: [] });
+        await expect(consumer.getByRole('status').filter({ hasText: "Continuation admitted to the original task's FIFO." })).toHaveText("Continuation admitted to the original task's FIFO.");
       },
     );
   } catch (error) {

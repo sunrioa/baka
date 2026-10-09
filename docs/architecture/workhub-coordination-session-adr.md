@@ -585,3 +585,34 @@ source cannot starve unrelated requests. With direct concurrency one, a settled
 request releases its slot so the queued producer can run, then the fresh requester
 Turn acquires the normal slot/conflict reservation again. Recovery/handoff fences
 the relay alongside the existing result poller.
+
+## Native task overview and delivery (Step 7)
+
+`workhub.tasks.query/read` project existing assignments, original Message
+admissions, owned root executions and the Step 6 evidence-continuation tip.
+They do not introduce a task database or infer ownership from Session names or
+the latest Session transcript. The recent window returns at most 32 rows from
+128 locked projections, prioritizing user requests and failures; truncation is
+explicit. Queue admission, direct-worker/workspace waiting, dependency waiting,
+native user requests and terminal execution remain separate states. A completed
+Run is **pending acceptance**, not verified goal or artifact completion.
+An unresolved durable stop request is **stopping**, not **stopped**; neither state
+can admit a continuation or expose an assistant delivery.
+
+Only an exact, owned terminal execution can supply a bounded 16 KiB committed
+assistant excerpt. Paths and test claims in it are unverified text, not artifact
+links or independently proven results. Shared Turns do not supply a delivery.
+WorkHub shows the native inbox first, optional task/source details next, and
+keeps its normal composer available. Refresh/reconnect rebuild the read-only
+projection; stale reads cannot supply authority or cross a Host switch.
+
+An explicit native `workhub.coordination.continue` binds a new user
+instruction to the exact source Action/Delegation and original target Session.
+It creates a new canonical assignment through the existing root owner, Action
+Gate and target FIFO, without model routing, Steering, Stop, cwd/model changes
+or restored task grants. Known task identity is not constrained by the model's
+candidate-page limit. Final admission revalidates source retirement and target
+workspace. An uncertain receipt is never automatically replayed; an explicit
+retry retains the same Turn/input identity across same-Host reconnection. A busy
+coordination root rejects the operation without discarding its draft. Restart
+rebuilds task facts from storage; no new execution or permission backend is added.

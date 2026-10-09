@@ -1134,6 +1134,9 @@ export interface MakaBridge {
   };
   workHub: {
     queryInteractions(coordinationSessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
+    queryTasks(coordinationSessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
+    readTask(coordinationSessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
+    continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
     answerInteraction(coordinationSessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
     revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
     getSession(coordinationSessionId: string): Promise<DesktopSessionSummary>;

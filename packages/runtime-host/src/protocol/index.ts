@@ -98,6 +98,7 @@ export * from './session-todo.js';
 export * from './workspace.js';
 export * from './workhub-coordination.js';
 export * from './workhub-interactions.js';
+export * from './workhub-tasks.js';
 export * from './websocket-path.js';
 export { INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID } from '../composition-identity.js';
 
@@ -105,7 +106,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 211 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 212 as const;
+// 212: WorkHub task overview, exact delivery reads and user-bound task continuation.
 // 211: WorkHub evidence dependencies use durable Host-bound requests and fresh non-user Turns.
 // 210: WorkHub approves, lists and revokes supplemental task execution grants.
 // 209: WorkHub exposes Host-bound pending task interactions and exact-Run answers.

@@ -266,15 +266,20 @@ test('a play assertion exception fails the render even if Storybook emits a fini
   assert.match(window.__makaStorybookSmoke.failures[0], /glyphs moved/);
 });
 
-test('WorkHub suggestion geometry runs at both widths in both themes', () => {
-  const jobs = catalogJobs(storyIndex('product-workhub--next-prompt-suggestion'));
-  assert.deepEqual(
-    jobs.map(({ colorScheme, viewport }) => [colorScheme, viewport.width]),
-    [
-      ['light', 1280],
-      ['light', 720],
-      ['dark', 1280],
-      ['dark', 720],
-    ],
-  );
+test('WorkHub suggestion and task overview geometry run at both widths in both themes', () => {
+  for (const storyId of [
+    'product-workhub--next-prompt-suggestion',
+    'product-workhub--task-overview-and-continuation',
+  ]) {
+    const jobs = catalogJobs(storyIndex(storyId));
+    assert.deepEqual(
+      jobs.map(({ colorScheme, viewport }) => [colorScheme, viewport.width]),
+      [
+        ['light', 1280],
+        ['light', 720],
+        ['dark', 1280],
+        ['dark', 720],
+      ],
+    );
+  }
 });

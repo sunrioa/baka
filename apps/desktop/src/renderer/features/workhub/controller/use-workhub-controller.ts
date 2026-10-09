@@ -50,6 +50,7 @@ import {
 } from '../../../application/contracts/workhub-workspace/coordination-lifecycle.js';
 import { useWorkHubServices } from '../services.js';
 import { useWorkHubTaskInbox } from './use-workhub-task-inbox.js';
+import { useWorkHubTaskOverview } from './use-workhub-task-overview.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
 
@@ -79,6 +80,7 @@ export function useWorkHubController(
   localeRef.current = locale;
   const [sessionId, setSessionId] = useState<string>();
   const taskInbox = useWorkHubTaskInbox(services, sessionId);
+  const taskOverview = useWorkHubTaskOverview(services, sessionId);
   const [sessions, setSessions] = useState<Awaited<ReturnType<WorkHubServices['listSessions']>>>(
     [],
   );
@@ -559,6 +561,7 @@ export function useWorkHubController(
         handle?.observationChanged(phase);
         if (phase === 'ready') {
           void taskInbox.refresh();
+          void taskOverview.refresh();
           refreshInteractions.current();
           void recoverSend();
           void resolvePendingQueued();
@@ -849,6 +852,7 @@ export function useWorkHubController(
   return {
     services,
     taskInbox,
+    taskOverview,
     sessionId,
     session,
     sessions,
