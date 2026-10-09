@@ -49,6 +49,7 @@ import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import { DEFAULT_TOOL_MODE, isToolMode, type ToolMode } from '@maka/core/tool-mode';
+import { WORKHUB_EVIDENCE_TOOL, isWorkHubEvidenceWaitResult } from '@maka/core/workhub-evidence';
 import {
   resolveEffectiveOrchestration,
   type EffectiveOrchestration,
@@ -2218,6 +2219,15 @@ export class AiSdkTurn {
               ) {
                 this.handleAgentGraphYieldToolResult(settlement.result);
               }
+              if (
+                toolCall?.toolName === WORKHUB_EVIDENCE_TOOL &&
+                isWorkHubEvidenceWaitResult(settlement.result)
+              ) {
+                // An accepted exclusive wait already persisted its dependency;
+                // sibling calls were refused and cannot keep that fragment alive.
+                this.loopStopReason = 'dependency_wait';
+                this.loopStopRequested = true;
+              }
             });
             // Continuation reads durable events, not raw results. Do not retain
             // an entire completed batch across the next provider request.
@@ -2641,6 +2651,10 @@ export class AiSdkTurn {
             isAgentGraphYieldToolResult(settlement.result)
           ) {
             this.handleAgentGraphYieldToolResult(settlement.result);
+          }
+          if (name === WORKHUB_EVIDENCE_TOOL && isWorkHubEvidenceWaitResult(settlement.result)) {
+            this.loopStopReason = 'dependency_wait';
+            this.loopStopRequested = true;
           }
           return settlement.result;
         },

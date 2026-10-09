@@ -62,6 +62,8 @@ export function threadSearchMatchKind(message: StoredMessage): ThreadSearchMatch
     case 'token_usage':
     case 'turn_state':
     case 'workhub_coordination':
+    case 'workhub_evidence':
+    case 'workhub_evidence_resolution':
     case 'system_note':
       throw new Error(`Message type ${message.type} is not searchable`);
   }

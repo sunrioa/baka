@@ -19,6 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { RunHandoffGate } from '../run-handoff-gate.js';
+import { WORKHUB_EVIDENCE_TOOL } from '@maka/core/workhub-evidence';
 import {
   buildModelProjectionTransition,
   type ModelProjectionTransition,
@@ -8957,6 +8958,102 @@ describe('AiSdkBackend usage telemetry', () => {
       'end_turn',
     );
   });
+
+  for (const mode of ['direct', 'code_mode'] as const)
+    for (const result of ['waiting', 'forged', 'malformed', 'sibling'] as const)
+      test(`WorkHub evidence ${mode} honors only its settled exact wait envelope: ${result}`, async () => {
+        const durable = durableTurnHarness('turn-evidence', 'get missing evidence');
+        let calls = 0;
+        let siblingEffects = 0;
+        const waits = result === 'waiting' || result === 'sibling';
+        const toolName = result === 'forged' ? 'unrelated_tool' : WORKHUB_EVIDENCE_TOOL;
+        const model = new MockLanguageModelV4({
+          doStream: async () => {
+            calls++;
+            const chunks: LanguageModelV4StreamPart[] = [{ type: 'stream-start', warnings: [] }];
+            if (calls === 1) {
+              chunks.push({
+                type: 'tool-call',
+                toolCallId: 'evidence-call',
+                toolName: mode === 'direct' ? toolName : 'exec',
+                input: JSON.stringify(
+                  mode === 'direct'
+                    ? {}
+                    : {
+                        code:
+                          result === 'sibling'
+                            ? `await tools.${toolName}({}); return await tools.sibling({})`
+                            : `return await tools.${toolName}({})`,
+                      },
+                ),
+              });
+              if (mode === 'direct' && result === 'sibling')
+                chunks.push({
+                  type: 'tool-call',
+                  toolCallId: 'sibling-call',
+                  toolName: 'sibling',
+                  input: '{}',
+                });
+            } else
+              chunks.push(
+                { type: 'text-start', id: 'final' },
+                { type: 'text-delta', id: 'final', delta: 'Finished without yielding' },
+                { type: 'text-end', id: 'final' },
+              );
+            chunks.push({
+              type: 'finish',
+              finishReason: { unified: calls === 1 ? 'tool-calls' : 'stop', raw: undefined },
+              usage: {
+                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 1, text: 1, reasoning: 0 },
+              },
+            });
+            return {
+              stream: simulateReadableStream({
+                chunks,
+                initialDelayInMs: null,
+                chunkDelayInMs: null,
+              }),
+            };
+          },
+        });
+        const backend = createBackend({
+          connection: connection(),
+          modelId: 'mock-model-id',
+          modelFactory: () => model,
+          tools: [
+            {
+              ...testTool(toolName, z.object({})),
+              executionSemantics: 'exclusive_step',
+              impl: () => ({
+                kind: 'workhub_evidence_waiting',
+                requestId: 'whe_request',
+                ...(result === 'malformed' ? { extra: true } : {}),
+              }),
+            },
+            {
+              ...testTool('sibling', z.object({})),
+              impl: () => {
+                siblingEffects++;
+                return { status: 'ok' };
+              },
+            },
+          ],
+          maxSteps: 4,
+          loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+        });
+        const events = await drainDurably(backend.send(durable.input({ toolMode: mode })), durable);
+        assert.equal(calls, waits ? 1 : 2);
+        assert.equal(
+          events.find((event) => event.type === 'complete')?.stopReason,
+          waits ? 'dependency_wait' : 'end_turn',
+        );
+        assert.equal(siblingEffects, 0, 'an accepted exclusive wait cannot share tool effects');
+        assert.ok(
+          events.some((event) => event.type === 'tool_result'),
+          'wait is honored only after durable tool settlement',
+        );
+      });
 
   test('ends the tool loop cooperatively when the graph supervisor yields', async () => {
     const durable = durableTurnHarness('turn-graph-yield', 'coordinate the graph');

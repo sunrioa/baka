@@ -27,6 +27,7 @@
  */
 
 import type { CloudActivationOrigin, WorkHubResultOrigin } from './turn-origin.js';
+import type { WorkHubEvidenceOrigin } from './workhub-evidence.js';
 import type { AgentGraphIntentClaim } from './agent-graph-control.js';
 import type {
   RuntimeEvent,
@@ -247,7 +248,7 @@ export type RootExecutionDescriptor =
       inputDigest?: `sha256:${string}`;
       maxSteps?: number;
       /** Caller-authored trigger retained so recovery preserves its authority class. */
-      origin?: CloudActivationOrigin;
+      origin?: CloudActivationOrigin | WorkHubEvidenceOrigin;
     }
   | {
       /** Conversational execution admitted only by WorkHub authority. */

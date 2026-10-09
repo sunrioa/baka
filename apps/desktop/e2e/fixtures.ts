@@ -122,7 +122,8 @@ export async function waitForInvocableSkills(
  * backend (BackendRegistry override in main); this only satisfies the UI
  * readiness gates. Kept in the fixture so test data stays out of production main.
  */
-async function seedE2eConnection(userDataDir: string): Promise<void> {
+async function seedE2eConnection(userDataDir: string, model?: { baseUrl: string; modelId: string }): Promise<void> {
+  const modelId = model?.modelId ?? 'claude-sonnet-4-5-20250929';
   const workspaceRoot = path.join(userDataDir, 'workspaces', 'default');
   const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
@@ -135,9 +136,10 @@ async function seedE2eConnection(userDataDir: string): Promise<void> {
       connection: {
         slug: 'e2e',
         name: 'E2E',
-        providerType: 'anthropic',
+        providerType: model ? 'ollama' : 'anthropic',
+        ...(model ? { baseUrl: model.baseUrl } : {}),
         enabled: true,
-        enabledModelIds: ['claude-sonnet-4-5-20250929'],
+        enabledModelIds: [modelId],
       },
     });
     if (created.kind !== 'committed') {
@@ -145,24 +147,26 @@ async function seedE2eConnection(userDataDir: string): Promise<void> {
     }
     const connection = created.snapshot.connections.find(({ slug }) => slug === 'e2e');
     if (!connection) throw new Error('E2E connection seed is missing from the committed catalog');
-    const credential = await stores.credentialVault.set({
-      locator: {
-        scope: 'connection',
-        connectionId: connection.connectionId,
-        kind: 'api_key',
-      },
-      expected: null,
-      secret: 'e2e-placeholder',
-    });
-    if (credential.kind !== 'committed') {
-      throw new Error(`E2E credential seed was not committed: ${credential.kind}`);
+    if (!model) {
+      const credential = await stores.credentialVault.set({
+        locator: {
+          scope: 'connection',
+          connectionId: connection.connectionId,
+          kind: 'api_key',
+        },
+        expected: null,
+        secret: 'e2e-placeholder',
+      });
+      if (credential.kind !== 'committed') {
+        throw new Error(`E2E credential seed was not committed: ${credential.kind}`);
+      }
     }
     const modelFetch = await stores.operations.beginModelFetch(connection.connectionId);
     if (modelFetch.kind !== 'ready') {
       throw new Error(`E2E model inventory seed could not start: ${modelFetch.kind}`);
     }
     const modelInventory = await stores.operations.completeModelFetch(modelFetch.ticket, {
-      models: [{ id: 'claude-sonnet-4-5-20250929' }],
+      models: [{ id: modelId }],
       source: 'fallback',
       fetchedAt: 0,
     });
@@ -173,11 +177,18 @@ async function seedE2eConnection(userDataDir: string): Promise<void> {
       expectedCatalogRevision: modelInventory.snapshot.revision,
       target: {
         connectionId: connection.connectionId,
-        modelId: 'claude-sonnet-4-5-20250929',
+        modelId,
       },
     });
     if (defaultTarget.kind !== 'committed') {
       throw new Error(`E2E default target seed was not committed: ${defaultTarget.kind}`);
+    }
+    if (model) {
+      const policy = await stores.runtimePolicy.getSnapshot();
+      const updated = await stores.runtimePolicy.mutate({ expectedRevision: policy.revision,
+        operation: {kind:'set_chat_defaults', value:{...policy.policy.chatDefaults, workHubMaxConcurrentSessions:1}},
+      });
+      if (updated.kind !== 'committed') throw new Error('Production-model fixture defaults were not committed');
     }
   } finally {
     await owner.close();
@@ -424,6 +435,7 @@ export async function withE2eWindow(
     onboardingPerfSessions,
     newTaskProject,
     tracePath,
+    productionModel,
     testInfo,
   }: {
     seed: boolean;
@@ -443,6 +455,8 @@ export async function withE2eWindow(
     onboardingPerfSessions?: number;
     newTaskProject?: boolean;
     tracePath?: string;
+    /** Real AI SDK/tool execution against an isolated local HTTP fixture, not FakeBackend. */
+    productionModel?: { baseUrl: string; modelId: string };
     /** Attaches captured main/renderer console output when the test fails. */
     testInfo?: TestInfo;
   },
@@ -458,7 +472,7 @@ export async function withE2eWindow(
   const mainLogs: string[] = [];
   const rendererLogs: string[] = [];
   try {
-    if (seed) await seedE2eConnection(userDataDir);
+    if (seed) await seedE2eConnection(userDataDir, productionModel);
     if (parentRemovalSessions) await seedParentRemovalSessions(userDataDir);
     if (railRenderSessions) await seedRailRenderSessions(userDataDir);
     if (onboardingPerfSessions !== undefined) {
@@ -476,17 +490,15 @@ export async function withE2eWindow(
     // opt in locally; on CI Linux every fixture is visible, because the display
     // there is headless and no one is watching it.
     const visibleWindow = showWindow || isCiLinuxDisplay();
+    const fixtureEnv = () => ({...buildFixtureEnv(userDataDir, homeDir, {
+      scenario: e2eFixtureScenario, locale, platform, showWindow: visibleWindow,
+    }), ...(productionModel ? {MAKA_E2E_PRODUCTION_MODEL:'1'} : {})});
     app = await electron.launch({
       // A visible fixture window is revealed inactively, which needs XWayland
       // on a native Wayland session.
       args: ['.', ...(visibleWindow ? inactiveWindowPlatformArgs() : [])],
       cwd: DESKTOP_ROOT,
-      env: buildFixtureEnv(userDataDir, homeDir, {
-        scenario: e2eFixtureScenario,
-        locale,
-        platform,
-        showWindow: visibleWindow,
-      }),
+      env: fixtureEnv(),
     });
     app.on('console', (message) => {
       mainLogs.push(message.text());
@@ -537,7 +549,7 @@ export async function withE2eWindow(
       app = await electron.launch({
         args: ['.', ...(visibleWindow ? inactiveWindowPlatformArgs() : [])],
         cwd: DESKTOP_ROOT,
-        env: buildFixtureEnv(userDataDir, homeDir, { scenario: e2eFixtureScenario, locale, platform, showWindow: visibleWindow }),
+        env: fixtureEnv(),
       });
       const restored = await app.firstWindow();
       restored.on('crash', () => {

@@ -364,6 +364,8 @@ export function backfillRuntimeEventsFromStoredMessages(
       // own durable proof, which no run ledger owns a copy of.
       case 'turn_state':
       case 'workhub_coordination':
+      case 'workhub_evidence':
+      case 'workhub_evidence_resolution':
         break;
 
       // A note that names a turn is that invocation's own fact, so it converts.

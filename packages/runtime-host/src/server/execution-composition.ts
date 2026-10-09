@@ -18,6 +18,7 @@
  */
 
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
+import { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
@@ -910,6 +911,7 @@ export async function createExecutionRuntimeHostComposition(
     let rootCoordinator: RootTurnCoordinator | undefined;
     let workHubCoordination: HostWorkHubCoordinationCoordinator;
     let workHubResults: ReturnType<typeof createWorkHubResultRuntime> | undefined;
+    let workHubEvidence: ReturnType<typeof createWorkHubEvidenceRuntime> | undefined;
     let workHubInspection: MakaTool | undefined;
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
     let memory: HostMemoryCoordinator | undefined;
@@ -1030,12 +1032,14 @@ export async function createExecutionRuntimeHostComposition(
     unsubscribeTranscriptChanges = stores.sessionStore.subscribeTranscriptChanges((sessionId) => {
       continuityCoordinator.enqueueCanonicalRefresh(sessionId);
       sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+      sessionAdmission.detach(() => workHubEvidence?.notify());
       if (rootRecoveryCompleted) taskGrants?.notify();
     });
     unsubscribeRuntimeEventCommits = stores.runtimeEventStore.subscribeRuntimeEventCommits(
       (sessionId) => {
         continuityCoordinator.enqueueTranscriptAdvanced(sessionId);
         sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+        sessionAdmission.detach(() => workHubEvidence?.notify());
         if (rootRecoveryCompleted) taskGrants?.notify();
         sessionAdmission.detach(() => promptSuggestions?.reconcile(sessionId));
       },
@@ -1166,10 +1170,17 @@ export async function createExecutionRuntimeHostComposition(
         goalTools: requireGoal(goal).tools,
         builtinTools,
         hostTools,
-        resolveRootTools: (sessionId) =>
+        resolveRootTools: async (sessionId) =>
           sessionId === WORKHUB_COORDINATION_SESSION_ID && workHubResults && workHubInspection
-            ? Promise.resolve([workHubResults.tool, workHubInspection])
-            : requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
+            ? [
+                workHubResults.tool,
+                workHubInspection,
+                ...(workHubEvidence ? [workHubEvidence.tool] : []),
+              ]
+            : [
+                ...(await requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId)),
+                ...(workHubEvidence ? [workHubEvidence.tool] : []),
+              ],
         resolvePluginTools: (sessionId, coreTools) =>
           pluginTools.resolveContributions(sessionId, coreTools),
         resolvePluginSystemPrompt: async (sessionId, promptContext, baseText) => {
@@ -1333,8 +1344,14 @@ export async function createExecutionRuntimeHostComposition(
       try {
         const [graphTools, planState] = await Promise.all([
           sessionId === WORKHUB_COORDINATION_SESSION_ID && workHubResults && workHubInspection
-            ? Promise.resolve([workHubResults.tool, workHubInspection])
-            : requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId),
+            ? Promise.resolve([
+                workHubResults.tool,
+                workHubInspection,
+                ...(workHubEvidence ? [workHubEvidence.tool] : []),
+              ])
+            : requireGraphCoordinator(graphCoordinator)
+                .toolsForSession(sessionId)
+                .then((tools) => [...tools, ...(workHubEvidence ? [workHubEvidence.tool] : [])]),
           planStore.readState(sessionId),
         ]);
         const { runtimePolicy, surface } = await resolveInteractiveToolSurface({
@@ -1784,6 +1801,8 @@ export async function createExecutionRuntimeHostComposition(
         begin: (input) => {
           const observer = requireGoal(goal).begin(input);
           return async (completion) => {
+            if (completion.kind === 'terminal')
+              await workHubEvidence?.assertSafeTerminal(completion.snapshot);
             await taskGrants?.reconcile();
             await observer?.(completion);
           };
@@ -2432,7 +2451,10 @@ export async function createExecutionRuntimeHostComposition(
             turnId: disposition.turnId,
             runId: disposition.runId,
           };
-          const latest = await coordinator.readLatestRootTurnLineage(identity);
+          const latest = workHubEvidence
+            ? await workHubEvidence.taskExecution(assignment, identity)
+            : await coordinator.readLatestRootTurnLineage(identity);
+          if ('request' in latest && latest.request) return 'not_retired';
           if (isActiveWorkHubRoot(coordinator, latest)) return 'not_retired';
           // The same restart window as `stopOwnedWorkHubRoot`: an unregistered
           // root is not evidence that its work ended.
@@ -2492,11 +2514,14 @@ export async function createExecutionRuntimeHostComposition(
               'WorkHub delegated execution is not resumable',
             );
           }
-          const source = await coordinator.readLatestRootTurnLineage({
+          const original = {
             sessionId: assignment.targetSessionId,
             turnId: disposition.turnId,
             runId: disposition.runId,
-          });
+          };
+          const source = workHubEvidence
+            ? await workHubEvidence.taskExecution(assignment, original)
+            : await coordinator.readLatestRootTurnLineage(original);
           if (isActiveWorkHubRoot(coordinator, source)) {
             return { outcome: 'already_running' as const };
           }
@@ -2583,11 +2608,14 @@ export async function createExecutionRuntimeHostComposition(
             return { outcome: 'not_owned' as const, targetTurnId: disposition.turnId };
           }
           if (disposition.kind === 'owned_root') {
-            const identity = await coordinator.readLatestRootTurnLineage({
+            const original = {
               sessionId: assignment.targetSessionId,
               turnId: disposition.turnId,
               runId: disposition.runId,
-            });
+            };
+            const identity = workHubEvidence
+              ? await workHubEvidence.taskExecution(assignment, original)
+              : await coordinator.readLatestRootTurnLineage(original);
             return retirement.cause === 'direct_stop'
               ? stopOwnedWorkHubRoot(coordinator, identity, retirement.cancellationClaimId)
               : stopReplacedWorkHubRoot(coordinator, identity);
@@ -2778,8 +2806,43 @@ export async function createExecutionRuntimeHostComposition(
       readExecution: async (sessionId) =>
         (await canonicalProjectionReader.read(sessionId))?.rootTurn ?? null,
     });
+    workHubEvidence = createWorkHubEvidenceRuntime({
+      stores,
+      executions: coordinator,
+      messages,
+      admission: sessionAdmission,
+      reader: requireTranscriptReader(transcriptReader),
+      hasLiveResources: async (sessionId) => {
+        const graph = requireGraphCoordinator(graphCoordinator);
+        const wake = requireGraphSupervisorWake(graphSupervisorWake);
+        const currentGoal = requireGoal(goal).manager.get(sessionId);
+        return (
+          currentGoal?.status === 'active' ||
+          currentGoal?.status === 'waiting' ||
+          (await runtimeResources!.hasLiveSessionResources(sessionId)) ||
+          (await graph.hasLiveSessionState(sessionId)) ||
+          wake.hasLiveSessionState(sessionId) ||
+          (await hasLiveLinkedDescendantState(
+            requireSessionManager(manager),
+            stores.runtimeEventStore,
+            sessionId,
+            async (id) =>
+              coordinator.hasActiveOrPendingTurn(id) ||
+              (await runtimeResources!.hasLiveSessionResources(id)) ||
+              (await graph.hasLiveSessionState(id)) ||
+              wake.hasLiveSessionState(id),
+          ))
+        );
+      },
+      acquireResidency: () => context.acquireResidency('hosted-execution'),
+      onError: (error) =>
+        console.error(
+          `[runtime-host] WorkHub evidence reconciliation failed: ${boundedFailureDiagnostic(error)}`,
+        ),
+    });
     workHubResults = createWorkHubResultRuntime({
       stores,
+      evidence: workHubEvidence,
       taskGrants,
       executions: coordinator,
       messages,
@@ -3185,6 +3248,7 @@ export async function createExecutionRuntimeHostComposition(
         },
         drain: [
           () => workHubResults?.coordinator.beginDrain(),
+          () => workHubEvidence?.beginDrain(),
           () => turnAccessRequests?.beginDrain(),
           () => rootCoordinator?.beginDrain(),
           () => workspaceExecution?.beginDrain(),
@@ -3203,6 +3267,7 @@ export async function createExecutionRuntimeHostComposition(
             await rootCloseTask;
           },
           () => workHubResults?.coordinator.close(),
+          () => workHubEvidence?.close(),
           () => runtimeResources?.close(),
           () => workspaceExecution?.close(),
           () => sessionEffects?.close(),
@@ -3260,7 +3325,10 @@ export async function createExecutionRuntimeHostComposition(
     const handlers = composeRuntimeHostDomainHandlers(domainModules);
     const recover = () => {
       recoveryTask ??= recoverRuntimeHostDomainModules(domainModules).then(() => {
-        if (!draining) workHubResults?.coordinator.start();
+        if (!draining) {
+          workHubEvidence?.start();
+          workHubResults?.coordinator.start();
+        }
       });
       return recoveryTask;
     };
@@ -3270,6 +3338,13 @@ export async function createExecutionRuntimeHostComposition(
         const errors: unknown[] = [];
         try {
           await recover();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          // The evidence relay reads graph/resource state while admitting a fresh
+          // Turn. Settle that reader before reverse-order domain close retires it.
+          await workHubEvidence?.close();
         } catch (error) {
           errors.push(error);
         }
@@ -3304,6 +3379,7 @@ export async function createExecutionRuntimeHostComposition(
         const scheduleHold = scheduledTasks?.holdForHandoff();
         const dailyReviewHold = dailyReview?.holdForHandoff();
         const workHubResultHold = workHubResults?.coordinator.holdForHandoff();
+        const workHubEvidenceHold = workHubEvidence?.holdForHandoff();
         let root: Awaited<ReturnType<RootTurnCoordinator['prepareHandoff']>>;
         let detached = false;
         const cancel = () => {
@@ -3313,11 +3389,18 @@ export async function createExecutionRuntimeHostComposition(
           scheduleHold?.release();
           dailyReviewHold?.release();
           workHubResultHold?.release();
+          workHubEvidenceHold?.release();
           signal.removeEventListener('abort', cancel);
         };
         signal.addEventListener('abort', cancel, { once: true });
         try {
-          if (!goalHold || !scheduleHold || !dailyReviewHold || !workHubResultHold) {
+          if (
+            !goalHold ||
+            !scheduleHold ||
+            !dailyReviewHold ||
+            !workHubResultHold ||
+            !workHubEvidenceHold
+          ) {
             cancel();
             return undefined;
           }
@@ -3327,6 +3410,7 @@ export async function createExecutionRuntimeHostComposition(
               scheduleHold.settled(),
               dailyReviewHold.settled(),
               workHubResultHold.settled(),
+              workHubEvidenceHold.settled(),
             ]).then(() => undefined),
             signal,
           );

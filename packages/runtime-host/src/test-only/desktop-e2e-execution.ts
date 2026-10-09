@@ -18,6 +18,7 @@
  */
 
 import type { ExecutionRuntimeHostCandidateDependencies } from '../server/execution-candidate.js';
+import type { BackendFactoryContext } from '@maka/runtime/session-manager';
 import { createExecutionRuntimeHostComposition } from '../server/execution-composition.js';
 import { DesktopE2eBackend, DESKTOP_E2E_OAUTH_AUTHORIZATION } from './desktop-e2e-backend.js';
 
@@ -34,7 +35,12 @@ export function createDesktopE2eExecutionCandidateDependencies(): ExecutionRunti
           bootstrapRuntimePolicy: false,
         },
         {
-          primaryBackendFactory: (backendContext) => new DesktopE2eBackend(backendContext),
+          ...(process.env.MAKA_E2E_PRODUCTION_MODEL === '1'
+            ? {}
+            : {
+                primaryBackendFactory: (backendContext: BackendFactoryContext) =>
+                  new DesktopE2eBackend(backendContext),
+              }),
           // The fake primary reply must not race a real auxiliary title request.
           // Keep Host-owned naming/persistence, using its deterministic fallback.
           generateSessionTitle: async () => undefined,

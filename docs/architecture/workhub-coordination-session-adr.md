@@ -528,5 +528,57 @@ This is a direct-WorkHub-worker collision guard, not a global filesystem lock or
 new sandbox boundary. Manual Turns, subagents, extra approved paths and detached
 processes are not brought into this budget. Private task directories do not
 override existing permission profiles, OS temporary grants or full-access mode.
-Dependency-aware worker yielding, cross-Session evidence exchange, aggregated
-task UI and new Windows execution backends remain subsequent steps.
+Aggregated task UI and new Windows execution backends remain subsequent steps.
+
+## Controlled evidence and dependency continuation (Step 6)
+
+`WorkHubEvidence` exposes only current, ordinary, result-enabled WorkHub
+assignments on this Host. It lists bounded task references and reads committed
+assistant output from the exact owned task execution. It does not expose arbitrary
+Session history, user messages, child Sessions, foreign Hosts or filesystem
+contents. The returned excerpt preserves action, delegation, original Message,
+Turn, Run and assistant-message provenance and marks truncation (16 KB of text,
+at most eight bounded transcript pages). A terminal source is not proof of
+artifact correctness; references or paths in its text are not verified files.
+
+A worker may ask a bounded question, optionally selecting a discovered source.
+Without one, WorkHub receives a result notification and selects a visible source
+or reports unavailable. Selecting a queued source does not dispatch more work.
+Supplemental execution still goes through the existing user-authorized Action
+Gate. Neither the question nor the source output is permission or a user message.
+WorkHub must finish coordination promptly, not poll or block on the worker.
+
+The Host fixes sender Session, Turn, Run, invocation, tool-call, assignment and
+original Message identities. It persists one typed request and immutable reply
+in the existing Session store; deterministic root admission is the delivery
+receipt. These operational records are not displayed, backfilled as model facts,
+searched as conversation text or copied into another Session. Only the current
+root invocation may request evidence; only WorkHub may resolve another task's
+request. Resolution fixes the exact source delegation and original Message,
+never a display name or a mutable latest-Session reply.
+
+A settled request ends its fragment with `dependency_wait`. It may release the
+direct-worker concurrency/cwd reservation only after canonical tool and Turn
+settlement and cleanup of live resources/children. Once evidence is available,
+the Host admits a **fresh non-user Turn**, after pending manual/FIFO admissions.
+It remains part of the original WorkHub task for result, Stop, correction and
+worker-budget accounting, but not part of the old execution/grant lineage.
+Existing task-scoped grants never flow into it; current Session defaults and
+normal native approval apply. No Session-wide permission override/restore,
+cheap same-Turn suspension or scheduler/subagent budget redesign is introduced.
+An active/waiting autonomous Goal must first be paused through its normal Goal
+control; the relay does not manipulate Goal state or let its automatic scheduler
+bypass the dependency wait. The entire encoded response also fits the existing
+root-admission budget, with explicit truncation of excerpts or repeated task text.
+
+Restart reconstructs waiting state from committed requests, owned execution
+proofs and admissions, without a second task database. Duplicate delivery or
+replies cannot create a second Turn; a conflicting reply is rejected. Stop,
+archive or replacement retires the requester, and a retired/cancelled source
+returns unavailable evidence. One-hour expiry returns an explicit expired
+outcome. Each task is limited to eight communication rounds; same-Session waits,
+self-dependencies and cycles/overlong dependency chains are rejected. One failing
+source cannot starve unrelated requests. With direct concurrency one, a settled
+request releases its slot so the queued producer can run, then the fresh requester
+Turn acquires the normal slot/conflict reservation again. Recovery/handoff fences
+the relay alongside the existing result poller.

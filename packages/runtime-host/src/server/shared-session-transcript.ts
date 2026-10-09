@@ -167,6 +167,8 @@ export function projectSharedSessionTranscriptMessage(
         : null;
     case 'permission_decision':
     case 'workhub_coordination':
+    case 'workhub_evidence':
+    case 'workhub_evidence_resolution':
       return null;
   }
 }

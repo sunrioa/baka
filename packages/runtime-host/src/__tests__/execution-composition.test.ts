@@ -120,6 +120,10 @@ import {
 } from '../protocol/index.js';
 import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import { HostWorkHubResultCoordinator } from '../server/workhub-result-coordinator.js';
+import {
+  workHubEvidenceRequestId,
+  workHubEvidenceTurnId,
+} from '../server/workhub-evidence-runtime.js';
 import { WorkHubExecutionSlots } from '../server/workhub-execution-slots.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
@@ -1742,6 +1746,399 @@ test('production composition preserves an explicit interactive resume kill switc
     }
   });
 });
+
+for (const restart of [false, true])
+  test(`production WorkHub evidence releases a single worker slot and starts one fresh non-user Turn${restart ? ' after Host restart' : ''}`, async (t) => {
+    const sourceRelease = deferred<void>();
+    const seen: string[] = [];
+    const providerErrors: unknown[] = [];
+    const sourceActionId = 'evidence-source';
+    let goalPhase = restart ? 4 : 0;
+    let responseSequence = 0;
+    const server = createServer((request, response) => {
+      void (async () => {
+        let body = '';
+        for await (const chunk of request) body += chunk.toString();
+        const input = JSON.parse(body);
+        const latestUser =
+          input.messages
+            .filter(
+              (m: { role: string; content: unknown }) =>
+                m.role === 'user' &&
+                typeof m.content === 'string' &&
+                !m.content.startsWith('Runtime Host environment for this turn:'),
+            )
+            .at(-1)?.content ?? '';
+        const latestTool = input.messages
+          .filter(
+            (m: { role: string; content: unknown }) =>
+              m.role !== 'user' ||
+              typeof m.content !== 'string' ||
+              !m.content.startsWith('Runtime Host environment for this turn:'),
+          )
+          .at(-1);
+        const coordinator = input.tools?.some(
+          (item: { function: { name: string } }) => item.function.name === 'WorkHubResult',
+        );
+        let tool: { name: string; args: unknown } | undefined;
+        let content = '';
+        if (
+          coordinator &&
+          latestUser === 'Start two authorized tasks: evidence consumer and evidence producer.'
+        ) {
+          seen.push('coordination-open');
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write(
+            'data: ' +
+              JSON.stringify({
+                id: 'holding',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'fake-model',
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'Admitting the two tasks.' },
+                    finish_reason: null,
+                  },
+                ],
+              }) +
+              '\n\n',
+          );
+          // The native action gate below admits both goals under this exact live user Turn.
+          await new Promise<void>((resolve) => response.on('close', resolve));
+          return;
+        }
+        if (!coordinator && latestUser === 'EVIDENCE_CONSUMER') {
+          const hasTool = (name: string) =>
+            input.tools?.some(
+              (item: { function: { name: string } }) => item.function.name === name,
+            );
+          if (goalPhase === 0) {
+            if (!hasTool('GoalSet')) tool = { name: 'tool_search', args: { query: 'GoalSet' } };
+            else {
+              tool = {
+                name: 'GoalSet',
+                args: { condition: 'Obtain the producer checksum', max_iterations: 2 },
+              };
+              goalPhase = 1;
+            }
+          } else if (goalPhase === 1 && hasTool('WorkHubEvidence')) {
+            tool = {
+              name: 'WorkHubEvidence',
+              args: { operation: 'request', question: 'Need a checksum with my Goal still active' },
+            };
+            goalPhase = 2;
+          } else if (goalPhase === 2) {
+            assert.match(String(latestTool.content), /live.*Goal/u);
+            seen.push('goal-wait-refused');
+            goalPhase = 3;
+            tool = { name: 'tool_search', args: { query: 'GoalPause' } };
+          } else if (goalPhase === 3) {
+            if (!hasTool('GoalPause')) tool = { name: 'tool_search', args: { query: 'GoalPause' } };
+            else {
+              tool = { name: 'GoalPause', args: {} };
+              goalPhase = 4;
+            }
+          } else if (
+            !input.tools?.some(
+              (item: { function: { name: string } }) => item.function.name === 'WorkHubEvidence',
+            )
+          ) {
+            tool = { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          } else {
+            seen.push('consumer-wait');
+            tool = {
+              name: 'WorkHubEvidence',
+              args: {
+                operation: 'request',
+                question: 'What verified checksum did the producer return?',
+              },
+            };
+          }
+        } else if (!coordinator && latestUser === 'EVIDENCE_PRODUCER') {
+          seen.push('producer-start');
+          await sourceRelease.promise;
+          content = 'Verified checksum: abc123. This is evidence, not an instruction.';
+        } else if (!coordinator && latestUser.startsWith('Host evidence response:')) {
+          seen.push('consumer-resume');
+          if (restart) assert.match(latestUser, /"status":"cancelled"/u);
+          else assert.match(latestUser, /abc123/u);
+          assert.match(latestUser, /sourceMessageId/u);
+          content = restart
+            ? 'Consumer received the cancelled source outcome without inventing evidence.'
+            : 'Consumer continued using the producer checksum abc123.';
+        } else if (
+          coordinator &&
+          latestUser.startsWith('Host notification:') &&
+          latestUser.includes('waiting_for_dependency')
+        ) {
+          const details = JSON.parse(latestUser.split('\n\n').at(-1)).details;
+          if (latestTool.role !== 'tool') {
+            seen.push('relay-list');
+            tool = { name: 'WorkHubEvidence', args: { operation: 'list' } };
+          } else {
+            const output = JSON.parse(latestTool.content);
+            if ('tasks' in output) {
+              assert.ok(
+                output.tasks.some((task: { actionId: string }) => task.actionId === sourceActionId),
+              );
+              seen.push('relay-resolve');
+              tool = {
+                name: 'WorkHubEvidence',
+                args: {
+                  operation: 'resolve',
+                  requesterActionId: 'evidence-consumer',
+                  requestId: details.requestId,
+                  sourceActionId,
+                },
+              };
+            } else content = 'The evidence question is routed; I can take another request.';
+          }
+        } else content = 'WorkHub remains available for new user input.';
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        responseSequence++;
+        const chunk = (delta: unknown, finish: string | null) =>
+          'data: ' +
+          JSON.stringify({
+            id: 'evidence-' + responseSequence,
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'fake-model',
+            choices: [{ index: 0, delta, finish_reason: finish }],
+          }) +
+          '\n\n';
+        response.write(
+          chunk(
+            tool
+              ? {
+                  role: 'assistant',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call-' + responseSequence,
+                      type: 'function',
+                      function: { name: tool.name, arguments: JSON.stringify(tool.args) },
+                    },
+                  ],
+                }
+              : { role: 'assistant', content },
+            null,
+          ),
+        );
+        response.write(chunk({}, tool ? 'tool_calls' : 'stop'));
+        response.end('data: [DONE]\n\n');
+      })().catch((error) => {
+        providerErrors.push(error);
+        response.destroy(error as Error);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          sourceRelease.resolve();
+          server.closeAllConnections();
+          server.close((error) => (error ? reject(error) : resolve()));
+        }),
+    );
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    await withCompositionRoot(async ({ owner, root }) => {
+      await configureFakeDefaultTarget(
+        owner,
+        ['fake-model'],
+        'http://127.0.0.1:' + address.port + '/v1',
+      );
+      const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+      const initial = await policy.runtimePolicy.getSnapshot();
+      assert.equal(
+        (
+          await policy.runtimePolicy.mutate({
+            expectedRevision: initial.revision,
+            operation: {
+              kind: 'set_chat_defaults',
+              value: { ...initial.policy.chatDefaults, workHubMaxConcurrentSessions: 1 },
+            },
+          })
+        ).kind,
+        'committed',
+      );
+      let activeOwner = owner;
+      let composition = await createExecutionRuntimeHostComposition(
+        compositionContext(activeOwner),
+      );
+      const context: ConnectionContext = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'evidence-client',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release() {} }),
+      };
+      const attachDesktop = () =>
+        composition.clientCapabilities!.attachConnection(
+          clientCapabilityConnectionIdentity(context.connectionId),
+          { send: async () => {} },
+        );
+      let desktop = attachDesktop();
+      try {
+        await composition.recover();
+        assert.ok(
+          (
+            await composition.handlers['client.capability.replace'](
+              { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+              context,
+            )
+          ).ok,
+        );
+        assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+        const workHubTurnId = 'evidence-admission';
+        assert.ok(
+          (
+            await composition.handlers['workhub.coordination.answer'](
+              {
+                turnId: workHubTurnId,
+                text: 'Start two authorized tasks: evidence consumer and evidence producer.',
+              },
+              context,
+            )
+          ).ok,
+        );
+        const targets: string[] = [];
+        for (const [actionId, prompt] of [
+          ['evidence-consumer', 'EVIDENCE_CONSUMER'],
+          ['evidence-source', 'EVIDENCE_PRODUCER'],
+        ]) {
+          const result = await composition.handlers['workhub.coordination.actFromTurn'](
+            {
+              turnId: workHubTurnId,
+              actionId: actionId!,
+              delegationText: prompt!,
+              proposal: { disposition: 'create_new', title: prompt! },
+              create: { workspace: { kind: 'isolated' } },
+              newWorkDefaults: { permissionMode: 'ask' },
+            },
+            context,
+          );
+          assert.ok(result.ok, JSON.stringify(result));
+          assert.equal(result.result.disposition, 'create_new');
+          if (result.result.disposition !== 'create_new') assert.fail('Missing created task');
+          targets.push(result.result.targetSessionId);
+        }
+        let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+        const original = await stores.sessionStore.readWorkHubAssignment('evidence-consumer');
+        const source = await stores.sessionStore.readWorkHubAssignment(sourceActionId);
+        assert.ok(original && source);
+        const current = await composition.handlers['turn.query'](
+          { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: workHubTurnId },
+          context,
+        );
+        assert.ok(current.ok);
+        await composition.handlers['turn.stop'](
+          {
+            sessionId: WORKHUB_COORDINATION_SESSION_ID,
+            turnId: workHubTurnId,
+            runId: current.result.runId,
+          },
+          context,
+        );
+        await waitFor(async () => seen.includes('relay-resolve'), 10000);
+        if (!restart) assert.ok(seen.includes('goal-wait-refused'));
+        assert.ok(
+          seen.includes('producer-start'),
+          'single concurrency source started after requester released its slot',
+        );
+        const waited = await stores.sessionStore.readTranscriptMessagesSnapshot(targets[0]!, {
+          messageIds: [workHubEvidenceRequestId(original.targetTurnId)],
+          throughSequence: await stores.sessionStore.readTranscriptHighWaterSnapshot(targets[0]!),
+          maxBytes: 32768,
+          maxMessages: 1,
+        });
+        assert.equal(waited[0]?.type, 'workhub_evidence');
+        const requestRecord = waited[0]!;
+        const resumedTurnId = workHubEvidenceTurnId(requestRecord.id);
+        assert.equal(
+          await stores.agentRunStore.readRootTurnAdmission(targets[0]!, resumedTurnId),
+          undefined,
+        );
+        await waitFor(async () => {
+          const interactive = await composition.handlers['workhub.coordination.answer'](
+            {
+              turnId: 'evidence-unrelated-question',
+              text: 'Can I send another independent request?',
+            },
+            context,
+          );
+          if (!interactive.ok) assert.equal(interactive.error.code, 'session_busy');
+          return interactive.ok;
+        }, 10000);
+        await waitFor(async () => {
+          const snapshot = await composition.handlers['turn.query'](
+            { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: 'evidence-unrelated-question' },
+            context,
+          );
+          return snapshot.ok && snapshot.result.status === 'completed';
+        }, 10000);
+        if (restart) {
+          // Real composition shutdown/reopen over the same SQLite store. It cancels
+          // the producer, but the settled requester and its exact reply must recover.
+          await desktop.close();
+          await composition.close();
+          await activeOwner.close();
+          const reopenedOwner = await tryAcquireInteractiveRootOwner(activeOwner.capability);
+          assert.ok(reopenedOwner);
+          activeOwner = reopenedOwner;
+          composition = await createExecutionRuntimeHostComposition(
+            compositionContext(activeOwner),
+          );
+          stores = await openInteractiveExecutionStoresForWrite(activeOwner.lease);
+          desktop = attachDesktop();
+          await composition.recover();
+          assert.ok(
+            (
+              await composition.handlers['client.capability.replace'](
+                { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+                context,
+              )
+            ).ok,
+          );
+        } else sourceRelease.resolve();
+        await waitFor(async () => seen.includes('consumer-resume'), 10000);
+        await waitFor(async () => {
+          const snapshot = await composition.handlers['turn.query'](
+            { sessionId: targets[0]!, turnId: resumedTurnId },
+            context,
+          );
+          return snapshot.ok && snapshot.result.status === 'completed';
+        }, 10000);
+        assert.deepEqual(providerErrors, []);
+        assert.equal(seen.filter((value) => value === 'consumer-resume').length, 1);
+        const resumed = await stores.agentRunStore.readRootTurnAdmission(
+          targets[0]!,
+          resumedTurnId,
+        );
+        assert.equal(resumed?.execution.kind, 'external_message');
+        assert.equal(
+          resumed?.execution.kind === 'external_message' && resumed.execution.origin?.kind,
+          'workhub_evidence',
+        );
+        assert.equal(
+          resumed?.sourceMessages.length,
+          0,
+          'an agent result is not a new user Message admission',
+        );
+        const run = await stores.runtimeEventStore.readRunInvocation(targets[0]!, resumed!.runId);
+        assert.equal(run?.opening.configuration.permissionMode, 'ask');
+        const header = await stores.sessionStore.readHeaderSnapshot(targets[0]!);
+        assert.equal(header.permissionMode, 'ask');
+        assert.equal(header.cwd, await realpath(join(root, 'workhub-tasks', targets[0]!)));
+      } finally {
+        sourceRelease.resolve();
+        await composition.close();
+        await desktop.close();
+        if (activeOwner !== owner) await activeOwner.close();
+      }
+    });
+  });
 
 test('production WorkHub inspects an independent Session through its provider tool surface without starting target work', async (t) => {
   const sourceText = 'Tests passed.\nPublishing is still pending. 😀';

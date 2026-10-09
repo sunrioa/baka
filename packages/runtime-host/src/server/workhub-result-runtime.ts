@@ -40,6 +40,7 @@ import {
   HostWorkHubResultCoordinator,
   type WorkHubResultObservation,
 } from './workhub-result-coordinator.js';
+import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 
 export function createWorkHubResultRuntime(options: {
   stores: ExecutionStoresWriter<'interactive'>;
@@ -47,6 +48,10 @@ export function createWorkHubResultRuntime(options: {
   messages: HostMessageCoordinator;
   interactions: HostInteractionCoordinator;
   taskGrants?: HostTaskGrantCoordinator;
+  evidence?: Pick<
+    ReturnType<typeof createWorkHubEvidenceRuntime>,
+    'taskExecution' | 'waitingObservation'
+  >;
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
   acquireResidency(): { release(): void };
@@ -121,11 +126,17 @@ export function createWorkHubResultRuntime(options: {
         };
       }
       if (disposition.kind !== 'owned_root' && disposition.kind !== 'shared_turn') return undefined;
-      const identity = await executions.readLatestRootTurnLineage({
+      const original = {
         sessionId: assignment.targetSessionId,
         turnId: disposition.turnId,
         runId: disposition.runId,
-      });
+      };
+      const identity =
+        options.evidence && disposition.kind === 'owned_root'
+          ? await options.evidence.taskExecution(assignment, original)
+          : await executions.readLatestRootTurnLineage(original);
+      const waiting = await options.evidence?.waitingObservation(assignment, identity);
+      if (waiting) return waiting;
       const snapshot = await executions.read(identity);
       const sharedTurn = disposition.kind === 'shared_turn';
       if (snapshot.status === 'waiting_for_user' || snapshot.status === 'running') {
@@ -204,11 +215,14 @@ export function createWorkHubResultRuntime(options: {
     );
     // A historical shared Turn does not confer authority over manual work.
     if (disposition.kind !== 'owned_root') return [];
-    const identity = await executions.readLatestRootTurnLineage({
+    const original = {
       sessionId: assignment.targetSessionId,
       turnId: disposition.turnId,
       runId: disposition.runId,
-    });
+    };
+    const identity = options.evidence
+      ? await options.evidence.taskExecution(assignment, original)
+      : await executions.readLatestRootTurnLineage(original);
     const snapshot = await executions.read(identity);
     if (snapshot.status !== 'waiting_for_user' && snapshot.status !== 'running') return [];
     const requests = (await pending(assignment.targetSessionId)).filter(

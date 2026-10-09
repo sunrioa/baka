@@ -18,6 +18,12 @@
  */
 
 import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
+import { isWorkHubEvidenceRequest, type WorkHubEvidenceOrigin } from '@maka/core/workhub-evidence';
+import {
+  workHubEvidenceRequestId,
+  workHubEvidenceTurnId,
+  readWorkHubEvidenceExecution,
+} from './workhub-evidence-runtime.js';
 import type { WorkHubActionReceipt } from '@maka/core/workhub-action-result';
 import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1803,6 +1809,13 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         operationUnavailable(WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON),
       );
     }
+    if (
+      request.execution.kind === 'external_message' &&
+      request.execution.origin?.kind === 'workhub_evidence'
+    )
+      return Promise.resolve(
+        operationUnavailable('Evidence delivery requires its dedicated Host authority'),
+      );
     return this.startRootMessage(request, context);
   }
 
@@ -1867,6 +1880,95 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
             return 'pending' as const;
           const header = await this.stores.sessionStore.readHeaderSnapshot(sessionId);
           if (runtimeHostExecutionUnavailableReason(header, execution)) return 'pending' as const;
+          const reservation = this.reserveRootTurn(sessionId);
+          if (!reservation) return 'pending' as const;
+          try {
+            if (!this.beginRootAdmission(reservation)) return 'pending' as const;
+            const admitted = await this.rootAdmissionOwner.admitRootTurn({
+              sessionId,
+              turnId,
+              proposedRunId: randomUUID(),
+              proposedUserMessageId: turnId,
+              execution,
+              normalizedInput: content,
+              sourceMessages: [],
+              admittedAt: Date.now(),
+            });
+            disposition = await this.prepareAdmittedTurn(
+              activationInputForAdmission(admitted.admission),
+              admitted.admission,
+              this.acquireRecoveryResidency,
+              lease,
+              undefined,
+              undefined,
+              reservation,
+            );
+            return 'delivered' as const;
+          } finally {
+            this.releaseRootReservation(reservation);
+          }
+        },
+      );
+      if (disposition) await this.resolveStartDisposition({ sessionId, turnId }, disposition);
+      return result;
+    });
+  }
+
+  /** A fresh non-user Turn, not a same-Turn resume or an inherited task grant. */
+  startWorkHubEvidence(
+    sessionId: string,
+    origin: WorkHubEvidenceOrigin,
+    sourceSessionId: string | undefined,
+    prepareContent: (lease: SessionAdmissionLease) => Promise<MessageContent | undefined>,
+  ): Promise<'delivered' | 'pending' | 'obsolete'> {
+    return this.runCommand(async () => {
+      const turnId = workHubEvidenceTurnId(origin.requestId);
+      let disposition: TurnStartDisposition | undefined;
+      const result = await this.sessionAdmission.runMany(
+        [WORKHUB_COORDINATION_SESSION_ID, sessionId, ...(sourceSessionId ? [sourceSessionId] : [])],
+        async (lease) => {
+          if (isWorkHubCoordinationSessionId(sessionId)) return 'obsolete' as const;
+          const existing = await this.stores.agentRunStore.readRootTurnAdmission(sessionId, turnId);
+          if (existing) {
+            if (
+              existing.execution.kind !== 'external_message' ||
+              !isDeepStrictEqual(existing.execution.origin, origin)
+            )
+              throw new Error('WorkHub evidence receipt identity conflict');
+            return 'delivered' as const;
+          }
+          await this.messages.consumePendingAdmissionsAdmitted(sessionId, lease);
+          const queue = this.messages.projection(sessionId);
+          if (
+            !this.isSessionExecutionIdle(sessionId) ||
+            queue.followup.length ||
+            queue.steering.length
+          )
+            return 'pending' as const;
+          const content = await prepareContent(lease);
+          if (!content) return 'obsolete' as const;
+          const previous = await this.stores.agentRunStore.readRootTurnAdmission(
+            sessionId,
+            origin.sourceTurnId,
+          );
+          if (
+            !previous ||
+            !(
+              await readWorkHubEvidenceExecution(this.stores.runtimeEventStore, previous)
+            )?.runIds.includes(origin.sourceRunId)
+          )
+            return 'obsolete' as const;
+          const execution: RootExecutionDescriptor = {
+            kind: 'external_message',
+            origin,
+            inputDigest: messageContentDigest(content),
+          };
+          if (!(await this.bindRecoveryCapabilities(sessionId, execution)))
+            return 'pending' as const;
+          const header = await this.stores.sessionStore.readHeaderSnapshot(sessionId);
+          if (header.isArchived || runtimeHostExecutionUnavailableReason(header, execution))
+            return 'pending' as const;
+          await this.clientCapabilities?.bindSessionSuccessor(sessionId);
           const reservation = this.reserveRootTurn(sessionId);
           if (!reservation) return 'pending' as const;
           try {
@@ -3245,8 +3347,8 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       if (!isShutdownCancelledInteractionAdmission(commandFailure)) this.requestHostDrain();
       throw commandFailure;
     } finally {
-      active.workHubSlot?.release();
       if (detached) {
+        active.workHubSlot?.release();
         this.#executions.release(active);
         active.residency.release();
       } else {
@@ -3255,7 +3357,12 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           execution: active,
           reason: 'Runtime root Turn ended without a canonical completion.',
         });
-        await active.observationSettled?.catch(() => this.requestHostDrain());
+        let safeToRelease = true;
+        await active.observationSettled?.catch(() => {
+          safeToRelease = false;
+          this.requestHostDrain();
+        });
+        if (safeToRelease) active.workHubSlot?.release();
         let releaseRootOwnership = active.messageTransitionCommitted;
         if (!active.messageTransitionCommitted) {
           try {
@@ -3293,13 +3400,37 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       if (!source) return false;
       admission = source;
     }
-    if (admission.execution.kind !== 'external_message' || admission.sourceMessages.length === 0)
-      return false;
+    if (admission.execution.kind !== 'external_message') return false;
     const assignments = await this.stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
       [admission.sessionId],
       undefined,
       true,
     );
+    const origin = admission.execution.origin;
+    if (origin?.kind === 'workhub_evidence') {
+      const [request] = await this.stores.sessionStore.readTranscriptMessagesSnapshot(
+        admission.sessionId,
+        {
+          messageIds: [workHubEvidenceRequestId(origin.sourceTurnId)],
+          throughSequence: await this.stores.sessionStore.readTranscriptHighWaterSnapshot(
+            admission.sessionId,
+          ),
+          maxBytes: 32768,
+          maxMessages: 1,
+        },
+      );
+      return (
+        isWorkHubEvidenceRequest(request) &&
+        request.id === origin.requestId &&
+        request.senderSessionId === admission.sessionId &&
+        request.senderRunId === origin.sourceRunId &&
+        request.delegationId === origin.delegationId &&
+        assignments.some(
+          (a) =>
+            a.delegationId === origin.delegationId && a.targetMessageId === request.rootMessageId,
+        )
+      );
+    }
     return assignments.some((assignment) =>
       admission.sourceMessages.some((source) => source.messageId === assignment.targetMessageId),
     );

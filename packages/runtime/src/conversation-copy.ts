@@ -232,9 +232,13 @@ export function createConversationCopySlice(
   sourceTurnId: string,
   boundary: 'through' | 'before',
 ): ConversationCopySlice | null {
+  const conversational = messages.filter(
+    (message) =>
+      message.type !== 'workhub_evidence' && message.type !== 'workhub_evidence_resolution',
+  );
   const turnOrder: string[] = [];
   const seen = new Set<string>();
-  for (const message of messages) {
+  for (const message of conversational) {
     const turnId = messageTurnId(message);
     if (turnId && !seen.has(turnId)) {
       seen.add(turnId);
@@ -251,11 +255,11 @@ export function createConversationCopySlice(
   const firstExcludedTimestamps =
     firstExcludedTurnId === undefined
       ? []
-      : messages
+      : conversational
           .filter((message) => messageTurnId(message) === firstExcludedTurnId)
           .map((message) => message.ts);
   return {
-    messages: messages.filter((message) => {
+    messages: conversational.filter((message) => {
       if (message.type === 'turn_state') return false;
       const turnId = messageTurnId(message);
       return turnId !== undefined && retained.has(turnId);
