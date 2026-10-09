@@ -30,7 +30,12 @@ export interface WorkHubResultObservation {
   readonly turnId: string;
   readonly runId: string;
   readonly eventKey: string;
-  readonly status: 'completed' | 'failed' | 'cancelled' | 'waiting_for_user';
+  readonly status:
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'waiting_for_user'
+    | 'waiting_for_dependency';
   readonly result: string;
   readonly details?: unknown;
   readonly sharedTurn: boolean;

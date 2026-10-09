@@ -18,6 +18,7 @@
  */
 
 import { defineObjectShape, hasExactShape, isRecord } from './record-schema.js';
+import type { WorkHubEvidenceOrigin } from './workhub-evidence.js';
 
 /** Non-user trigger source for a turn. */
 export interface WorkHubResultOrigin {
@@ -36,6 +37,7 @@ export interface CloudActivationOrigin {
 
 export type TurnOrigin =
   | WorkHubResultOrigin
+  | WorkHubEvidenceOrigin
   | CloudActivationOrigin
   | { kind: 'scheduled_task'; scheduledTaskId: string }
   | { kind: 'legacy_automation'; automationId: string }
@@ -76,6 +78,24 @@ const AGENT_GRAPH_ORIGIN_SHAPE = defineObjectShape<AgentGraphOrigin>()(
 /** Decode a persisted or runtime turn origin, normalizing released Automation rows. */
 export function decodeTurnOrigin(value: unknown): TurnOrigin | undefined {
   if (!isRecord(value)) return undefined;
+  if (value.kind === 'workhub_evidence') {
+    const keys = ['kind', 'requestId', 'delegationId', 'sourceTurnId', 'sourceRunId'];
+    if (
+      Object.keys(value).length !== keys.length ||
+      !keys.every(
+        (key) =>
+          typeof value[key] === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value[key] as string),
+      )
+    )
+      return undefined;
+    return {
+      kind: 'workhub_evidence',
+      requestId: value.requestId as string,
+      delegationId: value.delegationId as string,
+      sourceTurnId: value.sourceTurnId as string,
+      sourceRunId: value.sourceRunId as string,
+    };
+  }
   if (value.kind === 'workhub_result') {
     const keys = ['kind', 'eventId', 'actionId', 'delegationId', 'targetSessionId', 'targetTurnId'];
     if (

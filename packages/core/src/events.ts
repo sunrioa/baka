@@ -1394,6 +1394,7 @@ export interface CompleteEvent extends BaseEvent {
     | 'error'
     | 'plan_handoff'
     | 'graph_yield'
+    | 'dependency_wait'
     | 'permission_handoff'
     | 'step_limit'
     | 'max_tokens';

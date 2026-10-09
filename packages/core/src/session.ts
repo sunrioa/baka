@@ -20,6 +20,12 @@
 import type { ExecutorConfiguration } from './executor-catalog.js';
 
 import { isWorkHubActionReceipt, type WorkHubActionReceipt } from './workhub-action-result.js';
+import {
+  isWorkHubEvidenceRequest,
+  isWorkHubEvidenceResolution,
+  type WorkHubEvidenceRequestMessage,
+  type WorkHubEvidenceResolutionMessage,
+} from './workhub-evidence.js';
 import { isExecutorId } from './executor-id.js';
 import { isThinkingLevel, type ThinkingLevel } from './model-thinking.js';
 
@@ -809,6 +815,8 @@ export type StoredMessage =
   | TokenUsageMessage
   | TurnStateMessage
   | WorkHubCoordinationMessage
+  | WorkHubEvidenceRequestMessage
+  | WorkHubEvidenceResolutionMessage
   | SystemNoteMessage;
 
 export interface UserMessage extends MessageContent {
@@ -1722,6 +1730,12 @@ function decodeMessage(
       if (isWorkHubCoordinationMessage(message)) {
         return message as unknown as WorkHubCoordinationMessage;
       }
+      break;
+    case 'workhub_evidence':
+      if (isWorkHubEvidenceRequest(message)) return message;
+      break;
+    case 'workhub_evidence_resolution':
+      if (isWorkHubEvidenceResolution(message)) return message;
       break;
     case 'system_note':
       if (

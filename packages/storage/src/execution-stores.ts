@@ -103,6 +103,7 @@ const executionStoresWritersByLease = new WeakMap<object, object>();
 const executionStoresWritersOpeningByLease = new WeakMap<object, Promise<void>>();
 
 export {
+  ROOT_TURN_ADMISSION_MAX_CONTENT_BYTES,
   ROOT_TURN_ADMISSION_MAX_RECORD_BYTES,
   ROOT_TURN_ADMISSION_MAX_SOURCE_MESSAGES,
   normalizeRootTurnAdmissionPayload,
