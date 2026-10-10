@@ -2134,6 +2134,14 @@ for (const { restart, armGoalDuringWait } of [
           await stores.agentRunStore.readRootTurnAdmission(targets[0]!, resumedTurnId),
           undefined,
         );
+        const archiveWhileWaiting = await composition.handlers['session.lifecycle.set'](
+          { sessionId: targets[0]!, state: 'archived' },
+          context,
+        );
+        assert.equal(archiveWhileWaiting.ok, false, 'an evidence wait must prevent archive');
+        if (archiveWhileWaiting.ok) assert.fail('The evidence consumer was archived');
+        assert.equal(archiveWhileWaiting.error.code, 'session_busy');
+        assert.match(archiveWhileWaiting.error.message, /active WorkHub delegation/);
         if (armGoalDuringWait) {
           const goal = await composition.handlers['goal.query'](
             { sessionId: targets[0]! },

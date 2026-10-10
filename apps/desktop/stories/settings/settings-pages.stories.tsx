@@ -68,6 +68,7 @@ import type {
   ProviderType,
 } from '@maka/core/llm-connections';
 import { resolveConnectionModelCatalog } from '@maka/core/model-catalog';
+import { connectionEnabledModelIds } from '@maka/core/llm-connections';
 import { buildChatModelChoices } from '@maka/core/chat-model-choice';
 import type { LocalMemoryBackupInfo, LocalMemoryEntryPreview, LocalMemoryState } from '@maka/core/local-memory';
 import { buildHealthSnapshot } from '@maka/core/health';
@@ -75,6 +76,8 @@ import { createDefaultSettings, mergeSettings } from '@maka/core/settings';
 import { DEFAULT_DAILY_REVIEW_CONFIG } from '@maka/core/daily-review';
 import type { PetPackManifestV1 } from '@maka/core/pet';
 import { SettingsSurface } from '../../src/renderer/settings/settings-surface';
+import { TaskEntryServicesProvider } from '../../src/renderer/features/task-entry';
+import { createFakeTaskEntryServices } from '../../src/renderer/features/task-entry/testing';
 import { ConnectionSettingsServicesProvider } from '../../src/renderer/features/connection-settings';
 import { RuntimeHostManagementServicesProvider } from '../../src/renderer/features/runtime-host-management';
 import {
@@ -141,6 +144,7 @@ const noop = () => undefined;
 
 // Both halves open a native file dialog, which a story has none of. Cancelled is
 // the outcome that leaves the page exactly as it was.
+const taskEntryServices = createFakeTaskEntryServices();
 const sessionBundleServices: SessionBundleServices = {
   exportBundle: async () => ({ ok: false, reason: 'canceled' }),
   importBundle: async () => ({ ok: false, reason: 'canceled' }),
@@ -164,7 +168,8 @@ function makeConnection(input: {
     createdAt: NOW - 6 * 24 * 60 * 60 * 1000,
     updatedAt: NOW - 12 * 60_000,
   };
-  return { ...stored, catalogEntries: resolveConnectionModelCatalog(stored) };
+  const projected = { ...stored, enabledModelIds: connectionEnabledModelIds(stored) };
+  return { ...projected, catalogEntries: resolveConnectionModelCatalog(projected) };
 }
 
 const connections: ProjectedLlmConnection[] = [
@@ -1999,7 +2004,9 @@ function SettingsStory(props: SettingsStoryProps) {
       <DiagnosticsServicesProvider services={settingsDiagnosticsServices}>
         <AppUpdateServicesProvider services={settingsAppUpdateServices}>
           <AppUpdateProvider>
-            <SettingsStoryFrame {...props} />
+            <TaskEntryServicesProvider services={taskEntryServices}>
+              <SettingsStoryFrame {...props} />
+            </TaskEntryServicesProvider>
           </AppUpdateProvider>
         </AppUpdateServicesProvider>
       </DiagnosticsServicesProvider>
@@ -2121,7 +2128,7 @@ export const Models: Story = {
   decorators: [withSettingsBridge],
   render: () => <SettingsStory section="models" />,
 };
-// Real path: 设置 → 模型 → 连接详情, comparing the action before selection
+// Real path: 设置 → 模型 → 连接详情 with one enabled chat model, comparing the action before selection
 // with the settled state after a connection is the default. Both occupy the
 // same header slot, so changing state must not shrink the label typography.
 export const ModelsDefaultBadgeTypography: Story = {
@@ -2139,7 +2146,7 @@ export const ModelsDefaultBadgeTypography: Story = {
 
     await userEvent.click(setDefaultButton);
     const detailHeader = await canvas.findByRole('toolbar', { name: 'OpenAI Review' });
-    const defaultLabel = within(detailHeader).getByText('默认');
+    const defaultLabel = await within(detailHeader).findByText('默认');
     const defaultBadge = defaultLabel.closest<HTMLElement>('.astryx-badge');
     if (!defaultBadge) throw new Error('Connection default-state badge did not render');
 

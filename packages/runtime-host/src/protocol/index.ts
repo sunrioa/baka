@@ -106,7 +106,11 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 212 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 216 as const;
+// 216: Reconcile upstream retention, usage and catalog contracts with baka's
+// task inbox, grants, evidence and continuation contracts. Neither peer's
+// independent epoch-212 protocol is compatible with this combined contract.
+// baka history:
 // 212: WorkHub task overview, exact delivery reads and user-bound task continuation.
 // 211: WorkHub evidence dependencies use durable Host-bound requests and fresh non-user Turns.
 // 210: WorkHub approves, lists and revokes supplemental task execution grants.
@@ -115,6 +119,17 @@ export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 212 as const;
 // 206: Runtime Policy carries a separate, persisted WorkHub new-work permission default.
 // 205: WorkHub delegation receipts expose Message identity; queued work omits
 // the ancestor admission Turn until its actual execution ownership is proven.
+// Upstream Maka history:
+// 212: Session catalogs carry `backgroundActivity` and `backgroundActivityVersion`
+// for Host-owned activity and generation-scoped ordering independent of Session
+// revisions and Turn epochs. Older closed decoders reject these fields.
+// 208: Usage queries filter by model call kind. Epoch-207 peers reject the
+// filter or ignore it.
+// 206: `storage.retention.query` and `storage.retention.set` read and change the
+// opt-in retention for archived tasks. An epoch-205 Client could not show or
+// turn off a Host that deletes archived tasks on its own, and an epoch-205 Host
+// rejects the unknown operations, so the pair must fail admission.
+// 205: Default-model selection can enable atomically; discovery can preserve the model selection.
 // 204: Executor catalogs and Session configuration carry opaque mode IDs;
 // catalog queries may request a provider refresh. Older peers reject these fields.
 // 202: `session.remove.preview` takes a bounded list of Sessions and reports the
