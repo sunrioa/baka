@@ -31,6 +31,12 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const defaultManifestPath = join(repoRoot, 'scripts', 'windows-upgrade-baseline.json');
 
 export function validateWindowsUpgradeBaseline(manifest, candidateVersion) {
+  if (
+    manifest.repository !== undefined &&
+    !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(manifest.repository)
+  ) {
+    throw new Error('Baseline repository must be an owner/repository slug.');
+  }
   if (manifest.tag !== `v${manifest.version}`)
     throw new Error('Baseline tag must match its version.');
   if (manifest.assetName !== `Maka-${manifest.version}-win-x64.exe`) {
@@ -48,12 +54,7 @@ export function validateWindowsUpgradeBaseline(manifest, candidateVersion) {
 export async function prepareWindowsUpgradeBaseline(
   candidateVersion,
   outputDirectory,
-  {
-    manifestPath = defaultManifestPath,
-    repository = process.env.GITHUB_REPOSITORY ?? 'apache/maka',
-    run = runFile,
-    checksum = sha256File,
-  } = {},
+  { manifestPath = defaultManifestPath, repository, run = runFile, checksum = sha256File } = {},
 ) {
   const manifest = validateWindowsUpgradeBaseline(
     JSON.parse(await readFile(manifestPath, 'utf8')),
@@ -77,7 +78,7 @@ export async function prepareWindowsUpgradeBaseline(
     'download',
     manifest.tag,
     '--repo',
-    repository,
+    repository ?? manifest.repository ?? 'apache/maka',
     '--pattern',
     manifest.assetName,
     '--dir',

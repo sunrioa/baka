@@ -19,6 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { realpath } from 'node:fs/promises';
 import { createServer, type ServerResponse, type IncomingMessage } from 'node:http';
 import { describe, test } from 'node:test';
 import { methods, RequestError } from '@agentclientprotocol/sdk';
@@ -28,6 +29,9 @@ import {
   RUNTIME_HOST_PROTOCOL_VERSION,
   type PlanTurnStartResult,
 } from '@maka/runtime-host/protocol';
+import { openInteractivePlanStoreForWrite } from '@maka/storage/plan-authority';
+import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { createSessionStore } from '@maka/storage/session-store';
 import { withAcpChildProcessHarness } from './acp-child-process-harness.js';
 
 describe('ACP Goal/Plan real Host routes', () => {
@@ -280,6 +284,8 @@ describe('ACP Goal/Plan real Host routes', () => {
     timeout: 45_000,
   }, async () => {
     let call = 0;
+    let sessionId = '';
+    let latestProposalId = '';
     const model = createServer((request, response) => {
       void readRequest(request)
         .then((body) => {
@@ -332,7 +338,8 @@ describe('ACP Goal/Plan real Host routes', () => {
         async (harness) => {
           await harness.withClient(async ({ context }) => {
             await context.request(methods.agent.initialize, { protocolVersion: 1 });
-            const { sessionId } = await context.request(methods.agent.session.new, {
+            await context.request(methods.agent.session.load, {
+              sessionId,
               cwd: harness.workspaceRoot,
               mcpServers: [],
             });
@@ -341,37 +348,6 @@ describe('ACP Goal/Plan real Host routes', () => {
               configId: 'collaboration_mode',
               value: 'plan',
             });
-            let latestProposalId = '';
-            for (let index = 0; index < 17; index += 1) {
-              await context.request(methods.agent.session.prompt, {
-                sessionId,
-                prompt: [{ type: 'text', text: `Prepare fixture plan ${index}` }],
-              });
-              const latest = (await context.request('_maka/plan/query', {
-                kind: 'list_start',
-                sessionId,
-              })) as {
-                kind: string;
-                latestProposalId: string;
-              };
-              assert.equal(latest.kind, 'page');
-              latestProposalId = latest.latestProposalId;
-              if (index < 16) {
-                try {
-                  await context.request('_maka/plan/control', {
-                    kind: 'request_revision',
-                    sessionId,
-                    proposalId: latestProposalId,
-                    operationId: randomUUID(),
-                  });
-                } catch (error) {
-                  throw new Error(
-                    `revision index=${index} proposal=${latestProposalId} modelCalls=${call}`,
-                    { cause: error },
-                  );
-                }
-              }
-            }
             const first = (await context.request('_maka/plan/query', {
               kind: 'list_start',
               sessionId,
@@ -422,6 +398,56 @@ describe('ACP Goal/Plan real Host routes', () => {
         {
           startRuntimeHost: true,
           timeoutMs: 30_000,
+          beforeHostStart: async ({ workspaceRoot, modelConnectionId }) => {
+            // Paging needs persisted history, not 17 model Turns competing
+            // with the other workspace suites inside the client deadline.
+            const capability = await resolveStorageRoot({
+              path: workspaceRoot,
+              kind: 'interactive',
+            });
+            const owner = await tryAcquireInteractiveRootOwner(capability);
+            assert.ok(owner);
+            try {
+              const sessions = createSessionStore(workspaceRoot);
+              try {
+                const session = await sessions.create({
+                  cwd: await realpath(workspaceRoot),
+                  llmConnectionId: modelConnectionId,
+                  llmConnectionSlug: 'paging-fixture',
+                  model: 'paging-fixture',
+                  permissionMode: 'bypass',
+                });
+                sessionId = session.id;
+                const plans = await openInteractivePlanStoreForWrite(owner.lease);
+                try {
+                  for (let index = 0; index < 17; index += 1) {
+                    const submitted = await plans.submitProposal({
+                      sessionId,
+                      turnId: randomUUID(),
+                      title: `Fixture plan ${index}`,
+                      steps: [
+                        {
+                          id: 'step-1',
+                          title: 'Do the work',
+                          description: 'Finish the fixture task',
+                        },
+                      ],
+                    });
+                    assert.equal(submitted.event.type, 'plan_submitted');
+                    if (submitted.event.type === 'plan_submitted') {
+                      latestProposalId = submitted.event.proposal.proposalId;
+                    }
+                  }
+                } finally {
+                  plans.close();
+                }
+              } finally {
+                await sessions.close?.();
+              }
+            } finally {
+              await owner.close();
+            }
+          },
           model: {
             id: 'paging-fixture',
             thinkingLevels: [],

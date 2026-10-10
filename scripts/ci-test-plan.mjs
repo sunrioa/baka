@@ -110,6 +110,8 @@ const DURABLE_STATE_DECODER_FILES = new Set([
   'packages/storage/src/root-authority.ts',
   'packages/storage/src/state-root-composition.ts',
   'scripts/qualify-released-cli-state-root.mjs',
+  'scripts/release-cli-publication.mjs',
+  'scripts/release-cli-upgrade-baseline.json',
   'scripts/released-cli-state-root-fixture.mjs',
 ]);
 

@@ -549,11 +549,16 @@ test('retiring an operation selects the released forward roll', () => {
 });
 
 test('a durable-state decoder selects the released forward roll', () => {
-  const plan = planTests(['packages/runtime-host/src/server/access-credential-store.ts'], {
-    graph,
-  });
-
-  assert.equal(plan.stateRootCompat, true);
+  for (const path of [
+    'packages/runtime-host/src/server/access-credential-store.ts',
+    'scripts/release-cli-publication.mjs',
+    'scripts/release-cli-upgrade-baseline.json',
+  ]) {
+    const plan = planTests([path], { graph });
+    assert.equal(plan.stateRootCompat, true, path);
+    assert.equal(plan.cliPackage, true, path);
+    assert.equal(plan.releaseContract, true, path);
+  }
 });
 
 test('a core durable-state decoder selects the released forward roll', () => {

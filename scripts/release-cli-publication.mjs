@@ -218,13 +218,46 @@ export async function fetchRegistryRelease({
   return { ...record, tarballPath, sha256 };
 }
 
-export async function resolveRegistryNightlyPredecessor({ fetchImpl = fetch } = {}) {
-  const packageMetadata = await fetchJson(
-    fetchImpl,
-    `${REGISTRY_ORIGIN}/${PACKAGE_NAME}`,
-    'package metadata',
-  );
-  const version = packageMetadata?.['dist-tags']?.nightly;
+export async function resolveRegistryNightlyPredecessor({
+  fetchImpl = fetch,
+  repository = REPOSITORY,
+  forkBaseline,
+} = {}) {
+  let version;
+  let baseline;
+  if (repository === REPOSITORY) {
+    const packageMetadata = await fetchJson(
+      fetchImpl,
+      `${REGISTRY_ORIGIN}/${PACKAGE_NAME}`,
+      'package metadata',
+    );
+    version = packageMetadata?.['dist-tags']?.nightly;
+  } else {
+    // A diverged fork qualifies its declared predecessor, not an implicit
+    // downgrade from whatever upstream happens to publish next.
+    baseline =
+      forkBaseline ??
+      readJson(
+        new URL('./release-cli-upgrade-baseline.json', import.meta.url),
+        'Fork qualification baseline',
+      );
+    exactKeys(
+      baseline,
+      ['schemaVersion', 'repository', 'sourceRepository', 'version', 'integrity'],
+      'Fork qualification baseline',
+    );
+    if (
+      baseline.schemaVersion !== 1 ||
+      baseline.repository !== repository ||
+      baseline.sourceRepository !== REPOSITORY
+    ) {
+      throw new Error(
+        'Fork qualification baseline does not match its consumer and source repositories',
+      );
+    }
+    version = baseline.version;
+    parseSha512Integrity(baseline.integrity);
+  }
   parseProductNightlyVersion(version);
 
   const versionMetadata = await fetchJson(
@@ -240,6 +273,11 @@ export async function resolveRegistryNightlyPredecessor({ fetchImpl = fetch } = 
   const tarball = `${PACKAGE_NAME}-${version}.tgz`;
   const tarballUrl = parseRegistryTarballUrl(versionMetadata.dist?.tarball, tarball);
   const integrity = parseSha512Integrity(versionMetadata.dist?.integrity);
+  if (baseline && integrity !== baseline.integrity) {
+    throw new Error(
+      'Registry predecessor integrity does not match the fork qualification baseline',
+    );
+  }
   return {
     version,
     tarballUrl,
@@ -252,8 +290,10 @@ export async function assertRegistryNightlyPredecessor({
   expectedTarballUrl,
   expectedIntegrity,
   fetchImpl = fetch,
+  repository = REPOSITORY,
+  forkBaseline,
 }) {
-  const current = await resolveRegistryNightlyPredecessor({ fetchImpl });
+  const current = await resolveRegistryNightlyPredecessor({ fetchImpl, repository, forkBaseline });
   if (
     current.version !== expectedVersion ||
     current.tarballUrl !== expectedTarballUrl ||
@@ -621,9 +661,9 @@ async function main() {
     });
     return;
   }
-  if (command === 'resolve-nightly-predecessor' && args.length === 1) {
-    const [output] = args;
-    const predecessor = await resolveRegistryNightlyPredecessor();
+  if (command === 'resolve-nightly-predecessor' && (args.length === 1 || args.length === 2)) {
+    const [output, repository] = args;
+    const predecessor = await resolveRegistryNightlyPredecessor({ repository });
     appendOutputs(output, {
       version: predecessor.version,
       tarball_url: predecessor.tarballUrl,
@@ -631,12 +671,13 @@ async function main() {
     });
     return;
   }
-  if (command === 'assert-nightly-predecessor' && args.length === 3) {
-    const [expectedVersion, expectedTarballUrl, expectedIntegrity] = args;
+  if (command === 'assert-nightly-predecessor' && (args.length === 3 || args.length === 4)) {
+    const [expectedVersion, expectedTarballUrl, expectedIntegrity, repository] = args;
     await assertRegistryNightlyPredecessor({
       expectedVersion,
       expectedTarballUrl,
       expectedIntegrity,
+      repository,
     });
     return;
   }

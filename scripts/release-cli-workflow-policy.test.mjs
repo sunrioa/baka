@@ -63,7 +63,7 @@ test('CLI validation qualifies exact published State Roots without weakening art
   );
   assert.match(
     workflow,
-    /id: predecessor\n\s+run: node scripts\/release-cli-publication\.mjs resolve-nightly-predecessor "\$GITHUB_OUTPUT"/u,
+    /id: predecessor\n\s+run: node scripts\/release-cli-publication\.mjs resolve-nightly-predecessor "\$GITHUB_OUTPUT" "\$GITHUB_REPOSITORY"/u,
   );
   assert.match(workflow, /state-root-qualification:\n[\s\S]*?needs: build\n/u);
   assert.doesNotMatch(workflow, /needs\.build\.outputs\.release_predecessor/u);
@@ -118,11 +118,9 @@ test('CLI validation qualifies exact published State Roots without weakening art
   // three share one `set -e`, so it runs before either frozen tarball is
   // fetched. Read as positions in the script rather than restated, so a
   // reordering fails here instead of silently moving it back behind a `curl`.
-  const script = [
-    'current-nightly-predecessor-to-candidate',
-    'cross-epoch-74-to-76',
-    'same-epoch-76',
-  ].map((slug) => qualify.indexOf(`qualify ${slug}`));
+  const script = ['declared-predecessor-to-candidate', 'cross-epoch-74-to-76', 'same-epoch-76'].map(
+    (slug) => qualify.indexOf(`qualify ${slug}`),
+  );
   assert.ok(
     script.every((index) => index >= 0),
     'a declared State Root transition is no longer invoked',
@@ -141,10 +139,15 @@ test('CLI validation qualifies exact published State Roots without weakening art
     preserve,
     /if-no-files-found: \$\{\{ job\.status == 'success' && 'error' \|\| 'warn' \}\}/u,
   );
-  const freshness = namedStep(steps, 'Require the qualified Nightly predecessor to remain current');
+  const freshness = namedStep(steps, 'Require the qualified predecessor to remain declared');
   assert.match(freshness, /assert-nightly-predecessor/u);
+  assert.match(freshness, /"\$GITHUB_REPOSITORY"/u);
   assert.match(freshness, /steps\.predecessor\.outputs\.version/u);
   assert.ok(steps.indexOf(freshness) > steps.indexOf(preserve));
+  assert.match(
+    readWorkflow('ci.yml'),
+    /resolve-nightly-predecessor "\$GITHUB_OUTPUT" "\$GITHUB_REPOSITORY"/u,
+  );
 });
 
 test('both supported Node versions validate the tarball even when the first fails', () => {
