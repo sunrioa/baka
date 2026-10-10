@@ -317,6 +317,71 @@ test('the release predecessor may come from the previous product version', async
   assert.equal(predecessor.version, fixture.version);
 });
 
+test('fork qualification binds its declared predecessor instead of following upstream Nightly', async () => {
+  const fixture = createCandidate('0.2.0-dev.42.20260829', '0.2.0');
+  const baseline = {
+    schemaVersion: 1,
+    repository: 'sunrioa/baka',
+    sourceRepository: 'apache/maka',
+    version: fixture.version,
+    integrity: `sha512-${digest('sha512', fixture.bytes, 'base64')}`,
+  };
+  const requests = [];
+  const fetchImpl = async (input, options) => {
+    requests.push(String(input));
+    if (String(input) === 'https://registry.npmjs.org/maka-agent') {
+      return Response.json({ 'dist-tags': { nightly: '0.2.0-dev.43.20260830' } });
+    }
+    return registryFetch({ fixture })(input, options);
+  };
+  const predecessor = await resolveRegistryNightlyPredecessor({
+    repository: 'sunrioa/baka',
+    forkBaseline: baseline,
+    fetchImpl,
+  });
+  assert.equal(predecessor.version, baseline.version);
+  assert.equal(predecessor.integrity, baseline.integrity);
+  assert.deepEqual(requests, [`https://registry.npmjs.org/maka-agent/${fixture.version}`]);
+  await assert.doesNotReject(
+    assertRegistryNightlyPredecessor({
+      expectedVersion: predecessor.version,
+      expectedTarballUrl: predecessor.tarballUrl,
+      expectedIntegrity: predecessor.integrity,
+      repository: 'sunrioa/baka',
+      forkBaseline: baseline,
+      fetchImpl,
+    }),
+  );
+
+  for (const invalid of [
+    { ...baseline, schemaVersion: 2 },
+    { ...baseline, repository: 'other/fork' },
+    { ...baseline, sourceRepository: 'other/source' },
+    { ...baseline, integrity: 'sha512-invalid' },
+    { ...baseline, integrity: `sha512-${Buffer.alloc(64).toString('base64')}` },
+  ]) {
+    await assert.rejects(
+      resolveRegistryNightlyPredecessor({
+        repository: 'sunrioa/baka',
+        forkBaseline: invalid,
+        fetchImpl,
+      }),
+      /baseline|integrity/iu,
+    );
+  }
+  await assert.rejects(
+    assertRegistryNightlyPredecessor({
+      expectedVersion: '0.2.0-dev.43.20260830',
+      expectedTarballUrl: predecessor.tarballUrl,
+      expectedIntegrity: predecessor.integrity,
+      repository: 'sunrioa/baka',
+      forkBaseline: baseline,
+      fetchImpl,
+    }),
+    /no longer current/u,
+  );
+});
+
 test('a newer Nightly invalidates previously qualified predecessor evidence', async () => {
   const previous = createCandidate('0.2.0-dev.42.20260829', '0.2.0');
   const current = createCandidate('0.2.0-dev.43.20260830', '0.2.0');

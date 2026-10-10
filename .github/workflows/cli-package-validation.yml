@@ -44,6 +44,9 @@ on:
       - 'packages/storage/src/native-file-lock.ts'
       - 'scripts/generate-runtime-host-peer-*'
       - 'scripts/release-cli-package.mjs'
+      - 'scripts/release-cli-publication.mjs'
+      - 'scripts/release-cli-publication.test.mjs'
+      - 'scripts/release-cli-upgrade-baseline.json'
       - 'scripts/qualify-released-cli-state-root.mjs'
       - 'scripts/qualify-released-cli-state-root.test.mjs'
       - 'scripts/released-cli-state-root-fixture.mjs'
@@ -364,9 +367,9 @@ jobs:
       # every job downstream of it, and this is the only job that reads the
       # answer. It still costs no runner of its own, and the exported identity
       # is now this job's output.
-      - name: Resolve the current npm Nightly as immutable evidence
+      - name: Resolve the declared npm predecessor as immutable evidence
         id: predecessor
-        run: node scripts/release-cli-publication.mjs resolve-nightly-predecessor "$GITHUB_OUTPUT"
+        run: node scripts/release-cli-publication.mjs resolve-nightly-predecessor "$GITHUB_OUTPUT" "$GITHUB_REPOSITORY"
       # Three runs of one script against one sandbox, not three runners. Two of
       # these transitions are between tarballs that were published and frozen,
       # so nothing in a pull request can change their outcome except the
@@ -423,7 +426,7 @@ jobs:
             echo "::endgroup::"
           }
 
-          qualify current-nightly-predecessor-to-candidate \
+          qualify declared-predecessor-to-candidate \
             "$PREDECESSOR_TARBALL_URL" '' "$PREDECESSOR_INTEGRITY" \
             candidate '' '' any
 
@@ -453,7 +456,7 @@ jobs:
           path: ${{ runner.temp }}/released-state-root/*-report.json
           if-no-files-found: ${{ job.status == 'success' && 'error' || 'warn' }}
           retention-days: 7
-      - name: Require the qualified Nightly predecessor to remain current
+      - name: Require the qualified predecessor to remain declared
         env:
           PREDECESSOR_VERSION: ${{ steps.predecessor.outputs.version }}
           PREDECESSOR_TARBALL_URL: ${{ steps.predecessor.outputs.tarball_url }}
@@ -462,7 +465,8 @@ jobs:
           node scripts/release-cli-publication.mjs assert-nightly-predecessor \
             "$PREDECESSOR_VERSION" \
             "$PREDECESSOR_TARBALL_URL" \
-            "$PREDECESSOR_INTEGRITY"
+            "$PREDECESSOR_INTEGRITY" \
+            "$GITHUB_REPOSITORY"
 
   eval:
     name: Validate installed CLI Eval
