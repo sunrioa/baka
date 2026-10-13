@@ -581,9 +581,9 @@ or reports unavailable. Selecting a queued source does not dispatch more work.
 Supplemental execution still goes through the existing user-authorized Action
 Gate. Neither the question nor the source output is permission or a user message.
 WorkHub must finish coordination promptly, not poll or block on the worker.
-This request/resolve path still waits for committed source evidence or asks the
-coordinator to select it; it does not yet deliver the question to the peer model.
-Correlated peer inbox/reply delivery is a separate next-phase change.
+This compatible request/resolve path waits for committed source evidence or asks
+the coordinator to select it. The native peer path below additionally delivers
+the missing question to the selected worker, without waking a cold source.
 
 The Host fixes sender Session, Turn, Run, invocation, tool-call, assignment and
 original Message identities. It persists one typed request and immutable reply
@@ -622,6 +622,50 @@ source cannot starve unrelated requests. With direct concurrency one, a settled
 request releases its slot so the queued producer can run, then the fresh requester
 Turn acquires the normal slot/conflict reservation again. Recovery/handoff fences
 the relay alongside the existing result poller.
+
+### Correlated asynchronous peer questions (D2)
+
+`ask` selects the exact D1 `source` and commits a typed question in A plus a
+small inbox reference in B, in one existing Session-store transaction. The
+Host supplies both work/generation/action/delegation/Session/original-Message
+references and the true sender Turn/Run/invocation/tool-call identity. Stable
+question IDs derive from that invocation, not the payload; conflicting reuse
+fails, while exact replay retains the original acceptance and deadline. There
+are at most eight questions per Turn, with a one-hour lifetime. Question and
+answer JSON strings fit 2,048 and 3,072 encoded bytes respectively. Full evidence
+remains available through D1; an entire peer result/cursor page fits 7,500 bytes.
+
+Ask is nonblocking. Native B receives a short source-labelled notice at its next
+logical model boundary and can `inbox`, `reply` or read the correlated `result`.
+A can continue independent steps and read `result`; it alone can `cancel` or
+explicitly `wait`. A reply and cancellation share one immutable terminal identity
+in B, so the first committed outcome wins and later conflicting answers fail.
+Accepted, inbox-read and reply-committed are different facts, none of which proves
+model compliance. Sparse inbox pages retain signed high-water-bound cursors;
+current eligibility is rechecked and restart invalidates cursors, not facts.
+
+The live prompt scope carries the fixed BackendSendInput Run/invocation through
+both AiSdkTurn and the Host prompt adapter. Native owned-task authority is checked
+before sampling the inbox. Notices are bounded ephemeral user-role **request
+context**, not persisted user Messages, stable system text or new tool schemas.
+Plugin contexts, child tool ceilings and special run profiles remain unchanged.
+B running unrelated C in the same Session cannot see or answer B's questions;
+queued B follows the original FIFO before receiving its own notice. Plugin,
+shared-root and cold-ended recipients are explicitly unavailable. No peer call
+submits source work, changes model/cwd/permissions or grants agent authority.
+
+Only explicit wait enters the existing safe dependency-wait path described
+above, releasing the direct-worker slot after resource/Goal/tool settlement.
+Its request stores the exact peer question ID and fixes the source, so the
+coordinator cannot retarget it. A correlated wait stays visible in task status
+but does not dispatch a coordinator model merely to relay the known question.
+A committed reply, expiry or unavailable/retired source can admit one canonical
+fresh non-user A Turn through normal FIFO and slot ownership; a reply to a
+nonwaiting A never inserts a new execution. Durable facts reconstruct this path
+after restart; handoff/drain fence new peer effects alongside the existing relay.
+Stop/archive/replacement cannot resurrect retired A. Operational peer facts stay
+out of ordinary transcript, search, branch copy and model-history backfill.
+The canonical stored-message additions require compatibility epoch 219.
 
 ## Native task overview and delivery (Step 7)
 

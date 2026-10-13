@@ -28,14 +28,23 @@ import { WORKHUB_COORDINATION_SESSION_ID, decodeCanonicalMessage } from '@maka/c
 import { testInvocationRecord } from '@maka/runtime/test-only/invocation-fixture';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
-import type { WorkHubEvidenceOrigin } from '@maka/core/workhub-evidence';
+import {
+  workHubPeerInboxId,
+  workHubPeerSettlementId,
+  type WorkHubEvidenceOrigin,
+  type WorkHubPeerQuestionMessage,
+  type WorkHubPeerSettlementMessage,
+} from '@maka/core/workhub-evidence';
+import { isDeepStrictEqual } from 'node:util';
 import { normalizeRootTurnAdmissionPayload } from '@maka/storage/agent-run-store';
+import { SessionNotFoundError } from '@maka/storage/session-store';
 import {
   createWorkHubEvidenceRuntime,
   workHubEvidenceRequestId,
   workHubEvidenceTurnId,
 } from '../server/workhub-evidence-runtime.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { projectSharedSessionTranscriptMessage } from '../server/shared-session-transcript.js';
 
 type Options = Parameters<typeof createWorkHubEvidenceRuntime>[0];
 function fixture() {
@@ -67,12 +76,17 @@ function fixture() {
   }));
   const active = new Set(['a', 'b', 'c']);
   const archived = new Set<string>();
+  const deleted = new Set<string>();
   const headerOverrides = new Map<string, Partial<SessionHeader>>();
   const resources = new Set<string>();
   const stopped = new Set<string>();
   const replaced = new Set<string>();
   const outputs = new Map<string, StoredMessage[]>();
   const cancelledMessages = new Set<string>();
+  const dispositions = new Map<
+    string,
+    { kind: 'pending' } | { kind: 'owned_root'; turnId: string; runId: string }
+  >();
   const deliveries: Array<{ sessionId: string; text: string }> = [];
   const catalogReads: Array<{
     beforeSequence?: number;
@@ -119,6 +133,7 @@ function fixture() {
           })),
         readHeaderSnapshot: async (id: string) => ({
           id,
+          backend: 'ai-sdk',
           labels: [],
           isArchived: archived.has(id),
           ...headerOverrides.get(id),
@@ -143,7 +158,79 @@ function fixture() {
           };
         },
         readWorkHubTaskInputSuccessors: async () => [],
-        readTranscriptHighWaterSnapshot: async () => 1,
+        commitWorkHubPeerQuestion: async (q: WorkHubPeerQuestionMessage) => {
+          const old = records.get(q.sender.sessionId + '/' + q.id);
+          if (old) {
+            if (
+              old.type !== 'workhub_peer_question' ||
+              !isDeepStrictEqual(old, { ...q, ts: old.ts, expiresAt: old.expiresAt })
+            )
+              throw new Error('Peer question identity conflict');
+            return old;
+          }
+          records.set(q.sender.sessionId + '/' + q.id, decodeCanonicalMessage(q));
+          records.set(
+            q.recipient.sessionId + '/' + workHubPeerInboxId(q.id),
+            decodeCanonicalMessage({
+              type: 'workhub_peer_inbox',
+              schemaVersion: 1,
+              id: workHubPeerInboxId(q.id),
+              turnId: 'turn-' + q.recipient.sessionId,
+              ts: q.ts,
+              expiresAt: q.expiresAt,
+              requesterSessionId: q.sender.sessionId,
+              questionId: q.id,
+              target: q.recipient,
+            }),
+          );
+          return q;
+        },
+        commitWorkHubPeerSettlement: async (value: WorkHubPeerSettlementMessage) => {
+          const q = records.get(
+            value.requesterSessionId + '/' + value.questionId,
+          ) as WorkHubPeerQuestionMessage;
+          const key = q.recipient.sessionId + '/' + value.id;
+          const old = records.get(key);
+          if (old) {
+            if (
+              old.type !== 'workhub_peer_settlement' ||
+              (old.outcome === value.outcome && old.answer !== value.answer)
+            )
+              throw new Error('Peer answer identity conflict');
+            return old;
+          }
+          records.set(key, decodeCanonicalMessage(value));
+          return value;
+        },
+        readWorkHubPeerInboxPage: async (
+          sid: string,
+          actionId: string,
+          timestamp: number,
+          input: { beforeSequence?: number; maxMessages: number },
+        ) => {
+          const all = [...records.entries()]
+            .filter(([key]) => key.startsWith(sid + '/'))
+            .map(([, message]) => message);
+          return {
+            highWaterSequence: all.length ? all.length - 1 : null,
+            records: all
+              .map((message, sequence) => ({ message, sequence }))
+              .filter(
+                ({ message, sequence }) =>
+                  message.type === 'workhub_peer_inbox' &&
+                  message.target.actionId === actionId &&
+                  message.expiresAt > timestamp &&
+                  !records.has(sid + '/' + workHubPeerSettlementId(message.questionId)) &&
+                  sequence < (input.beforeSequence ?? Number.MAX_SAFE_INTEGER),
+              )
+              .reverse()
+              .slice(0, input.maxMessages),
+          };
+        },
+        readTranscriptHighWaterSnapshot: async (sid: string) => {
+          if (deleted.has(sid)) throw new SessionNotFoundError(sid);
+          return 1;
+        },
         readTranscriptMessagesSnapshot: async (sid: string, input: { messageIds: string[] }) =>
           input.messageIds.map((id) => records.get(sid + '/' + id)).filter(Boolean),
         appendMessages: async (sid: string, values: StoredMessage[]) => {
@@ -192,14 +279,15 @@ function fixture() {
         ),
     } as unknown as Options['executions'],
     messages: {
-      readMessageExecutionDispositionAdmitted: async (sid: string) =>
-        cancelledMessages.has(sid)
+      readMessageExecutionDispositionAdmitted: async (sid: string, messageId: string) =>
+        dispositions.get(messageId) ??
+        (cancelledMessages.has(sid)
           ? { kind: 'cancelled' }
           : {
               kind: 'owned_root',
               turnId: 'turn-' + sid,
               runId: 'run-' + sid,
-            },
+            }),
     } as unknown as Options['messages'],
     admission: lane,
     reader: {
@@ -281,6 +369,7 @@ function fixture() {
     terminal,
     active,
     archived,
+    deleted,
     headerOverrides,
     resources,
     stopped,
@@ -292,6 +381,7 @@ function fixture() {
     assignments,
     deliveries,
     cancelledMessages,
+    dispositions,
     catalogReads,
     transcriptReads,
     expire() {
@@ -299,6 +389,356 @@ function fixture() {
     },
   };
 }
+
+const peerSource = (a: WorkHubDelegationAssignedMessage) => ({
+  workId: a.work?.id ?? a.actionId,
+  generationId: a.work?.generationId ?? a.actionId,
+  actionId: a.actionId,
+  delegationId: a.delegationId,
+});
+type PeerReceipt = { questionId: string; requesterSessionId: string; status: string };
+const askPeer = async (f: ReturnType<typeof fixture>, ctx = f.caller()) =>
+  (await f.runtime.tool.impl(
+    { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Which checksum?' },
+    ctx,
+  )) as PeerReceipt;
+
+test('peer ask is nonblocking, native-work scoped and answers only its immutable correlation', async () => {
+  const f = fixture();
+  const q = await askPeer(f);
+  assert.equal(q.status, 'accepted');
+  assert.deepEqual(await askPeer(f), q);
+  assert.equal(f.deliveries.length, 0);
+  assert.equal(f.runs.get('run-a')?.terminalEvent, undefined, 'ask does not suspend A');
+  const contexts = await f.runtime.peerContexts(f.caller('b'));
+  assert.match(contexts[0]!.text, new RegExp(q.questionId));
+  assert.deepEqual(await f.runtime.peerContexts({ ...f.caller('b'), invocationId: 'wrong' }), []);
+  assert.deepEqual(
+    await f.runtime.peerContexts({ sessionId: 'b', turnId: 'turn-b', cwd: '/unused' }),
+    [],
+  );
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Different' },
+        f.caller(),
+      ),
+    /identity conflict/,
+  );
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'result', requesterSessionId: 'a', questionId: q.questionId },
+        f.caller('c'),
+      ),
+    /another work/,
+  );
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'ask', source: peerSource(f.assignments[0]!), question: 'Self' },
+        { ...f.caller(), toolCallId: 'self' },
+      ),
+    /cycle|same Session/,
+  );
+  const answer = (await f.runtime.tool.impl(
+    { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'abc123' },
+    f.caller('b'),
+  )) as { status: string; reply: { answer: string; invocationId: string } };
+  assert.equal(answer.status, 'reply_committed');
+  assert.equal(answer.reply.answer, 'abc123');
+  assert.equal(answer.reply.invocationId, 'run-b');
+  assert.deepEqual(
+    await f.runtime.tool.impl(
+      { operation: 'result', requesterSessionId: 'a', questionId: q.questionId },
+      f.caller(),
+    ),
+    answer,
+  );
+  await f.runtime.reconcile();
+  assert.equal(f.deliveries.length, 0, 'a reply does not insert a new root into nonwaiting A');
+  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
+  assert.ok(Buffer.byteLength(JSON.stringify(answer)) <= READ_PAGE_MAX_BYTES);
+  for (const fact of f.records.values())
+    assert.equal(
+      projectSharedSessionTranscriptMessage(fact, 'a'),
+      null,
+      'operational facts stay out of UI transcript',
+    );
+  f.terminal('b');
+  assert.deepEqual(
+    await askPeer(f),
+    q,
+    'exact uncertain-outcome replay retains acceptance after B ends',
+  );
+});
+
+test('an explicit correlated wait alone releases A, bypasses coordinator wake and resumes once after restart', async () => {
+  const f = fixture();
+  const q = await askPeer(f);
+  f.resources.add('a');
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
+        f.caller(),
+      ),
+    /resources.*Goal/,
+  );
+  f.resources.clear();
+  f.options.hasBlockingGoal = () => true;
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
+        f.caller(),
+      ),
+    /active Goal/,
+  );
+  f.options.hasBlockingGoal = () => false;
+  const waiting = await f.runtime.tool.impl(
+    { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
+    f.caller(),
+  );
+  assert.deepEqual(waiting, {
+    kind: 'workhub_evidence_waiting',
+    requestId: workHubEvidenceRequestId('turn-a'),
+  });
+  f.terminal('a', true);
+  const observation = await f.runtime.waitingObservation(f.assignments[0]!, {
+    sessionId: 'a',
+    turnId: 'turn-a',
+    runId: 'run-a',
+  });
+  assert.equal(observation?.notifyCoordinator, false);
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'ask', source: peerSource(f.assignments[0]!), question: 'Cyclic' },
+        f.caller('b'),
+      ),
+    /cycle/,
+  );
+  await f.runtime.tool.impl(
+    { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'abc123' },
+    f.caller('b'),
+  );
+  const restarted = f.restart();
+  await restarted.reconcile();
+  await restarted.reconcile();
+  assert.equal(f.deliveries.length, 1);
+  assert.equal(f.deliveries[0]!.sessionId, 'a');
+  assert.match(f.deliveries[0]!.text, /reply_committed.*abc123/);
+  assert.match(f.deliveries[0]!.text, /not.*permission grant/);
+});
+
+test('deleting a requester does not break another worker next-step inbox sampling', async () => {
+  const f = fixture();
+  await askPeer(f);
+  f.deleted.add('a');
+  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
+  const page = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as {
+    questions: unknown[];
+  };
+  assert.deepEqual(page.questions, []);
+});
+
+test('a queued B inbox cannot be observed or answered by unrelated C in the same Session', async () => {
+  const f = fixture();
+  const b = f.assignments[1]!;
+  const c = {
+    ...b,
+    actionId: 'unrelated-c',
+    delegationId: 'delegation-unrelated-c',
+    targetMessageId: 'message-unrelated-c',
+    targetTurnId: 'turn-b-c',
+  };
+  f.assignments.push(c);
+  f.active.add(c.actionId);
+  f.dispositions.set(b.targetMessageId, { kind: 'pending' });
+  f.dispositions.set(c.targetMessageId, {
+    kind: 'owned_root',
+    turnId: 'turn-b-c',
+    runId: 'run-b-c',
+  });
+  f.runs.set(
+    'run-b-c',
+    testInvocationRecord({ sessionId: 'b', turnId: 'turn-b-c', runId: 'run-b-c' }),
+  );
+  const q = await askPeer(f);
+  const unrelated = {
+    ...f.caller('b'),
+    turnId: 'turn-b-c',
+    runId: 'run-b-c',
+    invocationId: 'run-b-c',
+  };
+  assert.deepEqual(await f.runtime.peerContexts(unrelated), []);
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'wrong' },
+        unrelated,
+      ),
+    /another work/,
+  );
+  f.dispositions.delete(b.targetMessageId);
+  const inbox = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as {
+    questions: { questionId: string }[];
+  };
+  assert.equal(inbox.questions[0]!.questionId, q.questionId);
+});
+
+for (const change of ['expired', 'cancelled', 'retired', 'cold', 'plugin'] as const)
+  test(
+    'peer communication reports ' + change + ' without source wake or revived authority',
+    async () => {
+      const f = fixture();
+      if (change === 'cold') f.terminal('b');
+      if (change === 'plugin') f.headerOverrides.set('b', { backend: 'plugin-executor' });
+      const q = await askPeer(f);
+      if (change === 'cold' || change === 'plugin') {
+        assert.equal(q.status, 'unavailable');
+        assert.equal(f.records.size, 0);
+        return;
+      }
+      if (change === 'cancelled')
+        await f.runtime.tool.impl(
+          { operation: 'cancel', requesterSessionId: 'a', questionId: q.questionId },
+          f.caller(),
+        );
+      if (change === 'expired') f.expire();
+      if (change === 'retired') f.stopped.add('delegation-a');
+      const late = (await f.runtime.tool.impl(
+        { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'late' },
+        f.caller('b'),
+      )) as { status: string };
+      assert.equal(late.status, change === 'retired' ? 'source_retired' : change);
+      await f.runtime.reconcile();
+      assert.equal(f.deliveries.length, 0);
+      assert.equal(
+        f.records.has('b/' + workHubPeerSettlementId(q.questionId)),
+        change === 'cancelled',
+      );
+    },
+  );
+
+test('peer inbox encoded pagination retains its snapshot and rejects changed readers/restarts', async () => {
+  const f = fixture();
+  const expected = new Set<string>();
+  for (let i = 0; i < 8; i++) {
+    const value = (await f.runtime.tool.impl(
+      {
+        operation: 'ask',
+        source: peerSource(f.assignments[1]!),
+        question: '\u0000'.repeat(300) + '😀',
+      },
+      { ...f.caller(), toolCallId: `escaped-${i}` },
+    )) as PeerReceipt;
+    expected.add(value.questionId);
+  }
+  type Page = { questions: { questionId: string }[]; nextCursor: string | null };
+  const first = (await f.runtime.tool.impl(
+    { operation: 'inbox', limit: 8 },
+    f.caller('b'),
+  )) as Page;
+  assert.ok(first.nextCursor);
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= READ_PAGE_MAX_BYTES);
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl({ operation: 'inbox', cursor: first.nextCursor! }, f.caller('c')),
+    /another work/,
+  );
+  await assert.rejects(
+    async () =>
+      f.restart().tool.impl({ operation: 'inbox', cursor: first.nextCursor! }, f.caller('b')),
+    /Invalid or expired/,
+  );
+  const later = (await f.runtime.tool.impl(
+    { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Later snapshot' },
+    f.caller('c'),
+  )) as PeerReceipt;
+  const seen = new Set(first.questions.map((q) => q.questionId));
+  let cursor: string | null = first.nextCursor;
+  for (let i = 0; cursor; i++) {
+    assert.ok(i < 8);
+    const page = (await f.runtime.tool.impl(
+      { operation: 'inbox', cursor, limit: 8 },
+      f.caller('b'),
+    )) as Page;
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAGE_MAX_BYTES);
+    for (const q of page.questions) {
+      assert.equal(seen.has(q.questionId), false);
+      seen.add(q.questionId);
+    }
+    cursor = page.nextCursor;
+  }
+  assert.deepEqual(seen, expected);
+  assert.equal(seen.has(later.questionId), false);
+  const hold = f.runtime.holdForHandoff()!;
+  await assert.rejects(
+    async () => askPeer(f, { ...f.caller(), toolCallId: 'during-hold' }),
+    /handoff/,
+  );
+  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
+  hold.release();
+  f.runtime.beginDrain();
+  await assert.rejects(
+    async () => askPeer(f, { ...f.caller(), toolCallId: 'during-drain' }),
+    /drain/,
+  );
+});
+
+test('a sparse full inbox page does not hide older eligible questions', async () => {
+  const f = fixture();
+  const original = await askPeer(f);
+  for (let i = 0; i < 64; i++) {
+    const sid = `retired-${i}`;
+    const a = {
+      ...f.assignments[2]!,
+      actionId: sid,
+      delegationId: `delegation-${sid}`,
+      targetSessionId: sid,
+      targetMessageId: `message-${sid}`,
+      targetTurnId: `turn-${sid}`,
+    };
+    f.assignments.push(a);
+    f.active.add(sid);
+    f.runs.set(
+      'run-' + sid,
+      testInvocationRecord({ sessionId: sid, turnId: 'turn-' + sid, runId: 'run-' + sid }),
+    );
+    await askPeer(f, f.caller(sid));
+    f.active.delete(sid);
+  }
+  type Page = { questions: { questionId: string }[]; nextCursor: string | null };
+  const sparse = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as Page;
+  assert.deepEqual(sparse.questions, []);
+  assert.ok(sparse.nextCursor);
+  const older = (await f.runtime.tool.impl(
+    { operation: 'inbox', cursor: sparse.nextCursor! },
+    f.caller('b'),
+  )) as Page;
+  assert.equal(older.questions[0]!.questionId, original.questionId);
+});
+
+for (const change of ['expired', 'unavailable', 'source_retired'] as const)
+  test('a genuine peer dependency wait resumes with explicit ' + change, async () => {
+    const f = fixture();
+    const q = await askPeer(f);
+    await f.runtime.tool.impl(
+      { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
+      f.caller(),
+    );
+    f.terminal('a', true);
+    if (change === 'expired') f.expire();
+    if (change === 'unavailable') f.terminal('b');
+    if (change === 'source_retired') f.active.delete('b');
+    const restart = f.restart();
+    await restart.reconcile();
+    await restart.reconcile();
+    assert.equal(f.deliveries.length, 1);
+    assert.match(f.deliveries[0]!.text, new RegExp(change));
+  });
 
 test('evidence discovery pages the canonical work catalog beyond 32 sources without retargeting its snapshot', async () => {
   const f = fixture();
@@ -348,6 +788,7 @@ test('evidence discovery pages the canonical work catalog beyond 32 sources with
     delegationId: 'after-delegation',
     targetSessionId: 'after',
   });
+
   f.active.add('after-snapshot');
   for (let cursor = first.nextCursor; cursor; ) {
     const page = await read({ cursor });

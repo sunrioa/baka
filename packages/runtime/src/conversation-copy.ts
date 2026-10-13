@@ -234,7 +234,11 @@ export function createConversationCopySlice(
 ): ConversationCopySlice | null {
   const conversational = messages.filter(
     (message) =>
-      message.type !== 'workhub_evidence' && message.type !== 'workhub_evidence_resolution',
+      message.type !== 'workhub_evidence' &&
+      message.type !== 'workhub_evidence_resolution' &&
+      message.type !== 'workhub_peer_question' &&
+      message.type !== 'workhub_peer_inbox' &&
+      message.type !== 'workhub_peer_settlement',
   );
   const turnOrder: string[] = [];
   const seen = new Set<string>();

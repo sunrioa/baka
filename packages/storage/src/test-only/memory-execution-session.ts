@@ -28,6 +28,13 @@ import {
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import {
+  workHubPeerQuestionIdentity,
+  workHubPeerInboxId,
+  workHubPeerSettlementId,
+  WORKHUB_EVIDENCE_MAX_ROUNDS,
+  type WorkHubPeerTaskRef,
+} from '@maka/core/workhub-evidence';
+import {
   decodeCanonicalMessage,
   deriveTurnRecords,
   WORKHUB_COORDINATION_SESSION_ID as HUB,
@@ -408,6 +415,40 @@ function taskInput(
         admission.placement !== 'current_turn'))
   )
     return conflict('Invalid task input');
+  return value;
+}
+function peerTask(s: MemoryState, ref: WorkHubPeerTaskRef): WorkHubDelegationAssignedMessage {
+  const value = hubMessage(s, 'wha_' + suffix(ref.actionId));
+  const h = requireHeader(s, ref.sessionId).header;
+  const coord = requireHeader(s, HUB).header;
+  const fact = (prefix: string) => hubMessage(s, prefix + '_' + suffix(ref.delegationId));
+  const stop = fact('whzt') ?? fact('whz');
+  if (
+    value?.type !== 'workhub_coordination' ||
+    value.kind !== 'delegation_assigned' ||
+    (value.work?.id ?? value.actionId) !== ref.workId ||
+    (value.work?.generationId ?? value.actionId) !== ref.generationId ||
+    value.delegationId !== ref.delegationId ||
+    value.targetSessionId !== ref.sessionId ||
+    value.targetMessageId !== ref.messageId ||
+    !value.returnResults ||
+    h.isArchived ||
+    h.role !== undefined ||
+    h.subagentParent ||
+    h.labels.includes('mode:side_conversation') ||
+    coord.isArchived ||
+    coord.role !== WORKHUB_COORDINATION_SESSION_ROLE ||
+    fact('whp') ||
+    fact('whx') ||
+    fact('whb') ||
+    (fact('whq') &&
+      !(
+        stop?.type === 'workhub_coordination' &&
+        stop.kind === 'delegation_stop_resolved' &&
+        stop.outcome === 'not_owned'
+      ))
+  )
+    return conflict('Peer task identity is unavailable or retired');
   return value;
 }
 function previousTaskInput(
@@ -1035,6 +1076,147 @@ export function createMemorySessionStore(
           : undefined;
       }),
     readLatestWorkHubAssignment: async (id) => read((s) => latestWorkAssignment(s, id)),
+    commitWorkHubPeerQuestion: async (input) =>
+      write('workhub.peerQuestion', (s) => {
+        const q = decodeCanonicalMessage(copy(input));
+        if (
+          q.type !== 'workhub_peer_question' ||
+          q.id !== 'whpq_' + suffix(workHubPeerQuestionIdentity(q))
+        )
+          return conflict('Invalid peer question identity');
+        const old = messages(s)
+          .get(q.sender.sessionId)
+          ?.find((m) => m.id === q.id);
+        if (old) {
+          if (
+            old.type !== 'workhub_peer_question' ||
+            !equal(old, { ...q, ts: old.ts, expiresAt: old.expiresAt })
+          )
+            return conflict('Peer question identity conflict');
+          const inbox = messages(s)
+            .get(old.recipient.sessionId)
+            ?.find((m) => m.id === workHubPeerInboxId(old.id));
+          if (
+            inbox?.type !== 'workhub_peer_inbox' ||
+            inbox.questionId !== old.id ||
+            inbox.requesterSessionId !== old.sender.sessionId ||
+            inbox.expiresAt !== old.expiresAt ||
+            !equal(inbox.target, old.recipient)
+          )
+            return conflict('Peer inbox identity conflict');
+          return old;
+        }
+        peerTask(s, q.sender);
+        const target = peerTask(s, q.recipient);
+        if (
+          messages(s)
+            .get(q.recipient.sessionId)
+            ?.some((m) => m.id === workHubPeerInboxId(q.id))
+        )
+          return conflict('Peer inbox identity conflict');
+        if (q.ts > Date.now() || q.expiresAt <= Date.now())
+          return conflict('Peer question expired or future timestamp');
+        if (
+          (messages(s).get(q.sender.sessionId) ?? []).filter(
+            (m) => m.type === 'workhub_peer_question' && m.turnId === q.turnId,
+          ).length >= WORKHUB_EVIDENCE_MAX_ROUNDS
+        )
+          return conflict('Peer question limit reached');
+        append(s, q.sender.sessionId, [q]);
+        append(s, q.recipient.sessionId, [
+          {
+            type: 'workhub_peer_inbox',
+            schemaVersion: 1,
+            id: workHubPeerInboxId(q.id),
+            turnId: target.targetTurnId,
+            ts: q.ts,
+            expiresAt: q.expiresAt,
+            requesterSessionId: q.sender.sessionId,
+            questionId: q.id,
+            target: q.recipient,
+          },
+        ]);
+        return q;
+      }),
+    commitWorkHubPeerSettlement: async (input) =>
+      write('workhub.peerSettlement', (s) => {
+        const value = decodeCanonicalMessage(copy(input));
+        if (value.type !== 'workhub_peer_settlement') return conflict('Invalid peer settlement');
+        const q = messages(s)
+          .get(value.requesterSessionId)
+          ?.find((m) => m.id === value.questionId);
+        if (q?.type !== 'workhub_peer_question' || q.sender.sessionId !== value.requesterSessionId)
+          return conflict('Peer question unavailable');
+        if (
+          value.outcome === 'reply'
+            ? !equal(value.actor, q.recipient)
+            : value.actor.sessionId !== q.sender.sessionId ||
+              value.actor.workId !== q.sender.workId ||
+              value.actor.generationId !== q.sender.generationId
+        )
+          return conflict('Peer settlement actor conflict');
+        const old = messages(s)
+          .get(q.recipient.sessionId)
+          ?.find((m) => m.id === workHubPeerSettlementId(q.id));
+        if (old) {
+          if (
+            old.type !== 'workhub_peer_settlement' ||
+            old.questionId !== q.id ||
+            old.requesterSessionId !== q.sender.sessionId ||
+            (old.outcome === value.outcome && old.answer !== value.answer)
+          )
+            return conflict('Peer answer identity conflict');
+          return old;
+        }
+        peerTask(s, value.actor);
+        if (value.outcome === 'reply') peerTask(s, q.sender);
+        if (q.expiresAt <= Date.now() || value.ts < q.ts || value.ts > Date.now())
+          return conflict('Peer question expired or invalid settlement timestamp');
+        append(s, q.recipient.sessionId, [value]);
+        return value;
+      }),
+    readWorkHubPeerInboxPage: async (id, actionId, now, request) =>
+      read((s) => {
+        assertSafeSessionId(actionId);
+        requireHeader(s, id);
+        if (
+          !Number.isSafeInteger(now) ||
+          now < 0 ||
+          !Number.isSafeInteger(request.maxMessages) ||
+          request.maxMessages < 1 ||
+          request.maxMessages > 64 ||
+          !Number.isSafeInteger(request.maxStoredBytes) ||
+          request.maxStoredBytes < 1 ||
+          request.maxStoredBytes > 256 * 1024 ||
+          (request.beforeSequence !== undefined && request.afterSequence !== undefined) ||
+          [request.beforeSequence, request.afterSequence].some(
+            (n) => n !== undefined && (!Number.isSafeInteger(n) || n < 0),
+          )
+        )
+          return conflict('Invalid peer inbox bound');
+        const all = messages(s).get(id)!;
+        let rows = all
+          .map((message, sequence) => ({ message, sequence }))
+          .filter(
+            ({ message, sequence }) =>
+              message.type === 'workhub_peer_inbox' &&
+              message.target.actionId === actionId &&
+              message.expiresAt > now &&
+              !all.some((m) => m.id === workHubPeerSettlementId(message.questionId)) &&
+              sequence > (request.afterSequence ?? -1) &&
+              sequence < (request.beforeSequence ?? Infinity),
+          );
+        if (request.beforeSequence !== undefined) rows.reverse();
+        const records = [];
+        let bytes = 0;
+        for (const row of rows.slice(0, request.maxMessages)) {
+          const size = Buffer.byteLength(JSON.stringify(row.message));
+          if (records.length && bytes + size > request.maxStoredBytes) break;
+          records.push(row);
+          bytes += size;
+        }
+        return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
     readWorkHubTaskInput: async (id) =>
       read((s) => {
         const m = hubMessage(s, 'whti_' + suffix(id));

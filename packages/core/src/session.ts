@@ -24,6 +24,8 @@ import { isWorkHubTaskInputMessage, type WorkHubTaskInputMessage } from './workh
 import {
   isWorkHubEvidenceRequest,
   isWorkHubEvidenceResolution,
+  isWorkHubPeerMessage,
+  type WorkHubPeerMessage,
   type WorkHubEvidenceRequestMessage,
   type WorkHubEvidenceResolutionMessage,
 } from './workhub-evidence.js';
@@ -818,6 +820,7 @@ export type StoredMessage =
   | WorkHubCoordinationMessage
   | WorkHubEvidenceRequestMessage
   | WorkHubEvidenceResolutionMessage
+  | WorkHubPeerMessage
   | SystemNoteMessage;
 
 export interface UserMessage extends MessageContent {
@@ -1756,6 +1759,11 @@ function decodeMessage(
     case 'workhub_evidence_resolution':
       if (isWorkHubEvidenceResolution(message)) return message;
       break;
+    case 'workhub_peer_question':
+    case 'workhub_peer_inbox':
+    case 'workhub_peer_settlement':
+      if (isWorkHubPeerMessage(message)) return message;
+      break;
     case 'system_note':
       if (
         hasExactShape(message, SYSTEM_NOTE_MESSAGE_SHAPE) &&
@@ -2069,6 +2077,12 @@ export function deriveTurnRecords(messages: readonly StoredMessage[]): TurnRecor
   const order: string[] = [];
   const buckets = new Map<string, StoredMessage[]>();
   for (const message of messages) {
+    if (
+      message.type === 'workhub_peer_question' ||
+      message.type === 'workhub_peer_inbox' ||
+      message.type === 'workhub_peer_settlement'
+    )
+      continue;
     const turnId = (message as { turnId?: string }).turnId;
     if (!turnId) continue;
     if (!buckets.has(turnId)) {

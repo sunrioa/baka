@@ -567,6 +567,12 @@ async function createExecutionStoresForWrite(
       assignWorkHubMessage: (request) => run(() => sessionStore.assignWorkHubMessage(request)),
       readWorkHubAssignment: (actionId) => run(() => sessionStore.readWorkHubAssignment(actionId)),
       commitWorkHubTaskInput: (request) => run(() => sessionStore.commitWorkHubTaskInput(request)),
+      commitWorkHubPeerQuestion: (question) =>
+        run(() => sessionStore.commitWorkHubPeerQuestion(question)),
+      commitWorkHubPeerSettlement: (settlement) =>
+        run(() => sessionStore.commitWorkHubPeerSettlement(settlement)),
+      readWorkHubPeerInboxPage: (sessionId, actionId, now, request) =>
+        run(() => sessionStore.readWorkHubPeerInboxPage(sessionId, actionId, now, request)),
       readWorkHubTaskInput: (inputId) => run(() => sessionStore.readWorkHubTaskInput(inputId)),
       readWorkHubTaskInputByMessage: (messageId) =>
         run(() => sessionStore.readWorkHubTaskInputByMessage(messageId)),

@@ -2335,6 +2335,426 @@ for (const { restart, armGoalDuringWait } of [
     });
   });
 
+for (const queuedBehindC of [false, true])
+  test(`production peer questions reach the actual model request and preserve ${queuedBehindC ? 'single-worker FIFO behind unrelated C' : 'nonblocking concurrent work'}`, async (t) => {
+    const targetsReady = deferred<void>(),
+      bFirstRequest = deferred<void>(),
+      aContinued = deferred<void>();
+    const errors: unknown[] = [],
+      seen: string[] = [];
+    let selectedSource: {
+      workId: string;
+      generationId: string;
+      actionId: string;
+      delegationId: string;
+    };
+    let correlation: { questionId: string; requesterSessionId: string };
+    let aPhase = 0,
+      bPhase = 0,
+      cPhase = 0,
+      sequence = 0;
+    let bSystem: string | undefined, bTools: string | undefined;
+    const workerModels: string[] = [];
+    const server = createServer((request, response) => {
+      void (async () => {
+        let raw = '';
+        for await (const chunk of request) raw += chunk.toString();
+        const input = JSON.parse(raw) as {
+          model: string;
+          tools?: { function: { name: string } }[];
+          messages: { role: string; content: unknown }[];
+        };
+        const users = input.messages
+          .filter((m) => m.role === 'user' && typeof m.content === 'string')
+          .map((m) => m.content as string);
+        const prompt =
+          [...users]
+            .reverse()
+            .find(
+              (text) =>
+                [
+                  'PEER_A',
+                  'PEER_B',
+                  'UNRELATED_C',
+                  'Authorize peer work A and B, plus independent C if needed.',
+                ].includes(text) || text.startsWith('Host evidence response:'),
+            ) ?? '';
+        const latestTool = input.messages.filter((m) => m.role === 'tool').at(-1);
+        const notice = JSON.stringify(input.messages).includes(
+          'Host inbox notice for this exact owned work',
+        );
+        const coordinator = input.tools?.some((item) => item.function.name === 'WorkHubResult');
+        let tool: { name: string; args: unknown } | undefined;
+        let content = '';
+        if (
+          coordinator &&
+          prompt === 'Authorize peer work A and B, plus independent C if needed.'
+        ) {
+          response.writeHead(200, { 'content-type': 'text/event-stream' });
+          response.write(
+            'data: ' +
+              JSON.stringify({
+                id: 'peer-authority',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: input.model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'Admitting authorized work.' },
+                    finish_reason: null,
+                  },
+                ],
+              }) +
+              '\n\n',
+          );
+          await new Promise<void>((resolve) => response.on('close', resolve));
+          return;
+        }
+        if (coordinator) {
+          assert.doesNotMatch(
+            raw,
+            /waiting_for_dependency/,
+            'a correlated peer wait must not wake the coordinator model',
+          );
+          content = 'Acknowledged the completed work.';
+        } else if (prompt === 'PEER_A') {
+          workerModels.push(input.model);
+          await targetsReady.promise;
+          if (!queuedBehindC) await bFirstRequest.promise;
+          if (aPhase === 0) tool = { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          else if (aPhase === 1)
+            tool = {
+              name: 'WorkHubEvidence',
+              args: {
+                operation: 'ask',
+                source: selectedSource,
+                question: 'Which verified checksum belongs to this task?',
+              },
+            };
+          else if (aPhase === 2) {
+            const accepted = JSON.parse(String(latestTool?.content));
+            assert.equal(accepted.status, 'accepted');
+            assert.equal(accepted.consumption, 'unknown');
+            correlation = {
+              questionId: accepted.questionId,
+              requesterSessionId: accepted.requesterSessionId,
+            };
+            seen.push('a-continued-after-ask');
+            aContinued.resolve();
+            tool = { name: 'WorkHubEvidence', args: { operation: 'list', query: 'PEER_A' } };
+          } else if (aPhase === 3) {
+            assert.equal(JSON.parse(String(latestTool?.content)).status, 'ok');
+            tool = { name: 'WorkHubEvidence', args: { operation: 'wait', ...correlation } };
+          } else assert.fail('A must yield at its explicit dependency wait');
+          aPhase++;
+        } else if (prompt === 'UNRELATED_C') {
+          workerModels.push(input.model);
+          assert.equal(
+            notice,
+            false,
+            'a B inbox pointer must not leak into unrelated C in the same Session',
+          );
+          seen.push('c-step');
+          if (cPhase++ === 0) tool = { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          else content = 'Independent C is complete.';
+        } else if (prompt === 'PEER_B') {
+          workerModels.push(input.model);
+          const system = JSON.stringify(input.messages.filter((m) => m.role === 'system'));
+          if (bSystem === undefined) bSystem = system;
+          else
+            assert.equal(system, bSystem, 'peer notices leave the stable system prefix untouched');
+          if (bPhase === 0) {
+            seen.push('b-first-request');
+            bFirstRequest.resolve();
+            if (!queuedBehindC) {
+              assert.equal(notice, false);
+              await aContinued.promise;
+            } else
+              assert.equal(notice, true, 'queued B receives its notice when B actually starts');
+            tool = { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          } else {
+            const schemas = JSON.stringify(input.tools);
+            if (bTools === undefined) bTools = schemas;
+            else assert.equal(schemas, bTools, 'inbox/reply do not mutate tool schemas');
+            if (bPhase === 1) {
+              assert.equal(notice, true, 'notice must enter the actual next logical model request');
+              assert.match(raw, new RegExp(correlation.questionId));
+              seen.push('b-noticed');
+              tool = { name: 'WorkHubEvidence', args: { operation: 'inbox' } };
+            } else if (bPhase === 2) {
+              const page = JSON.parse(String(latestTool?.content));
+              assert.equal(page.questions.length, 1);
+              assert.equal(page.questions[0].questionId, correlation.questionId);
+              assert.equal(
+                page.questions[0].question,
+                'Which verified checksum belongs to this task?',
+              );
+              assert.ok(Buffer.byteLength(String(latestTool?.content)) <= 7500);
+              tool = {
+                name: 'WorkHubEvidence',
+                args: { operation: 'reply', ...correlation, answer: 'Verified checksum: abc123.' },
+              };
+            } else {
+              assert.equal(JSON.parse(String(latestTool?.content)).status, 'reply_committed');
+              assert.equal(notice, false, 'settled questions leave B inbox');
+              seen.push('b-replied');
+              content = 'B original work is complete.';
+            }
+          }
+          bPhase++;
+        } else if (prompt.startsWith('Host evidence response:')) {
+          workerModels.push(input.model);
+          assert.match(prompt, /reply_committed/);
+          assert.match(prompt, /abc123/);
+          assert.match(prompt, new RegExp(correlation.questionId));
+          seen.push('a-resumed');
+          content = 'A completed using the correlated checksum abc123.';
+        } else assert.fail('Unexpected peer provider request: ' + raw.slice(0, 2000));
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        sequence++;
+        const chunk = (delta: unknown, finish: string | null) =>
+          'data: ' +
+          JSON.stringify({
+            id: 'peer-' + sequence,
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: input.model,
+            choices: [{ index: 0, delta, finish_reason: finish }],
+          }) +
+          '\n\n';
+        response.write(
+          chunk(
+            tool
+              ? {
+                  role: 'assistant',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'peer-call-' + sequence,
+                      type: 'function',
+                      function: { name: tool.name, arguments: JSON.stringify(tool.args) },
+                    },
+                  ],
+                }
+              : { role: 'assistant', content },
+            null,
+          ),
+        );
+        response.write(chunk({}, tool ? 'tool_calls' : 'stop'));
+        response.end('data: [DONE]\n\n');
+      })().catch((error) => {
+        errors.push(error);
+        response.destroy(error as Error);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          targetsReady.resolve();
+          bFirstRequest.resolve();
+          aContinued.resolve();
+          server.closeAllConnections();
+          server.close((error) => (error ? reject(error) : resolve()));
+        }),
+    );
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    await withCompositionRoot(async ({ owner, root }) => {
+      await configureFakeDefaultTarget(
+        owner,
+        ['fake-model'],
+        'http://127.0.0.1:' + address.port + '/v1',
+      );
+      const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+      const initial = await policy.runtimePolicy.getSnapshot();
+      assert.equal(
+        (
+          await policy.runtimePolicy.mutate({
+            expectedRevision: initial.revision,
+            operation: {
+              kind: 'set_chat_defaults',
+              value: {
+                ...initial.policy.chatDefaults,
+                workHubMaxConcurrentSessions: queuedBehindC ? 1 : 2,
+              },
+            },
+          })
+        ).kind,
+        'committed',
+      );
+      const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+      const context: ConnectionContext = {
+        hostEpoch: 'execution-composition-test',
+        connectionId: 'peer-client',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release() {} }),
+      };
+      const desktop = composition.clientCapabilities!.attachConnection(
+        clientCapabilityConnectionIdentity(context.connectionId),
+        { send: async () => {} },
+      );
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      try {
+        await composition.recover();
+        assert.ok(
+          (
+            await composition.handlers['client.capability.replace'](
+              { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+              context,
+            )
+          ).ok,
+        );
+        assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+        const turnId = 'peer-user-authority';
+        assert.ok(
+          (
+            await composition.handlers['workhub.coordination.answer'](
+              { turnId, text: 'Authorize peer work A and B, plus independent C if needed.' },
+              context,
+            )
+          ).ok,
+        );
+        const create = async (actionId: string, text: string) => {
+          const result = await composition.handlers['workhub.coordination.actFromTurn'](
+            {
+              turnId,
+              actionId,
+              delegationText: text,
+              proposal: { disposition: 'create_new', title: text },
+              create: { workspace: { kind: 'isolated' } },
+              newWorkDefaults: { permissionMode: 'ask' },
+            },
+            context,
+          );
+          assert.ok(result.ok, JSON.stringify(result));
+          const assignment = await stores.sessionStore.readWorkHubAssignment(actionId);
+          assert.ok(assignment);
+          return assignment;
+        };
+        const a = await create('peer-a', 'PEER_A');
+        let b: Awaited<ReturnType<typeof create>>;
+        if (queuedBehindC) {
+          const c = await create('independent-c', 'UNRELATED_C');
+          const candidates = await composition.handlers['workhub.coordination.candidates'](
+            {},
+            context,
+          );
+          assert.ok(candidates.ok, JSON.stringify(candidates));
+          const candidate = candidates.result.candidates.find(
+            (item) => item.sessionId === c.targetSessionId,
+          );
+          assert.ok(candidate);
+          const delegated = await composition.handlers['workhub.coordination.actFromTurn'](
+            {
+              turnId,
+              actionId: 'peer-b',
+              candidateSetId: candidates.result.candidateSetId,
+              delegationText: 'PEER_B',
+              proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+            },
+            context,
+          );
+          assert.ok(delegated.ok, JSON.stringify(delegated));
+          const linked = await stores.sessionStore.readWorkHubAssignment('peer-b');
+          assert.ok(linked);
+          b = linked;
+        } else b = await create('peer-b', 'PEER_B');
+        selectedSource = {
+          workId: b.work?.id ?? b.actionId,
+          generationId: b.work?.generationId ?? b.actionId,
+          actionId: b.actionId,
+          delegationId: b.delegationId,
+        };
+        const beforeA = await stores.sessionStore.readHeaderSnapshot(a.targetSessionId),
+          beforeB = await stores.sessionStore.readHeaderSnapshot(b.targetSessionId);
+        const coordinating = await composition.handlers['turn.query'](
+          { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId },
+          context,
+        );
+        assert.ok(coordinating.ok);
+        assert.ok(
+          (
+            await composition.handlers['turn.stop'](
+              {
+                sessionId: WORKHUB_COORDINATION_SESSION_ID,
+                turnId,
+                runId: coordinating.result.runId,
+              },
+              context,
+            )
+          ).ok,
+        );
+        targetsReady.resolve();
+        await waitFor(async () => {
+          assert.deepEqual(errors, []);
+          return seen.includes('a-resumed') && seen.includes('b-replied');
+        }, 10000);
+        const resumedTurnId = workHubEvidenceTurnId(workHubEvidenceRequestId(a.targetTurnId));
+        await waitFor(async () => {
+          const result = await composition.handlers['turn.query'](
+            { sessionId: a.targetSessionId, turnId: resumedTurnId },
+            context,
+          );
+          return result.ok && result.result.status === 'completed';
+        }, 10000);
+        assert.equal(seen.filter((x) => x === 'a-resumed').length, 1);
+        assert.ok(seen.indexOf('a-continued-after-ask') < seen.indexOf('b-noticed'));
+        if (queuedBehindC)
+          assert.ok(
+            seen.lastIndexOf('c-step') < seen.indexOf('b-first-request'),
+            'B starts after C in the original FIFO',
+          );
+        const resumed = await stores.agentRunStore.readRootTurnAdmission(
+          a.targetSessionId,
+          resumedTurnId,
+        );
+        assert.ok(resumed);
+        assert.equal(resumed.execution.kind, 'external_message');
+        assert.equal(
+          resumed.execution.kind === 'external_message' && resumed.execution.origin?.kind,
+          'workhub_evidence',
+        );
+        assert.equal(
+          resumed.sourceMessages.length,
+          0,
+          'peer reply is not human steering or a user Message',
+        );
+        const aRuns = await stores.runtimeEventStore.listSessionInvocations(a.targetSessionId),
+          bRuns = await stores.runtimeEventStore.listSessionInvocations(b.targetSessionId);
+        assert.equal(aRuns.length, 2);
+        assert.equal(
+          bRuns.length,
+          queuedBehindC ? 2 : 1,
+          'peer traffic never wakes an extra B execution',
+        );
+        for (const [id, header] of [
+          [a.targetSessionId, beforeA],
+          [b.targetSessionId, beforeB],
+        ] as const) {
+          const after = await stores.sessionStore.readHeaderSnapshot(id);
+          for (const field of ['cwd', 'model', 'permissionMode', 'llmConnectionId'] as const)
+            assert.equal(after[field], header[field]);
+          assert.equal(after.permissionMode, 'ask');
+          assert.ok(after.cwd.startsWith(await realpath(join(root, 'workhub-tasks'))));
+          assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(id), []);
+        }
+        assert.ok(workerModels.length > 0);
+        assert.ok(
+          workerModels.every((model) => model === beforeA.model && model === beforeB.model),
+        );
+        assert.deepEqual(errors, []);
+      } finally {
+        targetsReady.resolve();
+        bFirstRequest.resolve();
+        aContinued.resolve();
+        await composition.close();
+        await desktop.close();
+      }
+    });
+  });
+
 test('production WorkHub inspects an independent Session through its provider tool surface without starting target work', async (t) => {
   const sourceText = 'Tests passed.\nPublishing is still pending. 😀';
   let targetSessionId = '';

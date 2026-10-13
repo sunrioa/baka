@@ -31,6 +31,16 @@ import {
   type WorkHubResultObservation,
 } from '../server/workhub-result-coordinator.js';
 
+test('correlated peer waits stay observable without dispatching the coordinator model', async () => {
+  const f = fixture();
+  f.setCurrent({ ...observation, status: 'waiting_for_dependency', notifyCoordinator: false });
+  await new HostWorkHubResultCoordinator(f.ports).reconcile();
+  assert.equal(f.contents.length, 0);
+  f.setCurrent(observation);
+  await new HostWorkHubResultCoordinator(f.ports).reconcile();
+  assert.equal(f.contents.length, 1, 'normal result notification remains enabled');
+});
+
 const assignment: WorkHubDelegationAssignedMessage = {
   type: 'workhub_coordination',
   id: 'wha_one',

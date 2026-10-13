@@ -169,6 +169,9 @@ export function projectSharedSessionTranscriptMessage(
     case 'workhub_coordination':
     case 'workhub_evidence':
     case 'workhub_evidence_resolution':
+    case 'workhub_peer_question':
+    case 'workhub_peer_inbox':
+    case 'workhub_peer_settlement':
       return null;
   }
 }

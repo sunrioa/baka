@@ -39,6 +39,8 @@ export interface WorkHubResultObservation {
   readonly result: string;
   readonly details?: unknown;
   readonly sharedTurn: boolean;
+  /** A correlated peer wait is observable to users but needs no coordinator-model wake. */
+  readonly notifyCoordinator?: boolean;
 }
 
 export interface WorkHubResultPorts {
@@ -199,11 +201,16 @@ export class HostWorkHubResultCoordinator {
           this.#needsRetry = true;
           continue;
         }
+        if (observed.notifyCoordinator === false) continue;
         const origin = workHubResultOrigin(assignment, observed);
         if (this.#delivered.has(origin.eventId)) continue;
         const result = await this.ports.deliver(origin, async (lease) => {
           const current = await this.ports.inspect(assignment, lease, true);
-          if (!current || workHubResultOrigin(assignment, current).eventId !== origin.eventId)
+          if (
+            !current ||
+            current.notifyCoordinator === false ||
+            workHubResultOrigin(assignment, current).eventId !== origin.eventId
+          )
             return undefined;
           return workHubResultContent(assignment, current);
         });

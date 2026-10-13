@@ -19,8 +19,9 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { decodeCanonicalMessage } from '../session.js';
+import { decodeCanonicalMessage, deriveTurnRecords } from '../session.js';
 import { decodeTurnOrigin } from '../turn-origin.js';
+import { threadSearchMatchKind } from '../transcript-search.js';
 import {
   isWorkHubEvidenceRequest,
   isWorkHubEvidenceResolution,
@@ -102,4 +103,99 @@ test('evidence records decode strict fixed identities, bounded rounds/lifetime a
   assert.deepEqual(decodeTurnOrigin(origin), origin);
   assert.equal(decodeTurnOrigin({ ...origin, sourceRunId: '' }), undefined);
   assert.equal(decodeTurnOrigin({ ...origin, permissionMode: 'bypass' }), undefined);
+});
+
+test('peer question, inbox and terminal settlement are strict bounded operational facts', () => {
+  const sender = {
+    workId: 'work-a',
+    generationId: 'generation-a',
+    actionId: 'action-a',
+    delegationId: 'delegation-a',
+    sessionId: 'a',
+    messageId: 'message-a',
+  };
+  const recipient = {
+    workId: 'work-b',
+    generationId: 'generation-b',
+    actionId: 'action-b',
+    delegationId: 'delegation-b',
+    sessionId: 'b',
+    messageId: 'message-b',
+  };
+  const suffix = 'a'.repeat(48);
+  const question = {
+    type: 'workhub_peer_question',
+    schemaVersion: 1,
+    id: `whpq_${suffix}`,
+    turnId: 'turn-a',
+    ts: 1,
+    expiresAt: 3600001,
+    sender,
+    recipient,
+    senderRunId: 'run-a',
+    senderInvocationId: 'invocation-a',
+    toolCallId: 'exec:nested:ask',
+    question: 'Which checksum?',
+    round: 1,
+  };
+  const inbox = {
+    type: 'workhub_peer_inbox',
+    schemaVersion: 1,
+    id: `whpi_${suffix}`,
+    turnId: 'turn-b',
+    ts: 1,
+    expiresAt: question.expiresAt,
+    requesterSessionId: 'a',
+    questionId: question.id,
+    target: recipient,
+  };
+  const answer = {
+    type: 'workhub_peer_settlement',
+    schemaVersion: 1,
+    id: `whps_${suffix}`,
+    turnId: 'turn-b',
+    ts: 2,
+    requesterSessionId: 'a',
+    questionId: question.id,
+    actor: recipient,
+    senderRunId: 'run-b',
+    senderInvocationId: 'invocation-b',
+    toolCallId: 'reply',
+    outcome: 'reply',
+    answer: 'Checksum abc123.',
+  };
+  for (const fact of [
+    question,
+    inbox,
+    answer,
+    { ...answer, actor: sender, outcome: 'cancelled', answer: undefined },
+  ]) {
+    assert.deepEqual(decodeCanonicalMessage(fact), fact);
+    assert.throws(() => threadSearchMatchKind(decodeCanonicalMessage(fact)), /not searchable/);
+    assert.deepEqual(
+      deriveTurnRecords([decodeCanonicalMessage(fact)]),
+      [],
+      'inbox publication cannot manufacture a completed legacy Turn',
+    );
+    assert.throws(() => decodeCanonicalMessage({ ...fact, permissionMode: 'bypass' }));
+    assert.throws(() => decodeCanonicalMessage({ ...fact, senderRunId: '' }));
+  }
+  for (const change of [
+    { round: 9 },
+    { expiresAt: 3600002 },
+    { recipient: sender },
+    { question: '\u0000'.repeat(4000) },
+    { question: '' },
+  ])
+    assert.throws(() => decodeCanonicalMessage({ ...question, ...change }));
+  assert.throws(() => decodeCanonicalMessage({ ...answer, answer: '\u0000'.repeat(4000) }));
+  assert.throws(() => decodeCanonicalMessage({ ...answer, outcome: 'cancelled' }));
+  assert.throws(() => decodeCanonicalMessage({ ...inbox, questionId: 'wrong-prefix' }));
+});
+
+test('peer dependency binding extends the existing wait without weakening legacy validation', () => {
+  const value = { ...request, peerQuestionId: `whpq_${'a'.repeat(48)}` };
+  assert.deepEqual(decodeCanonicalMessage(value), value);
+  assert.throws(() => decodeCanonicalMessage({ ...value, peerQuestionId: 'arbitrary' }));
+  assert.throws(() => decodeCanonicalMessage({ ...value, peerTargetSessionId: 'foreign' }));
 });

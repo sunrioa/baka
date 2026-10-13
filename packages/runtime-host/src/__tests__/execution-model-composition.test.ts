@@ -1273,6 +1273,7 @@ test('Run Composition keeps the Tool baseline while dispatch preserves dynamic c
   const dynamic = makeTool('dynamic_tool');
   let currentTools: readonly MakaTool[] = [initial];
   let committedToolNames: readonly string[] = [];
+  const promptScopes: { runId?: string; invocationId?: string }[] = [];
   let backend: Awaited<ReturnType<typeof createHostAiSdkBackend>> | undefined;
   try {
     backend = await createHostAiSdkBackend(
@@ -1286,11 +1287,14 @@ test('Run Composition keeps the Tool baseline while dispatch preserves dynamic c
           composerRevision: '1',
           tools: [initial],
           resolveTools: () => currentTools,
-          resolveSystemPrompt: async () => ({
-            text: 'test prompt',
-            contexts: [{ name: 'test.context', text: 'HOST_DYNAMIC_CONTEXT' }],
-            sourceRevisions: [],
-          }),
+          resolveSystemPrompt: async (scope) => {
+            promptScopes.push(scope);
+            return {
+              text: 'test prompt',
+              contexts: [{ name: 'test.context', text: 'HOST_DYNAMIC_CONTEXT' }],
+              sourceRevisions: [],
+            };
+          },
         }),
         recordRunComposition: async (_runId, snapshot) => {
           committedToolNames = decodeRunCompositionSnapshot(snapshot).toolNames;
@@ -1310,6 +1314,14 @@ test('Run Composition keeps the Tool baseline while dispatch preserves dynamic c
     }
 
     assert.deepEqual(committedToolNames, ['initial_tool']);
+    assert.ok(
+      promptScopes.some(
+        (scope) =>
+          scope.runId === 'composition-baseline-run' &&
+          scope.invocationId === 'composition-baseline-invocation',
+      ),
+      'live BackendSendInput scope survives the Host prompt adapter',
+    );
     assert.match(JSON.stringify(provider.requests[0]?.body.messages), /HOST_DYNAMIC_CONTEXT/u);
     const requestTools = provider.requests[0]?.body.tools as Array<{
       function?: { name?: string };

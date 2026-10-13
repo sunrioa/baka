@@ -64,6 +64,9 @@ export function threadSearchMatchKind(message: StoredMessage): ThreadSearchMatch
     case 'workhub_coordination':
     case 'workhub_evidence':
     case 'workhub_evidence_resolution':
+    case 'workhub_peer_question':
+    case 'workhub_peer_inbox':
+    case 'workhub_peer_settlement':
     case 'system_note':
       throw new Error(`Message type ${message.type} is not searchable`);
   }

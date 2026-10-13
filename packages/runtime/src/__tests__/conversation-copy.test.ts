@@ -45,6 +45,7 @@ import {
 } from '@maka/core/runtime-invocation';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import { scanToolLedger } from '@maka/core/tool-ledger-scanner';
+import { backfillRuntimeEventsFromStoredMessages } from '../runtime-event-backfill.js';
 import { createSqliteAgentRunStore } from '@maka/storage/agent-run-store';
 import { createWorkspaceRuntimeStore } from '@maka/storage/runtime-event-persistence';
 import { sectionedSummary } from './history-compact-test-fixtures.js';
@@ -431,7 +432,78 @@ test('conversation copy keeps ordinary archived tool results as references', () 
 });
 
 test('conversation copy slices exact turns on inclusive and exclusive boundaries', () => {
+  const sender = {
+    workId: 'work-a',
+    generationId: 'generation-a',
+    actionId: 'a',
+    delegationId: 'delegation-a',
+    sessionId: 'a',
+    messageId: 'message-a',
+  };
+  const recipient = {
+    ...sender,
+    workId: 'work-b',
+    generationId: 'generation-b',
+    actionId: 'b',
+    delegationId: 'delegation-b',
+    sessionId: 'b',
+    messageId: 'message-b',
+  };
+  const peers = [
+    {
+      type: 'workhub_peer_question',
+      schemaVersion: 1,
+      id: `whpq_${'a'.repeat(48)}`,
+      turnId: 'turn-1',
+      ts: 1,
+      expiresAt: 3600001,
+      sender,
+      recipient,
+      senderRunId: 'run-a',
+      senderInvocationId: 'invocation-a',
+      toolCallId: 'ask',
+      question: 'Private peer question',
+      round: 1,
+    },
+    {
+      type: 'workhub_peer_inbox',
+      schemaVersion: 1,
+      id: `whpi_${'a'.repeat(48)}`,
+      turnId: 'turn-1',
+      ts: 1,
+      expiresAt: 3600001,
+      requesterSessionId: 'a',
+      questionId: `whpq_${'a'.repeat(48)}`,
+      target: recipient,
+    },
+    {
+      type: 'workhub_peer_settlement',
+      schemaVersion: 1,
+      id: `whps_${'a'.repeat(48)}`,
+      turnId: 'turn-1',
+      ts: 2,
+      requesterSessionId: 'a',
+      questionId: `whpq_${'a'.repeat(48)}`,
+      actor: recipient,
+      senderRunId: 'run-b',
+      senderInvocationId: 'invocation-b',
+      toolCallId: 'reply',
+      outcome: 'reply',
+      answer: 'Private peer answer',
+    },
+  ] as const;
+  assert.deepEqual(
+    backfillRuntimeEventsFromStoredMessages({
+      run: { sessionId: 'a', turnId: 'turn-1', runId: 'run-a', invocationId: 'invocation-a' },
+      messages: peers,
+      modelHistory: 'full',
+      now: () => 3,
+    }).events.filter((event) => event.content !== undefined),
+    [],
+    'operational peer facts cannot become model history',
+  );
   const messages = [
+    ...peers,
     { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 1, text: 'first' },
     { type: 'user', id: 'user-2', turnId: 'turn-2', ts: 3, text: 'second' },
     {
