@@ -1141,9 +1141,16 @@ export function createMemoryRuntimeStore(a: MemoryExecutionAuthority): Execution
           );
         }
       }),
-    readTranscriptHighWater: async (sessionId) =>
+    readTranscriptHighWater: async (sessionId, turnId) =>
       a.read((s) => {
         check(sessionId);
+        if (turnId !== undefined) {
+          if (typeof turnId !== 'string' || !turnId) throw new Error('Invalid transcript Turn');
+          return (
+            transcriptTurns(s, sessionId).find((turn) => turn.turnId === turnId)?.lastOrdinal ??
+            null
+          );
+        }
         return ordinals(s).get(sessionId)?.at(-1)?.ordinal ?? null;
       }),
     subscribeRuntimeEventCommits: (listener) => {
@@ -1158,8 +1165,8 @@ export function createMemoryRuntimeStore(a: MemoryExecutionAuthority): Execution
       // The caller owns its projection result; it may contain live methods and
       // must not pass back through the authority's structured-clone boundary.
       const selected = a.read((s) => {
-        const { direction, throughOrdinal, position, maxEvents, maxBytes, maxRecordBytes } =
-          request;
+        const { direction, maxEvents, maxBytes, maxRecordBytes } = request;
+        let { throughOrdinal, position } = request;
         for (const value of [throughOrdinal, position])
           if (!Number.isSafeInteger(value) || value < 0)
             throw new RangeError('Invalid transcript bound');
@@ -1168,7 +1175,23 @@ export function createMemoryRuntimeStore(a: MemoryExecutionAuthority): Execution
             throw new RangeError('Invalid transcript read limit');
         if (direction !== 'older' && direction !== 'newer')
           throw new Error('Invalid transcript direction');
+        if (request.turnId !== undefined && (typeof request.turnId !== 'string' || !request.turnId))
+          throw new Error('Invalid transcript Turn');
         const older = direction === 'older';
+        if (request.turnId !== undefined) {
+          const extent = transcriptTurns(s, sessionId).find((t) => t.turnId === request.turnId);
+          if (!extent) return undefined;
+          throughOrdinal = Math.min(throughOrdinal, extent.lastOrdinal);
+          position = older
+            ? Math.min(position, extent.lastOrdinal)
+            : Math.max(position, extent.firstOrdinal);
+          if (
+            throughOrdinal < extent.firstOrdinal ||
+            position < extent.firstOrdinal ||
+            (!older && position > throughOrdinal)
+          )
+            return undefined;
+        }
         const visible = new Map(
           transcript(s, sessionId, throughOrdinal).map((i) => [i.invocation.invocationId, i]),
         );
@@ -1179,6 +1202,7 @@ export function createMemoryRuntimeStore(a: MemoryExecutionAuthority): Execution
         const seeked = walked.find(
           (e) =>
             (older ? e.ordinal <= position : e.ordinal >= position) &&
+            (request.turnId === undefined || e.event.turnId === request.turnId) &&
             visible.has(e.event.invocationId),
         );
         if (!seeked) return undefined;
@@ -1219,10 +1243,13 @@ export function createMemoryRuntimeStore(a: MemoryExecutionAuthority): Execution
               request.limit,
             );
       }),
-    readTranscriptTurnCrossing: async (sessionId, ordinal) =>
+    readTranscriptTurnCrossing: async (sessionId, ordinal, turnId) =>
       a.read((s) =>
         transcriptTurns(s, sessionId).some(
-          (turn) => turn.firstOrdinal < ordinal && turn.lastOrdinal >= ordinal,
+          (turn) =>
+            (turnId === undefined || turn.turnId === turnId) &&
+            turn.firstOrdinal < ordinal &&
+            turn.lastOrdinal >= ordinal,
         ),
       ),
   };

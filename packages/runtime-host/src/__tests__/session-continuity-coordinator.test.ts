@@ -49,6 +49,7 @@ import { waitFor as pollFor } from '@maka/core/test-only/async-primitives';
 
 const HOST_EPOCH = 'host-epoch';
 const SESSION_ID = 'session-1';
+const EXECUTION = { turnId: 'turn-1', runId: 'run-1' } as const;
 const TEST_OWNER_IDENTITY = {
   principalId: 'local_owner',
   principalKind: 'local_owner',
@@ -59,6 +60,360 @@ type TestIdentity =
       readonly principalId: string;
       readonly principalKind: 'session_guest';
     };
+
+test('an execution-scoped subscription retains only its own live activity and public state', async (t) => {
+  let state = canonical({
+    interactions: {
+      pending: [
+        pendingInteraction(),
+        {
+          ...pendingInteraction(),
+          interactionId: 'other',
+          turnId: 'other-turn',
+          runId: 'other-run',
+        },
+      ],
+    },
+    queue: {
+      hostEpoch: HOST_EPOCH,
+      queueRevision: 1,
+      steering: [],
+      followup: [
+        {
+          entryId: 'other-entry',
+          messageId: 'other-message',
+          content: { text: 'unrelated pending work' },
+          placement: 'next_turn',
+          state: 'queued',
+        },
+      ],
+    },
+  });
+  state = {
+    ...state,
+    goal: {
+      goalId: 'other-goal',
+      revision: 1,
+      sessionId: SESSION_ID,
+      condition: 'unrelated goal',
+      status: 'active',
+      setAt: 1,
+      iterations: 0,
+      maxIterations: 10,
+      consecutiveNoProgress: 0,
+      blockCap: 3,
+      tokenBudget: null,
+      tokensSpent: 0,
+      lastReason: null,
+      achievedAt: null,
+      pausedAt: null,
+    },
+  };
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => state,
+    new SessionAdmissionGate(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (id, execution) =>
+      id === SESSION_ID && [EXECUTION.runId, 'past-run'].includes(execution.runId),
+  );
+  t.after(() => coordinator.close());
+  await coordinator.acceptRuntimeEvent(SESSION_ID, EXECUTION.runId, textEvent(0));
+  await coordinator.acceptRuntimeEvent(SESSION_ID, EXECUTION.runId, previewEvent());
+  const sink = new RecordingSink();
+  attachTestConnection(coordinator, 'scoped', sink);
+  const result = await coordinator.handlers['subscription.open'](
+    { sessionId: SESSION_ID, execution: EXECUTION, transcript: { kind: 'none' } },
+    connectionContext('scoped'),
+  );
+  assert.ok(result.ok);
+  const opened = result.result;
+  assert.deepEqual(opened.execution, EXECUTION);
+  assert.deepEqual(opened.activeAssistantStreams, [
+    { kind: 'text', turnId: EXECUTION.turnId, messageId: 'message-1' },
+  ]);
+  assert.equal(opened.snapshot.rootTurn?.runId, EXECUTION.runId);
+  assert.equal(opened.snapshot.goal, null);
+  assert.deepEqual(opened.snapshot.queue.followup, []);
+  assert.deepEqual(
+    opened.snapshot.interactions.pending.map((p) => p.interactionId),
+    ['interaction-1'],
+  );
+  const client = clientSubscription(
+    opened,
+    async () => {},
+    async () => {
+      throw new Error('No transcript requested');
+    },
+  );
+  await coordinator.handlers['subscription.ready'](
+    { subscriptionId: opened.subscriptionId },
+    connectionContext('scoped'),
+  );
+  const pty = await coordinator.handlers['subscription.pty_interest.set'](
+    { subscriptionId: opened.subscriptionId, refs: [] },
+    connectionContext('scoped'),
+  );
+  assert.ok(!pty.ok && pty.error.code === 'operation_unavailable');
+  await coordinator.acceptRuntimeEvent(SESSION_ID, EXECUTION.runId, {
+    type: 'steering_message',
+    id: 'public-steer',
+    turnId: EXECUTION.turnId,
+    ts: 1,
+    messageId: 'steer',
+    content: { text: 'model-only skill body', displayText: 'public correction' },
+  });
+  await coordinator.acceptRuntimeEvent(
+    SESSION_ID,
+    EXECUTION.runId,
+    textCompleteEvent('message-1', 'final own answer'),
+  );
+  const past = await coordinator.handlers['subscription.open'](
+    {
+      sessionId: SESSION_ID,
+      execution: { turnId: 'past-turn', runId: 'past-run' },
+      transcript: { kind: 'none' },
+    },
+    connectionContext('scoped'),
+  );
+  assert.ok(past.ok);
+  assert.equal(past.result.snapshot.rootTurn, null);
+  assert.deepEqual(past.result.activeAssistantStreams, []);
+  state = canonical({
+    rootTurn: {
+      sessionId: SESSION_ID,
+      turnId: 'other-turn',
+      runId: 'other-run',
+      status: 'running',
+    },
+  });
+  await coordinator.refreshCanonical(SESSION_ID);
+  await coordinator.acceptRuntimeEvent(SESSION_ID, 'other-run', {
+    ...textEvent(10),
+    turnId: 'other-turn',
+    text: 'unrelated answer'.repeat(20_000),
+  });
+  coordinator.enqueueAgentGraphChanged({
+    rootSessionId: SESSION_ID,
+    graphId: 'other-graph',
+    reason: 'observation',
+  });
+  coordinator.enqueueSessionDomainChanged(SESSION_ID, 'todo');
+  await delayImmediate();
+  const frames = sink.frames.filter((f) => f.subscriptionId === opened.subscriptionId);
+  frames.forEach((f) => client.accept(f));
+  assert.deepEqual(
+    frames.map((f) => ('sequence' in f ? f.sequence : undefined)),
+    frames.map((_, i) => i + 1),
+  );
+  assert.ok(
+    frames.some(
+      (f) => f.kind === 'subscription.session_event' && f.event.type === 'tool_result_preview',
+    ),
+  );
+  const steering = frames.find(
+    (f) => f.kind === 'subscription.session_event' && f.event.type === 'steering_message',
+  );
+  assert.ok(
+    steering?.kind === 'subscription.session_event' && steering.event.type === 'steering_message',
+  );
+  assert.deepEqual(steering.event.content, { text: 'public correction' });
+  assert.ok(
+    frames.some(
+      (f) =>
+        f.kind === 'subscription.session_delta' &&
+        f.delta.reset &&
+        f.delta.text === 'final own answer',
+    ),
+  );
+  assert.ok(
+    frames.some(
+      (f) =>
+        f.kind === 'subscription.session_delta' &&
+        f.delta.complete &&
+        f.delta.startOffset === 'final own answer'.length,
+    ),
+  );
+  assert.ok(!JSON.stringify(frames).includes('unrelated answer'));
+  assert.ok(
+    !frames.some((f) =>
+      [
+        'subscription.agent_graph_changed',
+        'subscription.session_domain_changed',
+        'subscription.closed',
+      ].includes(f.kind),
+    ),
+  );
+  assert.equal(frames.at(-1)?.kind, 'subscription.session_projection');
+});
+
+test('excluded projections do not evict a scoped subscriber before readiness', async (t) => {
+  let state = canonical({
+    rootTurn: {
+      sessionId: SESSION_ID,
+      turnId: 'other-turn',
+      runId: 'other-run',
+      status: 'running',
+    },
+  });
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => state,
+    new SessionAdmissionGate(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async () => true,
+  );
+  t.after(() => coordinator.close());
+  const sink = new RecordingSink();
+  const connection = attachTestConnection(coordinator, 'quiet-scope', sink);
+  const opened = await coordinator.handlers['subscription.open'](
+    { sessionId: SESSION_ID, execution: EXECUTION, transcript: { kind: 'none' } },
+    connectionContext('quiet-scope'),
+  );
+  assert.ok(opened.ok);
+  for (let revision = 1; revision <= 40; revision++) {
+    state = {
+      ...state,
+      queue: {
+        ...state.queue,
+        queueRevision: revision,
+        followup: [
+          {
+            entryId: 'unrelated-entry',
+            messageId: 'unrelated-message',
+            content: { text: `unrelated change ${revision}` },
+            placement: 'next_turn',
+            state: 'queued',
+          },
+        ],
+      },
+      interactions: {
+        pending: [
+          {
+            ...pendingInteraction(),
+            turnId: 'other-turn',
+            runId: 'other-run',
+            interactionId: `other-${revision}`,
+          },
+        ],
+      },
+    };
+    await coordinator.refreshCanonical(SESSION_ID);
+  }
+  state = { ...state, session: { ...state.session, metadataRevision: 2 } };
+  await coordinator.refreshCanonical(SESSION_ID);
+  await connection.activate(opened.result.subscriptionId);
+  await delayImmediate();
+  assert.equal(sink.frames.length, 1, 'only meaningful visible metadata should spend a sequence');
+  const frame = sink.frames[0];
+  assert.equal(frame?.kind, 'subscription.session_projection');
+  assert.ok(frame?.kind === 'subscription.session_projection');
+  assert.equal(frame.sequence, 1);
+  assert.equal(frame.snapshot.session.metadataRevision, 2);
+  assert.equal(frame.snapshot.rootTurn, null);
+  assert.deepEqual(frame.snapshot.interactions.pending, []);
+  const client = clientSubscription(
+    opened.result,
+    async () => {},
+    async () => {
+      throw new Error('No transcript requested');
+    },
+  );
+  assert.doesNotThrow(() => client.accept(frame));
+});
+
+test('execution transcript paging, watermark and rejoin stay bound to the selected Turn', async (t) => {
+  const durable: StoredMessage[] = [
+    { type: 'user', id: 'own-user', turnId: EXECUTION.turnId, ts: 1, text: 'own prompt' },
+  ];
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => canonical(),
+    new SessionAdmissionGate(),
+    undefined,
+    transcriptReader(durable),
+    undefined,
+    undefined,
+    async (_id, scope) => scope.turnId === EXECUTION.turnId && scope.runId === EXECUTION.runId,
+  );
+  t.after(() => coordinator.close());
+  const sink = new RecordingSink();
+  const attached = attachTestConnection(coordinator, 'scoped-page', sink);
+  const input = {
+    sessionId: SESSION_ID,
+    execution: EXECUTION,
+    transcript: { kind: 'tail' as const, maxBytes: 1024 },
+  };
+  const opened = await coordinator.handlers['subscription.open'](
+    input,
+    connectionContext('scoped-page'),
+  );
+  assert.ok(opened.ok);
+  assert.equal(opened.result.transcript?.durable.throughSequence, 0);
+  await attached.activate(opened.result.subscriptionId);
+  durable.push({
+    ...assistantMessage('unrelated persisted answer'),
+    id: 'unrelated',
+    turnId: 'unrelated-turn',
+  });
+  await coordinator.refreshCanonical(SESSION_ID);
+  assert.equal(sink.frames.length, 0, 'other work must not advance this transcript');
+  durable.push(assistantMessage('own final'));
+  await coordinator.refreshCanonical(SESSION_ID);
+  const advanced = sink.frames.find((f) => f.kind === 'subscription.transcript_advanced');
+  assert.ok(advanced?.kind === 'subscription.transcript_advanced');
+  assert.equal(advanced.throughSequence, 2);
+  const page = await coordinator.handlers['session.transcript.page'](
+    {
+      subscriptionId: opened.result.subscriptionId,
+      direction: 'newer',
+      throughSequence: 2,
+      cursor: null,
+      anchorSequence: 0,
+      maxBytes: 1024,
+    },
+    connectionContext('scoped-page'),
+  );
+  assert.ok(page.ok);
+  assert.deepEqual(
+    page.result.fragments.map((f) => JSON.parse(Buffer.from(f.data, 'base64').toString()).text),
+    ['own final'],
+  );
+  attached.close();
+  attachTestConnection(coordinator, 'rejoined-scope', new RecordingSink());
+  const rejoined = await coordinator.handlers['subscription.open'](
+    input,
+    connectionContext('rejoined-scope'),
+  );
+  assert.ok(rejoined.ok);
+  const client = clientSubscription(
+    rejoined.result,
+    async () => {},
+    async () => {
+      throw new Error('Tail fits in bootstrap');
+    },
+  );
+  assert.deepEqual(
+    (await client.loadTranscript((v) => v as StoredMessage)).map((m) => m.id),
+    ['own-user', 'message-1'],
+  );
+  for (const scope of [
+    { turnId: EXECUTION.turnId, runId: 'wrong-run' },
+    { turnId: 'wrong-turn', runId: EXECUTION.runId },
+  ]) {
+    const wrong = await coordinator.handlers['subscription.open'](
+      { ...input, execution: scope },
+      connectionContext('rejoined-scope'),
+    );
+    assert.ok(!wrong.ok && wrong.error.code === 'not_found');
+  }
+});
 
 test('open is an inactive publication barrier and live sequence starts at nextSequence', async () => {
   const read = deferred<CanonicalSessionProjection | null>();

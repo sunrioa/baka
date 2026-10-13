@@ -541,6 +541,75 @@ for (const backend of ['Local', 'Memory'] as const) {
       assert.equal(result!.read(), 'caller-owned projection');
     });
   });
+  test(backend + ': scoped transcript seeks skip unrelated payloads before decoding', async () => {
+    await withProvider(make(), async ({ runtimeEventStore: s }) => {
+      const sessionId = 'scoped-transcript-session';
+      const own = {
+        sessionId,
+        turnId: 'owned-turn',
+        runId: 'owned-run',
+        invocationId: 'owned-invocation',
+      };
+      const other = {
+        sessionId,
+        turnId: 'unrelated-turn',
+        runId: 'unrelated-run',
+        invocationId: 'unrelated-invocation',
+      };
+      const opening = (run: typeof own) =>
+        buildInvocationOpenedEvent({
+          id: `${run.invocationId}-opened`,
+          run,
+          openedAt: 1,
+          opening: invocationOpening(),
+        });
+      const text = (run: typeof own, id: string, body: string): RuntimeEvent => ({
+        ...run,
+        id,
+        ts: 2,
+        partial: false,
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'text', text: body },
+      });
+      for (const event of [
+        opening(own),
+        text(own, 'own-prompt', 'Owned prompt'),
+        opening(other),
+        text(other, 'large-unrelated', 'x'.repeat(64 * 1024)),
+        text(own, 'own-answer', 'Owned answer'),
+        text(other, 'unrelated-tail', 'Not part of the selected work'),
+      ])
+        await s.appendRuntimeEvent(sessionId, event.runId, event);
+      assert.equal(await s.readTranscriptHighWater(sessionId), 6);
+      assert.equal(await s.readTranscriptHighWater(sessionId, own.turnId), 5);
+      assert.equal(await s.readTranscriptHighWater(sessionId, 'missing-turn'), null);
+      const request = {
+        direction: 'older' as const,
+        throughOrdinal: 6,
+        position: 6,
+        maxEvents: 8,
+        maxBytes: 16 * 1024,
+        maxRecordBytes: 4096,
+      };
+      const read = (_header: unknown, entries: Iterable<{ event: RuntimeEvent }>) =>
+        [...entries].map((e) => e.event.id);
+      await assert.rejects(
+        s.readTranscriptRun(sessionId, request, read),
+        RuntimeTranscriptOversizedTurnError,
+      );
+      assert.deepEqual(
+        await s.readTranscriptRun(sessionId, { ...request, turnId: own.turnId }, read),
+        ['owned-invocation-opened', 'own-prompt', 'own-answer'],
+      );
+      assert.equal(
+        await s.readTranscriptRun(sessionId, { ...request, turnId: 'missing-turn' }, read),
+        undefined,
+      );
+      assert.equal(await s.readTranscriptTurnCrossing(sessionId, 3), true);
+      assert.equal(await s.readTranscriptTurnCrossing(sessionId, 3, other.turnId), false);
+    });
+  });
   test(backend + ': transcript serves a running Turn up to the watermark', async () => {
     await withProvider(make(), async ({ runtimeEventStore: s }) => {
       const sessionId = 'watermark-session';

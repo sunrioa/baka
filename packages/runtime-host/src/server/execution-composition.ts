@@ -1023,6 +1023,13 @@ export async function createExecutionRuntimeHostComposition(
         hostChanges.publishSessionCatalog(sessionId, attention);
       },
       context.sessionAccessAuthority,
+      async (sessionId, execution) => {
+        const admission = await stores.agentRunStore.readRootTurnAdmission(
+          sessionId,
+          execution.turnId,
+        );
+        return admission?.runId === execution.runId;
+      },
     );
     const continuityCoordinator = continuity;
     const planStore = observeInteractivePlanStoreWriter(

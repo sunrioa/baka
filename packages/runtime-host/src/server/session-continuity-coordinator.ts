@@ -49,6 +49,7 @@ import {
   type SessionToolEvent,
   type SessionTranscriptAdvancedFrame,
   type SessionTranscriptPageInput,
+  type SessionExecutionScope,
   type OperationOutcome,
   type SubscriptionFrame,
   type SubscriptionOpenInput,
@@ -85,6 +86,11 @@ import {
 } from './session-transcript-pager.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 import { projectSharedSessionMessageContent } from './shared-session-transcript.js';
+import {
+  executionScopeMatches,
+  projectExecutionFrame,
+  projectExecutionSnapshot,
+} from './session-execution-scope.js';
 
 const MAX_CONNECTION_SUBSCRIPTIONS = 16;
 const MAX_SUBSCRIBER_QUEUED_FRAMES = 32;
@@ -159,6 +165,8 @@ interface QueuedSubscriptionFrame {
 }
 
 interface Subscriber {
+  readonly execution?: SessionExecutionScope;
+  lastExecutionProjection?: SessionContinuitySnapshot;
   connectionId: string;
   principalId: string;
   principalKind: NonNullable<ConnectionContext['principalKind']>;
@@ -230,6 +238,14 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
   readonly handlers: SessionContinuityOperationHandlerMap = {
     'subscription.pty_interest.set': async (input, context) => {
       const subscriber = this.#ownedSubscriber(context.connectionId, input.subscriptionId);
+      if (subscriber?.execution)
+        return {
+          ok: false,
+          error: {
+            code: 'operation_unavailable',
+            message: 'Execution views do not expose Session-wide PTY streams',
+          },
+        };
       if (!subscriber || !this.#canObserve(subscriber, subscriber.sessionId)) {
         return {
           ok: false,
@@ -317,6 +333,10 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
       RuntimeHostAccessAuthority,
       'activeSessionGrant' | 'subscribeGrantRevocations'
     >,
+    private readonly validateExecution?: (
+      sessionId: string,
+      execution: SessionExecutionScope,
+    ) => Promise<boolean>,
   ) {
     this.#hostEpoch = hostEpoch;
     this.#readCanonical = readCanonical;
@@ -475,7 +495,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         const state = this.#sessions.get(event.rootSessionId);
         if (!state) return;
         for (const subscriber of state.subscribers.values()) {
-          if (subscriber.principalKind === 'session_guest') continue;
+          if (subscriber.principalKind === 'session_guest' || subscriber.execution) continue;
           const frame: AgentGraphChangedFrame = {
             kind: 'subscription.agent_graph_changed',
             hostEpoch: this.#hostEpoch,
@@ -545,6 +565,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
       const state = this.#sessions.get(event.sessionId);
       if (!state) return;
       for (const subscriber of state.subscribers.values()) {
+        if (subscriber.execution) continue;
         if (!this.#canObserve(subscriber, event.sessionId)) {
           this.#closeSubscriber(subscriber, 'access_revoked');
           continue;
@@ -601,6 +622,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         }
         for (const change of frames) {
           for (const subscriber of state.subscribers.values()) {
+            if (subscriber.execution) continue;
             const projected =
               change.domain === 'runtime_resource' && subscriber.principalKind === 'session_guest'
                 ? {
@@ -802,6 +824,8 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           text: (current?.text ?? '') + event.text,
         });
         for (const subscriber of state.subscribers.values()) {
+          if (!executionScopeMatches(subscriber.execution, { turnId: event.turnId, runId }))
+            continue;
           if (subscriber.assistantBacklog.has(prefixKey)) {
             // This text is part of the prefix still being paid out; the payout
             // reads the accumulated stream, so it carries this delta already.
@@ -880,6 +904,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         state.toolResultPreviews.delete(event.toolUseId);
       }
       for (const subscriber of state.subscribers.values()) {
+        if (!executionScopeMatches(subscriber.execution, { turnId: event.turnId, runId })) continue;
         this.#deliverInOrder(
           subscriber,
           () => {
@@ -893,7 +918,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
               event: projectSessionEvent(
                 event,
                 sessionId,
-                subscriber.principalKind === 'session_guest',
+                subscriber.principalKind === 'session_guest' || !!subscriber.execution,
               ),
             };
             this.#enqueue(subscriber, frame);
@@ -988,6 +1013,15 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
             message: 'Session was not found',
           };
         }
+        if (
+          input.execution &&
+          (!this.validateExecution || !(await this.validateExecution(sessionId, input.execution)))
+        )
+          return {
+            ok: false as const,
+            code: 'not_found' as const,
+            message: 'The admitted execution was not found',
+          };
         const committed = this.#commitCanonical(sessionId, canonical);
         if (committed.changed) this.#broadcastProjection(committed.state, committed.value);
         if (this.#connections.get(connectionId) !== connection) {
@@ -996,9 +1030,13 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         }
 
         const subscriptionId = randomUUID();
-        const activeAssistantStreams = [...committed.state.assistantStreams.values()].map(
-          ({ kind, turnId, messageId }) => ({ kind, turnId, messageId }),
-        );
+        const activeAssistantStreams = [...committed.state.assistantStreams.values()]
+          .filter(
+            (stream) =>
+              executionScopeMatches(input.execution, committed.value.rootTurn) &&
+              (!input.execution || stream.turnId === input.execution.turnId),
+          )
+          .map(({ kind, turnId, messageId }) => ({ kind, turnId, messageId }));
         let transcript: SubscriberTranscriptState | undefined;
         let transcriptBootstrap: SubscriptionOpenResult['transcript'] = null;
         if (input.transcript.kind === 'tail') {
@@ -1010,16 +1048,25 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
             };
           }
           try {
-            const throughSequence = await this.#transcriptReader.readDurableHighWater(sessionId);
-            const snapshot = projectSessionSnapshot(committed.value, identity.principalKind);
+            const throughSequence = await this.#transcriptReader.readDurableHighWater(
+              sessionId,
+              input.execution?.turnId,
+            );
+            const snapshot = projectExecutionSnapshot(
+              projectSessionSnapshot(committed.value, identity.principalKind),
+              input.execution,
+            );
             const created = await createSessionTranscriptBootstrap({
               reader: this.#transcriptReader,
               sessionId,
               subscriptionId,
               throughSequence,
               maxBytes: input.transcript.maxBytes,
-              projection: identity.principalKind === 'session_guest' ? 'shared' : 'owner',
+              projection:
+                input.execution || identity.principalKind === 'session_guest' ? 'shared' : 'owner',
+              turnId: input.execution?.turnId,
               maxEncodedBytes: subscriptionOpenTranscriptBudget({
+                ...(input.execution ? { execution: input.execution } : {}),
                 hostEpoch: this.#hostEpoch,
                 subscriptionId,
                 nextSequence: 1,
@@ -1048,10 +1095,14 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           throw new Error('Runtime Host connection closed during subscription open');
         }
         const openValue: SubscriptionOpenResult = {
+          ...(input.execution ? { execution: { ...input.execution } } : {}),
           hostEpoch: this.#hostEpoch,
           subscriptionId,
           nextSequence: 1,
-          snapshot: projectSessionSnapshot(committed.value, identity.principalKind),
+          snapshot: projectExecutionSnapshot(
+            projectSessionSnapshot(committed.value, identity.principalKind),
+            input.execution,
+          ),
           activeAssistantStreams,
           transcript: transcriptBootstrap,
         };
@@ -1072,6 +1123,9 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           };
         }
         const subscriber: Subscriber = {
+          ...(input.execution
+            ? { execution: { ...input.execution }, lastExecutionProjection: openValue.snapshot }
+            : {}),
           connectionId,
           principalId: identity.principalId,
           principalKind: identity.principalKind,
@@ -1091,7 +1145,13 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           pumping: false,
           terminalQueued: false,
           assistantBacklog: new Map(
-            [...committed.state.assistantStreams.keys()].map((key) => [key, { sent: 0 }]),
+            [...committed.state.assistantStreams.entries()]
+              .filter(
+                ([, stream]) =>
+                  executionScopeMatches(input.execution, committed.value.rootTurn) &&
+                  (!input.execution || stream.turnId === input.execution.turnId),
+              )
+              .map(([key]) => [key, { sent: 0 }]),
           ),
           deferred: [],
           deferredBytes: 0,
@@ -1106,7 +1166,11 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         const firstSequence = subscriber.nextSequence;
         // Seed retained live previews so a mid-turn rejoin still has Open facts.
         const rootTurn = committed.state.canonical.rootTurn;
-        if (rootTurn && !isTerminalTurn(rootTurn)) {
+        if (
+          rootTurn &&
+          !isTerminalTurn(rootTurn) &&
+          executionScopeMatches(subscriber.execution, rootTurn)
+        ) {
           for (const preview of committed.state.toolResultPreviews.values()) {
             if (preview.turnId !== rootTurn.turnId) continue;
             const frame: SessionEventFrame = {
@@ -1119,7 +1183,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
               event: projectSessionEvent(
                 preview,
                 sessionId,
-                subscriber.principalKind === 'session_guest',
+                subscriber.principalKind === 'session_guest' || !!subscriber.execution,
               ),
             };
             this.#enqueue(subscriber, frame);
@@ -1217,8 +1281,16 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
   ): Promise<void> {
     if (!this.#transcriptReader || state.subscribers.size === 0) return;
     if (![...state.subscribers.values()].some((subscriber) => subscriber.transcript)) return;
-    const throughSequence = await this.#transcriptReader.readDurableHighWater(sessionId);
+    const highWaters = new Map<string | undefined, number | null>();
     for (const subscriber of state.subscribers.values()) {
+      if (!subscriber.transcript) continue;
+      const turnId = subscriber.execution?.turnId;
+      if (!highWaters.has(turnId))
+        highWaters.set(
+          turnId,
+          await this.#transcriptReader.readDurableHighWater(sessionId, turnId),
+        );
+      const throughSequence = highWaters.get(turnId)!;
       if (
         !subscriber.transcript ||
         !updateSubscriberTranscriptHighWater(subscriber.transcript, throughSequence) ||
@@ -1277,6 +1349,13 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
   }
 
   #enqueue(subscriber: Subscriber, frame: OrderedSubscriptionFrame): void {
+    const projected = subscriber.execution
+      ? projectExecutionFrame(frame, subscriber.execution)
+      : frame;
+    if (projected) this.#enqueueProjected(subscriber, projected);
+  }
+
+  #enqueueProjected(subscriber: Subscriber, frame: OrderedSubscriptionFrame): void {
     if (subscriber.phase !== 'open' || subscriber.terminalQueued) return;
     let encodedBytes: number;
     try {
@@ -1677,6 +1756,7 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
     finalText: string,
     interrupted?: true,
   ): void {
+    if (!executionScopeMatches(subscriber.execution, { turnId: stream.turnId, runId })) return;
     const backlog = subscriber.assistantBacklog.get(key);
     const held = backlog ? stream.text.slice(0, backlog.sent) : stream.text;
     if (backlog && finalText.startsWith(held)) {
@@ -1795,6 +1875,25 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
 
   #broadcastProjection(state: SessionProjectionState, snapshot: SessionContinuitySnapshot): void {
     for (const subscriber of state.subscribers.values()) {
+      const projected = projectExecutionSnapshot(
+        projectSessionSnapshot(snapshot, subscriber.principalKind),
+        subscriber.execution,
+      );
+      if (subscriber.execution) {
+        const previous = subscriber.lastExecutionProjection;
+        // Queue/projection revisions advance for excluded activity as well.
+        // Compare visible facts before spending deferred/transport budget,
+        // against the last scheduled projection so ordering stays intact.
+        if (
+          previous &&
+          previous.queue.hostEpoch === projected.queue.hostEpoch &&
+          isDeepStrictEqual(previous.session, projected.session) &&
+          isDeepStrictEqual(previous.rootTurn, projected.rootTurn) &&
+          isDeepStrictEqual(previous.interactions, projected.interactions)
+        )
+          continue;
+        subscriber.lastExecutionProjection = projected;
+      }
       this.#deliverInOrder(
         subscriber,
         () => {
@@ -1803,10 +1902,10 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
             hostEpoch: this.#hostEpoch,
             subscriptionId: subscriber.subscriptionId,
             sequence: subscriber.nextSequence,
-            snapshot: projectSessionSnapshot(snapshot, subscriber.principalKind),
+            snapshot: projected,
           });
         },
-        () => Buffer.byteLength(JSON.stringify(snapshot), 'utf8'),
+        () => Buffer.byteLength(JSON.stringify(projected), 'utf8'),
       );
     }
   }

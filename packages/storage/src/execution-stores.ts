@@ -807,14 +807,14 @@ async function createExecutionStoresForWrite(
         run(() => runtimeEventStore.countRuntimeEventMessages(sessionIds)),
       resequenceSessionEventOrdinals: (sessionId) =>
         run(() => runtimeEventStore.resequenceSessionEventOrdinals(sessionId)),
-      readTranscriptHighWater: (sessionId) =>
-        run(() => runtimeEventStore.readTranscriptHighWater(sessionId)),
+      readTranscriptHighWater: (sessionId, turnId) =>
+        run(() => runtimeEventStore.readTranscriptHighWater(sessionId, turnId)),
       readTranscriptRun: (sessionId, request, project) =>
         run(() => runtimeEventStore.readTranscriptRun(sessionId, request, project)),
       readTranscriptTurns: (sessionId, request) =>
         run(() => runtimeEventStore.readTranscriptTurns(sessionId, request)),
-      readTranscriptTurnCrossing: (sessionId, ordinal) =>
-        run(() => runtimeEventStore.readTranscriptTurnCrossing(sessionId, ordinal)),
+      readTranscriptTurnCrossing: (sessionId, ordinal, turnId) =>
+        run(() => runtimeEventStore.readTranscriptTurnCrossing(sessionId, ordinal, turnId)),
       subscribeRuntimeEventCommits: (listener) => {
         if (closed) throw invalidExecutionStores(kind, 'write');
         assertStorageRootLeaseActive(lease, kind, 'write');

@@ -70,6 +70,8 @@ export type RuntimeTranscriptTurnsRequest =
   | { readonly throughOrdinal: number; readonly limit: number };
 
 export interface RuntimeTranscriptRunRequest {
+  /** Optional exact Turn extent; excludes unrelated payloads before decoding. */
+  readonly turnId?: string;
   readonly direction: 'older' | 'newer';
   readonly throughOrdinal: number;
   /** Ordinal the walk starts from, inclusive, in `direction`. */
@@ -81,7 +83,7 @@ export interface RuntimeTranscriptRunRequest {
 }
 
 export interface RuntimeTranscriptQueries {
-  readTranscriptHighWater(sessionId: string): Promise<number | null>;
+  readTranscriptHighWater(sessionId: string, turnId?: string): Promise<number | null>;
   /**
    * The run the walk reaches from `position`, or `undefined` past the end.
    *
@@ -105,7 +107,7 @@ export interface RuntimeTranscriptQueries {
     request: RuntimeTranscriptTurnsRequest,
   ): Promise<RuntimeTranscriptTurn[]>;
   /** Whether some Turn has events both below `ordinal` and at or above it. */
-  readTranscriptTurnCrossing(sessionId: string, ordinal: number): Promise<boolean>;
+  readTranscriptTurnCrossing(sessionId: string, ordinal: number, turnId?: string): Promise<boolean>;
 }
 
 export class RuntimeTranscriptOversizedTurnError extends Error {
@@ -145,11 +147,12 @@ const openingContent = (invocation: string) => `
  * opening or its ending, so a Turn that is still running — and a Turn the walk
  * lands in the middle of — is reached the same way any other is.
  */
-const seek = (direction: 'older' | 'newer') => `
+const seek = (direction: 'older' | 'newer', scoped = false) => `
   SELECT o.ordinal AS ordinal, e.invocation_id AS invocation_id
   FROM runtime_session_event_ordinals o
   JOIN runtime_events e ON e.event_id = o.event_id
   WHERE o.session_id = :sessionId
+    ${scoped ? 'AND e.turn_id = :turnId AND o.ordinal >= :firstOrdinal' : ''}
     ${
       direction === 'older'
         ? // Folded into one bound because SQLite takes a single inequality per
@@ -251,8 +254,8 @@ export function rebuildTranscriptTurnExtents(db: DatabaseSync, sessionId?: strin
 }
 
 const RUN_QUERIES = {
-  older: { seek: seek('older'), boundary: boundary('older') },
-  newer: { seek: seek('newer'), boundary: boundary('newer') },
+  older: { seek: seek('older'), scopedSeek: seek('older', true), boundary: boundary('older') },
+  newer: { seek: seek('newer'), scopedSeek: seek('newer', true), boundary: boundary('newer') },
 } as const;
 
 /** Selects invocations by Session ordinal. Payloads are decoded, never classified. */
@@ -265,7 +268,16 @@ export class RuntimeTranscriptQuery {
     ) => RuntimeInvocationRecord,
   ) {}
 
-  highWater(sessionId: string): number | null {
+  highWater(sessionId: string, turnId?: string): number | null {
+    if (turnId !== undefined) {
+      assertTurnId(turnId);
+      const row = this.db
+        .prepare(
+          'SELECT last_ordinal AS high FROM runtime_session_turn_extents WHERE session_id = ? AND turn_id = ?',
+        )
+        .get(sessionId, turnId) as { high: number } | undefined;
+      return row?.high ?? null;
+    }
     const row = this.db
       .prepare(
         'SELECT MAX(ordinal) AS high FROM runtime_session_event_ordinals WHERE session_id = ?',
@@ -290,19 +302,48 @@ export class RuntimeTranscriptQuery {
     if (request.direction !== 'older' && request.direction !== 'newer') {
       throw new Error('Invalid transcript direction');
     }
+    if (request.turnId !== undefined) assertTurnId(request.turnId);
+    const extent =
+      request.turnId === undefined
+        ? undefined
+        : (this.db
+            .prepare(
+              'SELECT first_ordinal, last_ordinal FROM runtime_session_turn_extents WHERE session_id = ? AND turn_id = ?',
+            )
+            .get(sessionId, request.turnId) as
+            | { first_ordinal: number; last_ordinal: number }
+            | undefined);
+    if (request.turnId !== undefined && !extent) return undefined;
     const queries = RUN_QUERIES[request.direction];
+    const throughOrdinal = Math.min(
+      request.throughOrdinal,
+      extent?.last_ordinal ?? request.throughOrdinal,
+    );
+    const position = extent
+      ? request.direction === 'older'
+        ? Math.min(request.position, extent.last_ordinal)
+        : Math.max(request.position, extent.first_ordinal)
+      : request.position;
+    if (
+      extent &&
+      (throughOrdinal < extent.first_ordinal ||
+        (position > throughOrdinal && request.direction === 'newer') ||
+        position < extent.first_ordinal)
+    )
+      return undefined;
     const bind = {
       sessionId,
-      position: request.position,
-      throughOrdinal: request.throughOrdinal,
+      position,
+      throughOrdinal,
+      ...(extent ? { turnId: request.turnId!, firstOrdinal: extent.first_ordinal } : {}),
     };
-    const seeked = this.db.prepare(queries.seek).get(bind) as
+    const seeked = this.db.prepare(extent ? queries.scopedSeek : queries.seek).get(bind) as
       | { ordinal: number; invocation_id: string }
       | undefined;
     if (!seeked) return undefined;
     const stop = this.db.prepare(queries.boundary).get({
       sessionId,
-      throughOrdinal: request.throughOrdinal,
+      throughOrdinal,
       ordinal: seeked.ordinal,
       invocationId: seeked.invocation_id,
     }) as { ordinal: number } | undefined;
@@ -311,7 +352,7 @@ export class RuntimeTranscriptQuery {
       {
         invocation: this.invocation(sessionId, seeked.invocation_id),
         firstOrdinal: older ? (stop ? stop.ordinal + 1 : 0) : seeked.ordinal,
-        lastOrdinal: older ? seeked.ordinal : stop ? stop.ordinal - 1 : request.throughOrdinal,
+        lastOrdinal: older ? seeked.ordinal : stop ? stop.ordinal - 1 : throughOrdinal,
       },
       this.events(seeked.invocation_id, request),
     );
@@ -374,16 +415,18 @@ export class RuntimeTranscriptQuery {
     });
   }
 
-  crossing(sessionId: string, ordinal: number): boolean {
+  crossing(sessionId: string, ordinal: number, turnId?: string): boolean {
     assertOrdinal(ordinal);
+    if (turnId !== undefined) assertTurnId(turnId);
     return (
       this.db
         .prepare(`
         SELECT 1 FROM runtime_session_turn_extents
         WHERE session_id = ? AND first_ordinal < ? AND last_ordinal >= ?
+          AND (? IS NULL OR turn_id = ?)
         LIMIT 1
       `)
-        .get(sessionId, ordinal, ordinal) !== undefined
+        .get(sessionId, ordinal, ordinal, turnId ?? null, turnId ?? null) !== undefined
     );
   }
 
@@ -476,6 +519,10 @@ function decodeStoredEvent(row: StoredEventRow): RuntimeEvent {
 function assertOrdinal(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0)
     throw new Error('Invalid transcript event ordinal');
+}
+
+function assertTurnId(value: string): void {
+  if (typeof value !== 'string' || value.length === 0) throw new Error('Invalid transcript Turn');
 }
 
 function assertReadLimit(value: number, name: string): void {

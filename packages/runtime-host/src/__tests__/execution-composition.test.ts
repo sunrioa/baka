@@ -22,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { AsyncResource } from 'node:async_hooks';
-import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type StoredMessage } from '@maka/core/session';
 import {
   TOOL_BOUNDARY_PROTOCOL_V1,
   decodeRuntimeEvent,
@@ -129,6 +129,7 @@ import { WorkHubExecutionSlots } from '../server/workhub-execution-slots.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
+import { clientSubscription } from './fixtures/client-session-subscription.js';
 
 const require = createRequire(import.meta.url);
 const FAKE_CONNECTION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -3073,6 +3074,116 @@ test('WorkHub receives a pending question and then the result after the target r
   });
 });
 
+test('production execution-scoped subscriptions read a past task without waking it or exposing the new root', {
+  timeout: 20_000,
+}, async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push(input.text);
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'scoped-production',
+      principal: 'local_owner',
+      principalKind: 'local_owner',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const session = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const first = await composition.handlers['turn.start'](
+        {
+          sessionId: session.id,
+          turnId: 'original-work',
+          content: { text: 'original scoped work' },
+        },
+        context,
+      );
+      assert.ok(first.ok, JSON.stringify(first));
+      await waitFor(
+        async () =>
+          (await manager.listTurns(session.id)).some(
+            (t) => t.turnId === 'original-work' && t.status === 'completed',
+          ),
+        12_000,
+      );
+      if (first.result.kind !== 'started') assert.fail('Expected the original root to start');
+      const scope = { turnId: first.result.turn.turnId, runId: first.result.turn.runId };
+      const second = await composition.handlers['turn.start'](
+        {
+          sessionId: session.id,
+          turnId: 'unrelated-work',
+          content: { text: FAKE_HOLD_OPEN_PROMPT },
+        },
+        context,
+      );
+      assert.ok(second.ok, JSON.stringify(second));
+      if (second.result.kind !== 'started') assert.fail('Expected the unrelated root to start');
+      await waitFor(async () => sends.length === 2);
+      assert.ok(composition.continuity);
+      const observing = composition.continuity.attachConnection(context.connectionId, {
+        send: async () => {},
+      });
+      try {
+        const invalid = await composition.handlers['subscription.open'](
+          {
+            sessionId: session.id,
+            execution: { ...scope, runId: second.result.turn.runId },
+            transcript: { kind: 'tail', maxBytes: 1024 },
+          },
+          context,
+        );
+        assert.ok(!invalid.ok && invalid.error.code === 'not_found');
+        const input = {
+          sessionId: session.id,
+          execution: scope,
+          transcript: { kind: 'tail' as const, maxBytes: 1024 },
+        };
+        const opened = await composition.handlers['subscription.open'](input, context);
+        assert.ok(opened.ok, JSON.stringify(opened));
+        assert.deepEqual(opened.result.execution, scope);
+        assert.equal(opened.result.snapshot.rootTurn, null);
+        assert.deepEqual(opened.result.activeAssistantStreams, []);
+        const subscription = clientSubscription(
+          opened.result,
+          async () => {},
+          async (query) => {
+            const page = await composition.handlers['session.transcript.page'](query, context);
+            assert.ok(page.ok, JSON.stringify(page));
+            return page.result;
+          },
+        );
+        const transcript = await subscription.loadTranscript((value) => value as StoredMessage);
+        assert.ok(transcript.some((m) => m.type === 'user' && m.text === 'original scoped work'));
+        assert.ok(transcript.some((m) => m.type === 'assistant'));
+        assert.ok(transcript.every((m) => m.turnId === scope.turnId));
+        const unchanged = (await manager.listSessions()).find((s) => s.id === session.id)!;
+        assert.equal(unchanged.permissionMode, 'ask');
+        assert.equal(unchanged.model, 'fake-model');
+        assert.equal(unchanged.cwd, root);
+        assert.deepEqual(sends, ['original scoped work', FAKE_HOLD_OPEN_PROMPT]);
+      } finally {
+        observing.close();
+      }
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('WorkHub creates new work through the production assignment composition', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner, ['fake-model', 'fake-model-b']);
@@ -3149,6 +3260,7 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     let pauseNext = true;
+    let askAfterFirstHandoff = true;
     let boundary = deferred<void>();
     const primaryBackendFactory: BackendFactory = (backendContext) =>
       new (class extends FakeBackend {
@@ -3165,7 +3277,10 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
             assert.equal(await input.handoffBoundary!(new AbortController().signal, null), 'pause');
             return;
           }
-          yield* super.send(input);
+          if (backendContext.header.name === 'Payments' && askAfterFirstHandoff) {
+            askAfterFirstHandoff = false;
+            yield* super.send({ ...input, text: FAKE_ASK_USER_QUESTION_PROMPT });
+          } else yield* super.send(input);
         }
       })(backendContext);
     let { composition, manager } = await createCapturedExecutionComposition(owner, {
@@ -3262,6 +3377,52 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
       assert.equal(original.ok, true);
       if (!original.ok) return;
       await handoffAndReopen();
+      await waitFor(async () => (await manager.listActiveInteractions(target.id)).length === 1);
+      assert.ok(composition.continuity);
+      const readContext = { ...context, principalKind: 'local_owner' as const };
+      const observation = composition.continuity.attachConnection(context.connectionId, {
+        send: async () => {},
+      });
+      try {
+        const scope = { turnId: original.result.turnId, runId: original.result.runId };
+        const opened = await composition.handlers['subscription.open'](
+          { sessionId: target.id, execution: scope, transcript: { kind: 'tail', maxBytes: 1024 } },
+          readContext,
+        );
+        assert.ok(opened.ok, JSON.stringify(opened));
+        assert.deepEqual(
+          opened.result.execution,
+          scope,
+          'physical handoff keeps the admitted logical execution',
+        );
+        const whole = await composition.handlers['subscription.open'](
+          { sessionId: target.id, transcript: { kind: 'none' } },
+          readContext,
+        );
+        assert.ok(whole.ok, JSON.stringify(whole));
+        const pending = whole.result.snapshot.interactions.pending[0]!;
+        assert.notEqual(pending.runId, scope.runId, 'the successor owns the actual question');
+        assert.equal(opened.result.snapshot.interactions.pending.length, 1);
+        assert.equal(opened.result.snapshot.interactions.pending[0]!.runId, pending.runId);
+        assert.equal(
+          opened.result.snapshot.interactions.pending[0]!.interactionId,
+          pending.interactionId,
+        );
+        const subscription = clientSubscription(
+          opened.result,
+          async () => {},
+          async (query) => {
+            const page = await composition.handlers['session.transcript.page'](query, readContext);
+            assert.ok(page.ok, JSON.stringify(page));
+            return page.result;
+          },
+        );
+        const rows = await subscription.loadTranscript((v) => v as StoredMessage);
+        assert.ok(rows.some((m) => m.type === 'user' && m.text === FAKE_HOLD_OPEN_PROMPT));
+        assert.ok(rows.every((m) => m.turnId === scope.turnId));
+      } finally {
+        observation.close();
+      }
       const firstStop = await actWorkHub(
         composition,
         {
