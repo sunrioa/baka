@@ -36,6 +36,8 @@ import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type { WorkHubTaskInputCommitRequest } from './session-store-contract.js';
 import {
   decodeTaskExecutionGrant,
   type TaskExecutionGrantRecord,
@@ -271,6 +273,7 @@ export interface SqliteWorkHubMessageAssignmentRequest {
   readonly admission: PendingMessageAdmission;
   readonly projection: SessionCatalogMessageProjection;
   readonly supersession?: WorkHubDelegationSupersededMessage;
+  readonly taskInput?: WorkHubTaskInputMessage;
   readonly create?: {
     readonly header: SessionHeader;
     readonly requestFingerprint: string;
@@ -1826,6 +1829,10 @@ export class SqliteSessionMetadataStore {
       ? decodeCanonicalMessage(JSON.parse(supersessionJson) as unknown)
       : undefined;
     const admission = normalizePendingMessageAdmission(request.admission);
+    const taskInput =
+      request.taskInput && this.normalizeWorkHubTaskInput(request.taskInput, admission);
+    if (taskInput && taskInput.mode !== 'continuation')
+      throw new SessionMetadataConflictError('Invalid WorkHub continuation input');
     const suffix = createHash('sha256')
       .update(request.assignment.actionId)
       .digest('hex')
@@ -1854,6 +1861,15 @@ export class SqliteSessionMetadataStore {
     ) {
       throw new SessionMetadataConflictError('Invalid WorkHub assignment identity');
     }
+    if (
+      taskInput &&
+      (!assignment.work ||
+        assignment.work.id !== taskInput.workId ||
+        assignment.work.generationId !== taskInput.generationId ||
+        assignment.work.continuesActionId !== taskInput.sourceActionId ||
+        assignment.disposition !== 'delegate_existing')
+    )
+      throw new SessionMetadataConflictError('WorkHub continuation input changed source');
     if (
       (assignment.replacesActionId === undefined) !==
         (assignment.replacesDelegationId === undefined) ||
@@ -1910,6 +1926,8 @@ export class SqliteSessionMetadataStore {
         assignment.id,
       );
       if (existingAssignment) {
+        if (taskInput && !this.readExistingWorkHubTaskInputSync(taskInput))
+          throw new SessionMetadataConflictError('WorkHub continuation input receipt is missing');
         if (
           existingAssignment.type !== 'workhub_coordination' ||
           existingAssignment.kind !== 'delegation_assigned' ||
@@ -1924,6 +1942,12 @@ export class SqliteSessionMetadataStore {
           targetCreated: false,
           assignment: existingAssignment,
         };
+      }
+
+      if (taskInput) {
+        if (this.readExistingWorkHubTaskInputSync(taskInput))
+          throw new SessionMetadataConflictError('WorkHub input belongs to another effect');
+        this.assertWorkHubTaskInputSourceSync(taskInput);
       }
 
       if (assignment.work) {
@@ -2088,10 +2112,155 @@ export class SqliteSessionMetadataStore {
           ...(supersession && supersessionJson
             ? [{ message: supersession, json: supersessionJson }]
             : []),
+          ...(taskInput ? [{ message: taskInput, json: JSON.stringify(taskInput) }] : []),
         ],
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment: committedAssignment };
+    });
+  }
+
+  private normalizeWorkHubTaskInput(
+    input: WorkHubTaskInputMessage,
+    admission: PendingMessageAdmission,
+  ): WorkHubTaskInputMessage {
+    const canonical = decodeCanonicalMessage(JSON.parse(JSON.stringify(input)) as unknown);
+    const suffix = createHash('sha256').update(input.inputId).digest('hex').slice(0, 48);
+    if (
+      canonical.type !== 'workhub_coordination' ||
+      canonical.kind !== 'task_input' ||
+      canonical.id !== `whti_${suffix}` ||
+      canonical.targetSessionId !== admission.sessionId ||
+      canonical.targetMessageId !== admission.messageId ||
+      canonical.targetContentDigest !== messageContentDigest(admission.content) ||
+      (canonical.mode === 'steering' &&
+        (admission.messageId !== `whtm_${suffix}` ||
+          canonical.execution?.turnId !== admission.turnId ||
+          canonical.execution.runId !== admission.runId ||
+          admission.placement !== 'current_turn' ||
+          admission.disposition !== 'steering'))
+    )
+      throw new SessionMetadataConflictError('Invalid WorkHub task input identity');
+    return canonical;
+  }
+
+  private readExistingWorkHubTaskInputSync(
+    input: WorkHubTaskInputMessage,
+  ): WorkHubTaskInputMessage | undefined {
+    const existing = this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, input.id);
+    if (!existing) return undefined;
+    if (
+      existing.type !== 'workhub_coordination' ||
+      existing.kind !== 'task_input' ||
+      !isDeepStrictEqual({ ...existing, ts: input.ts }, input)
+    )
+      throw new SessionMetadataConflictError(
+        'WorkHub input identity belongs to different content or source',
+      );
+    return existing;
+  }
+
+  private assertWorkHubTaskInputSourceSync(
+    input: WorkHubTaskInputMessage,
+  ): WorkHubDelegationAssignedMessage {
+    const suffix = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 48);
+    const source = this.readMessageByIdSync(
+      WORKHUB_COORDINATION_SESSION_ID,
+      `wha_${suffix(input.sourceActionId)}`,
+    );
+    const latest = this.readLatestWorkHubAssignmentSync(input.workId);
+    const coordinator = this.readRecordSync(WORKHUB_COORDINATION_SESSION_ID)?.header;
+    const target = this.readRecordSync(input.targetSessionId)?.header;
+    if (
+      source?.type !== 'workhub_coordination' ||
+      source.kind !== 'delegation_assigned' ||
+      source.delegationId !== input.sourceDelegationId ||
+      source.targetSessionId !== input.targetSessionId ||
+      source.coordinationTurnId !== input.turnId ||
+      (source.work?.id ?? source.actionId) !== input.workId ||
+      (source.work?.generationId ?? source.actionId) !== input.generationId ||
+      !latest ||
+      (latest.work?.generationId ?? latest.actionId) !== input.generationId ||
+      coordinator?.role !== WORKHUB_COORDINATION_SESSION_ROLE ||
+      coordinator.isArchived ||
+      !target ||
+      target.isArchived ||
+      target.subagentParent ||
+      target.role !== undefined ||
+      target.labels.includes('mode:side_conversation')
+    )
+      throw new SessionMetadataConflictError(
+        'The selected work generation or target is unavailable',
+      );
+    const delegation = suffix(source.delegationId);
+    const read = (prefix: string) =>
+      this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `${prefix}_${delegation}`);
+    const stop = read('whq');
+    const resolution = read('whzt') ?? read('whz');
+    if (
+      read('whp') ||
+      read('whx') ||
+      read('whb') ||
+      (stop &&
+        !(
+          resolution?.type === 'workhub_coordination' &&
+          resolution.kind === 'delegation_stop_resolved' &&
+          resolution.outcome === 'not_owned'
+        ))
+    )
+      throw new SessionMetadataConflictError('The selected work is being retired');
+    return source;
+  }
+
+  /** Commit input provenance with the one target Message effect, without a second task ledger. */
+  async commitWorkHubTaskInput(
+    request: WorkHubTaskInputCommitRequest,
+  ): Promise<WorkHubTaskInputMessage> {
+    this.assertOpen();
+    const admission = normalizePendingMessageAdmission(request.admission);
+    const input = this.normalizeWorkHubTaskInput(request.input, admission);
+    const expected =
+      request.expectedAdmission && normalizePendingMessageAdmission(request.expectedAdmission);
+    if (input.mode === 'continuation' || (input.mode === 'queued_supplement') !== !!expected)
+      throw new SessionMetadataConflictError('Invalid WorkHub input admission mode');
+    return this.transaction(() => {
+      const existing = this.readExistingWorkHubTaskInputSync(input);
+      if (existing) return existing;
+      const source = this.assertWorkHubTaskInputSourceSync(input);
+      if (expected) {
+        const current = this.readMessageAdmissionSync(expected.sessionId, expected.messageId);
+        if (
+          !current ||
+          !samePendingMessageAdmission(current, expected) ||
+          source.targetMessageId !== admission.messageId ||
+          admission.sessionId !== expected.sessionId ||
+          admission.messageId !== expected.messageId ||
+          admission.turnId !== expected.turnId ||
+          admission.runId !== expected.runId ||
+          admission.admittedAt !== expected.admittedAt ||
+          admission.submittedPlacement !== expected.submittedPlacement ||
+          admission.placement !== 'next_turn' ||
+          admission.disposition !== 'followup' ||
+          expected.placement !== 'next_turn' ||
+          expected.disposition !== 'followup' ||
+          !isDeepStrictEqual(admission.submittedIntent, expected.submittedIntent)
+        )
+          throw new SessionMetadataConflictError('The queued work changed before supplementation');
+        this.updateMessageAdmissionSync(admission);
+      } else {
+        if (this.readMessageAdmissionSync(admission.sessionId, admission.messageId))
+          throw new SessionMetadataConflictError('WorkHub steering Message already has an owner');
+        this.insertMessageAdmissionSync(admission);
+      }
+      const row = this.db
+        .prepare(
+          'SELECT COALESCE(MAX(sequence), -1) AS last_sequence FROM session_messages WHERE session_id = ?',
+        )
+        .get(WORKHUB_COORDINATION_SESSION_ID) as { last_sequence: number };
+      this.insertSessionMessagesSync(WORKHUB_COORDINATION_SESSION_ID, row.last_sequence + 1, [
+        { message: input, json: JSON.stringify(input) },
+      ]);
+      return input;
     });
   }
 
@@ -2563,47 +2732,49 @@ export class SqliteSessionMetadataStore {
   async updateMessageAdmission(admission: PendingMessageAdmission): Promise<void> {
     this.assertOpen();
     const stored = normalizePendingMessageAdmission(admission);
-    this.transaction(() => {
-      const currentRow = this.db
-        .prepare(
-          `
+    this.transaction(() => this.updateMessageAdmissionSync(stored));
+  }
+
+  private updateMessageAdmissionSync(stored: PendingMessageAdmission): void {
+    const currentRow = this.db
+      .prepare(
+        `
           SELECT turn_id, run_id, message_id, content_json, submitted_content_digest,
             submitted_placement, placement, disposition, queue_order, admitted_at,
             submitted_intent_json, skill_invocation_json
           FROM message_admissions
           WHERE session_id = ? AND message_id = ?
         `,
-        )
-        .get(stored.sessionId, stored.messageId) as MessageAdmissionRow | undefined;
-      if (!currentRow) throw new SessionMetadataConflictError('Message admission does not exist');
-      const current = decodeMessageAdmissionRow(stored.sessionId, currentRow);
-      if (
-        current.turnId !== stored.turnId ||
-        current.runId !== stored.runId ||
-        current.submittedPlacement !== stored.submittedPlacement ||
-        current.admittedAt !== stored.admittedAt
-      ) {
-        throw new SessionMetadataConflictError('Message admission update identity conflict');
-      }
-      this.db
-        .prepare(
-          `
+      )
+      .get(stored.sessionId, stored.messageId) as MessageAdmissionRow | undefined;
+    if (!currentRow) throw new SessionMetadataConflictError('Message admission does not exist');
+    const current = decodeMessageAdmissionRow(stored.sessionId, currentRow);
+    if (
+      current.turnId !== stored.turnId ||
+      current.runId !== stored.runId ||
+      current.submittedPlacement !== stored.submittedPlacement ||
+      current.admittedAt !== stored.admittedAt
+    ) {
+      throw new SessionMetadataConflictError('Message admission update identity conflict');
+    }
+    this.db
+      .prepare(
+        `
           UPDATE message_admissions
           SET content_json = ?, submitted_content_digest = ?, placement = ?, disposition = ?,
             skill_invocation_json = ?
           WHERE session_id = ? AND message_id = ?
         `,
-        )
-        .run(
-          JSON.stringify(stored.content),
-          stored.submittedContentDigest,
-          stored.placement,
-          stored.disposition,
-          JSON.stringify(stored.skillInvocation),
-          stored.sessionId,
-          stored.messageId,
-        );
-    });
+      )
+      .run(
+        JSON.stringify(stored.content),
+        stored.submittedContentDigest,
+        stored.placement,
+        stored.disposition,
+        JSON.stringify(stored.skillInvocation),
+        stored.sessionId,
+        stored.messageId,
+      );
   }
 
   async cancelMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void> {

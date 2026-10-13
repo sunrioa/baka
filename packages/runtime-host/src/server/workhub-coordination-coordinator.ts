@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
@@ -1068,6 +1069,48 @@ export class HostWorkHubCoordinationCoordinator {
         );
       }
     });
+  }
+
+  /** Native user input does not allocate or wait for a Coordination model Turn. */
+  async continueTaskInput(
+    input: WorkHubTaskInputRequest,
+    context: ConnectionContext,
+  ): Promise<WorkHubCoordinationActResult> {
+    const source = await this.#stores.readWorkHubAssignment(input.sourceActionId);
+    if (
+      !source ||
+      source.delegationId !== input.sourceDelegationId ||
+      (source.work?.id ?? source.actionId) !== input.workId ||
+      (source.work?.generationId ?? source.actionId) !== input.generationId
+    )
+      throw new WorkHubActionGateFailure('action_conflict', 'The selected work source changed');
+    const target = await this.#actionGate.nativeTaskCandidate(source.targetSessionId);
+    if (!target)
+      throw new WorkHubActionGateFailure(
+        'candidate_unavailable',
+        'The selected work target is unavailable',
+      );
+    const suffix = createHash('sha256').update(input.inputId).digest('hex').slice(0, 48);
+    return this.#actionGate.act(
+      {
+        actionId: `whtinput_${suffix}`,
+        userText: input.text,
+        delegationText: input.text,
+        taskInput: input,
+        continuation: { workId: input.workId, sourceActionId: input.sourceActionId },
+        proposal: {
+          disposition: 'delegate_existing',
+          candidateRef: `native_${createHash('sha256').update(target.sessionId).digest('hex').slice(0, 48)}`,
+        },
+        selectedTarget: {
+          sessionId: target.sessionId,
+          workspaceDigest: digest(target.workspace),
+          sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+        },
+      },
+      context,
+      source.coordinationTurnId,
+    );
   }
 
   async #continueTask(

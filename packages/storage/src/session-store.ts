@@ -154,6 +154,8 @@ import type {
   PendingMessageAdmission,
 } from './message-admission-store.js';
 import { projectSessionCatalogMessages } from './session-message-projection.js';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type { WorkHubTaskInputCommitRequest } from './session-store-contract.js';
 export { projectSessionCatalogMessages };
 
 export function createSessionStore(workspaceRoot: string): SessionAuthorityStore {
@@ -337,6 +339,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
       assignment: request.assignment,
       admission: request.admission,
       projection: projectSessionCatalogMessages([request.assignment]),
+      ...(request.taskInput ? { taskInput: request.taskInput } : {}),
       ...(request.supersession ? { supersession: request.supersession } : {}),
       ...(create
         ? {
@@ -367,6 +370,25 @@ class SqliteSessionStore implements SessionAuthorityStore {
       `wha_${workHubIdentitySuffix(actionId)}`,
     );
     return message?.type === 'workhub_coordination' && message.kind === 'delegation_assigned'
+      ? message
+      : undefined;
+  }
+
+  async commitWorkHubTaskInput(
+    request: WorkHubTaskInputCommitRequest,
+  ): Promise<WorkHubTaskInputMessage> {
+    await this.ensureReady();
+    const result = await this.metadata.commitWorkHubTaskInput(request);
+    for (const listener of this.transcriptChangeListeners)
+      listener(WORKHUB_COORDINATION_SESSION_ID);
+    return result;
+  }
+
+  async readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined> {
+    const message = await this.readWorkHubCoordinationMessage(
+      `whti_${workHubIdentitySuffix(inputId)}`,
+    );
+    return message?.type === 'workhub_coordination' && message.kind === 'task_input'
       ? message
       : undefined;
   }

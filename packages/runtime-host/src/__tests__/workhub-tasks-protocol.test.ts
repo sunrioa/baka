@@ -19,7 +19,53 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HOST_OPERATION_SPECS } from '../protocol/index.js';
+import { HOST_OPERATION_SPECS, REMOTE_OWNER_OPERATION_GRANTS } from '../protocol/index.js';
+test('native task input accepts only fixed work sources and correlates proven receipt identities', () => {
+  const send = HOST_OPERATION_SPECS['workhub.tasks.send'];
+  const read = HOST_OPERATION_SPECS['workhub.tasks.input.read'];
+  const input = {
+    inputId: 'input',
+    workId: 'work',
+    generationId: 'generation',
+    sourceActionId: 'source-action',
+    sourceDelegationId: 'source-delegation',
+    text: 'Correct this work',
+  };
+  assert.deepEqual(send.decodeInput(input), input);
+  assert.ok(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.tasks.send'));
+  assert.ok(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.tasks.input.read'));
+  for (const invalid of [
+    { ...input, text: ' ' },
+    { ...input, text: '中'.repeat(17_000) },
+    { ...input, targetSessionId: 'client-selected-session' },
+    { ...input, generationId: undefined },
+    { ...input, permissionMode: 'bypass' },
+  ])
+    assert.throws(() => send.decodeInput(invalid));
+  const { text: _text, ...identity } = input;
+  const result = {
+    ...identity,
+    acceptedAt: 1,
+    mode: 'queued_supplement',
+    targetSessionId: 'host-resolved-session',
+    targetMessageId: 'message',
+    delivery: 'queued',
+  };
+  const decoded = send.decodeOutput(result);
+  send.assertOutputForInput!(input, decoded);
+  read.assertOutputForInput!({ workId: 'work', inputId: 'input' }, decoded);
+  assert.throws(() =>
+    send.assertOutputForInput!(input, { ...decoded, generationId: 'other-generation' }),
+  );
+  assert.throws(() =>
+    read.assertOutputForInput!({ workId: 'other-work', inputId: 'input' }, decoded),
+  );
+  assert.throws(() => send.decodeOutput({ ...result, delivery: 'delivered' }));
+  assert.throws(() =>
+    send.decodeOutput({ ...result, execution: { turnId: 'turn', runId: 'run' } }),
+  );
+  assert.throws(() => send.decodeOutput({ ...result, modelFollowed: true }));
+});
 const task = {
   actionId: 'action',
   delegationId: 'delegation',

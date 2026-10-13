@@ -18,6 +18,7 @@
  */
 
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
+import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
 import { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
@@ -2769,6 +2770,23 @@ export async function createExecutionRuntimeHostComposition(
                       : {}),
                   },
                   admission,
+                  ...(input.taskInput
+                    ? {
+                        taskInput: {
+                          type: 'workhub_coordination' as const,
+                          kind: 'task_input' as const,
+                          schemaVersion: 1 as const,
+                          id: `whti_${createHash('sha256').update(input.taskInput.inputId).digest('hex').slice(0, 48)}`,
+                          turnId: input.coordinationTurnId ?? input.actionId,
+                          ts: assignedAt,
+                          ...input.taskInput,
+                          targetSessionId: input.targetSessionId,
+                          targetMessageId: messageId,
+                          targetContentDigest: messageContentDigest(content),
+                          mode: 'continuation' as const,
+                        },
+                      }
+                    : {}),
                   ...(create ? { create } : {}),
                   ...(supersession ? { supersession } : {}),
                 });
@@ -2877,6 +2895,19 @@ export async function createExecutionRuntimeHostComposition(
       onError: (error) =>
         console.error(
           `[runtime-host] WorkHub result reconciliation failed: ${boundedFailureDiagnostic(error)}`,
+        ),
+    });
+    const workHubTaskInput = createWorkHubTaskInputRuntime({
+      stores,
+      messages,
+      executions: coordinator,
+      admission: sessionAdmission,
+      evidence: workHubEvidence,
+      coordination: workHubCoordination,
+      requestDrain: context.requestDrain,
+      onError: (error) =>
+        console.error(
+          `[runtime-host] WorkHub task input failed: ${boundedFailureDiagnostic(error)}`,
         ),
     });
     scheduledTasks = new HostScheduledTaskCoordinator({
@@ -3110,7 +3141,11 @@ export async function createExecutionRuntimeHostComposition(
       }),
       createRuntimeHostDomainModule({
         id: 'workhub',
-        handlers: [workHubCoordination.handlers, workHubResults.handlers],
+        handlers: [
+          workHubCoordination.handlers,
+          workHubResults.handlers,
+          workHubTaskInput.handlers,
+        ],
       }),
       createRuntimeHostDomainModule({
         id: 'configuration',

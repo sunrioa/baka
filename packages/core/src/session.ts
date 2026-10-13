@@ -20,6 +20,7 @@
 import type { ExecutorConfiguration } from './executor-catalog.js';
 
 import { isWorkHubActionReceipt, type WorkHubActionReceipt } from './workhub-action-result.js';
+import { isWorkHubTaskInputMessage, type WorkHubTaskInputMessage } from './workhub-task-input.js';
 import {
   isWorkHubEvidenceRequest,
   isWorkHubEvidenceResolution,
@@ -1255,6 +1256,7 @@ export interface WorkHubCoordinationActionMessage {
 }
 
 export type WorkHubCoordinationMessage =
+  | WorkHubTaskInputMessage
   | WorkHubCoordinationActionMessage
   | WorkHubDelegationAssignedMessage
   | WorkHubDelegationReplacementRequestedMessage
@@ -1768,6 +1770,7 @@ function decodeMessage(
 }
 
 function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean {
+  if (message.kind === 'task_input') return isWorkHubTaskInputMessage(message);
   if (message.kind === 'action_receipt')
     return (
       hasMessageEnvelope(message, true) &&

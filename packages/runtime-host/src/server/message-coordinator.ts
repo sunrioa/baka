@@ -1249,6 +1249,39 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     );
   }
 
+  /** Supplement exactly one pending WorkHub item without promoting it or moving its FIFO position. */
+  supplementWorkHubMessageAdmitted(
+    input: {
+      readonly sessionId: string;
+      readonly messageId: string;
+      readonly inputId: string;
+      readonly text: string;
+    },
+    lease: SessionAdmissionLease,
+    commit: (updated: PendingMessageAdmission, previous: PendingMessageAdmission) => Promise<void>,
+  ): Promise<MessageOutcome<QueueMutationResult>> {
+    return this.#sessionAdmission.runAdmitted(input.sessionId, lease, async () => {
+      await this.#consumePendingAdmissions(input.sessionId, lease);
+      const state = this.#sessions.get(input.sessionId);
+      const entry = state?.followup.find(
+        (item) => item.messageId === input.messageId && item.state === 'queued',
+      );
+      if (!state || !entry)
+        return failure('operation_conflict', 'The selected work is no longer queued');
+      return this.#updateQueueEntry(
+        {
+          sessionId: input.sessionId,
+          originHostEpoch: this.#hostEpoch,
+          entryId: entry.entryId,
+          updateId: input.inputId,
+          expectedQueueRevision: state.revision,
+          text: `${entry.content.text}\n\n${input.text}`,
+        },
+        commit,
+      );
+    });
+  }
+
   async #consumePendingAdmissions(
     sessionId: string,
     admissionLease: SessionAdmissionLease,
@@ -1979,6 +2012,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
 
   async #updateQueueEntry(
     input: QueueEntryUpdateInput,
+    commit?: (updated: PendingMessageAdmission, previous: PendingMessageAdmission) => Promise<void>,
   ): Promise<MessageOutcome<QueueMutationResult>> {
     const admitted = await this.#openQueueMutation(input.sessionId);
     if (!admitted.ok) return admitted;
@@ -2059,7 +2093,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       input.sessionId,
       queued.entry.messageId,
     );
-    await this.#admissions.updateMessageAdmission({
+    const updatedAdmission: PendingMessageAdmission = {
       sessionId: input.sessionId,
       turnId: queued.entry.admissionTurnId,
       runId: queued.entry.admissionRunId,
@@ -2071,7 +2105,13 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       disposition: queued.entry.disposition,
       skillInvocation: prepared.skillInvocation,
       admittedAt: queued.entry.admittedAt,
-    });
+      ...(admission?.submittedIntent ? { submittedIntent: admission.submittedIntent } : {}),
+    };
+    if (commit) {
+      if (!admission)
+        return failure('operation_conflict', 'The queued Message lost its durable admission');
+      await commit(updatedAdmission, admission);
+    } else await this.#admissions.updateMessageAdmission(updatedAdmission);
     queued.entry.content = content;
     queued.entry.modelContent = modelContent;
     queued.entry.submittedContentDigest = messageContentDigest(content);

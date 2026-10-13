@@ -24,6 +24,46 @@ import { decodeCanonicalMessage } from '../session.js';
 const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
 
 describe('WorkHub Coordination stored records', () => {
+  test('task input facts bind a source and distinguish acceptance from delivery', () => {
+    const input = {
+      type: 'workhub_coordination',
+      kind: 'task_input',
+      schemaVersion: 1,
+      id: 'input-record',
+      turnId: 'source-turn',
+      ts: 1,
+      inputId: 'client-input',
+      workId: 'work',
+      generationId: 'generation',
+      sourceActionId: 'source-action',
+      sourceDelegationId: 'source-delegation',
+      text: 'Change only the selected task',
+      targetSessionId: 'worker',
+      targetMessageId: 'message',
+      targetContentDigest: FINGERPRINT,
+      mode: 'queued_supplement',
+    } as const;
+    assert.deepEqual(decodeCanonicalMessage(input), input);
+    const steering = {
+      ...input,
+      mode: 'steering',
+      execution: { turnId: 'worker-turn', runId: 'worker-run' },
+    };
+    assert.deepEqual(decodeCanonicalMessage(steering), steering);
+    for (const invalid of [
+      { ...input, text: ' ' },
+      { ...input, text: '中'.repeat(17_000) },
+      { ...input, generationId: undefined },
+      { ...input, workId: '../foreign' },
+      { ...input, targetContentDigest: 'not-a-digest' },
+      { ...input, delivered: true },
+      { ...input, execution: steering.execution },
+      { ...steering, execution: undefined },
+      { ...steering, execution: { ...steering.execution, permissionMode: 'bypass' } },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid), /Invalid stored message schema/u);
+  });
+
   test('decodes one exact atomic delegation assignment', () => {
     const assigned = {
       type: 'workhub_coordination',

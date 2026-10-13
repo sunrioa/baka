@@ -72,6 +72,7 @@ import { RECALL_OPERATION_SPECS } from './recall.js';
 import { WORKHUB_COORDINATION_OPERATION_SPECS } from './workhub-coordination.js';
 import { WORKHUB_INTERACTION_OPERATION_SPECS } from './workhub-interactions.js';
 import { WORKHUB_TASK_OPERATION_SPECS } from './workhub-tasks.js';
+import { WORKHUB_TASK_INPUT_OPERATION_SPECS } from './workhub-task-input.js';
 
 export type {
   HostDiagnosticsInput,
@@ -199,6 +200,7 @@ export * from './usage-pricing.js';
 export * from './web-search.js';
 export * from './recall.js';
 export * from './workspace.js';
+export * from './workhub-task-input.js';
 
 export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
   HOST_BOOTSTRAP_OPERATION_SPECS,
@@ -245,7 +247,11 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
   RECALL_OPERATION_SPECS,
   CONFIGURATION_OPERATION_SPECS,
   WORKHUB_COORDINATION_OPERATION_SPECS,
-  { ...WORKHUB_INTERACTION_OPERATION_SPECS, ...WORKHUB_TASK_OPERATION_SPECS },
+  {
+    ...WORKHUB_INTERACTION_OPERATION_SPECS,
+    ...WORKHUB_TASK_OPERATION_SPECS,
+    ...WORKHUB_TASK_INPUT_OPERATION_SPECS,
+  },
   PLUGIN_PLATFORM_OPERATION_SPECS,
 );
 
@@ -395,6 +401,8 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.tasks.read',
   'workhub.tasks.history',
   'workhub.tasks.executions',
+  'workhub.tasks.send',
+  'workhub.tasks.input.read',
   'workhub.coordination.continue',
 ] as const satisfies readonly OperationKey[]);
 

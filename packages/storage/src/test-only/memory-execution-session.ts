@@ -26,6 +26,7 @@ import {
   type TaskExecutionGrantRecord,
 } from '@maka/core/task-execution-grant';
 import { isDeepStrictEqual } from 'node:util';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import {
   decodeCanonicalMessage,
   deriveTurnRecords,
@@ -385,6 +386,84 @@ function latestWorkAssignment(
         m.kind === 'delegation_assigned' &&
         (m.work?.id ?? m.actionId) === workId,
     );
+}
+function taskInput(
+  input: WorkHubTaskInputMessage,
+  admission: PendingMessageAdmission,
+): WorkHubTaskInputMessage {
+  const value = decodeCanonicalMessage(copy(input));
+  if (
+    value.type !== 'workhub_coordination' ||
+    value.kind !== 'task_input' ||
+    value.id !== 'whti_' + suffix(value.inputId) ||
+    value.targetSessionId !== admission.sessionId ||
+    value.targetMessageId !== admission.messageId ||
+    value.targetContentDigest !== messageContentDigest(admission.content) ||
+    (value.mode === 'steering' &&
+      (admission.messageId !== 'whtm_' + suffix(value.inputId) ||
+        value.execution?.turnId !== admission.turnId ||
+        value.execution.runId !== admission.runId ||
+        admission.disposition !== 'steering' ||
+        admission.placement !== 'current_turn'))
+  )
+    return conflict('Invalid task input');
+  return value;
+}
+function previousTaskInput(
+  s: MemoryState,
+  input: WorkHubTaskInputMessage,
+): WorkHubTaskInputMessage | undefined {
+  const previous = hubMessage(s, input.id);
+  if (!previous) return undefined;
+  if (
+    previous.type !== 'workhub_coordination' ||
+    previous.kind !== 'task_input' ||
+    !equal({ ...previous, ts: input.ts }, input)
+  )
+    return conflict('Task input identity changed');
+  return previous;
+}
+function taskInputSource(
+  s: MemoryState,
+  input: WorkHubTaskInputMessage,
+): WorkHubDelegationAssignedMessage {
+  const source = hubMessage(s, 'wha_' + suffix(input.sourceActionId));
+  const latest = latestWorkAssignment(s, input.workId);
+  const h = requireHeader(s, input.targetSessionId).header,
+    coordinator = requireHeader(s, HUB).header;
+  if (
+    source?.type !== 'workhub_coordination' ||
+    source.kind !== 'delegation_assigned' ||
+    source.delegationId !== input.sourceDelegationId ||
+    source.targetSessionId !== input.targetSessionId ||
+    source.coordinationTurnId !== input.turnId ||
+    (source.work?.id ?? source.actionId) !== input.workId ||
+    (source.work?.generationId ?? source.actionId) !== input.generationId ||
+    !latest ||
+    (latest.work?.generationId ?? latest.actionId) !== input.generationId ||
+    coordinator.role !== WORKHUB_COORDINATION_SESSION_ROLE ||
+    coordinator.isArchived ||
+    h.isArchived ||
+    h.role !== undefined ||
+    h.subagentParent ||
+    h.labels.includes('mode:side_conversation')
+  )
+    return conflict('Work generation or target unavailable');
+  const read = (prefix: string) => hubMessage(s, prefix + '_' + suffix(source.delegationId));
+  const resolution = read('whzt') ?? read('whz');
+  if (
+    read('whp') ||
+    read('whx') ||
+    read('whb') ||
+    (read('whq') &&
+      !(
+        resolution?.type === 'workhub_coordination' &&
+        resolution.kind === 'delegation_stop_resolved' &&
+        resolution.outcome === 'not_owned'
+      ))
+  )
+    return conflict('Work is being retired');
+  return source;
 }
 function remove(s: MemoryState, id: string, group: Set<string>): void {
   const record = requireHeader(s, id);
@@ -955,6 +1034,54 @@ export function createMemorySessionStore(
           : undefined;
       }),
     readLatestWorkHubAssignment: async (id) => read((s) => latestWorkAssignment(s, id)),
+    readWorkHubTaskInput: async (id) =>
+      read((s) => {
+        const m = hubMessage(s, 'whti_' + suffix(id));
+        return m?.type === 'workhub_coordination' && m.kind === 'task_input' ? m : undefined;
+      }),
+    commitWorkHubTaskInput: async (request) => {
+      const result = write('workhub.input', (s) => {
+        const admission = normalizePendingMessageAdmission(copy(request.admission));
+        const input = taskInput(request.input, admission);
+        const expected =
+          request.expectedAdmission &&
+          normalizePendingMessageAdmission(copy(request.expectedAdmission));
+        if (input.mode === 'continuation' || (input.mode === 'queued_supplement') !== !!expected)
+          conflict('Invalid input mode');
+        const previous = previousTaskInput(s, input);
+        if (previous) return previous;
+        const source = taskInputSource(s, input);
+        if (expected) {
+          const current = admissions(s).get(key(expected.sessionId, expected.messageId));
+          if (
+            !current ||
+            !samePendingMessageAdmission(current, expected) ||
+            source.targetMessageId !== admission.messageId ||
+            admission.sessionId !== expected.sessionId ||
+            admission.messageId !== expected.messageId ||
+            admission.turnId !== expected.turnId ||
+            admission.runId !== expected.runId ||
+            admission.admittedAt !== expected.admittedAt ||
+            admission.submittedPlacement !== expected.submittedPlacement ||
+            admission.placement !== 'next_turn' ||
+            admission.disposition !== 'followup' ||
+            expected.placement !== 'next_turn' ||
+            expected.disposition !== 'followup' ||
+            !equal(admission.submittedIntent, expected.submittedIntent)
+          )
+            conflict('Queued work changed');
+          admissions(s).set(key(admission.sessionId, admission.messageId), admission);
+        } else {
+          if (admissions(s).has(key(admission.sessionId, admission.messageId)))
+            conflict('Steering Message already owned');
+          admit(s, admission);
+        }
+        append(s, HUB, [input]);
+        return input;
+      });
+      a.notify(HUB);
+      return result;
+    },
     readWorkHubReplacement: async (id) =>
       read((s) => {
         const m = hubMessage(s, 'whp_' + suffix(id));
@@ -1106,11 +1233,26 @@ export function createMemorySessionStore(
           conflict('Coordination Session unavailable');
         const prior = hubMessage(s, v.id);
         if (prior) {
+          if (request.taskInput && !previousTaskInput(s, taskInput(request.taskInput, admission)))
+            conflict('Input receipt missing');
           if (prior.type !== 'workhub_coordination' || prior.kind !== 'delegation_assigned')
             throw new SessionMetadataConflictError('Action identity conflict');
           if (!equal(assignmentIdentity(prior), assignmentIdentity(v)))
             conflict('Action identity conflict');
           return { kind: 'existing' as const, targetCreated: false, assignment: prior };
+        }
+        const acceptedInput = request.taskInput && taskInput(request.taskInput, admission);
+        if (acceptedInput) {
+          if (
+            previousTaskInput(s, acceptedInput) ||
+            acceptedInput.mode !== 'continuation' ||
+            v.work?.id !== acceptedInput.workId ||
+            v.work?.generationId !== acceptedInput.generationId ||
+            v.work?.continuesActionId !== acceptedInput.sourceActionId ||
+            v.disposition !== 'delegate_existing'
+          )
+            conflict('Continuation input changed');
+          taskInputSource(s, acceptedInput);
         }
         if (v.work) {
           const sourceActionId = v.work.continuesActionId ?? v.replacesActionId;
@@ -1195,7 +1337,11 @@ export function createMemorySessionStore(
           conflict('Message identity already admitted');
         admit(s, admission);
         const committed = { ...v, targetSessionName: h.name };
-        append(s, HUB, [committed, ...(request.supersession ? [request.supersession] : [])]);
+        append(s, HUB, [
+          committed,
+          ...(request.supersession ? [request.supersession] : []),
+          ...(acceptedInput ? [acceptedInput] : []),
+        ]);
         return { kind: 'assigned' as const, targetCreated, assignment: committed };
       });
       if (result.kind === 'assigned') a.notify(HUB);

@@ -74,6 +74,7 @@
     "./client-capability-grant": "./dist/client-capability-grant.js",
     "./task-execution-grant": "./dist/task-execution-grant.js",
     "./workhub-evidence": "./dist/workhub-evidence.js",
+    "./workhub-task-input": "./dist/workhub-task-input.js",
     "./client-plugin-bridge": "./dist/client-plugin-bridge.js",
     "./health": "./dist/health.js",
     "./search": "./dist/search.js",
