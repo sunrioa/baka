@@ -174,10 +174,44 @@ export interface WorkHubCoordinationCandidatesResult {
   readonly candidates: readonly WorkHubCoordinationCandidate[];
 }
 
+export interface WorkHubWorksQueryInput {
+  readonly query?: string;
+  readonly cursor?: string;
+  readonly limit?: number;
+}
+
+/** Source-backed objective identity; Session activity is not creation provenance. */
+export interface WorkHubWorkSummary {
+  readonly workId: string;
+  readonly sourceActionId: string;
+  readonly sourceDelegationId: string;
+  readonly targetSessionId: string;
+  readonly targetSessionName: string;
+  readonly coordinationTurnId: string;
+  readonly sourceMessageId?: string;
+  readonly createdAt: number;
+  readonly originalRequest: string;
+  readonly requestTruncated: boolean;
+  /** Distinguishes independent objectives originating in the same user Message. */
+  readonly objective: string;
+  readonly objectiveTruncated: boolean;
+  readonly available: boolean;
+}
+
+export interface WorkHubWorksQueryResult {
+  readonly works: readonly WorkHubWorkSummary[];
+  readonly nextCursor: string | null;
+}
+
 export type WorkHubRoutingProposal =
   | {
       readonly disposition: 'delegate_existing';
       readonly candidateRef: string;
+    }
+  | {
+      readonly disposition: 'continue_work';
+      readonly workId: string;
+      readonly sourceActionId: string;
     }
   | { readonly disposition: 'create_new'; readonly title: string };
 
@@ -261,6 +295,92 @@ export type WorkHubCoordinationActResult = Exclude<
 >;
 
 export const WORKHUB_COORDINATION_OPERATION_SPECS = {
+  'workhub.coordination.works': defineOperation({
+    mode: 'query',
+    availability: 'ready',
+    errors: [...CANDIDATE_ERRORS, 'operation_conflict'],
+    decodeInput(value: unknown): WorkHubWorksQueryInput {
+      const input = requireShapedRecord(
+        value,
+        'WorkHub work index',
+        [],
+        ['query', 'cursor', 'limit'],
+      );
+      const limit =
+        input.limit === undefined ? undefined : requireCount(input.limit, 'WorkHub work limit');
+      if (limit !== undefined && (limit < 1 || limit > 8))
+        throw invalidProtocolFrame('Invalid WorkHub work limit');
+      return {
+        ...(input.query === undefined
+          ? {}
+          : { query: requireUtf8String(input.query, 'WorkHub work query', 1024) }),
+        ...(input.cursor === undefined
+          ? {}
+          : { cursor: requireUtf8String(input.cursor, 'WorkHub work cursor', 2048) }),
+        ...(limit === undefined ? {} : { limit }),
+      };
+    },
+    decodeOutput(value: unknown): WorkHubWorksQueryResult {
+      const result = requireExactRecord(value, 'WorkHub work index', ['works', 'nextCursor']);
+      if (!Array.isArray(result.works) || result.works.length > 8)
+        throw invalidProtocolFrame('Invalid WorkHub works');
+      const works = result.works.map((raw): WorkHubWorkSummary => {
+        const work = requireShapedRecord(
+          raw,
+          'WorkHub work',
+          [
+            'workId',
+            'sourceActionId',
+            'sourceDelegationId',
+            'targetSessionId',
+            'targetSessionName',
+            'coordinationTurnId',
+            'createdAt',
+            'originalRequest',
+            'requestTruncated',
+            'objective',
+            'objectiveTruncated',
+            'available',
+          ],
+          ['sourceMessageId'],
+        );
+        if (
+          typeof work.requestTruncated !== 'boolean' ||
+          typeof work.objectiveTruncated !== 'boolean' ||
+          typeof work.available !== 'boolean'
+        )
+          throw invalidProtocolFrame('Invalid WorkHub work state');
+        return {
+          workId: requireEntityId(work.workId, 'WorkHub work ID'),
+          sourceActionId: requireEntityId(work.sourceActionId, 'WorkHub source action'),
+          sourceDelegationId: requireEntityId(work.sourceDelegationId, 'WorkHub source delegation'),
+          targetSessionId: requireEntityId(work.targetSessionId, 'WorkHub target Session'),
+          targetSessionName: requireUtf8String(work.targetSessionName, 'WorkHub task name', 512),
+          coordinationTurnId: requireEntityId(work.coordinationTurnId, 'WorkHub source Turn'),
+          ...(work.sourceMessageId === undefined
+            ? {}
+            : { sourceMessageId: requireEntityId(work.sourceMessageId, 'WorkHub source Message') }),
+          createdAt: requireCount(work.createdAt, 'WorkHub creation time'),
+          originalRequest: requireUtf8String(
+            work.originalRequest,
+            'WorkHub original request',
+            8192,
+          ),
+          requestTruncated: work.requestTruncated,
+          objective: requireUtf8String(work.objective, 'WorkHub original objective', 8192),
+          objectiveTruncated: work.objectiveTruncated,
+          available: work.available,
+        };
+      });
+      return {
+        works,
+        nextCursor:
+          result.nextCursor === null
+            ? null
+            : requireUtf8String(result.nextCursor, 'WorkHub work cursor', 2048),
+      };
+    },
+  }),
   'workhub.coordination.continue': defineOperation({
     mode: 'command',
     availability: 'ready',
@@ -557,6 +677,17 @@ function decodeWorkHubCoordinationActionFields(
     }
     return { ...base, candidateSetId: candidateSetId(input.candidateSetId) };
   }
+  if ('disposition' in proposal && proposal.disposition === 'continue_work') {
+    if (
+      input.create !== undefined ||
+      input.candidateSetId !== undefined ||
+      input.newWorkDefaults !== undefined
+    )
+      throw invalidProtocolFrame(
+        'A work continuation cannot select a different Session or creation defaults',
+      );
+    return base;
+  }
   if ('disposition' in proposal && proposal.disposition === 'create_new') {
     if (input.candidateSetId !== undefined || input.create === undefined) {
       throw invalidProtocolFrame('Invalid WorkHub creation context');
@@ -627,6 +758,19 @@ function decodeWorkHubCoordinationCandidate(value: unknown): WorkHubCoordination
 
 function decodeWorkHubCoordinationProposal(value: unknown): WorkHubCoordinationProposal {
   const proposal = requireRecord(value, 'WorkHub Coordination proposal');
+
+  if (proposal.disposition === 'continue_work') {
+    const exact = requireExactRecord(proposal, 'WorkHub work continuation', [
+      'disposition',
+      'workId',
+      'sourceActionId',
+    ]);
+    return {
+      disposition: 'continue_work',
+      workId: requireEntityId(exact.workId, 'WorkHub work ID'),
+      sourceActionId: requireEntityId(exact.sourceActionId, 'WorkHub source action'),
+    };
+  }
 
   if (proposal.disposition === 'delegate_existing') {
     const exact = requireExactRecord(proposal, 'WorkHub delegation proposal', [

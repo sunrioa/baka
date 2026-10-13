@@ -1926,6 +1926,28 @@ export class SqliteSessionMetadataStore {
         };
       }
 
+      if (assignment.work) {
+        const sourceActionId = assignment.work.continuesActionId ?? assignment.replacesActionId;
+        if (sourceActionId) {
+          const source = this.readMessageByIdSync(
+            WORKHUB_COORDINATION_SESSION_ID,
+            `wha_${createHash('sha256').update(sourceActionId).digest('hex').slice(0, 48)}`,
+          );
+          if (
+            source?.type !== 'workhub_coordination' ||
+            source.kind !== 'delegation_assigned' ||
+            (source.work?.id ?? source.actionId) !== assignment.work.id ||
+            (assignment.work.continuesActionId &&
+              source.targetSessionId !== assignment.targetSessionId)
+          )
+            throw new SessionMetadataConflictError(
+              'WorkHub continuation source does not own this work',
+            );
+        } else if (assignment.work.id !== assignment.actionId) {
+          throw new SessionMetadataConflictError('WorkHub work requires its original action');
+        }
+      }
+
       if (supersession && assignment.replacesActionId && assignment.replacesDelegationId) {
         const replacedSuffix = createHash('sha256')
           .update(assignment.replacesActionId)
@@ -2893,6 +2915,20 @@ export class SqliteSessionMetadataStore {
     sessionId: string,
     request: SessionMessageScanRequest,
   ): Promise<SessionMessageScanPage> {
+    return this.readMessageScanPage(sessionId, request, false);
+  }
+
+  async readWorkHubAssignmentsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, true);
+  }
+
+  private async readMessageScanPage(
+    sessionId: string,
+    request: SessionMessageScanRequest,
+    assignmentsOnly: boolean,
+  ): Promise<SessionMessageScanPage> {
     this.assertOpen();
     assertSafeSessionId(sessionId);
     if (!Number.isSafeInteger(request.maxMessages) || request.maxMessages < 1) {
@@ -2914,6 +2950,7 @@ export class SqliteSessionMetadataStore {
           LEFT JOIN session_message_payloads AS payload
             ON payload.session_id = message.session_id AND payload.sequence = message.sequence
           WHERE message.session_id = ? AND message.sequence ${backward ? '<' : '>'} ?
+            ${assignmentsOnly ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
           ORDER BY message.sequence ${backward ? 'DESC' : 'ASC'}
           LIMIT ?
         `)
@@ -6749,6 +6786,7 @@ function sameWorkHubAssignmentRequest(
   return isDeepStrictEqual(
     {
       actionId: existing.actionId,
+      work: existing.work,
       actionFingerprint: existing.actionFingerprint,
       coordinationTurnId: existing.coordinationTurnId,
       targetSessionId: existing.targetSessionId,
@@ -6762,6 +6800,7 @@ function sameWorkHubAssignmentRequest(
     },
     {
       actionId: requested.actionId,
+      work: requested.work,
       actionFingerprint: requested.actionFingerprint,
       coordinationTurnId: requested.coordinationTurnId,
       targetSessionId: requested.targetSessionId,

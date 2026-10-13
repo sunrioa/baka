@@ -48,6 +48,27 @@ describe('WorkHub Coordination stored records', () => {
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
     const delegated = { ...assigned, delegationText: 'Inspect the payment retry state' };
     assert.deepEqual(decodeCanonicalMessage(delegated), delegated);
+    const original = { ...assigned, schemaVersion: 4, work: { id: assigned.actionId } };
+    assert.deepEqual(decodeCanonicalMessage(original), original);
+    const continuation = {
+      ...original,
+      actionId: 'follow-up',
+      work: {
+        id: assigned.actionId,
+        continuesActionId: assigned.actionId,
+        sourceMessageId: 'actual-message',
+      },
+    };
+    assert.deepEqual(decodeCanonicalMessage(continuation), continuation);
+    for (const invalid of [
+      { ...original, schemaVersion: 1 },
+      { ...original, work: undefined },
+      { ...original, work: { id: 'different-objective' } },
+      { ...continuation, work: { ...continuation.work, continuesActionId: 'follow-up' } },
+      { ...continuation, work: { ...continuation.work, sourceMessageId: '../foreign' } },
+      { ...continuation, work: { ...continuation.work, permissionMode: 'bypass' } },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid), /Invalid stored message schema/u);
     for (const delegationText of ['', '  ', 42, null]) {
       assert.throws(
         () => decodeCanonicalMessage({ ...assigned, delegationText }),

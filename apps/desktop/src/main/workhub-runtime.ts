@@ -26,7 +26,7 @@ import type { WorkHubTasksInput } from '../shared/workhub-tool-schema.js';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 interface WorkHubRuntimeDeps {
-  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'queryMessageExecutions' | 'stopTurn' | 'listProjects' | 'listWorkHubCoordinationCandidates' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
+  client(scope: DesktopTargetScope): Pick<DesktopRuntimeHostClient, 'queryTurn' | 'queryMessageExecutions' | 'stopTurn' | 'listProjects' | 'listWorkHubCoordinationCandidates' | 'queryWorkHubWorks' | 'actWorkHubCoordinationFromTurn' | 'selectAndDelegateWorkHubTarget'>;
   isCurrent(scope: DesktopTargetScope): boolean;
   createDefaults(scope: DesktopTargetScope): Promise<WorkHubCreateDefaults>;
   changed(scope: DesktopTargetScope, reason: 'created' | 'status-change', sessionId: string): void;
@@ -76,6 +76,15 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
     async actTasks(scope: DesktopTargetScope, turnId: string, toolCallId: string, input: WorkHubTasksInput) {
       requireCurrent(scope);
       const client = deps.client(scope);
+      if (input.operation === 'works') {
+        const result = await client.queryWorkHubWorks({
+          ...(input.query === undefined ? {} : { query: input.query }),
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          ...(input.limit === undefined ? {} : { limit: input.limit }),
+        });
+        requireCurrent(scope);
+        return result;
+      }
       if (input.operation === 'projects') {
         const matches = (await projects(scope, client)).filter(({ project }) =>
           !input.query || project.name.toLowerCase().includes(input.query.toLowerCase()),
@@ -136,6 +145,7 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
       }
       let proposal: WorkHubCoordinationProposal;
       switch (input.operation) {
+        case 'continue_work': proposal = { disposition: 'continue_work', workId: input.workId, sourceActionId: input.sourceActionId }; break;
         case 'delegate_existing': proposal = { disposition: 'delegate_existing', candidateRef: input.candidateRef }; break;
         case 'create_new': proposal = { disposition: 'create_new', title: input.title }; break;
         case 'correct': proposal = { operation: 'correct', replacesActionId: input.replacesActionId, target: input.target.disposition === 'create_new'

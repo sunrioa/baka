@@ -609,6 +609,30 @@ export function createMemorySessionStore(
         }
         return { records, highWaterSequence: all.length ? all.length - 1 : null };
       }),
+    readWorkHubAssignmentsPage: async (request) =>
+      read((s) => {
+        requireHeader(s, HUB);
+        const all = messages(s).get(HUB)!;
+        let selected = all
+          .map((message, sequence) => ({ message, sequence }))
+          .filter(
+            (r) =>
+              r.message.type === 'workhub_coordination' &&
+              r.message.kind === 'delegation_assigned' &&
+              r.sequence > (request.afterSequence ?? -1) &&
+              r.sequence < (request.beforeSequence ?? Infinity),
+          );
+        if (request.beforeSequence !== undefined) selected.reverse();
+        let bytes = 0;
+        const records = [];
+        for (const r of selected.slice(0, request.maxMessages)) {
+          const size = Buffer.byteLength(JSON.stringify(r.message));
+          if (records.length && bytes + size > request.maxStoredBytes) break;
+          records.push(r);
+          bytes += size;
+        }
+        return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
     readTranscriptMessagesSnapshot: async (id, request) =>
       read((s) => {
         requireHeader(s, id);
@@ -1074,6 +1098,20 @@ export function createMemorySessionStore(
             conflict('Action identity conflict');
           return { kind: 'existing' as const, targetCreated: false, assignment: prior };
         }
+        if (v.work) {
+          const sourceActionId = v.work.continuesActionId ?? v.replacesActionId;
+          if (sourceActionId) {
+            const source = hubMessage(s, 'wha_' + suffix(sourceActionId));
+            if (
+              source?.type !== 'workhub_coordination' ||
+              source.kind !== 'delegation_assigned' ||
+              (source.work?.id ?? source.actionId) !== v.work.id ||
+              (v.work.continuesActionId && source.targetSessionId !== v.targetSessionId)
+            )
+              conflict('WorkHub continuation source does not own this work');
+          } else if (v.work.id !== v.actionId)
+            conflict('WorkHub work requires its original action');
+        }
         if ((v.disposition === 'create_new') !== Boolean(request.create))
           conflict('Create disposition mismatch');
         if (
@@ -1370,6 +1408,7 @@ export function createMemorySessionStore(
 function assignmentIdentity(v: WorkHubDelegationAssignedMessage) {
   return {
     actionId: v.actionId,
+    work: v.work,
     actionFingerprint: v.actionFingerprint,
     coordinationTurnId: v.coordinationTurnId,
     targetSessionId: v.targetSessionId,

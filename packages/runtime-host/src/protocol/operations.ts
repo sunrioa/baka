@@ -384,6 +384,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.coordination.actFromTurn',
   'workhub.coordination.selectAndDelegate',
   'workhub.coordination.candidates',
+  'workhub.coordination.works',
   'workhub.coordination.configureModel',
   'workhub.coordination.query',
   'workhub.coordination.resolve',

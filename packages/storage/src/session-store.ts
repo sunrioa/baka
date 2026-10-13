@@ -384,6 +384,13 @@ class SqliteSessionStore implements SessionAuthorityStore {
     );
   }
 
+  async readWorkHubAssignmentsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubAssignmentsPage(request);
+  }
+
   async readWorkHubReplacement(
     delegationId: string,
   ): Promise<WorkHubDelegationReplacementRequestedMessage | undefined> {

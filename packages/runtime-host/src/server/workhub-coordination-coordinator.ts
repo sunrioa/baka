@@ -53,7 +53,9 @@ import {
   WORKHUB_COORDINATION_DEFAULT_MODEL_REQUIRED_MESSAGE,
   type WorkHubCoordinationSelectAndDelegateInput,
   type WorkHubTaskContinueInput,
+  type WorkHubWorksQueryInput,
 } from '../protocol/workhub-coordination.js';
+import { createWorkHubWorkIndex, WorkHubWorkCursorError } from './workhub-work-index.js';
 import type {
   ConnectionContext,
   WorkHubCoordinationOperationHandlerMap,
@@ -117,6 +119,7 @@ type CoordinationStores = Pick<
   | 'readHeaderSnapshot'
   | 'readCatalogRecord'
   | 'readWorkHubAssignment'
+  | 'readWorkHubAssignmentsPage'
   | 'readActiveWorkHubAssignmentsByTarget'
   | 'readWorkHubReplacement'
   | 'readWorkHubReplacementAbort'
@@ -184,6 +187,7 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
 export class HostWorkHubCoordinationCoordinator {
   readonly #requestForm: HostWorkHubCoordinationCoordinatorOptions['requestForm'];
   readonly handlers: WorkHubCoordinationOperationHandlerMap = {
+    'workhub.coordination.works': (input) => this.#works(input),
     'workhub.coordination.continue': (input, context) => this.#continueTask(input, context),
     'workhub.coordination.selectAndDelegate': (input, context) =>
       this.#selectAndDelegate(input, context),
@@ -209,6 +213,7 @@ export class HostWorkHubCoordinationCoordinator {
   readonly #requestDrain: () => void;
   readonly #actionGate: WorkHubCoordinationActionGate;
   readonly #routingModel: HostWorkHubRoutingModel | undefined;
+  readonly #workIndex: ReturnType<typeof createWorkHubWorkIndex>;
   readonly #readDelegationRetirement: HostWorkHubCoordinationCoordinatorOptions['sessionActions']['readDelegationRetirement'];
 
   constructor(options: HostWorkHubCoordinationCoordinatorOptions) {
@@ -278,6 +283,11 @@ export class HostWorkHubCoordinationCoordinator {
           input.assertTargetExecutionReady,
         )),
       }),
+    });
+    this.#workIndex = createWorkHubWorkIndex({
+      stores: this.#stores,
+      isEligible: async (sessionId) =>
+        Boolean(await this.#actionGate.nativeTaskCandidate(sessionId)),
     });
   }
 
@@ -575,6 +585,26 @@ export class HostWorkHubCoordinationCoordinator {
     );
   }
 
+  async #works(
+    input: WorkHubWorksQueryInput,
+  ): Promise<OperationOutcome<'workhub.coordination.works'>> {
+    try {
+      return { ok: true, result: await this.#workIndex(input) };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code:
+            error instanceof WorkHubWorkCursorError ? 'operation_conflict' : 'persistence_failed',
+          message:
+            error instanceof WorkHubWorkCursorError
+              ? error.message
+              : 'WorkHub work sources are unavailable',
+        },
+      };
+    }
+  }
+
   async #candidates(): Promise<OperationOutcome<'workhub.coordination.candidates'>> {
     try {
       const result = await this.#actionGate.candidates();
@@ -800,7 +830,47 @@ export class HostWorkHubCoordinationCoordinator {
         },
       };
     }
-    const { turnId: _turnId, create, ...action } = input;
+    let proposal: WorkHubAdmittedAction['proposal'];
+    let continuation: WorkHubAdmittedAction['continuation'];
+    if ('disposition' in input.proposal && input.proposal.disposition === 'continue_work') {
+      try {
+        const source = await this.#stores.readWorkHubAssignment(input.proposal.sourceActionId);
+        if (!source || (source.work?.id ?? source.actionId) !== input.proposal.workId)
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'The selected source does not belong to this work',
+          );
+        const target = await this.#actionGate.nativeTaskCandidate(source.targetSessionId);
+        const committed = await this.#stores.readWorkHubAssignment(input.actionId);
+        if (!target && !committed)
+          throw new WorkHubActionGateFailure(
+            'candidate_unavailable',
+            'The selected work is unavailable; query its source instead of substituting a historical Session',
+          );
+        continuation = { workId: input.proposal.workId, sourceActionId: source.actionId };
+        selectedTarget = {
+          sessionId: source.targetSessionId,
+          workspaceDigest: target ? digest(target.workspace) : digest({ replay: input.actionId }),
+          sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+        };
+        proposal = { disposition: 'delegate_existing', candidateRef: source.actionId };
+      } catch (error) {
+        return {
+          ok: false,
+          error: {
+            code:
+              error instanceof WorkHubActionGateFailure
+                ? 'operation_conflict'
+                : 'persistence_failed',
+            message: error instanceof Error ? error.message : 'WorkHub work resolution failed',
+          },
+        };
+      }
+    } else {
+      proposal = input.proposal;
+    }
+    const { turnId: _turnId, create, ...fields } = input;
+    const action = { ...fields, proposal };
     if (request.decision && !routingDecisionAllowsProposal(request.decision, action)) {
       return {
         ok: false,
@@ -828,6 +898,8 @@ export class HostWorkHubCoordinationCoordinator {
         result: await this.#actionGate.act(
           {
             ...action,
+            ...(continuation ? { continuation } : {}),
+            ...(request.sourceMessageId ? { sourceMessageId: request.sourceMessageId } : {}),
             ...(resolvedCreate ? { create: resolvedCreate } : {}),
             ...(selectedTarget ? { selectedTarget } : {}),
             coordinationRunId: request.runId,

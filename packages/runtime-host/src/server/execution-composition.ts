@@ -2730,12 +2730,15 @@ export async function createExecutionRuntimeHostComposition(
                     id: `wha_${suffix}`,
                     turnId: input.coordinationTurnId ?? input.actionId,
                     ts: assignedAt,
-                    schemaVersion: supersession
-                      ? WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION
-                      : 1,
+                    schemaVersion: input.work
+                      ? 4
+                      : supersession
+                        ? WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION
+                        : 1,
                     kind: 'delegation_assigned',
                     returnResults: true,
                     actionId: input.actionId,
+                    ...(input.work ? { work: input.work } : {}),
                     actionFingerprint: input.actionFingerprint,
                     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
                     targetSessionId: input.targetSessionId,

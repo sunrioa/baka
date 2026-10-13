@@ -50,6 +50,42 @@ function fixture() {
   return { deps, client, requests, stops, changes, retire: () => { current = false; }, runtime: createWorkHubRuntime(deps) };
 }
 
+test('work discovery and continuation preserve exact objective references without target rediscovery', async () => {
+  const f = fixture();
+  const queries: unknown[] = [];
+  const work = { workId: 'current-a', sourceActionId: 'assignment-a', sourceDelegationId: 'delegation-a',
+    targetSessionId: 'session-a', targetSessionName: 'Same title', coordinationTurnId: 'original-turn',
+    createdAt: 1, originalRequest: 'This round A', requestTruncated: false, objective: 'Inspect A', objectiveTruncated: false, available: true };
+  f.client.queryWorkHubWorks = async (input) => { queries.push(input); return { works: [work], nextCursor: null }; };
+  f.client.listWorkHubCoordinationCandidates = async () => { throw new Error('Continuation must not rediscover a target'); };
+  f.deps.createDefaults = async () => { throw new Error('Existing work must not read creation defaults'); };
+  f.client.actWorkHubCoordinationFromTurn = async (input) => {
+    f.requests.push(decodeWorkHubCoordinationActFromTurnInput(input));
+    return { disposition: 'delegate_existing', workId: work.workId, targetSessionId: work.targetSessionId, targetMessageId: 'queued-message' };
+  };
+  const page = await f.runtime.actTasks(scope, 'turn', 'read-work', workHubTasksSchema.parse({ operation: 'works', query: 'A', limit: 1 }));
+  assert.deepEqual(page, { works: [work], nextCursor: null });
+  assert.deepEqual(queries, [{ query: 'A', limit: 1 }]);
+  const result = await f.runtime.actTasks(scope, 'turn', 'continue-a', workHubTasksSchema.parse({
+    operation: 'continue_work', workId: work.workId, sourceActionId: work.sourceActionId, text: 'Read the complete file',
+  }));
+  assert.deepEqual(f.requests, [{ turnId: 'turn', actionId: 'continue-a',
+    proposal: { disposition: 'continue_work', workId: 'current-a', sourceActionId: 'assignment-a' },
+    delegationText: 'Read the complete file' }]);
+  assert.ok('workId' in result);
+  assert.equal(result.workId, 'current-a');
+  assert.deepEqual(f.changes, [[scope, 'status-change', 'session-a']]);
+  assert.throws(() => workHubTasksSchema.parse({ operation: 'continue_work', workId: 'current-a',
+    sourceActionId: 'assignment-a', text: 'Continue', permissionMode: 'bypass' }));
+});
+
+test('work discovery does not return data from a Host retired during the query', async () => {
+  const f = fixture();
+  f.client.queryWorkHubWorks = async () => { f.retire(); return { works: [], nextCursor: null }; };
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'read-work', { operation: 'works' }), /Runtime Host changed/);
+  assert.deepEqual(f.requests, []);
+});
+
 test('task delegation binds the tool action to the Host turn and trusted creation context', async () => {
   const f = fixture();
   const result = await f.runtime.actTasks(scope, 'turn', 'tool-call', { operation: 'create_new', title: 'Fix login', text: 'Implement and test the login fix' });

@@ -34,6 +34,7 @@ import type {
   WorkHubDelegationStopResolvedMessage,
   WorkHubDelegationStopOutcome,
   WorkHubDelegationSupersededMessage,
+  WorkHubWorkBinding,
 } from '@maka/core/session';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
@@ -58,7 +59,14 @@ import type {
 
 /** User content is read from the active Host Turn before reaching this gate. */
 export interface WorkHubAdmittedAction
-  extends Omit<WorkHubCoordinationActFromTurnInput, 'turnId' | 'create'> {
+  extends Omit<WorkHubCoordinationActFromTurnInput, 'turnId' | 'create' | 'proposal'> {
+  readonly proposal: Exclude<
+    WorkHubCoordinationActFromTurnInput['proposal'],
+    { readonly disposition: 'continue_work' }
+  >;
+  readonly sourceMessageId?: string;
+  /** Host-resolved work selection; never a second semantic target selection. */
+  readonly continuation?: { readonly workId: string; readonly sourceActionId: string };
   readonly create?: { readonly workspace: WorkspaceTarget };
   readonly userText: string;
   readonly attachments?: AttachmentRef[];
@@ -200,6 +208,7 @@ export interface WorkHubRetirementResult {
 }
 
 export interface WorkHubDelegationAssignmentInput {
+  readonly work?: WorkHubWorkBinding;
   /** Rechecked under the target admission lease, only before a fresh assignment. */
   readonly validateFreshTarget?: () => Promise<void>;
   readonly targetExecutionPreparation?: WorkHubTargetExecutionPreparationInput;
@@ -622,6 +631,9 @@ export class WorkHubCoordinationActionGate {
       const source = await this.#effects.readAssignment(ref.actionId);
       if (
         !source ||
+        (input.continuation &&
+          (input.continuation.sourceActionId !== source.actionId ||
+            input.continuation.workId !== (source.work?.id ?? source.actionId))) ||
         source.delegationId !== ref.delegationId ||
         source.targetSessionId !== target.sessionId ||
         !(await this.#effects.listActiveAssignments(target.sessionId)).some(
@@ -637,10 +649,26 @@ export class WorkHubCoordinationActionGate {
         );
     };
     await validateSource();
+    const sourceRef = input.selectedTarget?.sourceTask;
+    const source = sourceRef ? await this.#effects.readAssignment(sourceRef.actionId) : undefined;
+    if (sourceRef && !source)
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        'The selected work source became unavailable',
+      );
 
     return this.#assign(
       {
         ...delegationAssignment(input, fingerprint, target.sessionId, target.sessionName),
+        ...(source
+          ? {
+              work: {
+                id: source.work?.id ?? source.actionId,
+                continuesActionId: source.actionId,
+                ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+              },
+            }
+          : {}),
         ...this.#targetExecutionPreparation(input, target.sessionId, target.sessionName),
         ...(input.selectedTarget
           ? {
@@ -945,7 +973,10 @@ export class WorkHubCoordinationActionGate {
         'WorkHub replacement source identity changed',
       );
     }
-    let assignment = assignmentInputFromReplacement(replacement);
+    let assignment = {
+      ...assignmentInputFromReplacement(replacement),
+      work: { id: source.work?.id ?? source.actionId },
+    };
     const retirement = await this.#effects.readDelegationRetirement(source);
     if (retirement === 'recovering') {
       throw new WorkHubActionEffectFailure(
@@ -1084,6 +1115,7 @@ export class WorkHubCoordinationActionGate {
     if (assignment.replacesDelegationId) {
       return {
         disposition: 'replace',
+        ...(assignment.work ? { workId: assignment.work.id } : {}),
         replacementDisposition: assignment.disposition,
         targetSessionId: assignment.targetSessionId,
         ...(admitted.turnId ? { targetTurnId: admitted.turnId } : {}),
@@ -1093,6 +1125,7 @@ export class WorkHubCoordinationActionGate {
     }
     return {
       disposition: assignment.disposition,
+      ...(assignment.work ? { workId: assignment.work.id } : {}),
       targetSessionId: assignment.targetSessionId,
       ...(admitted.turnId ? { targetTurnId: admitted.turnId } : {}),
       ...(admitted.messageId ? { targetMessageId: admitted.messageId } : {}),
@@ -1230,6 +1263,10 @@ function delegationAssignment(
   }
   const base = {
     actionId: input.actionId,
+    work: {
+      id: input.actionId,
+      ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+    },
     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
     actionFingerprint,
     targetSessionId,
@@ -1290,7 +1327,11 @@ function digest(value: unknown): `sha256:${string}` {
 
 function actionFingerprint(input: WorkHubAdmittedAction): `sha256:${string}` {
   const common = {
-    ...(input.selectedTarget ? { selectedTarget: input.selectedTarget } : {}),
+    ...(input.continuation
+      ? { continuation: input.continuation }
+      : input.selectedTarget
+        ? { selectedTarget: input.selectedTarget }
+        : {}),
     userText: input.userText,
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.newWorkDefaults ? { newWorkDefaults: input.newWorkDefaults } : {}),
@@ -1328,7 +1369,18 @@ function actionRequestFingerprint(input: WorkHubAdmittedAction): `sha256:${strin
   // Coordination execution identity changes when the Host retries the same
   // durable action after a process failure. It authorizes where a repair Form
   // is shown, but is not part of the user's proposal or replay identity.
-  const { coordinationRunId: _coordinationRunId, ...proposal } = input;
+  // The retry's source Message is provenance, not a different durable action.
+  const {
+    coordinationRunId: _coordinationRunId,
+    sourceMessageId: _sourceMessageId,
+    ...proposal
+  } = input;
+  if (input.continuation) {
+    // The canonical work/source pair owns replay. Fresh workspace observations
+    // are admission preconditions, not a new routing decision on every retry.
+    const { selectedTarget: _selectedTarget, ...bound } = proposal;
+    return digest(bound);
+  }
   return digest(proposal);
 }
 
@@ -1429,6 +1481,7 @@ function assignmentInputFromRecord(
 ): WorkHubDelegationAssignmentInput {
   return {
     actionId: assignment.actionId,
+    ...(assignment.work ? { work: assignment.work } : {}),
     coordinationTurnId: assignment.coordinationTurnId,
     actionFingerprint: assignment.actionFingerprint,
     targetSessionId: assignment.targetSessionId,

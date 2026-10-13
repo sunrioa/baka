@@ -40,6 +40,100 @@ import {
   type AssignmentRequest,
 } from './fixtures/workhub-assignment.js';
 
+test('persists exact work relationships atomically and pages assignments without reading unrelated output', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-work-binding-'));
+  let store = createSessionStore(root);
+  try {
+    await createCoordinationSession(store, root);
+    const target = await store.create({
+      cwd: root,
+      name: 'Same title',
+      llmConnectionSlug: 'test',
+      model: 'test',
+      permissionMode: 'ask',
+    });
+    const original = assignmentRequest('work-a', target.id, target.name, 'turn-a');
+    original.assignment.schemaVersion = 4;
+    original.assignment.work = { id: 'work-a', sourceMessageId: 'source-user-message' };
+    await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, {
+      type: 'user',
+      id: 'source-user-message',
+      turnId: 'work-a',
+      ts: 1,
+      text: original.assignment.userText,
+    });
+    await store.assignWorkHubMessage(original);
+    const independent = assignmentRequest('work-b', target.id, target.name, 'turn-b');
+    independent.assignment.schemaVersion = 4;
+    independent.assignment.work = { id: 'work-b' };
+    await store.assignWorkHubMessage(independent);
+    await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, {
+      type: 'assistant',
+      id: 'large-unrelated-result',
+      turnId: 'other-turn',
+      ts: 20,
+      text: 'x'.repeat(200_000),
+      modelId: 'test',
+    });
+    const followup = assignmentRequest('followup-a', target.id, target.name, 'turn-followup');
+    followup.assignment.schemaVersion = 4;
+    followup.assignment.work = { id: 'work-a', continuesActionId: 'work-a' };
+    await store.assignWorkHubMessage(followup);
+    assert.equal((await store.readWorkHubAssignment('work-b'))?.work?.id, 'work-b');
+    const first = await store.readWorkHubAssignmentsPage({
+      beforeSequence: Number.MAX_SAFE_INTEGER,
+      maxMessages: 1,
+      maxStoredBytes: 1024,
+    });
+    assert.deepEqual(
+      first.records.map(({ message }) => message.id),
+      [followup.assignment.id],
+    );
+    const older = await store.readWorkHubAssignmentsPage({
+      beforeSequence: first.records[0]!.sequence,
+      maxMessages: 2,
+      maxStoredBytes: 4096,
+    });
+    assert.deepEqual(
+      older.records.map(({ message }) => message.id),
+      [independent.assignment.id, original.assignment.id],
+    );
+    for (const [actionId, work] of [
+      ['wrong-work', { id: 'work-b', continuesActionId: 'work-a' }],
+      ['missing-source', { id: 'work-a', continuesActionId: 'unknown' }],
+    ] as const) {
+      const bad = assignmentRequest(actionId, target.id, target.name, 'rejected-turn');
+      bad.assignment.schemaVersion = 4;
+      bad.assignment.work = work;
+      await assert.rejects(store.assignWorkHubMessage(bad), /WorkHub continuation source/);
+      assert.equal(await store.readWorkHubAssignment(actionId), undefined);
+      assert.equal(await store.readMessageAdmission(target.id, bad.admission.messageId), undefined);
+    }
+    await store.close?.();
+    store = createSessionStore(root);
+    assert.deepEqual(
+      (await store.assignWorkHubMessage(followup)).assignment.work,
+      followup.assignment.work,
+    );
+    await assert.rejects(
+      store.assignWorkHubMessage({
+        ...followup,
+        assignment: {
+          ...followup.assignment,
+          work: { id: 'work-b', continuesActionId: 'work-b' },
+        },
+      }),
+      /different assignment/,
+    );
+    assert.equal((await store.readHeaderSnapshot(target.id)).permissionMode, 'ask');
+    assert.equal((await store.readHeaderSnapshot(target.id)).model, 'test');
+    assert.equal((await store.readHeaderSnapshot(target.id)).cwd, root);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('atomically commits one WorkHub assignment and target admission', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-workhub-assignment-'));
   const store = createSessionStore(root);

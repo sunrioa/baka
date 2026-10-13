@@ -4608,6 +4608,144 @@ test('WorkHub concurrency releases failed roots and places same-Session successo
   });
 });
 
+test('one real coordination message can establish distinct objectives and queue a work-bound follow-up', async () => {
+  await withCompositionRoot(async ({ owner }) => {
+    await configureFakeDefaultTarget(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const release = deferred<void>();
+    const sends: Array<{ sessionId: string; text: string }> = [];
+    const { composition } = await createCapturedExecutionComposition(owner, {
+      defaultWorkHubRouting: true,
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push({ sessionId: context.sessionId, text: input.text });
+            if (input.text === 'batch objective A') await release.promise;
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'work-objectives-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const desktop = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(context.connectionId),
+      { send: async () => {} },
+    );
+    try {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+            context,
+          )
+        ).ok,
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const userText = 'Inspect A and summarize unrelated B. Then ask A for details.';
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId: 'batch-objectives', text: userText },
+            context,
+          )
+        ).ok,
+      );
+      for (const [actionId, text] of [
+        ['batch-a', 'batch objective A'],
+        ['batch-b', 'batch objective B'],
+      ]) {
+        const result = await composition.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'batch-objectives',
+            actionId: actionId!,
+            proposal: { disposition: 'create_new', title: 'Same title' },
+            delegationText: text!,
+            create: { workspace: { kind: 'isolated' } },
+            newWorkDefaults: { permissionMode: 'ask' },
+          },
+          context,
+        );
+        assert.ok(result.ok, JSON.stringify(result));
+      }
+      const page = await composition.handlers['workhub.coordination.works']({}, context);
+      assert.ok(page.ok, JSON.stringify(page));
+      assert.deepEqual(page.result.works.map((work) => work.workId).sort(), ['batch-a', 'batch-b']);
+      assert.deepEqual(page.result.works.map((work) => work.objective).sort(), [
+        'batch objective A',
+        'batch objective B',
+      ]);
+      const admission = await stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        'batch-objectives',
+      );
+      assert.ok(admission?.userMessageId);
+      for (const work of page.result.works) {
+        assert.equal(work.originalRequest, userText);
+        assert.equal(work.sourceMessageId, admission.userMessageId);
+      }
+      const a = page.result.works.find((work) => work.workId === 'batch-a')!;
+      const continued = await composition.handlers['workhub.coordination.actFromTurn'](
+        {
+          turnId: 'batch-objectives',
+          actionId: 'batch-a-followup',
+          proposal: {
+            disposition: 'continue_work',
+            workId: a.workId,
+            sourceActionId: a.sourceActionId,
+          },
+          delegationText: 'A follow-up details',
+        },
+        context,
+      );
+      assert.ok(continued.ok, JSON.stringify(continued));
+      if (continued.result.disposition !== 'delegate_existing')
+        assert.fail('Missing work continuation');
+      assert.equal(continued.result.workId, 'batch-a');
+      assert.equal(continued.result.targetSessionId, a.targetSessionId);
+      assert.ok(continued.result.targetMessageId);
+      const pending = await stores.sessionStore.readMessageAdmission(
+        a.targetSessionId,
+        continued.result.targetMessageId,
+      );
+      assert.equal(pending?.placement, 'next_turn');
+      assert.equal(pending?.disposition, 'followup');
+      assert.equal(
+        sends.some((send) => send.text === 'A follow-up details'),
+        false,
+      );
+      const followup = await stores.sessionStore.readWorkHubAssignment('batch-a-followup');
+      assert.equal(followup?.work?.continuesActionId, 'batch-a');
+      const running = await composition.handlers['turn.query'](
+        { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: 'batch-objectives' },
+        context,
+      );
+      assert.ok(running.ok);
+      await composition.handlers['turn.stop'](
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          turnId: 'batch-objectives',
+          runId: running.result.runId,
+        },
+        context,
+      );
+      release.resolve();
+      await waitFor(async () => sends.some((send) => send.text === 'A follow-up details'), 10000);
+      assert.equal(
+        sends.find((send) => send.text === 'A follow-up details')?.sessionId,
+        a.targetSessionId,
+      );
+    } finally {
+      release.resolve();
+      await desktop.close();
+      await composition.close();
+    }
+  });
+});
+
 test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
@@ -4675,6 +4813,12 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       );
       const source = await stores.sessionStore.readWorkHubAssignment('overview-source');
       assert.ok(source);
+      assert.equal(source.work?.id, 'overview-source');
+      const sourceAdmission = await stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        source.coordinationTurnId,
+      );
+      assert.equal(source.work?.sourceMessageId, sourceAdmission?.userMessageId ?? undefined);
       const query = async () => {
         const page = await composition.handlers['workhub.tasks.query']({}, context);
         assert.ok(page.ok, JSON.stringify(page));
@@ -4703,6 +4847,18 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       const first = await composition.handlers['workhub.coordination.continue'](input, context);
       assert.ok(first.ok, JSON.stringify(first));
       assert.equal(first.result.targetSessionId, target.id);
+      assert.ok('workId' in first.result);
+      assert.equal(first.result.workId, source.work!.id);
+      const workPage = await composition.handlers['workhub.coordination.works'](
+        { query: 'original-task' },
+        context,
+      );
+      assert.ok(workPage.ok, JSON.stringify(workPage));
+      assert.equal(workPage.result.works[0]?.workId, source.work!.id);
+      const continuationSource = await stores.sessionStore.readWorkHubAssignment(
+        workPage.result.works[0]!.sourceActionId,
+      );
+      assert.equal(continuationSource?.work?.continuesActionId, source.actionId);
       assert.deepEqual(
         sends.map((s) => s.text),
         ['original-task'],

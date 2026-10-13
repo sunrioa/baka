@@ -110,6 +110,10 @@ describe('WorkHub Coordination Action Gate', () => {
       } else {
         assert.equal((await operation).targetSessionId, 'original');
         assert.equal(effects.assignments.length, 1);
+        assert.deepEqual(effects.assignments[0]?.work, {
+          id: 'source',
+          continuesActionId: 'source',
+        });
       }
     }
   });
@@ -1181,6 +1185,7 @@ describe('WorkHub Coordination Action Gate', () => {
       disposition: 'delegate_existing',
       targetSessionId: 'payments',
       targetTurnId: 'turn-delegate',
+      workId: 'delegate',
     });
     assert.equal(effects.assignments[0]!.targetSessionName, 'Payments');
     assert.equal(effects.assignments[0]!.userText, 'Continue payments');
@@ -1473,6 +1478,7 @@ describe('WorkHub Coordination Action Gate', () => {
       replacementDisposition: 'delegate_existing',
       targetSessionId: 'destination',
       targetTurnId: 'turn-replacement-action',
+      workId: 'source-action',
     });
     assert.equal(effects.replacements.size, 1);
     assert.equal(effects.retirements[0]?.actionId, 'source-action');
@@ -2210,9 +2216,10 @@ function assignmentRecord(
     id: `assignment-${input.actionId}`,
     turnId: input.actionId,
     ts: 1,
-    schemaVersion: input.replacesDelegationId ? 2 : 1,
+    schemaVersion: input.work ? 4 : input.replacesDelegationId ? 2 : 1,
     kind: 'delegation_assigned',
     actionId: input.actionId,
+    ...(input.work ? { work: input.work } : {}),
     actionFingerprint: input.actionFingerprint,
     coordinationTurnId: input.actionId,
     targetSessionId: input.targetSessionId,
