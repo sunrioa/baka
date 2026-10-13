@@ -1,0 +1,74 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import { useEffect, useRef, type RefObject } from 'react';
+import { Composer, Button, useUiLocale, type ComposerHandle } from '@maka/ui';
+import { formatUiMessage } from '@maka/core/ui-locale';
+import type { WorkHubServices } from '../ports.js';
+import type { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
+import { useWorkHubTaskInput } from '../controller/use-workhub-task-input.js';
+import { workHubTaskInputCopy } from '../locales/workhub-task-input-copy.js';
+import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
+
+export function WorkHubTaskComposer({ services, owner, workId, name, view, composerRef, onBack }: {
+  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; composerRef?: RefObject<ComposerHandle | null>; onBack(): void;
+}) {
+  const locale = useUiLocale(), t = workHubTaskInputCopy[locale];
+  const input = useWorkHubTaskInput(services, owner, workId, view);
+  const { state, model } = input;
+  const localComposer = useRef<ComposerHandle>(null);
+  const composer = composerRef ?? localComposer;
+  useEffect(() => {
+    // Reconciliation after reload may confirm a send whose response was lost.
+    // The model clears only its unchanged submitted draft, never a newer edit.
+    const text = model.readDraft();
+    if (composer.current?.getDraft(model.key) !== text) composer.current?.setDraft(model.key, text);
+  }, [composer, model, state.draftVersion]);
+  const unknown = !!state.attempt && !state.receipt && !state.rejected;
+  const error = state.error ? t.error[state.error] : state.rejected?.message;
+  const blocked = !view.ready ? t.unavailable : !input.source ? t.history : input.session?.backend === 'plugin-executor' ? t.unsupported : !input.ready ? t.sessionUnavailable : undefined;
+  return <div className="workHubTaskComposer" data-work-input={workId}>
+    <div className="workHubTaskInputHeader">
+      <p>{formatUiMessage(t.address, { name }, locale)}</p>
+      <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].coordinatorInput} onClick={onBack} />
+    </div>
+    {input.session && <p className="workHubTaskInputTarget">{input.session.name} · {input.session.model ?? t.unknownModel}</p>}
+    {blocked && <p role="status">{blocked}{!input.source && view.ready && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].follow} onClick={view.followLatest} />}</p>}
+    {error && <p role="alert">{error}</p>}
+    {state.recoveryUnsafe && state.error !== 'storage' && <p role="alert">{t.error.storage}</p>}
+    {state.receipt && <p role="status" data-input-id={state.receipt.inputId} data-input-delivery={state.receipt.delivery}>{t.delivery[state.receipt.delivery]}</p>}
+    {state.attempt && <details className="workHubTaskInputDetails">
+      <summary>{t.original}</summary>
+      <div><p>{state.attempt.input.text}</p><code>{state.attempt.input.generationId} / {state.attempt.input.sourceActionId}</code></div>
+    </details>}
+    {unknown && <div className="workHubTaskInputRecovery">
+      <p>{t.pending}</p>
+      <Button size="sm" variant="ghost" label={t.check} isDisabled={state.reconciling} onClick={() => { void model.reconcile(); }} />
+      <Button size="sm" variant="ghost" label={t.retry} isDisabled={!view.ready || state.sending} onClick={() => { void model.retry(); }} />
+    </div>}
+    {input.stopFailed && <p role="alert">{t.stopFailed}</p>}
+    <Composer ref={composer} draftKey={model.key} draftPersistence={input.persistence}
+      placeholder={t.placeholder} onSend={input.send} onStop={input.stop}
+      streaming={input.canStop} stopPending={input.stopPending}
+      sendBlocked={!input.ready || state.sending || unknown} sendBlockedReason={blocked ?? (unknown ? t.pending : undefined)}
+      activeSession={input.session} activeModel={input.session?.model} pickersReadOnly
+      activeModelConnectionId={input.session?.llmConnectionId} activeModelConnectionSlug={input.session?.llmConnectionSlug}
+      showStaticModelUnavailableStatus={false} />
+  </div>;
+}

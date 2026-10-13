@@ -35,6 +35,7 @@ import { encodeDesktopTranscriptBatches, encodeDesktopTranscriptSnapshot } from 
 import { AttachmentIngestBlockedError } from '@maka/core/attachments';
 import type { AttachmentRef } from '@maka/core/events';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import type { OperationInput } from '@maka/runtime-host/protocol';
 
 test('WorkHub permission reads, writes and notifications stay on the Coordination Host', async () => {
   const owners = ['host-a', 'host-b'].map((hostId, index) => ({
@@ -56,7 +57,7 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
       ipcRenderer: {
         on(channel: string, listener: (...args: unknown[]) => void) { listeners.set(channel, listener); },
         off(channel: string) { listeners.delete(channel); }, send() {},
-        async invoke(channel: string, scope: { hostId: string }, mode: 'ask' | 'bypass' | number) {
+        async invoke(channel: string, scope: { hostId: string }, mode: 'ask' | 'bypass' | number | OperationInput<'workhub.tasks.send'>) {
           if (channel === 'runtime-host:identities') return owners;
           if (channel === 'runtime-host:awaitReady') return { ready: true };
           assert.ok(modes.has(scope.hostId));
@@ -69,6 +70,14 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
           if (channel === 'workhub:queryTasks') return { tasks: [{ actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' }], truncated: false };
           if (channel === 'workhub:readTask') return { task: { actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' } };
           if (channel === 'workhub:continueTask') return { disposition: 'delegate_existing', targetSessionId: 'original-task' };
+          if (channel === 'workhub:sendTaskInput' || channel === 'workhub:readTaskInput') {
+            const request = mode as OperationInput<'workhub.tasks.send'>;
+            assert.equal(scope.hostId, 'host-b', 'task input stays on its non-default owning Host');
+            assert.equal(request.inputId, 'task-input');
+            const receipt = { workId: request.workId, inputId: request.inputId, generationId: 'task-generation', sourceActionId: 'task-action', sourceDelegationId: 'task-delegation',
+              targetSessionId: 'original-task', targetMessageId: 'input-message', acceptedAt: 1, mode: 'steering', delivery: 'queued' };
+            return channel === 'workhub:sendTaskInput' ? { kind: 'accepted', receipt } : receipt;
+          }
           if (channel === 'workhub:getExecutionConcurrency') return 3;
           if (channel === 'workhub:setExecutionConcurrency') return mode;
           if (channel === 'workhub:setNewWorkPermissionMode') modes.set(scope.hostId, mode as 'ask' | 'bypass');
@@ -98,6 +107,14 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   assert.equal(taskDetail.task.targetSessionId, session('host-b', 'original-task'));
   const continuation = await bridge.workHub.continueTask(session('host-b'), { ...taskRef, turnId: 'new-turn', text: 'Continue' });
   assert.equal(continuation.targetSessionId, session('host-b', 'original-task'));
+  const taskInput = { inputId: 'task-input', workId: 'task-work', generationId: 'task-generation', sourceActionId: 'task-action', sourceDelegationId: 'task-delegation', text: 'Correction' };
+  const accepted = await bridge.workHub.sendTaskInput(session('host-b'), taskInput);
+  assert.equal(accepted.kind, 'accepted');
+  if (accepted.kind === 'accepted') {
+    assert.equal(accepted.receipt.targetSessionId, session('host-b', 'original-task'));
+    assert.equal(accepted.receipt.sourceActionId, taskInput.sourceActionId);
+  }
+  assert.equal((await bridge.workHub.readTaskInput(session('host-b'), { workId: taskInput.workId, inputId: taskInput.inputId })).targetSessionId, session('host-b', 'original-task'));
   const before = calls.length;
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('host-b', 'ordinary-session'), 'bypass'), /Invalid WorkHub Coordination Session identity/u);
   await assert.rejects(bridge.workHub.setNewWorkPermissionMode(session('unknown-host'), 'bypass'));
@@ -107,6 +124,9 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   await assert.rejects(bridge.workHub.queryTasks(session('host-b', 'ordinary-session')));
   await assert.rejects(bridge.workHub.readTask(session('unknown-host'), taskRef));
   await assert.rejects(bridge.workHub.continueTask(session('host-b', 'ordinary-session'), { ...taskRef, turnId: 'new-turn', text: 'Continue' }));
+  await assert.rejects(bridge.workHub.sendTaskInput(session('host-b', 'ordinary-session'), taskInput));
+  await assert.rejects(bridge.workHub.sendTaskInput(session('unknown-host'), taskInput));
+  await assert.rejects(bridge.workHub.readTaskInput(session('host-b', 'ordinary-session'), { workId: taskInput.workId, inputId: taskInput.inputId }));
   await assert.rejects(bridge.workHub.answerInteraction(session('unknown-host'), {
     actionId: 'action', interactionId: 'question', expectedTurnId: 'turn', expectedRunId: 'run',
     answer: { kind: 'question', answers: ['Yes'] },

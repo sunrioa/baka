@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RuntimeHostOperationError } from '@maka/runtime-host/client';
+import { RuntimeHostOperationError, RuntimeHostRequestInterruptedError } from '@maka/runtime-host/client';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import { createDefaultRuntimePolicy, type RuntimePolicy } from '@maka/core/runtime-policy';
@@ -47,12 +47,47 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(reconnectable.has('workhub:readTask'), true);
   assert.equal(reconnectable.has('workhub:taskHistory'), true);
   assert.equal(reconnectable.has('workhub:taskExecutions'), true);
+  assert.equal(reconnectable.has('workhub:readTaskInput'), true);
+  assert.equal(ordinary.has('workhub:sendTaskInput'), true);
+  assert.equal(reconnectable.has('workhub:sendTaskInput'), false, 'a lost task input is reconciled by ID, not blindly replayed');
   assert.equal(ordinary.has('workhub:continueTask'), true);
   assert.equal(reconnectable.has('workhub:continueTask'), false, 'a lost task continuation is not automatically replayed');
   assert.equal(ordinary.has('workhub:answerInteraction'), true);
   assert.equal(reconnectable.has('workhub:answerInteraction'), false, 'lost approvals are not automatically replayed');
   assert.equal(ordinary.has('workhub:revokeTaskGrant'), true);
   assert.equal(reconnectable.has('workhub:revokeTaskGrant'), false, 'revocation receipts are rebuilt, never replayed');
+});
+
+test('native task input IPC preserves exact IDs and distinguishes rejected from unknown without another command', async () => {
+  const handlers = new Map<string, IpcHandler>();
+  const input = { inputId: 'input-1', workId: 'work-1', generationId: 'gen-1', sourceActionId: 'action-1', sourceDelegationId: 'delegation-1', text: 'Correction' };
+  const { text: _text, ...identity } = input;
+  const receipt = { ...identity, acceptedAt: 1, targetSessionId: 'worker', targetMessageId: 'message', mode: 'steering' as const, delivery: 'queued' as const };
+  const sends: unknown[] = [], reads: unknown[] = [];
+  let failure: Error | undefined;
+  const client = {
+    sendWorkHubTaskInput: async (value: unknown) => { sends.push(value); if (failure) throw failure; return receipt; },
+    readWorkHubTaskInput: async (value: unknown) => { reads.push(value); return receipt; },
+  } as Parameters<typeof registerRuntimeHostWorkHubIpc>[0];
+  registerRuntimeHostWorkHubIpc(client, { handle: (channel, handler) => handlers.set(channel, handler) }, {});
+  const send = handlers.get('workhub:sendTaskInput')!, read = handlers.get('workhub:readTaskInput')!;
+  const event = {} as Parameters<IpcHandler>[0];
+  assert.deepEqual(await send(event, input), { kind: 'accepted', receipt });
+  for (const code of ['operation_unavailable', 'operation_conflict', 'commit_outcome_unknown', 'persistence_failed'] as const) {
+    failure = new RuntimeHostOperationError('workhub.tasks.send', code, `specific ${code}`);
+    const expected = ['operation_unavailable', 'operation_conflict'].includes(code)
+      ? { kind: 'rejected', code, message: `specific ${code}` } : { kind: 'unknown' };
+    assert.deepEqual(await send(event, input), expected);
+  }
+  failure = new RuntimeHostRequestInterruptedError('workhub.tasks.send', 'command', 'dispatched', 'connection_lost');
+  assert.deepEqual(await send(event, input), { kind: 'unknown' });
+  failure = new RuntimeHostRequestInterruptedError('workhub.tasks.send', 'command', 'not_dispatched', 'connection_lost');
+  assert.deepEqual(await send(event, input), { kind: 'rejected', code: 'host_not_ready', message: failure.message });
+  const beforeRead = sends.length;
+  assert.deepEqual(await read(event, { workId: input.workId, inputId: input.inputId }), receipt);
+  assert.equal(sends.length, beforeRead, 'receipt reads never resubmit a command');
+  assert.deepEqual(reads, [{ workId: input.workId, inputId: input.inputId }]);
+  assert.ok(sends.every(value => value === input), 'all explicit retries preserve the original payload');
 });
 
 test('stores new-work execution defaults separately from the coordination Session', async () => {

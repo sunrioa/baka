@@ -27,4 +27,6 @@ export { workspaceNameFromCwd } from './model/workspace-name.js';
 export { allocateWorkHubHues } from './model/identity-colors.js';
 export { workHubLinkedWork } from './model/linked-work.js';
 export { createWorkHubTaskViewModel } from './model/task-view-model.js';
-export { useWorkHubExecutionView } from './controller/use-workhub-task-view.js';
+export { useWorkHubExecutionView, useWorkHubTaskView } from './controller/use-workhub-task-view.js';
+export { createWorkHubTaskInputModel, workHubTaskInputSource } from './model/task-input-model.js';
+export { useWorkHubTaskInput } from './controller/use-workhub-task-input.js';

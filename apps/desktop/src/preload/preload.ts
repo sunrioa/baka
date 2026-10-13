@@ -29,6 +29,7 @@ import type {
   WorkHubAnswerInput,
   WorkHubAnswerResult,
   WorkHubPrepareAttachmentsResult,
+  WorkHubTaskSendResult,
 } from '../shared/workhub-conversation.js';
 import type { SessionObservationMessage } from '../shared/session-execution-projection.js';
 import { executionEventChannel, sameExecutionScope } from '../shared/execution-observation.js';
@@ -2212,6 +2213,17 @@ const makaBridge = {
       const result = await invokeWhenReady('workhub:taskExecutions', scope, input) as OperationOutput<'workhub.tasks.executions'>;
       return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId,
         executions: result.executions.map(item => ({ ...item, sessionId: observeRuntimeHostSessionScope(scope, item.sessionId).sessionId })) };
+    },
+    async sendTaskInput(coordinationSessionId: string, input: OperationInput<'workhub.tasks.send'>): Promise<WorkHubTaskSendResult> {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:sendTaskInput', scope, input) as WorkHubTaskSendResult;
+      return result.kind === 'accepted' ? { ...result, receipt: { ...result.receipt,
+        targetSessionId: observeRuntimeHostSessionScope(scope, result.receipt.targetSessionId).sessionId } } : result;
+    },
+    async readTaskInput(coordinationSessionId: string, input: OperationInput<'workhub.tasks.input.read'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:readTaskInput', scope, input) as OperationOutput<'workhub.tasks.input.read'>;
+      return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId };
     },
     async continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);

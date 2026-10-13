@@ -1404,6 +1404,8 @@ export class DesktopRuntimeHostClient {
   queryWorkHubTasks(): Promise<OperationOutput<'workhub.tasks.query'>> { return this.request('workhub.tasks.query', {}); }
   readWorkHubTaskHistory(input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>> { return this.request('workhub.tasks.history', input); }
   readWorkHubTaskExecutions(input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>> { return this.request('workhub.tasks.executions', input); }
+  sendWorkHubTaskInput(input: OperationInput<'workhub.tasks.send'>): Promise<OperationOutput<'workhub.tasks.send'>> { return this.request('workhub.tasks.send', input); }
+  readWorkHubTaskInput(input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>> { return this.request('workhub.tasks.input.read', input); }
   readWorkHubTask(input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>> { return this.request('workhub.tasks.read', input); }
   continueWorkHubTask(input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>> { return this.request('workhub.coordination.continue', input); }
 

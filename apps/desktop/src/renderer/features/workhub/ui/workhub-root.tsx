@@ -40,8 +40,9 @@ import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-pre
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { workHubLinkedWork } from '../model/linked-work.js';
 import { WorkHubTaskView } from './workhub-task-view.js';
+import { WorkHubTaskComposer } from './workhub-task-composer.js';
+import { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
-import { formatUiMessage } from '@maka/core/ui-locale';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
 function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
@@ -84,13 +85,21 @@ function revealWordmark(element: HTMLDivElement | null, content: HTMLDivElement 
 export function WorkHubRoot() {
   const highlight = useWorkHubHighlightState();
   const composer = useRef<ComposerHandle>(null);
+  const taskComposer = useRef<ComposerHandle>(null);
   const draftRestore = useRef<((sessionId: string, draft: RestoredDraftContent) => void) | undefined>(undefined);
   const controller = useWorkHubController(
     () => highlight.selectWork(undefined),
     (sessionId, draft) => draftRestore.current?.(sessionId, draft),
   );
   const { services, session, transcript, busy } = controller;
-  const selectedTask = highlight.selectedWork?.workId && sameWorkHubHost(controller.sessionId, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
+  const retainedTaskOwner = useRef({ services, owner: controller.sessionId });
+  if (retainedTaskOwner.current.services !== services) retainedTaskOwner.current = { services, owner: controller.sessionId };
+  else if (controller.sessionId) retainedTaskOwner.current.owner = controller.sessionId;
+  const taskOwner = controller.sessionId ?? retainedTaskOwner.current.owner;
+  const selectedTask = highlight.selectedWork?.workId && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
+  const taskView = useWorkHubTaskView(services, selectedTask ? taskOwner : undefined, selectedTask?.workId, controller.sessionId === taskOwner && !!controller.sessionId);
+  const selectedTaskRef = useRef(selectedTask); selectedTaskRef.current = selectedTask;
+  const focusComposer = () => (selectedTaskRef.current ? taskComposer : composer).current?.focus();
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
     return () => services.bindBrowserSession(null);
@@ -206,7 +215,7 @@ export function WorkHubRoot() {
     const id = controller.activeInteraction?.requestId;
     if (previousInteraction.current && !id && document.hasFocus() &&
       (document.activeElement === document.body || composerSurface.current?.contains(document.activeElement))) {
-      composer.current?.focus();
+      focusComposer();
     }
     previousInteraction.current = id;
   }, [controller.activeInteraction?.requestId]);
@@ -218,7 +227,7 @@ export function WorkHubRoot() {
     } else {
       setConversationExpanded(true);
     }
-    composer.current?.focus();
+    focusComposer();
   };
   useEffect(() => {
     let active = true;
@@ -247,10 +256,10 @@ export function WorkHubRoot() {
     void services.control.getSnapshot().then(acceptControl).catch(controller.report);
     const focus = services.presentation.onFocusComposer((expand) => {
       if (expand) setConversationExpanded(true);
-      const choice = surface.current?.querySelector<HTMLElement>('.maka-choice-panel');
+      const choice = selectedTaskRef.current ? undefined : surface.current?.querySelector<HTMLElement>('.maka-choice-panel');
       if (choice) {
         if (!choice.contains(document.activeElement)) choice.focus();
-      } else composer.current?.focus();
+      } else focusComposer();
       // A warm summon must not fade the last painted frame back out.
       if (hasPresented.current) return;
       hasPresented.current = true;
@@ -314,6 +323,7 @@ export function WorkHubRoot() {
               {!progress && !selectedTask && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))}
                 onView={task => highlight.selectWork({ sessionId: task.targetSessionId, name: task.targetSessionName, workId: task.workId ?? task.actionId })} />}
             </div>
+            {(controller.activeForm || controller.activeQuestion) && <div hidden={Boolean(selectedTask)}>
             {controller.activeForm && (
               <FormInteractionPrompt
                 request={controller.activeForm}
@@ -326,10 +336,11 @@ export function WorkHubRoot() {
             {controller.activeQuestion && <UserQuestionPrompt key={controller.activeQuestion.requestId}
               request={controller.activeQuestion} onRespond={controller.respondToUserQuestion}
               onStop={controller.stop} stopPending={controller.stopPending} />}
-            {selectedTask && <div className="workHubTaskReadOnly" role="status">
-              <p>{formatUiMessage(taskCopy.readOnly, { name: selectedTask.name }, locale)}</p>
-              <Button size="sm" variant="ghost" label={taskCopy.coordinatorInput} onClick={() => highlight.selectWork(undefined)} />
             </div>}
+            {selectedTask && taskOwner && <WorkHubTaskComposer
+              key={JSON.stringify([taskOwner, selectedTask.workId])}
+              services={services} owner={taskOwner} workId={selectedTask.workId!} name={selectedTask.name} view={taskView}
+              composerRef={taskComposer} onBack={() => highlight.selectWork(undefined)} />}
             <div className="workHubComposerContent" hidden={Boolean(selectedTask || controller.activeQuestion || controller.activeForm)}>
             <WorkHubComposer
               pendingMessages={controller.transientMessages}
@@ -452,14 +463,15 @@ export function WorkHubRoot() {
         }
       >
         <div ref={history} className="workHubHistory" aria-hidden={!showConversation} inert={!showConversation}>
-        {selectedTask && controller.sessionId ? <WorkHubTaskView key={JSON.stringify([controller.sessionId, selectedTask.workId])}
-          services={services} owner={controller.sessionId} workId={selectedTask.workId!} name={selectedTask.name}
+        {selectedTask && taskOwner ? <WorkHubTaskView key={JSON.stringify([taskOwner, selectedTask.workId])}
+          services={services} owner={taskOwner} workId={selectedTask.workId!} name={selectedTask.name}
+          view={taskView}
           onClose={() => highlight.selectWork(undefined)} /> : <WorkHubConversation
           workLinks={links}
           onReadAttachmentBytes={services.readAttachmentBytes}
           onOpenWork={(id) => call(services.presentation.openSession(id))}
           scrollBehavior="auto"
-          onNew={() => composer.current?.focus()}
+          onNew={focusComposer}
           messages={[...transcript.messages]}
           hasEarlierHistory={transcript.hasOlder}
           onLoadEarlierHistory={controller.loadEarlier}

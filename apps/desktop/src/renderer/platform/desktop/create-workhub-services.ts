@@ -105,6 +105,8 @@ export function createDesktopWorkHubServices(
     readTask: (sessionId, input) => bridge.workHub.readTask(sessionId, input),
     taskHistory: (sessionId, input) => bridge.workHub.taskHistory(sessionId, input),
     taskExecutions: (sessionId, input) => bridge.workHub.taskExecutions(sessionId, input),
+    sendTaskInput: (sessionId, input) => bridge.workHub.sendTaskInput(sessionId, input),
+    readTaskInput: (sessionId, input) => bridge.workHub.readTaskInput(sessionId, input),
     continueTask: (sessionId, input) => bridge.workHub.continueTask(sessionId, input),
     answerTaskInteraction: (sessionId, input) => bridge.workHub.answerInteraction(sessionId, input),
     revokeTaskGrant: (sessionId, input) => bridge.workHub.revokeTaskGrant(sessionId, input),

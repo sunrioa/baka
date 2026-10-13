@@ -23,7 +23,9 @@ import { act, createElement, StrictMode } from 'react';
 import { LocaleProvider } from '@maka/ui';
 import { deferred, waitFor } from '@maka/core/test-only/async-primitives';
 import type { WorkHubTaskAssignment, WorkHubTaskExecutionsResult, TurnSnapshot } from '@maka/runtime-host/protocol';
-import { createWorkHubTaskViewModel, useWorkHubExecutionView } from '../../renderer/features/workhub/testing.js';
+import { createWorkHubTaskViewModel, useWorkHubExecutionView, useWorkHubTaskView, useWorkHubTaskInput } from '../../renderer/features/workhub/testing.js';
+import type { SessionSummary } from '@maka/core/session';
+import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
 import { installReactRenderer, cleanupFakeDom } from './fake-dom.js';
 
@@ -214,4 +216,107 @@ test('task view rejects foreign work/session responses and expires restart-bound
   mode = 'expired'; await model.refresh(); assert.match(model.snapshot().error!, /expired cursor/);
   assert.equal(model.snapshot().executionsReady, false);
   model.close();
+});
+
+test('the shared task view withdraws send authority synchronously on scope or availability changes', async () => {
+  const { root } = installReactRenderer();
+  const availability = new Set<() => void>();
+  const history = (workId: string) => ({ ...assignment(workId), workId });
+  const services = {
+    taskHistory: async (_owner: string, input: { workId: string }) => ({ workId: input.workId, assignments: [history(input.workId)], nextCursor: null }),
+    taskExecutions: async (_owner: string, input: { actionId: string; delegationId: string }) => ({ actionId: input.actionId, delegationId: input.delegationId, targetSessionId: 'same-session', executions: [{ ...turn(`turn-${input.actionId}`), runId: `run-${input.actionId}` }], nextCursor: null }),
+    subscribeSessions: () => () => {}, subscribeAvailability: (handler: () => void) => { availability.add(handler); return () => { availability.delete(handler); }; },
+  } as unknown as WorkHubServices;
+  let view!: ReturnType<typeof useWorkHubTaskView>;
+  function Probe({ workId, available = true }: { workId?: string; available?: boolean }) { view = useWorkHubTaskView(services, 'owner', workId, available); return null; }
+  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'a' }))); });
+  const a = view; assert.equal(a.currentSnapshot().assignment?.workId, 'a');
+  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'b' }))); });
+  assert.equal(view.assignment?.workId, 'b'); assert.equal(a.currentSnapshot().ready, false);
+  const beforeLoss = view;
+  await act(async () => {
+    for (const handler of availability) handler();
+    assert.equal(beforeLoss.currentSnapshot().ready, false, 'invalidated live model outranks a still-rendered ready closure');
+  });
+  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'b', available: false }))); });
+  assert.equal(view.assignment?.workId, 'b', 'records remain inspectable while authority is absent');
+  assert.equal(beforeLoss.currentSnapshot().ready, false); assert.equal(view.currentSnapshot().ready, false);
+  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, {}))); });
+  assert.deepEqual(view.assignments, []); assert.equal(view.currentSnapshot().ready, false);
+});
+
+test('real task input hook uses the shared canonical source, survives switching, and stops only its shown owned execution', async (t) => {
+  const storageValues = new Map<string, string>();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: { getItem: (key: string) => storageValues.get(key) ?? null, setItem: (key: string, value: string) => storageValues.set(key, value) } });
+  t.after(() => { if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor); else Reflect.deleteProperty(globalThis, 'sessionStorage'); });
+  const owner = desktopSessionKey({ hostId: 'task-host', sessionId: 'maka_workhub_coordination' });
+  const tasks = ['a', 'b'].map(id => assignment(id, { workId: `work-${id}`, targetSessionId: desktopSessionKey({ hostId: 'task-host', sessionId: `session-${id}` }) }));
+  const sessionChanges = new Set<() => void>(), availability = new Set<() => void>();
+  const sends: Array<Parameters<WorkHubServices['sendTaskInput']>> = [], stops: unknown[] = [];
+  let backend: SessionSummary['backend'] = 'ai-sdk';
+  let successor = '';
+  const services = {
+    taskHistory: async (_owner, input) => ({ workId: input.workId, assignments: tasks.filter(a => a.workId === input.workId), nextCursor: null }),
+    taskExecutions: async (_owner, input) => {
+      const a = tasks.find(a => a.actionId === input.actionId)!;
+      return { actionId: a.actionId, delegationId: a.delegationId, targetSessionId: a.targetSessionId,
+        executions: [{ sessionId: a.targetSessionId, ...a.execution!, status: 'completed', terminalEventId: 'old-complete' },
+          { sessionId: a.targetSessionId, turnId: `${a.execution!.turnId}-resume${successor}`, runId: `${a.execution!.runId}-resume${successor}`, status: 'running' }], nextCursor: null };
+    },
+    getTaskSession: async id => ({ id, name: 'Actual task', backend, model: 'actual-worker-model', llmConnectionId: 'worker-connection', llmConnectionSlug: 'worker',
+      permissionMode: 'ask', cwd: '/original-worker', isFlagged: false, isArchived: false, labels: [], hasUnread: false, status: 'active', connectionLocked: false, runningTurnIds: ['unrelated-root'] }),
+    subscribeSessions: handler => { sessionChanges.add(handler); return () => { sessionChanges.delete(handler); }; },
+    subscribeAvailability: handler => { availability.add(handler); return () => { availability.delete(handler); }; },
+    sendTaskInput: async (...args) => {
+      sends.push(args); const [_owner, input] = args;
+      const a = tasks.find(a => a.actionId === input.sourceActionId)!;
+      return { kind: 'accepted', receipt: { workId: input.workId, generationId: input.generationId, sourceActionId: input.sourceActionId, sourceDelegationId: input.sourceDelegationId,
+        inputId: input.inputId, acceptedAt: 1, targetSessionId: a.targetSessionId, targetMessageId: 'accepted-input', mode: 'steering', delivery: 'queued' } };
+    },
+    readTaskInput: async () => { throw new Error('No receipt yet'); },
+    stop: async (...args) => { stops.push(args); return []; },
+  } satisfies Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'getTaskSession' | 'subscribeSessions' | 'subscribeAvailability' | 'sendTaskInput' | 'readTaskInput' | 'stop'>;
+  let view!: ReturnType<typeof useWorkHubTaskView>, input!: ReturnType<typeof useWorkHubTaskInput>;
+  function Probe({ workId }: { workId: string }) {
+    view = useWorkHubTaskView(services, owner, workId);
+    input = useWorkHubTaskInput(services, owner, workId, view);
+    return null;
+  }
+  const { root } = installReactRenderer();
+  const render = (workId: string) => root.render(createElement(StrictMode, {}, createElement(Probe, { workId })));
+  await act(async () => { render('work-a'); });
+  assert.equal(input.ready, true); const oldA = input;
+  await act(async () => { input.model.writeDraft('A correction'); });
+  await act(async () => { render('work-b'); });
+  await act(async () => { input.model.writeDraft('B draft'); assert.equal(await oldA.send('stale A closure'), false); });
+  assert.equal(sends.length, 0); assert.equal(input.model.readDraft(), 'B draft');
+  await act(async () => { render('work-a'); });
+  assert.equal(input.model.readDraft(), 'A correction');
+  assert.equal(input.session?.model, 'actual-worker-model'); assert.equal(input.session?.permissionMode, 'ask'); assert.equal(input.session?.cwd, '/original-worker');
+  await act(async () => { assert.equal(await input.send('A correction'), true); });
+  assert.equal(sends.length, 1); assert.equal(sends[0]![0], owner); assert.equal(sends[0]![1].sourceActionId, tasks[0]!.actionId);
+  await act(async () => { await input.stop(); });
+  assert.deepEqual(stops, [[tasks[0]!.targetSessionId, 'turn-a-resume']], 'never stop the unrelated Session root or coordinator');
+  const stillRendered = input;
+  await act(async () => {
+    successor = '-next'; await view.refresh();
+    assert.equal(view.execution?.turnId, 'turn-a-resume', 'React has not committed the new execution yet');
+    assert.equal(view.currentSnapshot().execution?.turnId, 'turn-a-resume-next');
+    await stillRendered.stop();
+    assert.equal(stops.length, 1, 'the old Stop must not target an undisplayed successor');
+  });
+  await act(async () => { await input.stop(); });
+  assert.deepEqual(stops[1], [tasks[0]!.targetSessionId, 'turn-a-resume-next'], 'the newly rendered Stop can address its exact successor');
+  await act(async () => { view.selectExecution('turn-a'); });
+  assert.equal(input.ready, false); assert.equal(input.canStop, false);
+  await act(async () => { await input.stop(); }); assert.equal(stops.length, 2);
+  await act(async () => { view.followLatest(); });
+  const beforeLoss = input;
+  await act(async () => { for (const notify of availability) notify(); assert.equal(await beforeLoss.send('during loss'), false); });
+  assert.equal(sends.length, 1);
+  await act(async () => { backend = 'plugin-executor'; for (const notify of sessionChanges) notify(); });
+  assert.equal(input.ready, false); await act(async () => { assert.equal(await input.send('unsupported'), false); });
+  await act(async () => { await input.stop(); }); assert.equal(stops.length, 2);
+  assert.equal(sends.length, 1);
 });

@@ -25,7 +25,7 @@ import type { StoredMessage, SessionSummary, WorkHubCreateDefaults } from '@maka
 import type { ComposerAttachmentService } from '@maka/ui/use-composer-attachments';
 import type { SessionEvent, AttachmentRef, MessageQueuePlacement } from '@maka/core/events';
 import type { OperationInput, OperationOutput, TurnMessageExecutionQueryResult } from '@maka/runtime-host/protocol';
-import type { WorkHubAnswerInput, WorkHubAnswerResult } from '../../../shared/workhub-conversation.js';
+import type { WorkHubAnswerInput, WorkHubAnswerResult, WorkHubTaskSendResult } from '../../../shared/workhub-conversation.js';
 import type { WorkHubControlBridge } from '../../../shared/workhub-control.js';
 import type { WorkHubPresentationBridge } from '../../../shared/workhub-presentation.js';
 import type { WorkHubWorkspaceServices } from '../../application/contracts/workhub-workspace/use-workhub-workspace.js';
@@ -66,6 +66,8 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   readTask(sessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
   taskHistory(sessionId: string, input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>>;
   taskExecutions(sessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;
+  sendTaskInput(sessionId: string, input: OperationInput<'workhub.tasks.send'>): Promise<WorkHubTaskSendResult>;
+  readTaskInput(sessionId: string, input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>>;
   continueTask(sessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
   answerTaskInteraction(sessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
   revokeTaskGrant(sessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
