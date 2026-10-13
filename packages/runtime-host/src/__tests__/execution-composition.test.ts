@@ -3260,6 +3260,7 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     let pauseNext = true;
+    let askAfterFirstHandoff = true;
     let boundary = deferred<void>();
     const primaryBackendFactory: BackendFactory = (backendContext) =>
       new (class extends FakeBackend {
@@ -3276,7 +3277,10 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
             assert.equal(await input.handoffBoundary!(new AbortController().signal, null), 'pause');
             return;
           }
-          yield* super.send(input);
+          if (backendContext.header.name === 'Payments' && askAfterFirstHandoff) {
+            askAfterFirstHandoff = false;
+            yield* super.send({ ...input, text: FAKE_ASK_USER_QUESTION_PROMPT });
+          } else yield* super.send(input);
         }
       })(backendContext);
     let { composition, manager } = await createCapturedExecutionComposition(owner, {
@@ -3373,6 +3377,7 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
       assert.equal(original.ok, true);
       if (!original.ok) return;
       await handoffAndReopen();
+      await waitFor(async () => (await manager.listActiveInteractions(target.id)).length === 1);
       assert.ok(composition.continuity);
       const readContext = { ...context, principalKind: 'local_owner' as const };
       const observation = composition.continuity.attachConnection(context.connectionId, {
@@ -3389,6 +3394,19 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
           opened.result.execution,
           scope,
           'physical handoff keeps the admitted logical execution',
+        );
+        const whole = await composition.handlers['subscription.open'](
+          { sessionId: target.id, transcript: { kind: 'none' } },
+          readContext,
+        );
+        assert.ok(whole.ok, JSON.stringify(whole));
+        const pending = whole.result.snapshot.interactions.pending[0]!;
+        assert.notEqual(pending.runId, scope.runId, 'the successor owns the actual question');
+        assert.equal(opened.result.snapshot.interactions.pending.length, 1);
+        assert.equal(opened.result.snapshot.interactions.pending[0]!.runId, pending.runId);
+        assert.equal(
+          opened.result.snapshot.interactions.pending[0]!.interactionId,
+          pending.interactionId,
         );
         const subscription = clientSubscription(
           opened.result,

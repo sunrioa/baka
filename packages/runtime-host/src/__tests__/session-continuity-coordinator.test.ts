@@ -250,6 +250,84 @@ test('an execution-scoped subscription retains only its own live activity and pu
   assert.equal(frames.at(-1)?.kind, 'subscription.session_projection');
 });
 
+test('excluded projections do not evict a scoped subscriber before readiness', async (t) => {
+  let state = canonical({
+    rootTurn: {
+      sessionId: SESSION_ID,
+      turnId: 'other-turn',
+      runId: 'other-run',
+      status: 'running',
+    },
+  });
+  const coordinator = new SessionContinuityCoordinator(
+    HOST_EPOCH,
+    async () => state,
+    new SessionAdmissionGate(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async () => true,
+  );
+  t.after(() => coordinator.close());
+  const sink = new RecordingSink();
+  const connection = attachTestConnection(coordinator, 'quiet-scope', sink);
+  const opened = await coordinator.handlers['subscription.open'](
+    { sessionId: SESSION_ID, execution: EXECUTION, transcript: { kind: 'none' } },
+    connectionContext('quiet-scope'),
+  );
+  assert.ok(opened.ok);
+  for (let revision = 1; revision <= 40; revision++) {
+    state = {
+      ...state,
+      queue: {
+        ...state.queue,
+        queueRevision: revision,
+        followup: [
+          {
+            entryId: 'unrelated-entry',
+            messageId: 'unrelated-message',
+            content: { text: `unrelated change ${revision}` },
+            placement: 'next_turn',
+            state: 'queued',
+          },
+        ],
+      },
+      interactions: {
+        pending: [
+          {
+            ...pendingInteraction(),
+            turnId: 'other-turn',
+            runId: 'other-run',
+            interactionId: `other-${revision}`,
+          },
+        ],
+      },
+    };
+    await coordinator.refreshCanonical(SESSION_ID);
+  }
+  state = { ...state, session: { ...state.session, metadataRevision: 2 } };
+  await coordinator.refreshCanonical(SESSION_ID);
+  await connection.activate(opened.result.subscriptionId);
+  await delayImmediate();
+  assert.equal(sink.frames.length, 1, 'only meaningful visible metadata should spend a sequence');
+  const frame = sink.frames[0];
+  assert.equal(frame?.kind, 'subscription.session_projection');
+  assert.ok(frame?.kind === 'subscription.session_projection');
+  assert.equal(frame.sequence, 1);
+  assert.equal(frame.snapshot.session.metadataRevision, 2);
+  assert.equal(frame.snapshot.rootTurn, null);
+  assert.deepEqual(frame.snapshot.interactions.pending, []);
+  const client = clientSubscription(
+    opened.result,
+    async () => {},
+    async () => {
+      throw new Error('No transcript requested');
+    },
+  );
+  assert.doesNotThrow(() => client.accept(frame));
+});
+
 test('execution transcript paging, watermark and rejoin stay bound to the selected Turn', async (t) => {
   const durable: StoredMessage[] = [
     { type: 'user', id: 'own-user', turnId: EXECUTION.turnId, ts: 1, text: 'own prompt' },

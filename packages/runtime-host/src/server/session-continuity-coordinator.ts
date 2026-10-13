@@ -166,6 +166,7 @@ interface QueuedSubscriptionFrame {
 
 interface Subscriber {
   readonly execution?: SessionExecutionScope;
+  lastExecutionProjection?: SessionContinuitySnapshot;
   connectionId: string;
   principalId: string;
   principalKind: NonNullable<ConnectionContext['principalKind']>;
@@ -1122,7 +1123,9 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
           };
         }
         const subscriber: Subscriber = {
-          ...(input.execution ? { execution: { ...input.execution } } : {}),
+          ...(input.execution
+            ? { execution: { ...input.execution }, lastExecutionProjection: openValue.snapshot }
+            : {}),
           connectionId,
           principalId: identity.principalId,
           principalKind: identity.principalKind,
@@ -1876,6 +1879,21 @@ export class SessionContinuityCoordinator implements SessionContinuityService {
         projectSessionSnapshot(snapshot, subscriber.principalKind),
         subscriber.execution,
       );
+      if (subscriber.execution) {
+        const previous = subscriber.lastExecutionProjection;
+        // Queue/projection revisions advance for excluded activity as well.
+        // Compare visible facts before spending deferred/transport budget,
+        // against the last scheduled projection so ordering stays intact.
+        if (
+          previous &&
+          previous.queue.hostEpoch === projected.queue.hostEpoch &&
+          isDeepStrictEqual(previous.session, projected.session) &&
+          isDeepStrictEqual(previous.rootTurn, projected.rootTurn) &&
+          isDeepStrictEqual(previous.interactions, projected.interactions)
+        )
+          continue;
+        subscriber.lastExecutionProjection = projected;
+      }
       this.#deliverInOrder(
         subscriber,
         () => {

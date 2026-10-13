@@ -45,7 +45,11 @@ export function projectExecutionSnapshot(
     goal: null,
     queue: { ...snapshot.queue, steering: [], followup: [] },
     interactions: {
-      pending: snapshot.interactions.pending.filter((p) => executionScopeMatches(scope, p)),
+      // The admitted Session/Turn is unique. Handoffs retain that Turn, but
+      // pending requests keep the physical Run needed for their real answers.
+      pending: snapshot.interactions.pending.filter(
+        (p) => p.sessionId === snapshot.session.sessionId && p.turnId === scope.turnId,
+      ),
     },
   };
 }
