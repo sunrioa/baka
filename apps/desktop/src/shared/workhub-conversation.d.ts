@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { OperationInput, TurnSnapshot } from '@maka/runtime-host/protocol';
+import type { OperationInput, OperationOutput, TurnSnapshot } from '@maka/runtime-host/protocol';
 import type { AttachmentIngestBlockedCode } from '@maka/core/attachments';
 import type { AttachmentRef } from '@maka/core/events';
 
@@ -30,6 +30,12 @@ export type WorkHubAnswerResult =
   | { readonly kind: 'admitted'; readonly turnId: string; readonly status?: TurnSnapshot['status'] }
   | { readonly kind: 'unknown'; readonly originHostEpoch: string }
   | { readonly kind: 'not_admitted' };
+
+/** Unknown delivery retains the original task input ID and payload for reconciliation. */
+export type WorkHubTaskSendResult =
+  | { readonly kind: 'accepted'; readonly receipt: OperationOutput<'workhub.tasks.send'> }
+  | { readonly kind: 'unknown' }
+  | { readonly kind: 'rejected'; readonly code: string; readonly message: string };
 
 export type WorkHubCoordinationSessionResolution =
   | { readonly sessionId: string }

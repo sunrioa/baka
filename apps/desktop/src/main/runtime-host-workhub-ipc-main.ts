@@ -32,6 +32,7 @@ import type {
   WorkHubAnswerResult,
   WorkHubCoordinationSessionResolution,
   WorkHubPrepareAttachmentsResult,
+  WorkHubTaskSendResult,
 } from '../shared/workhub-conversation.js';
 import { toDesktopHostSessionSummary } from './runtime-host-session-catalog-ipc-main.js';
 import {
@@ -54,6 +55,8 @@ type RuntimeHostWorkHubClient = Pick<
   | 'queryWorkHubTasks'
   | 'readWorkHubTaskHistory'
   | 'readWorkHubTaskExecutions'
+  | 'sendWorkHubTaskInput'
+  | 'readWorkHubTaskInput'
   | 'readWorkHubTask'
   | 'continueWorkHubTask'
   | 'answerWorkHubInteraction'
@@ -146,6 +149,26 @@ export function registerRuntimeHostWorkHubIpc(
   handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
   handleReconnectableRead(ipcMain, 'workhub:taskHistory', (_event, input) => client.readWorkHubTaskHistory(input));
   handleReconnectableRead(ipcMain, 'workhub:taskExecutions', (_event, input) => client.readWorkHubTaskExecutions(input));
+  handleReconnectableRead(ipcMain, 'workhub:readTaskInput', (_event, input) => client.readWorkHubTaskInput(input));
+  ipcMain.handle('workhub:sendTaskInput', async (_event, input): Promise<WorkHubTaskSendResult> => {
+    try {
+      return { kind: 'accepted', receipt: await client.sendWorkHubTaskInput(input) };
+    } catch (error) {
+      // These are authoritative rejections before this payload's admission.
+      // Persistence/transport failures may have committed: do not erase its ID
+      // or automatically submit another command while recovering the read.
+      if (error instanceof RuntimeHostOperationError && [
+        'operation_conflict', 'operation_unavailable', 'not_found', 'session_archived',
+        'session_busy', 'host_not_ready', 'host_draining',
+      ].includes(error.code)) {
+        return { kind: 'rejected', code: error.code, message: error.message };
+      }
+      if (error instanceof RuntimeHostRequestInterruptedError && error.dispatch === 'not_dispatched') {
+        return { kind: 'rejected', code: 'host_not_ready', message: error.message };
+      }
+      return { kind: 'unknown' };
+    }
+  });
   handleReconnectableRead(ipcMain, 'workhub:readTask', (_event, input) => client.readWorkHubTask(input));
   // A lost continuation receipt is never automatically replayed with a new identity.
   ipcMain.handle('workhub:continueTask', (_event, input) => client.continueWorkHubTask(input));

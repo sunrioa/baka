@@ -27,27 +27,40 @@ import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } fr
 
 const emptyTranscript: WorkHubTranscriptSnapshot = { messages: [], ready: false, hasOlder: false };
 const emptyView: WorkHubTaskViewSnapshot = { assignments: [], historyCursor: null, ready: false, loadingEarlier: false, executions: [], executionsReady: false };
+type TaskViewServices = Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'subscribeSessions' | 'subscribeAvailability'>;
 
-export function useWorkHubTaskView(services: WorkHubServices, owner: string, workId: string) {
-  const [state, setState] = useState(emptyView);
-  const model = useRef<ReturnType<typeof createWorkHubTaskViewModel>>(undefined);
+export function useWorkHubTaskView(services: TaskViewServices, owner: string | undefined, workId: string | undefined, available = true) {
+  const [state, setState] = useState<{ services?: TaskViewServices; owner?: string; workId?: string; value: WorkHubTaskViewSnapshot }>({ value: emptyView });
+  const model = useRef<{ services: TaskViewServices; owner: string; workId: string; value: ReturnType<typeof createWorkHubTaskViewModel> }>(undefined);
+  const rendered = useRef({ services, owner, workId, available }); rendered.current = { services, owner, workId, available };
+  const currentModel = () => {
+    const a = model.current, b = rendered.current;
+    return a && a.services === services && a.owner === owner && a.workId === workId && b.services === services && b.owner === owner && b.workId === workId ? a.value : undefined;
+  };
   useEffect(() => {
+    if (!owner || !workId) return;
     const current = createWorkHubTaskViewModel(services, owner, workId);
-    model.current = current;
-    setState(current.snapshot());
-    const unsubscribes = [current.subscribe(() => setState(current.snapshot())),
+    model.current = { services, owner, workId, value: current };
+    const update = () => setState({ services, owner, workId, value: current.snapshot() });
+    update();
+    const unsubscribes = [current.subscribe(update),
       services.subscribeSessions(() => { void current.refresh(); }),
       services.subscribeAvailability(() => current.invalidate())];
     void current.refresh();
     return () => {
       current.close();
       for (const unsubscribe of unsubscribes) unsubscribe();
-      if (model.current === current) model.current = undefined;
+      if (model.current?.value === current) model.current = undefined;
     };
   }, [services, owner, workId]);
-  return { ...state, refresh: () => model.current?.refresh(), loadEarlier: () => model.current?.loadEarlier(),
-    selectAssignment: (id: string) => model.current?.selectAssignment(id), selectExecution: (id: string) => model.current?.selectExecution(id),
-    followLatest: () => model.current?.followLatest() };
+  const displayed = state.services === services && state.owner === owner && state.workId === workId ? state.value : emptyView;
+  return { ...displayed, ready: available && displayed.ready, currentSnapshot: () => {
+    const current = currentModel()?.snapshot() ?? emptyView;
+    return available && rendered.current.available ? current : { ...current, ready: false };
+  },
+    refresh: () => currentModel()?.refresh(), loadEarlier: () => currentModel()?.loadEarlier(),
+    selectAssignment: (id: string) => currentModel()?.selectAssignment(id), selectExecution: (id: string) => currentModel()?.selectExecution(id),
+    followLatest: () => currentModel()?.followLatest() };
 }
 
 /** One immutable owned execution. Its parent keys it by Host, Session, Turn and Run. */

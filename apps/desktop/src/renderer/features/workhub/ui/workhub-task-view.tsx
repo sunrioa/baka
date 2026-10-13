@@ -21,17 +21,16 @@ import { useMemo } from 'react';
 import { Button, ChatView, useUiLocale } from '@maka/ui';
 import type { SessionExecutionScope, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import type { WorkHubServices } from '../ports.js';
-import { useWorkHubTaskView, useWorkHubExecutionView } from '../controller/use-workhub-task-view.js';
+import { useWorkHubExecutionView, type useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useAppShellTurnPresentation } from '../../../application/contracts/turn-presentation.js';
 import { formatUiMessage } from '@maka/core/ui-locale';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
-export function WorkHubTaskView({ services, owner, workId, name, onClose }: {
-  services: WorkHubServices; owner: string; workId: string; name: string; onClose(): void;
+export function WorkHubTaskView({ services, owner, workId, name, view, onClose }: {
+  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; onClose(): void;
 }) {
   const locale = useUiLocale();
   const copy = workHubTaskViewCopy[locale];
-  const view = useWorkHubTaskView(services, owner, workId);
   const groups = useMemo(() => {
     const result = new Map<string, WorkHubTaskAssignment[]>();
     for (const assignment of view.assignments) {

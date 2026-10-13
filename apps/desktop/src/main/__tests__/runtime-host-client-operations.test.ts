@@ -114,6 +114,19 @@ test('resolves WorkHub coordination through the dedicated Host operation', async
   ]);
 });
 
+test('sends native task input and reads its exact durable receipt without a coordinator Turn', async () => {
+  const input = { workId: 'work', generationId: 'generation', sourceActionId: 'action', sourceDelegationId: 'delegation', inputId: 'input', text: 'Correct this task' };
+  const { text: _text, ...identity } = input;
+  const receipt = { ...identity, targetSessionId: 'task-session', targetMessageId: 'message', acceptedAt: 4, mode: 'queued_supplement', delivery: 'queued' };
+  const { client, requests } = clientWithResponses([receipt, receipt]);
+  assert.deepEqual(await client.sendWorkHubTaskInput(input), receipt);
+  assert.deepEqual(await client.readWorkHubTaskInput({ workId: 'work', inputId: 'input' }), receipt);
+  assert.deepEqual(requests, [
+    { operation: 'workhub.tasks.send', input },
+    { operation: 'workhub.tasks.input.read', input: { workId: 'work', inputId: 'input' } },
+  ]);
+});
+
 test('re-reads the Session revision before retrying a product update', async () => {
   const { client, requests } = clientWithResponses([
     { kind: 'session', session: session('session-1', 4) },
