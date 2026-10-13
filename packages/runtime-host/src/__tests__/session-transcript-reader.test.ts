@@ -659,6 +659,23 @@ test('pages the ledger without materializing Turns it takes no rows from', async
       read.readDurablePage(session.id, { direction: 'newer', maxBytes: 1024, maxMessages: 1 }),
     );
     assert.equal(JSON.parse(head.fragments[0]!.data.toString()).text, 'prompt 0');
+    const scoped = await decoding('scoped record page', SMALL_TURN_BUDGET, () =>
+      read.readDurableRecords(
+        session.id,
+        {
+          direction: 'older',
+          throughSequence: through,
+          maxMessages: 64,
+          maxStoredBytes: 256 * 1024,
+        },
+        'turn-0',
+      ),
+    );
+    assert.ok(scoped.records.length > 0);
+    assert.ok(
+      scoped.records.every(({ message }) => 'turnId' in message && message.turnId === 'turn-0'),
+    );
+    assert.equal(scoped.nextPosition, null, 'scoped reads do not scan unrelated later Turns');
     const landmarks = await decoding('landmarks', SMALL_TURN_BUDGET, () =>
       read.readDurableTurnLandmarks(session.id, { maxLandmarks: 3, turnId: null }),
     );
