@@ -72,6 +72,25 @@ test('A → B → A and reload retain source-bound IDs, drafts and newer edits a
   const foreign = createWorkHubTaskInputModel(services, owner('host-b'), a.workId, () => task('a', 'host-b'), storage);
   assert.equal(foreign.readDraft(), ''); assert.equal(foreign.snapshot().attempt, undefined);
   viewB.close(); revisitedA.close(); reloadedA.close(); foreign.close();
+
+  const base = memoryStorage(); let writable = true, active = true;
+  const storageWithFailures = { ...base, setItem: (key: string, value: string) => { if (!writable) throw new Error('Quota exceeded'); base.setItem(key, value); } };
+  const late = deferred<WorkHubTaskSendResult>(); let reserved!: WorkHubTaskInputRequest;
+  const race: Services = { sendTaskInput: async (_owner, input) => { reserved = input; return late.promise; },
+    readTaskInput: async () => receipt(reserved, a.targetSessionId, 'delivered') };
+  const old = createWorkHubTaskInputModel(race, owner(), a.workId, () => active ? a : undefined, storageWithFailures, () => 'old-owner-input');
+  old.writeDraft('Original editor'); const pending = old.send(a, old.readDraft());
+  writable = false;
+  for (let i = 1; i <= 3; i++) old.writeDraft(`Old failed edit ${i}`);
+  active = false; writable = true;
+  const current = createWorkHubTaskInputModel(race, owner(), a.workId, () => a, storageWithFailures);
+  current.writeDraft('New owner saved draft');
+  assert.ok(old.snapshot().draftVersion > current.snapshot().draftVersion, 'failed local writes do not define a global cross-mount order');
+  late.resolve({ kind: 'accepted', receipt: receipt(reserved, a.targetSessionId, 'delivered') }); await pending;
+  assert.equal(JSON.parse(base.values.get(old.key)!).draft, 'New owner saved draft', 'the late old editor cannot persist its obsolete failed edits');
+  const afterAck = createWorkHubTaskInputModel(race, owner(), a.workId, () => a, storageWithFailures);
+  assert.equal(afterAck.readDraft(), 'New owner saved draft');
+  old.close(); current.close(); afterAck.close();
 });
 
 test('an unknown send and absent receipt never become a new ID; explicit retry keeps the old payload across a generation change', async () => {

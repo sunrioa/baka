@@ -129,16 +129,15 @@ export function createWorkHubTaskInputModel(
     // A failed or weaker later read cannot erase immutable delivery evidence.
     const proven = state.receipt && ['delivered', 'cancelled'].includes(state.receipt.delivery);
     publish({ receipt: proven ? state.receipt : receipt, rejected: undefined, error: undefined });
+    // Failed edits belong to this editor, not a cross-mount version order.
+    // A late receipt cannot write that RAM over another owner's saved draft.
+    // Keep the warning until the active editor actually persists its edits.
+    if (recoveryError && (recovery.draftVersion !== attempt.draftVersion || recovery.draft !== attempt.editorDraft)) return true;
     // Another mounted owner may have edited this work while this IPC awaited.
     // Read its latest reservation, and clear only this exact, unedited draft.
     try {
       const latest = readRecovery();
-      if (latest.attempt?.input.inputId === attempt.input.inputId && recovery.draftVersion > latest.draftVersion) {
-        // A newer editor write may have failed quota. Confirming the old input
-        // must preserve this current draft or keep its warning, not clear an
-        // older, smaller storage record and imply that recovery is now safe.
-        persist(recovery); publish({ error: undefined });
-      } else if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.editorDraft) {
+      if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.editorDraft) {
         const next = { ...latest, draft: '', draftVersion: latest.draftVersion + 1 };
         persist(next);
         if (recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) { recovery = next; publish({ error: undefined }); }
