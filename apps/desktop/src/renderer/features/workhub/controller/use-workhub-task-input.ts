@@ -77,17 +77,23 @@ export function useWorkHubTaskInput(services: TaskInputServices, owner: string, 
   }), [model]);
   const [stop, setStop] = useState<{ model: typeof model; pending: boolean; failed?: boolean }>();
   const stopping = useRef(false);
-  const latest = view.executions.at(-1);
-  const canStop = native && source.state === 'owned' && !!latest && ['created', 'admitted', 'running', 'waiting_for_user'].includes(latest.status);
+  const shown = view.executions.find(execution => execution.turnId === view.execution?.turnId && execution.runId === view.execution?.runId);
+  const canStop = native && source.state === 'owned' && !!shown && ['created', 'admitted', 'running', 'waiting_for_user'].includes(shown.status);
   return { model, state, session, source, ready, persistence, canStop, stopPending: stop?.model === model && stop.pending, stopFailed: stop?.model === model && stop.failed,
     send: (text: string) => ready && source ? model.send(source, text) : Promise.resolve(false),
     async stop() {
-      if (active.current !== model || stopping.current) return;
+      if (!canStop || !source || !shown || active.current !== model || stopping.current) return;
       const current = props.current.view.currentSnapshot();
-      const a = workHubTaskInputSource(current), execution = current.executions.at(-1);
+      const a = workHubTaskInputSource(current);
+      const execution = current.executions.find(item => item.turnId === current.execution?.turnId && item.runId === current.execution?.runId);
       const task = targetRef.current;
       if (!a || a.state !== 'owned' || !execution || !['created', 'admitted', 'running', 'waiting_for_user'].includes(execution.status) ||
           task?.services !== services || !task.ready || task.id !== a.targetSessionId || task.session?.backend === 'plugin-executor' || !task.session || task.session.isArchived) return;
+      // The live model may advance before React commits the new button. A Stop
+      // belongs to its rendered source and execution, never that unseen successor.
+      if (a.workId !== source.workId || a.generationId !== source.generationId || a.actionId !== source.actionId ||
+          a.delegationId !== source.delegationId || a.targetSessionId !== source.targetSessionId ||
+          execution.sessionId !== shown.sessionId || execution.turnId !== shown.turnId || execution.runId !== shown.runId) return;
       stopping.current = true; setStop({ model, pending: true });
       let failed = false;
       try { failed = (await services.stop(a.targetSessionId, execution.turnId)) === undefined; }

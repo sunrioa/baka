@@ -255,13 +255,14 @@ test('real task input hook uses the shared canonical source, survives switching,
   const sessionChanges = new Set<() => void>(), availability = new Set<() => void>();
   const sends: Array<Parameters<WorkHubServices['sendTaskInput']>> = [], stops: unknown[] = [];
   let backend: SessionSummary['backend'] = 'ai-sdk';
+  let successor = '';
   const services = {
     taskHistory: async (_owner, input) => ({ workId: input.workId, assignments: tasks.filter(a => a.workId === input.workId), nextCursor: null }),
     taskExecutions: async (_owner, input) => {
       const a = tasks.find(a => a.actionId === input.actionId)!;
       return { actionId: a.actionId, delegationId: a.delegationId, targetSessionId: a.targetSessionId,
         executions: [{ sessionId: a.targetSessionId, ...a.execution!, status: 'completed', terminalEventId: 'old-complete' },
-          { sessionId: a.targetSessionId, turnId: `${a.execution!.turnId}-resume`, runId: `${a.execution!.runId}-resume`, status: 'running' }], nextCursor: null };
+          { sessionId: a.targetSessionId, turnId: `${a.execution!.turnId}-resume${successor}`, runId: `${a.execution!.runId}-resume${successor}`, status: 'running' }], nextCursor: null };
     },
     getTaskSession: async id => ({ id, name: 'Actual task', backend, model: 'actual-worker-model', llmConnectionId: 'worker-connection', llmConnectionSlug: 'worker',
       permissionMode: 'ask', cwd: '/original-worker', isFlagged: false, isArchived: false, labels: [], hasUnread: false, status: 'active', connectionLocked: false, runningTurnIds: ['unrelated-root'] }),
@@ -297,15 +298,25 @@ test('real task input hook uses the shared canonical source, survives switching,
   assert.equal(sends.length, 1); assert.equal(sends[0]![0], owner); assert.equal(sends[0]![1].sourceActionId, tasks[0]!.actionId);
   await act(async () => { await input.stop(); });
   assert.deepEqual(stops, [[tasks[0]!.targetSessionId, 'turn-a-resume']], 'never stop the unrelated Session root or coordinator');
+  const stillRendered = input;
+  await act(async () => {
+    successor = '-next'; await view.refresh();
+    assert.equal(view.execution?.turnId, 'turn-a-resume', 'React has not committed the new execution yet');
+    assert.equal(view.currentSnapshot().execution?.turnId, 'turn-a-resume-next');
+    await stillRendered.stop();
+    assert.equal(stops.length, 1, 'the old Stop must not target an undisplayed successor');
+  });
+  await act(async () => { await input.stop(); });
+  assert.deepEqual(stops[1], [tasks[0]!.targetSessionId, 'turn-a-resume-next'], 'the newly rendered Stop can address its exact successor');
   await act(async () => { view.selectExecution('turn-a'); });
   assert.equal(input.ready, false); assert.equal(input.canStop, false);
-  await act(async () => { await input.stop(); }); assert.equal(stops.length, 1);
+  await act(async () => { await input.stop(); }); assert.equal(stops.length, 2);
   await act(async () => { view.followLatest(); });
   const beforeLoss = input;
   await act(async () => { for (const notify of availability) notify(); assert.equal(await beforeLoss.send('during loss'), false); });
   assert.equal(sends.length, 1);
   await act(async () => { backend = 'plugin-executor'; for (const notify of sessionChanges) notify(); });
   assert.equal(input.ready, false); await act(async () => { assert.equal(await input.send('unsupported'), false); });
-  await act(async () => { await input.stop(); }); assert.equal(stops.length, 1);
+  await act(async () => { await input.stop(); }); assert.equal(stops.length, 2);
   assert.equal(sends.length, 1);
 });

@@ -97,17 +97,26 @@ test('an unknown send and absent receipt never become a new ID; explicit retry k
 });
 
 test('reload reconciles accepted delivery without replaying a command and clears only the unchanged submitted draft', async () => {
-  const a = task('a'), storage = memoryStorage();
-  let submitted!: WorkHubTaskInputRequest, sends = 0;
-  const services: Services = { sendTaskInput: async (_owner, input) => { sends++; submitted = input; return { kind: 'unknown' }; },
-    readTaskInput: async (_owner, input) => { assert.equal(input.inputId, submitted.inputId); return receipt(submitted, a.targetSessionId, 'delivered'); } };
-  const first = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'reload-input');
-  first.writeDraft('Correction before reload'); await first.send(a, first.readDraft()); first.close();
-  const reload = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage);
-  await reload.reconcile();
-  assert.equal(reload.readDraft(), ''); assert.equal(reload.snapshot().receipt?.delivery, 'delivered'); assert.equal(sends, 1);
-  await reload.reconcile(); assert.equal(reload.snapshot().receipt?.delivery, 'delivered'); assert.equal(sends, 1);
-  reload.close();
+  for (const legacy of [false, true]) {
+    const a = task('a'), storage = memoryStorage();
+    const editorDraft = '  Correction before reload\n', wireText = 'Correction before reload';
+    let submitted!: WorkHubTaskInputRequest, sends = 0;
+    const services: Services = { sendTaskInput: async (_owner, input) => { sends++; submitted = input; return { kind: 'unknown' }; },
+      readTaskInput: async (_owner, input) => { assert.equal(input.inputId, submitted.inputId); return receipt(submitted, a.targetSessionId, 'delivered'); } };
+    const first = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'reload-input');
+    first.writeDraft(editorDraft); await first.send(a, wireText); first.close();
+    if (legacy) {
+      const saved = JSON.parse(storage.values.get(first.key)!);
+      delete saved.attempt.editorDraft;
+      storage.values.set(first.key, JSON.stringify(saved));
+    }
+    const reload = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage);
+    assert.equal(reload.snapshot().attempt?.input.text, wireText, 'the immutable wire payload is not reconstructed from editor whitespace');
+    await reload.reconcile();
+    assert.equal(reload.readDraft(), ''); assert.equal(reload.snapshot().receipt?.delivery, 'delivered'); assert.equal(sends, 1);
+    await reload.reconcile(); assert.equal(reload.snapshot().receipt?.delivery, 'delivered'); assert.equal(sends, 1);
+    reload.close();
+  }
 });
 
 test('late receipt reads cannot replace a newer input or downgrade proven delivery', async () => {

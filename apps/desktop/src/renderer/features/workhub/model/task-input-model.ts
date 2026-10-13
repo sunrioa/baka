@@ -26,7 +26,7 @@ import type { WorkHubServices } from '../ports.js';
 import type { WorkHubTaskViewSnapshot } from './task-view-model.js';
 
 type RecoveryStorage = Pick<Storage, 'getItem' | 'setItem'>;
-interface Attempt { input: WorkHubTaskInputRequest; targetSessionId: string; draftVersion: number }
+interface Attempt { input: WorkHubTaskInputRequest; targetSessionId: string; draftVersion: number; editorDraft: string }
 interface Recovery { draft: string; draftVersion: number; attempt?: Attempt }
 export interface WorkHubTaskInputSnapshot extends Recovery {
   readonly sending: boolean;
@@ -90,15 +90,21 @@ export function createWorkHubTaskInputModel(
           typeof input.text !== 'string' || !input.text.trim() ||
           new TextEncoder().encode(input.text).length > WORKHUB_TASK_INPUT_TEXT_MAX_BYTES ||
           typeof a.targetSessionId !== 'string' || parseDesktopSessionKey(a.targetSessionId).hostId !== host.hostId ||
-          !Number.isSafeInteger(a.draftVersion) || (a.draftVersion as number) < 0 || (a.draftVersion as number) > result.draftVersion) throw new Error('Invalid pending task input');
-      result.attempt = { input: input as unknown as WorkHubTaskInputRequest, targetSessionId: a.targetSessionId, draftVersion: a.draftVersion as number };
+          !Number.isSafeInteger(a.draftVersion) || (a.draftVersion as number) < 0 || (a.draftVersion as number) > result.draftVersion ||
+          (a.editorDraft !== undefined && (typeof a.editorDraft !== 'string' || a.editorDraft.length > 120000))) throw new Error('Invalid pending task input');
+      result.attempt = { input: input as unknown as WorkHubTaskInputRequest, targetSessionId: a.targetSessionId, draftVersion: a.draftVersion as number,
+        // Older reservations have no editor snapshot. Only their unchanged
+        // version can use the saved draft; a later edit must never be cleared.
+        editorDraft: typeof a.editorDraft === 'string' ? a.editorDraft : result.draftVersion === a.draftVersion ? result.draft : input.text };
     }
     return result;
   }
   function persist(next: Recovery) {
     if (!storage) throw new Error('Reload-safe recovery storage unavailable');
     if (next.draft.length > 120000 || !Number.isSafeInteger(next.draftVersion)) throw new Error('Draft exceeds the recovery bound');
-    storage.setItem(key, JSON.stringify(next));
+    const raw = JSON.stringify(next);
+    if (raw.length > 1024 * 1024) throw new Error('Recovery record exceeds its bound');
+    storage.setItem(key, raw);
   }
   function publish(patch: Partial<WorkHubTaskInputSnapshot>) {
     state = { ...state, ...recovery, ...patch };
@@ -121,11 +127,11 @@ export function createWorkHubTaskInputModel(
     // Read its latest reservation, and clear only this exact, unedited draft.
     try {
       const latest = readRecovery();
-      if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.input.text) {
+      if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.editorDraft) {
         const next = { ...latest, draft: '', draftVersion: latest.draftVersion + 1 };
         persist(next);
-        if (recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.input.text) { recovery = next; publish({}); }
-      } else if (latest.attempt?.input.inputId === attempt.input.inputId && !latest.draft && recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.input.text) {
+        if (recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) { recovery = next; publish({}); }
+      } else if (latest.attempt?.input.inputId === attempt.input.inputId && !latest.draft && recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) {
         recovery = latest; publish({});
       }
     } catch { publish({ error: 'storage' }); }
@@ -167,7 +173,7 @@ export function createWorkHubTaskInputModel(
       if (!text.trim() || new TextEncoder().encode(text).length > WORKHUB_TASK_INPUT_TEXT_MAX_BYTES) { publish({ error: 'length' }); return false; }
       const attempt: Attempt = {
         input: { inputId: newId(), workId, generationId: source.generationId, sourceActionId: source.actionId, sourceDelegationId: source.delegationId, text },
-        targetSessionId: source.targetSessionId, draftVersion: recovery.draftVersion,
+        targetSessionId: source.targetSessionId, draftVersion: recovery.draftVersion, editorDraft: recovery.draft,
       };
       try {
         if (!entity(attempt.input.inputId) || !sourceFields.every(field => entity(attempt.input[field])) || parseDesktopSessionKey(attempt.targetSessionId).hostId !== host.hostId) throw new Error('Input source changed Host');
