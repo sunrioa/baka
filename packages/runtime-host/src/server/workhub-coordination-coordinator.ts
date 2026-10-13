@@ -119,6 +119,7 @@ type CoordinationStores = Pick<
   | 'readHeaderSnapshot'
   | 'readCatalogRecord'
   | 'readWorkHubAssignment'
+  | 'readLatestWorkHubAssignment'
   | 'readWorkHubAssignmentsPage'
   | 'readActiveWorkHubAssignmentsByTarget'
   | 'readWorkHubReplacement'
@@ -246,6 +247,7 @@ export class HostWorkHubCoordinationCoordinator {
       probeTargetRemoval: async (sessionId) =>
         (await this.#stores.probeSessionRemoval(sessionId)).kind,
       readAssignment: (actionId) => this.#stores.readWorkHubAssignment(actionId),
+      readLatestWorkAssignment: (workId) => this.#stores.readLatestWorkHubAssignment(workId),
       // This lookup is advisory. Stop and replacement both repeat their exact
       // proof under the Coordination and target admissions before writing.
       listActiveAssignments: (targetSessionId, includeStopped) =>
@@ -338,6 +340,18 @@ export class HostWorkHubCoordinationCoordinator {
             'WorkHub correction source is no longer the latest active delegation',
           );
         }
+        const head = await this.#stores.readLatestWorkHubAssignment(
+          latest.work?.id ?? latest.actionId,
+        );
+        if (
+          !head ||
+          (head.work?.generationId ?? head.actionId) !==
+            (latest.work?.generationId ?? latest.actionId)
+        )
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'WorkHub correction source belongs to a retired work generation',
+          );
         const stopRequest = await this.#stores.readWorkHubStopRequest(input.replacesDelegationId);
         if (stopRequest) {
           const resolution = await this.#stores.readWorkHubStopResolution(

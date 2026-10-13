@@ -1933,17 +1933,28 @@ export class SqliteSessionMetadataStore {
             WORKHUB_COORDINATION_SESSION_ID,
             `wha_${createHash('sha256').update(sourceActionId).digest('hex').slice(0, 48)}`,
           );
+          const latest = this.readLatestWorkHubAssignmentSync(assignment.work.id);
           if (
             source?.type !== 'workhub_coordination' ||
             source.kind !== 'delegation_assigned' ||
             (source.work?.id ?? source.actionId) !== assignment.work.id ||
+            !latest ||
+            (latest.work?.generationId ?? latest.actionId) !==
+              (source.work?.generationId ?? source.actionId) ||
+            assignment.work.generationId !==
+              (assignment.work.continuesActionId
+                ? (source.work?.generationId ?? source.actionId)
+                : assignment.actionId) ||
             (assignment.work.continuesActionId &&
               source.targetSessionId !== assignment.targetSessionId)
           )
             throw new SessionMetadataConflictError(
               'WorkHub continuation source does not own this work',
             );
-        } else if (assignment.work.id !== assignment.actionId) {
+        } else if (
+          assignment.work.id !== assignment.actionId ||
+          assignment.work.generationId !== assignment.actionId
+        ) {
           throw new SessionMetadataConflictError('WorkHub work requires its original action');
         }
       }
@@ -2922,6 +2933,49 @@ export class SqliteSessionMetadataStore {
     request: SessionMessageScanRequest,
   ): Promise<SessionMessageScanPage> {
     return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, true);
+  }
+
+  async readLatestWorkHubAssignment(
+    workId: string,
+  ): Promise<WorkHubDelegationAssignedMessage | undefined> {
+    this.assertOpen();
+    return this.readTransaction(() => this.readLatestWorkHubAssignmentSync(workId));
+  }
+
+  private readLatestWorkHubAssignmentSync(
+    workId: string,
+  ): WorkHubDelegationAssignedMessage | undefined {
+    const originId = `wha_${createHash('sha256').update(workId).digest('hex').slice(0, 48)}`;
+    // Scan only canonical assignment records newer than this objective's origin.
+    // Large unrelated tool results never enter the decoder, and no second
+    // durable task index can disagree with the source ledger.
+    const rows = this.db
+      .prepare(`
+      SELECT message.sequence, message.record_json, payload.record_bytes, payload.sha256
+      FROM session_messages AS message
+      LEFT JOIN session_message_payloads AS payload
+        ON payload.session_id = message.session_id AND payload.sequence = message.sequence
+      WHERE message.session_id = ? AND message.message_id GLOB 'wha_*'
+        AND length(message.message_id) = 52 AND message.sequence >= (
+          SELECT sequence FROM session_messages WHERE session_id = ? AND message_id = ?
+        )
+      ORDER BY message.sequence DESC
+    `)
+      .iterate(
+        WORKHUB_COORDINATION_SESSION_ID,
+        WORKHUB_COORDINATION_SESSION_ID,
+        originId,
+      ) as Iterable<StoredSessionMessagePayloadRow>;
+    for (const row of rows) {
+      const message = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+      if (
+        message.type === 'workhub_coordination' &&
+        message.kind === 'delegation_assigned' &&
+        (message.work?.id ?? message.actionId) === workId
+      )
+        return message;
+    }
+    return undefined;
   }
 
   private async readMessageScanPage(

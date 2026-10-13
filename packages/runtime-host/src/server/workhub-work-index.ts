@@ -39,7 +39,10 @@ const cursorSchema = z
 export function createWorkHubWorkIndex(options: {
   stores: Pick<
     ExecutionSessionWriter,
-    'readWorkHubAssignmentsPage' | 'readWorkHubAssignment' | 'readActiveWorkHubAssignmentsByTarget'
+    | 'readWorkHubAssignmentsPage'
+    | 'readWorkHubAssignment'
+    | 'readLatestWorkHubAssignment'
+    | 'readActiveWorkHubAssignmentsByTarget'
   >;
   isEligible(sessionId: string): Promise<boolean>;
 }) {
@@ -106,7 +109,11 @@ export function createWorkHubWorkIndex(options: {
         continue;
       const original = Array.from(origin.userText);
       const objective = Array.from(origin.delegationText ?? origin.userText);
+      const latest = await options.stores.readLatestWorkHubAssignment(workId);
       const available =
+        !!latest &&
+        (latest.work?.generationId ?? latest.actionId) ===
+          (message.work?.generationId ?? message.actionId) &&
         (await options.isEligible(message.targetSessionId)) &&
         (await options.stores.readActiveWorkHubAssignmentsByTarget([message.targetSessionId])).some(
           (assignment) => assignment.actionId === message.actionId,

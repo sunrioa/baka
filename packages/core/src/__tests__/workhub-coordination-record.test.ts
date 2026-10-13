@@ -48,13 +48,18 @@ describe('WorkHub Coordination stored records', () => {
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
     const delegated = { ...assigned, delegationText: 'Inspect the payment retry state' };
     assert.deepEqual(decodeCanonicalMessage(delegated), delegated);
-    const original = { ...assigned, schemaVersion: 4, work: { id: assigned.actionId } };
+    const original = {
+      ...assigned,
+      schemaVersion: 4,
+      work: { id: assigned.actionId, generationId: assigned.actionId },
+    };
     assert.deepEqual(decodeCanonicalMessage(original), original);
     const continuation = {
       ...original,
       actionId: 'follow-up',
       work: {
         id: assigned.actionId,
+        generationId: assigned.actionId,
         continuesActionId: assigned.actionId,
         sourceMessageId: 'actual-message',
       },
@@ -63,6 +68,7 @@ describe('WorkHub Coordination stored records', () => {
     for (const invalid of [
       { ...original, schemaVersion: 1 },
       { ...original, work: undefined },
+      { ...original, work: { ...original.work, generationId: 'different-generation' } },
       { ...original, work: { id: 'different-objective' } },
       { ...continuation, work: { ...continuation.work, continuesActionId: 'follow-up' } },
       { ...continuation, work: { ...continuation.work, sourceMessageId: '../foreign' } },

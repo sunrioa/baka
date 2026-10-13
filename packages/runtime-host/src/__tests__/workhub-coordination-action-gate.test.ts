@@ -112,6 +112,7 @@ describe('WorkHub Coordination Action Gate', () => {
         assert.equal(effects.assignments.length, 1);
         assert.deepEqual(effects.assignments[0]?.work, {
           id: 'source',
+          generationId: 'source',
           continuesActionId: 'source',
         });
       }
@@ -1994,6 +1995,11 @@ function fakeEffects(initialSessions: WorkHubActionGateSession[]) {
     },
     async readAssignment(actionId: string) {
       return assignmentRecords.get(actionId);
+    },
+    async readLatestWorkAssignment(workId: string) {
+      return [...assignmentRecords.values()]
+        .reverse()
+        .find((assignment) => (assignment.work?.id ?? assignment.actionId) === workId);
     },
     async listActiveAssignments(targetSessionId) {
       return [...assignmentRecords.values()].filter((assignment) => {

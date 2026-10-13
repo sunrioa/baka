@@ -1008,6 +1008,8 @@ export const WORKHUB_COORDINATION_WORK_SCHEMA_VERSION = 4 as const;
 export interface WorkHubWorkBinding {
   /** The action that first established the objective; legacy assignments use their actionId. */
   readonly id: string;
+  /** First assignment in the current execution container; changes on replacement. */
+  readonly generationId: string;
   /** Exact prior assignment continued by this input, not a title/path inference. */
   readonly continuesActionId?: string;
   /** Actual source user Message when the Host can prove that identity. */
@@ -1922,16 +1924,20 @@ function isWorkHubWorkBinding(
 ): boolean {
   if (
     !isRecord(value) ||
-    Object.keys(value).some((key) => !['id', 'continuesActionId', 'sourceMessageId'].includes(key))
+    Object.keys(value).some(
+      (key) => !['id', 'generationId', 'continuesActionId', 'sourceMessageId'].includes(key),
+    )
   )
     return false;
   const identity = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(v);
   return (
     identity(value.id) &&
+    identity(value.generationId) &&
     (value.sourceMessageId === undefined || identity(value.sourceMessageId)) &&
     (value.continuesActionId === undefined ||
       (identity(value.continuesActionId) && value.continuesActionId !== actionId)) &&
     (value.continuesActionId === undefined || replacesActionId === undefined) &&
+    (value.continuesActionId !== undefined || value.generationId === actionId) &&
     (value.id === actionId ||
       value.continuesActionId !== undefined ||
       replacesActionId !== undefined)

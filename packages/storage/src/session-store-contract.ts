@@ -497,6 +497,9 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     request: WorkHubMessageAssignmentRequest,
   ): Promise<WorkHubMessageAssignmentResult>;
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
+  readLatestWorkHubAssignment(
+    workId: string,
+  ): Promise<WorkHubDelegationAssignedMessage | undefined>;
   /** Canonical assignment rows only; large tool results do not consume a work-index page. */
   readWorkHubAssignmentsPage(request: SessionMessageScanRequest): Promise<SessionMessageScanPage>;
   /** Newest assignment first. includeStopped retains stopped links for lineage-aware controls; superseded links remain excluded. */

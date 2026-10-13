@@ -128,6 +128,7 @@ export interface WorkHubActionGateEffects {
    */
   probeTargetRemoval(sessionId: string): Promise<'present' | 'removed' | 'absent'>;
   readAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
+  readLatestWorkAssignment(workId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
   listActiveAssignments(
     targetSessionId: string,
     includeStopped?: boolean,
@@ -629,8 +630,14 @@ export class WorkHubCoordinationActionGate {
       const ref = input.selectedTarget?.sourceTask;
       if (!ref) return;
       const source = await this.#effects.readAssignment(ref.actionId);
+      const latest = source
+        ? await this.#effects.readLatestWorkAssignment(source.work?.id ?? source.actionId)
+        : undefined;
       if (
         !source ||
+        !latest ||
+        (latest.work?.generationId ?? latest.actionId) !==
+          (source.work?.generationId ?? source.actionId) ||
         (input.continuation &&
           (input.continuation.sourceActionId !== source.actionId ||
             input.continuation.workId !== (source.work?.id ?? source.actionId))) ||
@@ -664,6 +671,7 @@ export class WorkHubCoordinationActionGate {
           ? {
               work: {
                 id: source.work?.id ?? source.actionId,
+                generationId: source.work?.generationId ?? source.actionId,
                 continuesActionId: source.actionId,
                 ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
               },
@@ -975,7 +983,7 @@ export class WorkHubCoordinationActionGate {
     }
     let assignment = {
       ...assignmentInputFromReplacement(replacement),
-      work: { id: source.work?.id ?? source.actionId },
+      work: { id: source.work?.id ?? source.actionId, generationId: replacement.actionId },
     };
     const retirement = await this.#effects.readDelegationRetirement(source);
     if (retirement === 'recovering') {
@@ -1265,6 +1273,7 @@ function delegationAssignment(
     actionId: input.actionId,
     work: {
       id: input.actionId,
+      generationId: input.actionId,
       ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
     },
     coordinationTurnId: input.coordinationTurnId ?? input.actionId,

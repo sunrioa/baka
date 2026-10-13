@@ -373,6 +373,19 @@ function hubMessage(s: MemoryState, id: string): StoredMessage | undefined {
     .get(HUB)
     ?.find((m) => m.id === id);
 }
+function latestWorkAssignment(
+  s: MemoryState,
+  workId: string,
+): WorkHubDelegationAssignedMessage | undefined {
+  return [...(messages(s).get(HUB) ?? [])]
+    .reverse()
+    .find(
+      (m): m is WorkHubDelegationAssignedMessage =>
+        m.type === 'workhub_coordination' &&
+        m.kind === 'delegation_assigned' &&
+        (m.work?.id ?? m.actionId) === workId,
+    );
+}
 function remove(s: MemoryState, id: string, group: Set<string>): void {
   const record = requireHeader(s, id);
   const provisions = [...rows<AgentGraphOperatorProvision>(s, 'graphProvisions').values()];
@@ -941,6 +954,7 @@ export function createMemorySessionStore(
           ? m
           : undefined;
       }),
+    readLatestWorkHubAssignment: async (id) => read((s) => latestWorkAssignment(s, id)),
     readWorkHubReplacement: async (id) =>
       read((s) => {
         const m = hubMessage(s, 'whp_' + suffix(id));
@@ -1102,14 +1116,22 @@ export function createMemorySessionStore(
           const sourceActionId = v.work.continuesActionId ?? v.replacesActionId;
           if (sourceActionId) {
             const source = hubMessage(s, 'wha_' + suffix(sourceActionId));
+            const latest = latestWorkAssignment(s, v.work.id);
             if (
               source?.type !== 'workhub_coordination' ||
               source.kind !== 'delegation_assigned' ||
               (source.work?.id ?? source.actionId) !== v.work.id ||
+              !latest ||
+              (latest.work?.generationId ?? latest.actionId) !==
+                (source.work?.generationId ?? source.actionId) ||
+              v.work.generationId !==
+                (v.work.continuesActionId
+                  ? (source.work?.generationId ?? source.actionId)
+                  : v.actionId) ||
               (v.work.continuesActionId && source.targetSessionId !== v.targetSessionId)
             )
               conflict('WorkHub continuation source does not own this work');
-          } else if (v.work.id !== v.actionId)
+          } else if (v.work.id !== v.actionId || v.work.generationId !== v.actionId)
             conflict('WorkHub work requires its original action');
         }
         if ((v.disposition === 'create_new') !== Boolean(request.create))

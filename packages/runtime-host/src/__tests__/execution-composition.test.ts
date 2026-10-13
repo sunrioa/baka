@@ -4746,6 +4746,184 @@ test('one real coordination message can establish distinct objectives and queue 
   });
 });
 
+test('work replacement retires ancestor sources even when the objective returns to its original Session', async () => {
+  await withCompositionRoot(async ({ owner }) => {
+    await configureFakeDefaultTarget(owner);
+    const sends: Array<{ sessionId: string; text: string }> = [];
+    const { composition } = await createCapturedExecutionComposition(owner, {
+      defaultWorkHubRouting: true,
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push({ sessionId: context.sessionId, text: input.text });
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'work-generation-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const desktop = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(context.connectionId),
+      { send: async () => {} },
+    );
+    try {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            {
+              registrationId: randomUUID(),
+              offers: workHubDesktopCapabilityOffers(),
+            },
+            context,
+          )
+        ).ok,
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            {
+              turnId: 'work-generations',
+              text: 'Continue A and move its execution container when requested.',
+            },
+            context,
+          )
+        ).ok,
+      );
+      const act = (
+        actionId: string,
+        proposal: WorkHubCoordinationActFromTurnInput['proposal'],
+        delegationText: string,
+        candidateSetId?: string,
+      ) =>
+        composition.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'work-generations',
+            actionId,
+            proposal,
+            delegationText,
+            ...(candidateSetId ? { candidateSetId } : {}),
+            ...((
+              'disposition' in proposal
+                ? proposal.disposition === 'create_new'
+                : proposal.operation === 'correct' && proposal.target.disposition === 'create_new'
+            )
+              ? {
+                  create: { workspace: { kind: 'isolated' as const } },
+                  newWorkDefaults: { permissionMode: 'ask' as const },
+                }
+              : {}),
+          },
+          context,
+        );
+      const original = await act(
+        'generation-a',
+        { disposition: 'create_new', title: 'A' },
+        'original objective A',
+      );
+      assert.ok(original.ok);
+      const followProposal = {
+        disposition: 'continue_work' as const,
+        workId: 'generation-a',
+        sourceActionId: 'generation-a',
+      };
+      const followed = await act(
+        'generation-a-follow',
+        followProposal,
+        'A follow-up before moving',
+      );
+      assert.ok(followed.ok);
+      await waitFor(async () => sends.some((s) => s.text === 'A follow-up before moving'), 10000);
+      const moved = await act(
+        'generation-a-move',
+        {
+          operation: 'correct',
+          replacesActionId: 'generation-a-follow',
+          target: { disposition: 'create_new', title: 'Moved A' },
+        },
+        'A in a new execution container',
+      );
+      assert.ok(moved.ok, JSON.stringify(moved));
+      assert.notEqual(moved.result.targetSessionId, original.result.targetSessionId);
+      assert.equal(
+        (await act('stale-original', followProposal, 'must never execute in old A')).ok,
+        false,
+      );
+      // Durable retries are still the original action, not fresh stale input.
+      assert.deepEqual(
+        await act('generation-a-follow', followProposal, 'A follow-up before moving'),
+        followed,
+      );
+      let cursor: string | null | undefined;
+      let oldAvailable: boolean | undefined;
+      for (let i = 0; i < 8 && cursor !== null; i++) {
+        const page = await composition.handlers['workhub.coordination.works'](
+          { limit: 1, ...(cursor ? { cursor } : {}) },
+          context,
+        );
+        assert.ok(page.ok);
+        oldAvailable =
+          page.result.works.find((w) => w.sourceActionId === 'generation-a')?.available ??
+          oldAvailable;
+        cursor = page.result.nextCursor;
+      }
+      assert.equal(
+        oldAvailable,
+        false,
+        'older assignment pages must not advertise a retired generation',
+      );
+      const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+      assert.ok(candidates.ok);
+      const oldTarget = candidates.result.candidates.find(
+        (c) => c.sessionId === original.result.targetSessionId,
+      );
+      assert.ok(oldTarget);
+      const returned = await act(
+        'generation-a-return',
+        {
+          operation: 'correct',
+          replacesActionId: 'generation-a-move',
+          target: { disposition: 'delegate_existing', candidateRef: oldTarget.candidateRef },
+        },
+        'A moved back to its first Session',
+        candidates.result.candidateSetId,
+      );
+      assert.ok(returned.ok, JSON.stringify(returned));
+      assert.equal(returned.result.targetSessionId, original.result.targetSessionId);
+      assert.equal(
+        (await act('stale-same-session', followProposal, 'must not revive first generation')).ok,
+        false,
+      );
+      const fresh = await act(
+        'current-generation-follow',
+        {
+          disposition: 'continue_work',
+          workId: 'generation-a',
+          sourceActionId: 'generation-a-return',
+        },
+        'follow the current generation',
+      );
+      assert.ok(fresh.ok, JSON.stringify(fresh));
+      await waitFor(
+        async () => sends.some((s) => s.text === 'follow the current generation'),
+        10000,
+      );
+      assert.equal(sends.filter((s) => s.text === 'A follow-up before moving').length, 1);
+      assert.equal(
+        sends.some((s) => s.text.startsWith('must ')),
+        false,
+      );
+    } finally {
+      await desktop.close();
+      await composition.close();
+    }
+  });
+});
+
 test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);

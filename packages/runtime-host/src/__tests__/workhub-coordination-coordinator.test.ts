@@ -149,7 +149,11 @@ describe('Host WorkHub Coordination coordinator', () => {
       assert.ok('workId' in result.result);
       assert.equal(result.result.workId, 'current-a');
       const followup = await store.readWorkHubAssignment('current-a-followup');
-      assert.deepEqual(followup?.work, { id: 'current-a', continuesActionId: 'current-a' });
+      assert.deepEqual(followup?.work, {
+        id: 'current-a',
+        generationId: 'current-a',
+        continuesActionId: 'current-a',
+      });
       assert.equal((await store.readWorkHubAssignment('unrelated-b'))?.work?.id, 'unrelated-b');
       const bad = await host.act(
         {
