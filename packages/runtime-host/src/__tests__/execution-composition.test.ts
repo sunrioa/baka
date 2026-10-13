@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { AsyncResource } from 'node:async_hooks';
 import { WORKHUB_COORDINATION_SESSION_ID, type StoredMessage } from '@maka/core/session';
@@ -2584,6 +2584,10 @@ test('default production WorkHub selects and delegates through its durable Host 
         return turn.ok && turn.result.status === 'completed';
       });
       assert.equal((await query()).ok, true);
+      // A durable terminal fact can precede retirement of the live root.
+      // Candidate freshness includes the live catalog; wait for that owner,
+      // not a delay or a retry of a legitimately stale candidate set.
+      await waitFor(async () => manager.runningTurnIds(beta.id).length === 0);
       for (const cancel of [true, false]) {
         const fresh = await composition.handlers['workhub.coordination.candidates']({}, context);
         assert.ok(fresh.ok);
@@ -3184,6 +3188,152 @@ test('production execution-scoped subscriptions read a past task without waking 
   });
 });
 
+test('WorkHub task history separates same-Session work and exposes only original owned roots without waking workers', {
+  timeout: 20_000,
+}, async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const sends: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (backendContext) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput) {
+            sends.push(input.text);
+            yield* super.send(input);
+          }
+        })(backendContext),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'task-history-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const target = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      await delegateWorkHubTarget(composition, context, target.id, 'view-work-a', 'Read task A');
+      await waitFor(
+        async () =>
+          (await manager.listTurns(target.id)).some((turn) => turn.status === 'completed'),
+        12_000,
+      );
+      const initial = await composition.handlers['workhub.tasks.history'](
+        { workId: 'view-work-a' },
+        context,
+      );
+      assert.ok(initial.ok, JSON.stringify(initial));
+      const source = initial.result.assignments[0]!;
+      await waitFor(
+        async () =>
+          (await manager.listTurns(target.id)).some(
+            (turn) => turn.turnId === source.execution?.turnId && turn.status === 'completed',
+          ),
+        12_000,
+      );
+      assert.equal(source.workId, 'view-work-a');
+      assert.equal(source.state, 'owned');
+      const followupAction = `whcontinue_${createHash('sha256').update('view-a-followup').digest('hex').slice(0, 48)}`;
+      const desktop = composition.clientCapabilities!.attachConnection(
+        clientCapabilityConnectionIdentity(context.connectionId),
+        { send: async () => {} },
+      );
+      const registered = await composition.handlers['client.capability.replace'](
+        { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+        context,
+      );
+      assert.ok(registered.ok, JSON.stringify(registered));
+      const continued = await composition.handlers['workhub.coordination.continue'](
+        {
+          turnId: 'view-a-followup',
+          text: 'A follow-up',
+          actionId: source.actionId,
+          delegationId: source.delegationId,
+        },
+        context,
+      );
+      await desktop.close();
+      assert.ok(continued.ok, JSON.stringify(continued));
+      await waitFor(
+        async () =>
+          (await manager.listTurns(target.id)).filter((turn) => turn.status === 'completed')
+            .length === 2,
+        12_000,
+      );
+      const after = await composition.handlers['workhub.tasks.history'](
+        { workId: 'view-work-a' },
+        context,
+      );
+      assert.ok(after.ok, JSON.stringify(after));
+      assert.deepEqual(
+        after.result.assignments.map((item) => item.actionId),
+        [followupAction, 'view-work-a'],
+      );
+      const followup = after.result.assignments[0]!;
+      await waitFor(
+        async () =>
+          (await manager.listTurns(target.id)).some(
+            (turn) => turn.turnId === followup.execution?.turnId && turn.status === 'completed',
+          ),
+        12_000,
+      );
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        target.id,
+        'view-work-b',
+        'Independent task B',
+      );
+      await waitFor(async () => sends.includes('Independent task B'));
+      const beforeReads = sends.length;
+      const history = await composition.handlers['workhub.tasks.history'](
+        { workId: 'view-work-a' },
+        context,
+      );
+      assert.ok(history.ok, JSON.stringify(history));
+      assert.deepEqual(
+        history.result.assignments.map((item) => item.actionId),
+        [followupAction, 'view-work-a'],
+      );
+      assert.equal(new Set(history.result.assignments.map((item) => item.generationId)).size, 1);
+      for (const assignment of history.result.assignments) {
+        const executions = await composition.handlers['workhub.tasks.executions'](
+          { actionId: assignment.actionId, delegationId: assignment.delegationId },
+          context,
+        );
+        assert.ok(executions.ok, JSON.stringify(executions));
+        assert.deepEqual(
+          executions.result.executions.map((item) => item.turnId),
+          [assignment.execution!.turnId],
+        );
+        assert.equal(executions.result.targetSessionId, target.id);
+      }
+      const unknown = await composition.handlers['workhub.tasks.executions'](
+        { actionId: source.actionId, delegationId: 'wrong-delegation' },
+        context,
+      );
+      assert.ok(!unknown.ok && unknown.error.code === 'not_found');
+      const changed = (await manager.listSessions()).find((item) => item.id === target.id)!;
+      assert.equal(changed.permissionMode, 'ask');
+      assert.equal(changed.model, 'fake-model');
+      assert.equal(changed.cwd, root);
+      assert.equal(
+        sends.length,
+        beforeReads,
+        'read-only history cannot dispatch, admit or wake a worker',
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('WorkHub creates new work through the production assignment composition', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner, ['fake-model', 'fake-model-b']);
@@ -3555,6 +3705,19 @@ test('WorkHub Resume and Stop follow logical lineage across repeated physical ha
       assert.ok(assignment);
       // The existing Desktop card query must resolve the resumed execution,
       // rather than keep projecting the original interrupted Turn.
+      const attempts = await composition.handlers['workhub.tasks.executions'](
+        { actionId: assignment.actionId, delegationId: assignment.delegationId },
+        context,
+      );
+      assert.ok(attempts.ok, JSON.stringify(attempts));
+      assert.equal(attempts.result.executions[0]!.turnId, original.result.turnId);
+      assert.equal(attempts.result.executions.at(-1)!.turnId, continuation.turnId);
+      assert.equal(
+        attempts.result.executions.length,
+        3,
+        'physical handoffs remain inside their logical attempts; Resume adds a real descendant',
+      );
+      assert.equal(attempts.result.nextCursor, null);
       const feedback = await composition.handlers['turn.message.execution.query'](
         {
           sessionId: target.id,

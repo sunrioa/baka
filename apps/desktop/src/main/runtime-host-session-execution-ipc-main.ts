@@ -31,6 +31,7 @@ import {
 } from '@maka/runtime-host/client';
 import {
   MESSAGE_QUEUE_MAX_ENTRIES,
+  HOST_OPERATION_SPECS,
   type TurnMessageExecutionResolution,
 } from '@maka/runtime-host/protocol';
 import {
@@ -251,10 +252,11 @@ export function registerRuntimeHostSessionObservationIpc(
   handleReconnectableRead(
     ipcMain,
     'sessions:observe',
-    async (event, sessionId: unknown, observerId: unknown) => {
+    async (event, sessionId: unknown, observerId: unknown, execution: unknown) => {
       const normalizedSessionId = requiredId(sessionId, 'Session');
+      const scope = normalizeExecutionScope(normalizedSessionId, execution);
       const current = deps.observations.trackRenderer(event.sender);
-      const sideConversation = await deps.resolveSideConversation(normalizedSessionId);
+      const sideConversation = scope ? false : await deps.resolveSideConversation(normalizedSessionId);
       if (!current()) return { kind: 'cancelled' };
       return observationIpcResult(
         deps.observations.observe(
@@ -262,13 +264,14 @@ export function registerRuntimeHostSessionObservationIpc(
           requiredId(observerId, 'Session observer'),
           event.sender as RuntimeHostSessionObserverTarget,
           sideConversation,
+          scope,
         ),
       );
     },
   );
   ipcMain.handle(
     'sessions:transcript:open',
-    async (event, sessionId: unknown, consumerId: unknown, mode: unknown, resumeFrom: unknown) => {
+    async (event, sessionId: unknown, consumerId: unknown, mode: unknown, resumeFrom: unknown, execution: unknown) => {
       deps.observations.trackRenderer(event.sender);
       return observationIpcResult(
         deps.observations.openTranscript(
@@ -277,6 +280,7 @@ export function registerRuntimeHostSessionObservationIpc(
           event.sender as RuntimeHostTranscriptTarget,
           normalizeTranscriptOpenMode(mode),
           optionalSequence(resumeFrom, 'Desktop transcript resume position'),
+          normalizeExecutionScope(requiredId(sessionId, 'Session'), execution),
         ),
       );
     },
@@ -303,6 +307,11 @@ export function registerRuntimeHostSessionObservationIpc(
       event.sender.id,
     );
   });
+}
+
+function normalizeExecutionScope(sessionId: string, execution: unknown) {
+  return execution === undefined || execution === null ? undefined :
+    HOST_OPERATION_SPECS['subscription.open'].decodeInput({ sessionId, transcript: { kind: 'none' }, execution }).execution;
 }
 
 async function observationIpcResult<T>(

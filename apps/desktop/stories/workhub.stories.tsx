@@ -81,7 +81,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       return [
         { type: 'user', id: `user-${index}`, turnId, ts: index * 3, text: index === 2 ? '继续补充异常场景。' : `请检查${work.name}。` },
         { type: 'assistant', id: `answer-${index}`, turnId, ts: index * 3 + 1, modelId: 'model-a', text: '任务已交给对应 Work。' },
-        { ...link, id: `link-${index}`, turnId, coordinationTurnId: turnId, targetSessionId: work.id, targetSessionName: work.name } as StoredMessage,
+        { ...link, id: `link-${index}`, turnId, coordinationTurnId: turnId, actionId: `action-${index}`, delegationId: `delegation-${index}`, targetTurnId: `target-turn-${index}`, targetMessageId: `target-message-${index}`, targetSessionId: work.id, targetSessionName: work.name } as StoredMessage,
       ];
     });
     messages.push({ type: 'user', id: 'unlinked', turnId: 'unlinked-turn', ts: 20, text: '先讨论一下整体计划。' });
@@ -141,6 +141,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     bindBrowserSession: () => {},
     resolve: async () => sessionId, subscribeHosts: listener => { if (taskOverview) overviewHostListeners.add(listener); return () => { overviewHostListeners.delete(listener); }; }, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
     getSession: async () => session,
+    getTaskSession: async id => id === target.id ? target : id === secondTarget.id ? secondTarget : null,
     listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? repairChoices : choices,
     setDefaultModel: async () => {},
     attachments: { pickFiles: async () => ({ ok: true, files: [{ approvalId: 'file-1', name: 'requirements.txt', size: 12, mimeType: 'text/plain' }] }), previewApproval: async () => ({ ok: false, reason: 'not-image' }) },
@@ -149,6 +150,21 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
     queryTaskInteractions: async () => ({ requests: taskRequests, grants: taskGrants, truncated: false }),
     queryTasks: async () => { if (disconnectedRead) { disconnectedRead = false; throw new Error('Host disconnected'); } return { tasks, truncated: taskOverview }; },
+    taskHistory: async (_owner, input) => {
+      const task = tasks.find(item => item.actionId === input.workId);
+      const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.workId);
+      if (task) return { workId: input.workId, assignments: [{ ...task, workId: input.workId, generationId: input.workId, state: task.execution ? 'owned' : 'queued', superseded: false }], nextCursor: null };
+      if (link?.type !== 'workhub_coordination' || link.kind !== 'delegation_assigned') throw new Error('No canonical task');
+      return { workId: input.workId, assignments: [{ workId: input.workId, generationId: input.workId, actionId: link.actionId, delegationId: link.delegationId, targetSessionId: link.targetSessionId, targetSessionName: link.targetSessionName, targetMessageId: link.targetMessageId, text: link.userText, createdAt: link.ts, state: 'owned', superseded: false, execution: { turnId: link.targetTurnId, runId: `run-${link.targetTurnId}` } }], nextCursor: null };
+    },
+    taskExecutions: async (_owner, input) => {
+      const task = tasks.find(item => item.actionId === input.actionId);
+      const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.actionId);
+      const targetSessionId = task?.targetSessionId ?? (link?.type === 'workhub_coordination' && link.kind === 'delegation_assigned' ? link.targetSessionId : undefined);
+      const execution = task?.execution ?? (link?.type === 'workhub_coordination' && link.kind === 'delegation_assigned' ? { turnId: link.targetTurnId, runId: `run-${link.targetTurnId}` } : undefined);
+      if (!targetSessionId || !execution) throw new Error('No owned execution');
+      return { actionId: input.actionId, delegationId: input.delegationId, targetSessionId, executions: [{ sessionId: targetSessionId, turnId: execution.turnId, runId: execution.runId, ...(input.actionId === 'overview-running' ? { status: 'running' as const } : { status: 'completed' as const, terminalEventId: `complete-${execution.turnId}` }) }], nextCursor: null };
+    },
     readTask: async (_id, ref) => {
       const task = tasks.find(task => task.actionId === ref.actionId && task.delegationId === ref.delegationId);
       if (!task) throw new Error('Original task unavailable');
@@ -256,8 +272,23 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     subscribeNewWorkPermissionMode: (_id, handler) => { permissionChanged = handler; return () => { permissionChanged = undefined; }; },
     getExecutionConcurrency: async () => executionConcurrency,
     setExecutionConcurrency: async (id, value) => { writes.concurrency(id, value); executionConcurrency = value; permissionChanged?.(); return value; },
-    observe: (_id, _event, _error, _phase, execution) => { updateExecution = execution; publishExecution(); return () => { updateExecution = undefined; }; },
-    openTranscript: async (_id, handler) => { updateTranscript = handler; publish(); return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => { updateTranscript = undefined; } }; },
+    observe: (id, _event, _error, phase, execution, scope) => {
+      if (scope) { phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: scope.turnId === 'running-turn' ? { sessionId: id, ...scope, status: 'running' } : null }); return () => {}; }
+      updateExecution = execution; publishExecution(); return () => { updateExecution = undefined; };
+    },
+    openTranscript: async (_id, handler, _signal, _error, scope) => {
+      if (scope) {
+        handler({ messages: [
+          { type: 'user', id: `user-${scope.turnId}`, turnId: scope.turnId, ts: 1, text: '核对当前任务，不改变权限和工作目录。' },
+          { type: 'tool_call', id: `tool-${scope.turnId}`, turnId: scope.turnId, ts: 2, toolName: 'Read', args: { path: '/projects/maka/package.json' } },
+          { type: 'tool_result', id: `result-${scope.turnId}`, turnId: scope.turnId, ts: 3, toolUseId: `tool-${scope.turnId}`, isError: false, content: { kind: 'text', text: '{ "name": "maka" }' } },
+          { type: 'assistant', id: `answer-${scope.turnId}`, turnId: scope.turnId, ts: 4, modelId: 'model-a', text: `任务公开输出 ${scope.turnId}：已读取依赖，未更改文件。` },
+          ...(scope.turnId === 'running-turn' ? [] : [{ type: 'turn_state' as const, id: `complete-${scope.turnId}`, turnId: scope.turnId, ts: 5, status: 'completed' as const }]),
+        ], hasOlder: false, ready: true });
+        return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => {} };
+      }
+      updateTranscript = handler; publish(); return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => { updateTranscript = undefined; } };
+    },
     stop: async () => {
       questionPending = false;
       pendingForm = undefined;
@@ -310,6 +341,37 @@ export const FullConversationAndWorkIdentity: Story = {
   },
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
+// Real path: WorkHub → task overview → View task execution. The production
+// WorkHubRoot selects a canonical work, then mounts the real scoped reader.
+// Only Host responses are mocked; the read-only composer and ChatView are real.
+export const TaskExecutionView: Story = {
+  render: () => <Surface history="usage" taskInbox taskOverview />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const heading = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
+    await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
+    const view = await canvas.findByRole('region', { name: '任务实时执行' });
+    await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
+    const header = view.querySelector('.workHubTaskViewHeader')!;
+    expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    expect(header.getBoundingClientRect().bottom).toBeLessThan(window.innerHeight);
+    const inboxToggle = canvasElement.querySelector('.workHubTaskViewInbox summary')!;
+    expect(inboxToggle).toBeVisible();
+    await userEvent.click(inboxToggle);
+    await waitFor(() => expect(canvas.getByRole('region', { name: '待你处理' })).toBeVisible());
+    await userEvent.click(inboxToggle);
+    expect(canvasElement.querySelector('.workHubTaskOverview')).toBeNull();
+    expect(view.querySelector('[data-task-turn-id]')).toHaveAttribute('data-task-turn-id', 'running-turn');
+    expect(within(view).queryByText(/已补充重复投递测试/)).toBeNull();
+    expect(canvasElement.querySelector('.workHubTaskReadOnly')).toBeVisible();
+    expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
+    expect(view.scrollWidth).toBeLessThanOrEqual(view.clientWidth);
+    expect(writes.answer).not.toHaveBeenCalled();
+    expect(writes.taskContinue).not.toHaveBeenCalled();
+    expect(writes.permissions).not.toHaveBeenCalled();
+    expect(writes.defaults).not.toHaveBeenCalled();
+  },
+};
 // Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
 // continuation retains unsent drafts across same-Host re-resolution and keeps
 // its exact submission after a lost receipt and reconnect.
@@ -808,6 +870,8 @@ export const QuestionStopped: Story = {
   },
 };
 
+// Real path: WorkHub's canonical assignment rail opens the real task view;
+// returning restores the coordinator history without opening another window.
 export const FilterWorkConversations: Story = {
   render: () => <Surface history colors />,
   play: async ({ canvasElement }) => {
@@ -816,19 +880,19 @@ export const FilterWorkConversations: Story = {
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     writes.open.mockClear();
     await userEvent.click(canvasElement.querySelector('.maka-user-message .workhub-message-rail') as HTMLElement);
-    await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(2));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
     expect(canvas.queryByText('请检查发布检查清单。')).toBeNull();
     expect(canvas.queryByText('先讨论一下整体计划。')).toBeNull();
-    expect(canvas.getByText('继续补充异常场景。')).toBeInTheDocument();
+    await waitFor(() => expect(canvas.getByText(/任务公开输出/)).toBeInTheDocument());
     expect(writes.open).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('button', { name: '显示全部对话' }));
+    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     const answerRail = canvasElement.querySelector('.maka-assistant-answer .workhub-message-rail') as HTMLElement;
     answerRail.focus();
     expect(answerRail).toHaveFocus();
     await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(2));
-    await userEvent.click(canvas.getByRole('button', { name: '显示全部对话' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
+    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     expect(writes.open).not.toHaveBeenCalled();
   },
@@ -873,7 +937,6 @@ export const WorkFilterHoverAndToggle: Story = {
   play: async ({ canvasElement }) => {
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     writes.open.mockClear();
-    const transcriptElement = canvasElement.querySelector('[data-turn-source-count]');
     const stripe = () => canvasElement.querySelector('.maka-user-message .workhub-message-rail') as HTMLElement;
     const color = () => getComputedStyle(stripe(), '::before').backgroundColor;
     const original = color();
@@ -890,11 +953,10 @@ export const WorkFilterHoverAndToggle: Story = {
     await userEvent.unhover(stripe());
     await waitFor(() => expect(color()).toBe(original));
     await userEvent.click(stripe());
-    await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(2));
-    await userEvent.click(canvasElement.querySelector('.maka-assistant-answer .workhub-message-rail') as HTMLElement);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '返回 WorkHub' }));
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     expect(writes.open).not.toHaveBeenCalled();
-    expect(canvasElement.querySelector('[data-turn-source-count]')).toBe(transcriptElement);
   },
 };
 
@@ -904,6 +966,9 @@ export const SendWhileWorkFiltered: Story = {
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvasElement.querySelector('.workhub-message-rail')).not.toBeNull());
     await userEvent.click(canvasElement.querySelector('.workhub-message-rail') as HTMLElement);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
+    expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
+    await userEvent.click(canvas.getByRole('button', { name: '返回协调输入' }));
     const editor = canvasElement.querySelector('[contenteditable="true"]') as HTMLElement;
     await userEvent.click(editor);
     await userEvent.keyboard('FILTERED_SEND_PROBE{Enter}');
@@ -924,7 +989,7 @@ export const RetryWhileWorkFiltered: Story = {
     await userEvent.keyboard('FILTERED_RETRY_PROBE{Enter}');
     await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Temporary Host failure'));
     await userEvent.click(canvasElement.querySelector('.workhub-message-rail') as HTMLElement);
-    await waitFor(() => expect(canvas.getByRole('button', { name: '显示全部对话' })).toBeInTheDocument());
+    await waitFor(() => expect(canvas.getByRole('button', { name: '返回 WorkHub' })).toBeInTheDocument());
     await userEvent.click(canvas.getByRole('button', { name: /^重试$/ }));
     await waitFor(() => expect(writes.answer).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(canvas.getByText('已收到。')).toBeInTheDocument());

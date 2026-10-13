@@ -27,6 +27,7 @@ import type {
   SessionAssistantStreamIdentity,
   SessionContinuitySnapshot,
   SubscriptionFrame,
+  SessionExecutionScope,
 } from "@maka/runtime-host/protocol";
 import type {
   DesktopRuntimeHostClient,
@@ -36,6 +37,7 @@ import {
   DesktopTranscriptReplica,
   type DesktopTranscriptReplicaOptions,
 } from './desktop-transcript-replica.js';
+import { sameExecutionScope } from '../shared/execution-observation.js';
 
 type SessionSubscriptionClient = Pick<DesktopRuntimeHostClient, "openSession">;
 
@@ -48,6 +50,7 @@ export interface PreparedSessionSubscription {
 export interface RuntimeHostSessionSubscriptionOwnerDeps {
   readonly client: SessionSubscriptionClient;
   readonly sessionId: string;
+  readonly execution?: SessionExecutionScope;
   readonly transcriptReplicaOptions?: DesktopTranscriptReplicaOptions;
   prepareActivation(
     subscription: PreparedSessionSubscription,
@@ -259,7 +262,11 @@ export class RuntimeHostSessionSubscriptionOwner {
     attempt: SubscriptionAttempt;
     prepared: PreparedSessionSubscription;
   }> {
-    const handle = await this.#deps.client.openSession(this.#deps.sessionId);
+    const handle = await this.#deps.client.openSession(this.#deps.sessionId, this.#deps.execution);
+    if (!sameExecutionScope(handle.execution, this.#deps.execution)) {
+      await handle.close().catch(() => undefined);
+      throw new Error('Runtime Host Session execution scope changed');
+    }
     if (this.#closed) {
       await handle.close().catch(() => undefined);
       throw ownerClosed();

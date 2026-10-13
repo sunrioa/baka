@@ -52,6 +52,8 @@ type RuntimeHostWorkHubClient = Pick<
   | 'getWorkHubSession'
   | 'queryWorkHubInteractions'
   | 'queryWorkHubTasks'
+  | 'readWorkHubTaskHistory'
+  | 'readWorkHubTaskExecutions'
   | 'readWorkHubTask'
   | 'continueWorkHubTask'
   | 'answerWorkHubInteraction'
@@ -142,6 +144,8 @@ export function registerRuntimeHostWorkHubIpc(
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
   handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
   handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
+  handleReconnectableRead(ipcMain, 'workhub:taskHistory', (_event, input) => client.readWorkHubTaskHistory(input));
+  handleReconnectableRead(ipcMain, 'workhub:taskExecutions', (_event, input) => client.readWorkHubTaskExecutions(input));
   handleReconnectableRead(ipcMain, 'workhub:readTask', (_event, input) => client.readWorkHubTask(input));
   // A lost continuation receipt is never automatically replayed with a new identity.
   ipcMain.handle('workhub:continueTask', (_event, input) => client.continueWorkHubTask(input));

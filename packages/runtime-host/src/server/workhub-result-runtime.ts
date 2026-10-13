@@ -41,6 +41,7 @@ import {
   type WorkHubResultObservation,
 } from './workhub-result-coordinator.js';
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
+import { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
 import {
   WORKHUB_TASK_MAX_ITEMS,
   WORKHUB_TASK_TEXT_MAX_BYTES,
@@ -58,7 +59,8 @@ export function createWorkHubResultRuntime(options: {
   evidence?: Pick<
     ReturnType<typeof createWorkHubEvidenceRuntime>,
     'taskExecution' | 'waitingObservation'
-  >;
+  > &
+    Partial<Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'readEvidenceContinuation'>>;
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
   acquireResidency(): { release(): void };
@@ -308,6 +310,7 @@ export function createWorkHubResultRuntime(options: {
       return undefined;
     if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return undefined;
     const task: WorkHubTask = {
+      workId: assignment.work?.id ?? assignment.actionId,
       actionId: assignment.actionId,
       delegationId: assignment.delegationId,
       targetSessionId: assignment.targetSessionId,
@@ -433,7 +436,16 @@ export function createWorkHubResultRuntime(options: {
     | 'workhub.interactions.revoke'
     | 'workhub.tasks.query'
     | 'workhub.tasks.read'
+    | 'workhub.tasks.history'
+    | 'workhub.tasks.executions'
   > = {
+    ...createWorkHubTaskHistoryRuntime({
+      stores,
+      messages,
+      admission,
+      evidence: options.evidence,
+      onError: options.onError,
+    }).handlers,
     'workhub.tasks.query': async () => {
       const targets = (await stores.sessionStore.listHeaders())
         .filter(

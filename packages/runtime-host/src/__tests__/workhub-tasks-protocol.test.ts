@@ -31,6 +31,51 @@ const task = {
   status: 'pending_acceptance',
   execution: { turnId: 'turn', runId: 'run', sharedTurn: false },
 };
+test('task history and execution pages enforce bounded, exact work/assignment ownership', () => {
+  const history = HOST_OPERATION_SPECS['workhub.tasks.history'];
+  const assignment = {
+    ...task,
+    workId: 'work',
+    generationId: 'generation',
+    state: 'owned',
+    superseded: true,
+    execution: { turnId: 'turn', runId: 'run' },
+  };
+  const { status: _status, ...row } = assignment;
+  const result = history.decodeOutput({ workId: 'work', assignments: [row], nextCursor: null });
+  history.assertOutputForInput!({ workId: 'work' }, result);
+  assert.throws(() => history.assertOutputForInput!({ workId: 'foreign' }, result));
+  for (const patch of [
+    { workId: 'foreign' },
+    { state: 'queued' },
+    { execution: undefined },
+    { generationId: '' },
+  ])
+    assert.throws(() => history.decodeOutput({ ...result, assignments: [{ ...row, ...patch }] }));
+  assert.throws(() => history.decodeInput({ workId: 'work', targetSessionId: 'override' }));
+  assert.throws(() => history.decodeOutput({ ...result, assignments: Array(9).fill(row) }));
+  const executions = HOST_OPERATION_SPECS['workhub.tasks.executions'];
+  const page = executions.decodeOutput({
+    actionId: 'action',
+    delegationId: 'delegation',
+    targetSessionId: 'target',
+    executions: [{ sessionId: 'target', turnId: 'turn', runId: 'run', status: 'running' }],
+    nextCursor: null,
+  });
+  executions.assertOutputForInput!({ actionId: 'action', delegationId: 'delegation' }, page);
+  assert.throws(() =>
+    executions.assertOutputForInput!({ actionId: 'action', delegationId: 'other' }, page),
+  );
+  assert.throws(() =>
+    executions.decodeOutput({
+      ...page,
+      executions: [{ ...page.executions[0], sessionId: 'foreign' }],
+    }),
+  );
+  assert.throws(() =>
+    executions.decodeOutput({ ...page, executions: Array(17).fill(page.executions[0]) }),
+  );
+});
 test('WorkHub task reads are bounded, unique and reject fabricated execution state', () => {
   const spec = HOST_OPERATION_SPECS['workhub.tasks.query'];
   assert.deepEqual(spec.decodeInput({}), {});

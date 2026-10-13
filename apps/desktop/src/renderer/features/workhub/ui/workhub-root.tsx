@@ -39,6 +39,14 @@ import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { workHubLinkedWork } from '../model/linked-work.js';
+import { WorkHubTaskView } from './workhub-task-view.js';
+import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
+
+function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
+  if (!owner || !target) return false;
+  try { return parseDesktopSessionKey(owner).hostId === parseDesktopSessionKey(target).hostId; }
+  catch { return false; }
+}
 
 function cancelReveal(element: HTMLDivElement | null, content: HTMLDivElement | null) {
   for (const target of [element, content]) for (const animation of target?.getAnimations() ?? []) animation.cancel();
@@ -80,6 +88,7 @@ export function WorkHubRoot() {
     (sessionId, draft) => draftRestore.current?.(sessionId, draft),
   );
   const { services, session, transcript, busy } = controller;
+  const selectedTask = highlight.selectedWork?.workId && sameWorkHubHost(controller.sessionId, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
     return () => services.bindBrowserSession(null);
@@ -296,8 +305,11 @@ export function WorkHubRoot() {
               </div>
             )}
             <div className="workHubTaskPanels">
-              <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
-              {!progress && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))} />}
+              {selectedTask ? <details className="workHubTaskViewInbox"><summary>{locale === 'zh-CN' ? '待处理的问题与权限' : 'Pending questions and permissions'}</summary>
+                <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
+              </details> : <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />}
+              {!progress && !selectedTask && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))}
+                onView={task => highlight.selectWork({ sessionId: task.targetSessionId, name: task.targetSessionName, workId: task.workId ?? task.actionId })} />}
             </div>
             {controller.activeForm && (
               <FormInteractionPrompt
@@ -311,7 +323,11 @@ export function WorkHubRoot() {
             {controller.activeQuestion && <UserQuestionPrompt key={controller.activeQuestion.requestId}
               request={controller.activeQuestion} onRespond={controller.respondToUserQuestion}
               onStop={controller.stop} stopPending={controller.stopPending} />}
-            <div className="workHubComposerContent" hidden={Boolean(controller.activeQuestion || controller.activeForm)}>
+            {selectedTask && <div className="workHubTaskReadOnly" role="status">
+              <p>{locale === 'zh-CN' ? `正在查看「${selectedTask.name}」的执行。此阶段为只读视图，尚未启用直接纠正发送。` : `Viewing execution for “${selectedTask.name}”. This stage is read-only; direct corrections are not enabled yet.`}</p>
+              <Button size="sm" variant="ghost" label={locale === 'zh-CN' ? '返回协调输入' : 'Return to coordinator input'} onClick={() => highlight.selectWork(undefined)} />
+            </div>}
+            <div className="workHubComposerContent" hidden={Boolean(selectedTask || controller.activeQuestion || controller.activeForm)}>
             <WorkHubComposer
               pendingMessages={controller.transientMessages}
               queuedMessages={controller.messageQueue.entries}
@@ -433,7 +449,9 @@ export function WorkHubRoot() {
         }
       >
         <div ref={history} className="workHubHistory" aria-hidden={!showConversation} inert={!showConversation}>
-        <WorkHubConversation
+        {selectedTask && controller.sessionId ? <WorkHubTaskView key={JSON.stringify([controller.sessionId, selectedTask.workId])}
+          services={services} owner={controller.sessionId} workId={selectedTask.workId!} name={selectedTask.name}
+          onClose={() => highlight.selectWork(undefined)} /> : <WorkHubConversation
           workLinks={links}
           onReadAttachmentBytes={services.readAttachmentBytes}
           onOpenWork={(id) => call(services.presentation.openSession(id))}
@@ -455,7 +473,7 @@ export function WorkHubRoot() {
               <p>{t.hint}</p>
             </div>
           }
-        />
+        />}
         </div>
       </ChatSurfaceLayout>
       </div></div>

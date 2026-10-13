@@ -19,6 +19,8 @@
 
 import type { WebContents } from 'electron';
 import type { StoredMessage } from '@maka/core/session';
+import type { SessionExecutionScope } from '@maka/runtime-host/protocol';
+import { sameExecutionScope } from '../shared/execution-observation.js';
 import { RuntimeHostOperationError } from "@maka/runtime-host/client";
 import type {
   RuntimeHostSessionObserver,
@@ -100,6 +102,7 @@ function isMissingRuntimeHostSessionError(error: unknown): boolean {
 }
 
 interface SessionObservationRegistration {
+  readonly execution?: SessionExecutionScope;
   readonly sessionId: string;
   readonly messageAdmissions: boolean;
   readonly target: RuntimeHostSessionObserverTarget;
@@ -109,6 +112,7 @@ interface SessionObservationRegistration {
 }
 
 interface TranscriptRegistration {
+  readonly execution?: SessionExecutionScope;
   readonly sessionId: string;
   readonly mode: DesktopTranscriptOpenMode;
   readonly target: RuntimeHostTranscriptTarget;
@@ -197,6 +201,8 @@ export class RuntimeHostSessionObservationRegistry {
             observerId,
             bindTarget(registration.target),
             registration.messageAdmissions,
+            undefined,
+            registration.execution,
           );
           if (
             this.#source !== source ||
@@ -217,7 +223,7 @@ export class RuntimeHostSessionObservationRegistry {
               // registration regardless of lifecycle so the stale entry
               // cannot fail every future reconnect, and let the upper layer
               // drop the Session view.
-              onSessionMissing?.(registration.sessionId);
+              if (!registration.execution) onSessionMissing?.(registration.sessionId);
               this.#deleteRegistration(observerId, registration);
               return undefined;
             }
@@ -327,6 +333,7 @@ export class RuntimeHostSessionObservationRegistry {
     observerId: string,
     target: RuntimeHostSessionObserverTarget,
     messageAdmissions = false,
+    execution?: SessionExecutionScope,
   ): Promise<void> {
     this.#assertOpen();
     const previous = this.#registrations.get(observerId);
@@ -334,7 +341,8 @@ export class RuntimeHostSessionObservationRegistry {
       if (
         previous.sessionId !== sessionId ||
         previous.target.id !== target.id ||
-        previous.messageAdmissions !== messageAdmissions
+        previous.messageAdmissions !== messageAdmissions ||
+        !sameExecutionScope(previous.execution, execution)
       ) {
         throw new Error("Runtime Host Session observer identity was reused");
       }
@@ -347,6 +355,7 @@ export class RuntimeHostSessionObservationRegistry {
     const ready = observationReadiness();
     void ready.promise.catch(() => undefined);
     const registration: SessionObservationRegistration = {
+      ...(execution ? { execution: Object.freeze({ ...execution }) } : {}),
       sessionId,
       messageAdmissions,
       target,
@@ -365,6 +374,8 @@ export class RuntimeHostSessionObservationRegistry {
         observerId,
         this.#bindTarget(target),
         messageAdmissions,
+        undefined,
+        registration.execution,
       );
       if (
         this.#source === source &&
@@ -423,6 +434,7 @@ export class RuntimeHostSessionObservationRegistry {
     target: RuntimeHostTranscriptTarget,
     mode: DesktopTranscriptOpenMode = 'tail',
     resumeFrom?: number,
+    execution?: SessionExecutionScope,
   ): Promise<DesktopTranscriptOpenResult> {
     this.#assertOpen();
     if (this.#transcripts.has(consumerId)) {
@@ -434,6 +446,7 @@ export class RuntimeHostSessionObservationRegistry {
     const ready = transcriptReadiness();
     void ready.promise.catch(() => undefined);
     const registration: TranscriptRegistration = {
+      ...(execution ? { execution: Object.freeze({ ...execution }) } : {}),
       sessionId,
       mode,
       target,
@@ -456,6 +469,7 @@ export class RuntimeHostSessionObservationRegistry {
         this.#trackDelivered(registration, this.#bindTarget(target)),
         mode,
         resumeFrom,
+        registration.execution,
       );
       if (this.#source === source && this.#transcripts.get(consumerId) === registration) {
         registration.lifecycle = 'active';
@@ -644,6 +658,7 @@ export class RuntimeHostSessionObservationRegistry {
         this.#trackDelivered(registration, this.#bindTarget(registration.target)),
         registration.mode,
         registration.deliveredFrom ?? undefined,
+        registration.execution,
       );
       if (
         this.#source === source &&

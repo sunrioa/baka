@@ -20,20 +20,23 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
 
 import { allocateWorkHubHues } from '../model/identity-colors.js';
+export interface SelectedWorkHubWork { sessionId: string; name: string; workId?: string }
 
 export const WorkHubHighlightContext = createContext<{
   sessionId: string | undefined;
   highlight(sessionId: string | undefined): void;
-  selectedWork?: { sessionId: string; name: string };
-  toggleWork(work: { sessionId: string; name: string }): void;
-  selectWork(work: { sessionId: string; name: string } | undefined): void;
+  selectedWork?: SelectedWorkHubWork;
+  toggleWork(work: SelectedWorkHubWork): void;
+  selectWork(work: SelectedWorkHubWork | undefined): void;
 }>({ sessionId: undefined, highlight: () => {}, selectWork: () => {}, toggleWork: () => {} });
 
 /** Work identity hover and conversation filtering are local presentation state. */
 export function useWorkHubHighlightState() {
   const [sessionId, highlight] = useState<string>();
-  const [selectedWork, selectWork] = useState<{ sessionId: string; name: string }>();
-  return { sessionId, highlight, selectedWork, selectWork, toggleWork: (work: { sessionId: string; name: string }) => selectWork(selectedWork?.sessionId === work.sessionId ? undefined : work) };
+  const [selectedWork, selectWork] = useState<SelectedWorkHubWork>();
+  return { sessionId, highlight, selectedWork, selectWork, toggleWork: (work: SelectedWorkHubWork) => selectWork(
+    selectedWork && (selectedWork.workId ?? selectedWork.sessionId) === (work.workId ?? work.sessionId) ? undefined : work,
+  ) };
 }
 
 const WorkHubHueContext = createContext<ReadonlyMap<string, number> | undefined>(undefined);

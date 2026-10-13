@@ -31,6 +31,7 @@ import type {
   WorkHubPrepareAttachmentsResult,
 } from '../shared/workhub-conversation.js';
 import type { SessionObservationMessage } from '../shared/session-execution-projection.js';
+import { executionEventChannel, sameExecutionScope } from '../shared/execution-observation.js';
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { workHubControlBridge } from './workhub-control.js';
 import { workHubPresentationBridge } from './workhub-presentation.js';
@@ -2201,6 +2202,17 @@ const makaBridge = {
       const result = await invokeWhenReady('workhub:readTask', scope, input) as OperationOutput<'workhub.tasks.read'>;
       return { ...result, task: { ...result.task, targetSessionId: observeRuntimeHostSessionScope(scope, result.task.targetSessionId).sessionId } };
     },
+    async taskHistory(coordinationSessionId: string, input: OperationInput<'workhub.tasks.history'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:taskHistory', scope, input) as OperationOutput<'workhub.tasks.history'>;
+      return { ...result, assignments: result.assignments.map(item => ({ ...item, targetSessionId: observeRuntimeHostSessionScope(scope, item.targetSessionId).sessionId })) };
+    },
+    async taskExecutions(coordinationSessionId: string, input: OperationInput<'workhub.tasks.executions'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:taskExecutions', scope, input) as OperationOutput<'workhub.tasks.executions'>;
+      return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId,
+        executions: result.executions.map(item => ({ ...item, sessionId: observeRuntimeHostSessionScope(scope, item.sessionId).sessionId })) };
+    },
     async continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       const result = await invokeWhenReady('workhub:continueTask', scope, input) as OperationOutput<'workhub.coordination.continue'>;
@@ -2571,6 +2583,7 @@ const makaBridge = {
       onObservationPhase?: (phase: 'pending' | 'ready') => void,
       onSeedError?: (error: unknown) => void,
       onExecution?: (projection: import('../shared/session-execution-projection.js').SessionExecutionProjection | undefined) => void,
+      execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
     ): () => void {
       const observerId = crypto.randomUUID();
       let lastExecution: import('../shared/session-execution-projection.js').SessionExecutionProjection | undefined;
@@ -2600,6 +2613,10 @@ const makaBridge = {
             if (runtimeHostMetadataFor(scope)?.profileId !== profileId) return;
             if (event.type === 'host_observation_seed') {
               if (!event.observerIds.includes(observerId)) return;
+              if (!sameExecutionScope(execution, event.executionScope)) {
+                onSeedError?.(new Error('Runtime Host observation execution scope changed'));
+                return;
+              }
               // Seed and live updates share this ordered channel. Readiness
               // follows consumption, never the separate registration reply.
               acceptExecution(event.execution);
@@ -2623,7 +2640,7 @@ const makaBridge = {
             }
             handler(projectDesktopSessionEvent(scope, event));
         };
-        const observationChannel = `sessions:event:${session.sessionId}`;
+        const observationChannel = executionEventChannel(session.sessionId, execution);
         unsubscribeEvents = subscribeEveryRuntimeHostEvent(observationChannel, consumeObservationEvent);
         return {
           completion: invokeWhenReady(
@@ -2631,6 +2648,7 @@ const makaBridge = {
             session.scope,
             session.sessionId,
             observerId,
+            execution ?? null,
           ) as Promise<RuntimeHostObservationIpcResult<void>>,
         };
       });
@@ -2815,6 +2833,7 @@ const makaBridge = {
       registerCancellation?: (cancel: () => void) => void,
       mode: DesktopTranscriptOpenMode = 'history',
       resumeFrom?: number,
+      execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
     ): Promise<DesktopTranscriptHandle> {
       const consumerId = crypto.randomUUID();
       const channel = `sessions:transcript:${consumerId}`;
@@ -2840,6 +2859,9 @@ const makaBridge = {
             host.targetEpoch !== consumerScope.targetEpoch
           ) return;
           batch = assertDesktopTranscriptBatch(value);
+          if (!sameExecutionScope(execution, batch.execution)) {
+            throw new Error('Desktop transcript execution scope changed');
+          }
           if (!retiredGenerations.has(batch.generation)) {
             const adopted = adoptTranscriptIdentity(identity, batch);
             if (adopted !== identity) {
@@ -2876,6 +2898,7 @@ const makaBridge = {
             consumerId,
             mode,
             resumeFrom ?? null,
+            execution ?? null,
           ) as Promise<RuntimeHostObservationIpcResult<DesktopTranscriptOpenResult>>,
         };
       });
@@ -2897,7 +2920,7 @@ const makaBridge = {
         const cancelled = closed;
         closed = true;
         ipcRenderer.off(channel, listener);
-        if (!cancelled && !identity && session) {
+        if (!cancelled && !identity && session && !execution) {
           // The cache stands in only when the live read never answered; on a
           // healthy open the first published history is the live answer itself.
           const cached = await invokeWhenReady(
@@ -2926,6 +2949,10 @@ const makaBridge = {
         throw new Error('Desktop transcript open was cancelled');
       }
       const opened = openResult.value;
+      if (!sameExecutionScope(execution, opened.execution)) {
+        requestClose();
+        throw new Error('Desktop transcript execution scope changed');
+      }
       if (closed) throw new Error('Desktop transcript open was cancelled');
       identity ??= { generation: opened.generation, hostEpoch: opened.hostEpoch };
       return {

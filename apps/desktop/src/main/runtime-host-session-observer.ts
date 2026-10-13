@@ -33,6 +33,7 @@ import type {
   SessionDomainChange,
   SessionContinuitySnapshot,
   SubscriptionFrame,
+  SessionExecutionScope,
 } from "@maka/runtime-host/protocol";
 import type { DesktopRuntimeHostClient } from "./runtime-host-client.js";
 import {
@@ -66,6 +67,7 @@ import {
   encodeDesktopTranscriptChange,
   encodeDesktopTranscriptSnapshot,
 } from './desktop-transcript-ipc.js';
+import { executionEventChannel, executionObservationKey, sameExecutionScope } from '../shared/execution-observation.js';
 
 type SessionObserverClient = Pick<DesktopRuntimeHostClient, 'openSession'> &
   Partial<
@@ -125,6 +127,8 @@ interface ObserverTargetGroup {
 }
 
 interface ObservedSessionState {
+  readonly key: string;
+  readonly execution?: SessionExecutionScope;
   readonly sessionId: string;
   readonly targets: Map<number, ObserverTargetGroup>;
   readonly watchedTurnIds: Set<string>;
@@ -147,6 +151,7 @@ interface ObservedSessionState {
 }
 
 interface TranscriptConsumer {
+  readonly execution?: SessionExecutionScope;
   readonly consumerId: string;
   readonly target: RuntimeHostTranscriptTarget;
   generation: string;
@@ -280,6 +285,7 @@ export class RuntimeHostSessionObserver {
      * the first answer reads back down to here instead of to one budget.
      */
     resumeFrom?: number,
+    execution?: SessionExecutionScope,
   ): Promise<DesktopTranscriptOpenResult> {
     this.#assertOpen();
     if (
@@ -288,7 +294,7 @@ export class RuntimeHostSessionObserver {
     ) {
       throw new Error('Desktop transcript consumer identity was reused');
     }
-    const state = this.#state(sessionId);
+    const state = this.#state(sessionId, execution);
     let cancel!: () => void;
     const cancelled = new Promise<never>((_resolve, reject) => {
       cancel = () => reject(new Error('Desktop transcript open was cancelled'));
@@ -328,6 +334,7 @@ export class RuntimeHostSessionObserver {
       }
     }
     const consumer: TranscriptConsumer = {
+      ...(state.execution ? { execution: state.execution } : {}),
       consumerId,
       target,
       generation: replica.generation,
@@ -368,6 +375,7 @@ export class RuntimeHostSessionObserver {
         generation: currentReplica.generation,
         hostEpoch: currentReplica.hostEpoch,
         readThroughMessageId,
+        ...(state.execution ? { execution: state.execution } : {}),
       };
     } catch (error) {
       this.#detachTranscriptConsumer(state, consumer);
@@ -506,12 +514,14 @@ export class RuntimeHostSessionObserver {
     target: RuntimeHostSessionObserverTarget,
     messageAdmissions = false,
     ptyRef?: string,
+    execution?: SessionExecutionScope,
   ): Promise<void> {
     this.#assertOpen();
     const previous = this.#observers.get(observerId);
     if (previous) {
       if (
         previous.state.sessionId !== sessionId ||
+        !sameExecutionScope(previous.state.execution, execution) ||
         previous.group.target.id !== target.id
       ) {
         throw new Error("Runtime Host Session observer identity was reused");
@@ -520,7 +530,8 @@ export class RuntimeHostSessionObserver {
       if (!previous.seeded) this.#seedTarget(previous.state, previous.group, observerId);
       return;
     }
-    const state = this.#state(sessionId);
+    if (execution && (messageAdmissions || ptyRef)) throw new Error('Execution views are read-only and do not observe Session-wide PTY');
+    const state = this.#state(sessionId, execution);
     if (messageAdmissions && !state.messageAdmissions) {
       state.messageAdmissions = true;
       state.projector?.enableMessageAdmissions();
@@ -638,17 +649,17 @@ export class RuntimeHostSessionObserver {
       toolUseId: interactionToolUseId(pending),
     };
     if (answered.outcome.kind === "question_answer") {
-      this.#broadcast(answered.sessionId, {
+      this.#broadcastInteractionAnswer(answered, {
         type: "user_question_answer_ack",
         ...base,
       });
     } else if (answered.outcome.kind === "form_answer") {
-      this.#broadcast(answered.sessionId, {
+      this.#broadcastInteractionAnswer(answered, {
         type: "form_answer_ack",
         ...base,
       });
     } else if (answered.outcome.kind === "sandbox_boundary_decision") {
-      this.#broadcast(answered.sessionId, {
+      this.#broadcastInteractionAnswer(answered, {
         type: "sandbox_boundary_decision_ack",
         ...base,
         decision: answered.outcome.decision,
@@ -656,7 +667,7 @@ export class RuntimeHostSessionObserver {
         revision: answered.revision,
       });
     } else if (answered.outcome.kind === "client_capability_decision") {
-      this.#broadcast(answered.sessionId, {
+      this.#broadcastInteractionAnswer(answered, {
         type: "client_capability_decision_ack",
         ...base,
         decision: answered.outcome.decision,
@@ -676,20 +687,22 @@ export class RuntimeHostSessionObserver {
     await Promise.all(states.map((state) => this.#closeState(state)));
   }
 
-  #state(sessionId: string): ObservedSessionState {
-    const existing = this.#states.get(sessionId);
+  #state(sessionId: string, execution?: SessionExecutionScope): ObservedSessionState {
+    const key = executionObservationKey(sessionId, execution);
+    const existing = this.#states.get(key);
     if (existing) return existing;
     let state!: ObservedSessionState;
     const subscriptionOwner = new RuntimeHostSessionSubscriptionOwner({
       client: this.#client,
       sessionId,
+      execution,
       transcriptReplicaOptions: {
         accountPreparationBytes: (deltaBytes) =>
           this.#accountTranscriptPreparation(state, deltaBytes),
         onChange: (replica, change) => {
           if (state.replica !== replica) return;
           this.#broadcastTranscriptChange(state, replica, change);
-          this.#cacheTranscript(replica.snapshot());
+          if (!state.execution) this.#cacheTranscript(replica.snapshot());
         },
       },
       // Runs inside the owner's staleness check. The pointer moves after the
@@ -699,7 +712,7 @@ export class RuntimeHostSessionObserver {
       // non-throwing, or the state keeps a pointer to a replica the owner
       // already closed.
       installReseededReplica: (replica) => {
-        this.#cacheTranscript(replica.snapshot());
+        if (!state.execution) this.#cacheTranscript(replica.snapshot());
         replica.adoptResidentAccounting();
         state.replica = replica;
         // The projector outlives an evicted replica, so rows that went
@@ -710,7 +723,7 @@ export class RuntimeHostSessionObserver {
         for (const event of
           state.projector?.noteDurableTranscriptMessages(replica.messages()) ??
           []) {
-          this.#broadcast(state.sessionId, event);
+          this.#broadcast(state, event);
         }
         this.#resetTranscriptConsumers(state);
         this.#touchReplica(state, state);
@@ -719,7 +732,7 @@ export class RuntimeHostSessionObserver {
         this.#prepareSubscriptionActivation(state, subscription, recovered),
       acceptFrame: (frame) => this.#acceptFrame(state, frame),
       recoveryStarted: (error) => {
-        this.#broadcast(state.sessionId, { type: 'host_observation_pending' });
+        this.#broadcast(state, { type: 'host_observation_pending' });
         console.warn(
           "[runtime-host-session-observer] recovering subscription",
           subscriptionFailureIdentity(state, error),
@@ -745,6 +758,8 @@ export class RuntimeHostSessionObserver {
         this.#handleTerminalSubscriptionFailure(state, error),
     });
     state = {
+      key,
+      ...(execution ? { execution: Object.freeze({ ...execution }) } : {}),
       sessionId,
       targets: new Map(),
       watchedTurnIds: new Set(),
@@ -755,7 +770,7 @@ export class RuntimeHostSessionObserver {
       messageAdmissions: false,
       closing: false,
     };
-    this.#states.set(sessionId, state);
+    this.#states.set(key, state);
     subscriptionOwner.start();
     return state;
   }
@@ -771,6 +786,7 @@ export class RuntimeHostSessionObserver {
     this.#send(state, group, {
       type: 'host_observation_seed',
       observerIds,
+      ...(state.execution ? { executionScope: state.execution } : {}),
       execution: { type: 'host_execution', available: true, rootTurn: state.snapshot.rootTurn },
       events,
     });
@@ -829,7 +845,7 @@ export class RuntimeHostSessionObserver {
       await this.#reconcileRemovedQueueMessages(state, update.previousSnapshot, state.snapshot);
     }
     for (const event of update.events) {
-      this.#broadcast(state.sessionId, event);
+      this.#broadcast(state, event);
       if (event.type === "tool_result") {
         this.#emitSessionsChanged("message-appended", state.sessionId, {
           turnId: event.turnId,
@@ -904,7 +920,7 @@ export class RuntimeHostSessionObserver {
             ? 'retracted' as const
             : undefined;
         if (!outcome) continue;
-        this.#broadcast(state.sessionId, {
+        this.#broadcast(state, {
           type: 'message_admission',
           id: `host-message-resolution:${next.queue.hostEpoch}:${next.queue.queueRevision}:${resolution.messageId}`,
           turnId,
@@ -919,9 +935,15 @@ export class RuntimeHostSessionObserver {
     }
   }
 
-  #broadcast(sessionId: string, event: SessionEvent | SessionObservationMessage): void {
-    const state = this.#states.get(sessionId);
-    if (!state) return;
+  #broadcastInteractionAnswer(answered: InteractionAnsweredSnapshot, event: SessionEvent): void {
+    for (const state of this.#states.values()) {
+      if (state.sessionId !== answered.sessionId) continue;
+      if (state.execution && state.execution.turnId !== answered.turnId) continue;
+      this.#broadcast(state, event);
+    }
+  }
+
+  #broadcast(state: ObservedSessionState, event: SessionEvent | SessionObservationMessage): void {
     for (const group of state.targets.values()) {
       this.#send(state, group, event);
     }
@@ -942,7 +964,7 @@ export class RuntimeHostSessionObserver {
     event: SessionEvent | SessionObservationMessage,
   ): void {
     try {
-      group.target.send(sessionEventChannel(state.sessionId), event);
+      group.target.send(executionEventChannel(state.sessionId, state.execution), event);
     } catch {
       this.#detachTarget(state, group);
       void this.#closeIfIdle(state);
@@ -954,10 +976,10 @@ export class RuntimeHostSessionObserver {
     error: Error,
   ): void {
     const root = state.snapshot?.rootTurn;
-    this.#broadcast(state.sessionId, { type: 'host_observation_pending' });
+    this.#broadcast(state, { type: 'host_observation_pending' });
     for (const group of state.targets.values()) {
       try {
-        group.target.send(sessionEventChannel(state.sessionId), {
+        group.target.send(executionEventChannel(state.sessionId, state.execution), {
           type: 'host_observation_error', message: error.message,
         });
       } catch {
@@ -984,6 +1006,10 @@ export class RuntimeHostSessionObserver {
       error.operation === 'subscription.open' &&
       error.code === 'not_found'
     ) {
+      if (state.execution) {
+        this.#publishSubscriptionFailure(state, error);
+        return;
+      }
       error = new SessionRemovedSubscriptionError(error.message);
     }
     if (error instanceof SessionRemovedSubscriptionError) {
@@ -1007,7 +1033,7 @@ export class RuntimeHostSessionObserver {
     subscription: PreparedSessionSubscription,
     recovered: boolean,
   ): Promise<() => void> {
-    if (state.closing || this.#states.get(state.sessionId) !== state) {
+    if (state.closing || this.#states.get(state.key) !== state) {
       throw new Error("Runtime Host Session observer closed before commit");
     }
     const previousSnapshot = state.snapshot;
@@ -1033,7 +1059,7 @@ export class RuntimeHostSessionObserver {
       subscription.replica,
       terminalTurnIds,
     );
-    if (state.closing || this.#states.get(state.sessionId) !== state) {
+    if (state.closing || this.#states.get(state.key) !== state) {
       throw new Error('Runtime Host Session observer closed before commit');
     }
     const replacement =
@@ -1054,14 +1080,14 @@ export class RuntimeHostSessionObserver {
     return () => {
       if (
         state.closing ||
-        this.#states.get(state.sessionId) !== state ||
+        this.#states.get(state.key) !== state ||
         state.snapshot !== previousSnapshot ||
         state.replica !== previousReplica
       ) {
         throw new Error('Runtime Host Session observer changed before activation');
       }
       state.snapshot = structuredClone(subscription.snapshot);
-      this.#cacheTranscript(subscription.replica.snapshot());
+      if (!state.execution) this.#cacheTranscript(subscription.replica.snapshot());
       subscription.replica.adoptResidentAccounting();
       state.replica = subscription.replica;
       state.projector = projector;
@@ -1110,11 +1136,12 @@ export class RuntimeHostSessionObserver {
         recordedTurns,
       );
 
-      if (recovered) this.#emitSubscriptionRecovered(state.sessionId);
+      if (recovered && !state.execution) this.#emitSubscriptionRecovered(state.sessionId);
     };
   }
 
   #emitActiveInteractions(state: ObservedSessionState): void {
+    if (state.execution) return;
     const interactions = state.snapshot?.interactions.pending.flatMap(
       (interaction) =>
         projectRuntimeHostInteractionRequest(interaction, this.#now()),
@@ -1175,6 +1202,8 @@ export class RuntimeHostSessionObserver {
    * A running root Turn keeps the subscription whether or not anyone is
    * looking: the Host goes on producing either way, and letting go here only
    * makes the next viewer ask it to send everything a second time.
+   * A task-scoped reader is different: switching among active tasks must
+   * release invisible read subscriptions, not consume the connection's cap.
    */
   #isRetained(state: ObservedSessionState): boolean {
     const root = state.snapshot?.rootTurn;
@@ -1183,7 +1212,7 @@ export class RuntimeHostSessionObserver {
       state.watchedTurnIds.size > 0 ||
       state.transcriptConsumers.size > 0 ||
       state.pendingTranscriptConsumers > 0 ||
-      (root !== null && root !== undefined && !isTerminalTurn(root))
+      (!state.execution && root !== null && root !== undefined && !isTerminalTurn(root))
     );
   }
 
@@ -1223,8 +1252,8 @@ export class RuntimeHostSessionObserver {
     if (!state.closing) {
       state.closing = true;
       this.#finishAllWatchedTurns(state, "abandoned");
-      if (this.#states.get(state.sessionId) === state)
-        this.#states.delete(state.sessionId);
+      if (this.#states.get(state.key) === state)
+        this.#states.delete(state.key);
       for (const group of state.targets.values())
         this.#detachTarget(state, group);
       for (const consumer of state.transcriptConsumers.values()) {
@@ -1289,7 +1318,7 @@ export class RuntimeHostSessionObserver {
       state.projector?.noteDurableTranscriptMessages(
         change.durableUpserts.map((entry) => entry.message),
       ) ?? []) {
-      this.#broadcast(state.sessionId, event);
+      this.#broadcast(state, event);
     }
     this.#sendTranscriptChange(state, replica, change);
     this.#touchReplica(state);
@@ -1599,6 +1628,7 @@ export class RuntimeHostSessionObserver {
       try {
       consumer.target.send(transcriptChannel(consumer.consumerId), {
         ...batch,
+        ...(consumer.execution ? { execution: consumer.execution } : {}),
         deliverySequence,
       });
       await acknowledged;
@@ -1685,6 +1715,7 @@ export class RuntimeHostSessionObserver {
   }
 
   #markTranscriptRead(state: ObservedSessionState, replica: DesktopTranscriptReplica): void {
+    if (state.execution) return;
     const messageId = replica.latestDurableVisibleMessageId();
     if (!messageId) return;
     const update = this.#client.setSessionReadMarker?.(state.sessionId, messageId);
@@ -1696,10 +1727,6 @@ function interactionToolUseId(interaction: InteractionPendingSnapshot): string {
   return interaction.request.kind === "sandbox_boundary"
     ? interaction.interactionId
     : interaction.request.toolUseId;
-}
-
-function sessionEventChannel(sessionId: string): string {
-  return `sessions:event:${sessionId}`;
 }
 
 function transcriptChannel(consumerId: string): string {

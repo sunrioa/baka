@@ -29,6 +29,7 @@ import {
 import type { DesktopRuntimeHostSession } from '../runtime-host-client.js';
 
 export function runtimeHostSessionFixture(input: {
+  readonly execution?: import('@maka/runtime-host/protocol').SessionExecutionScope;
   readonly snapshot: SessionContinuitySnapshot;
   readonly activeAssistantStreams?: readonly SessionAssistantStreamIdentity[];
   readonly transcript?: Promise<StoredMessage[]>;
@@ -61,6 +62,7 @@ export function runtimeHostSessionFixture(input: {
   });
   let transcriptWatermark = transcriptBootstrap.durable.throughSequence;
   return {
+    ...(input.execution ? { execution: input.execution } : {}),
     hostEpoch: 'host-1',
     subscriptionId: `subscription-${sessionId}`,
     snapshot: input.snapshot,

@@ -20,8 +20,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
-import { DURABLE_TOOL_RESULT_PROJECTION_MAX_BYTES } from '@maka/core/durable-tool-result-projection';
-import { readLogicalRuntimeExecution } from '@maka/core/runtime-logical-execution';
 import type { MessageContent } from '@maka/core/events';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
@@ -49,6 +47,8 @@ import type { HostMessageCoordinator } from './message-coordinator.js';
 import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admission-gate.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 import type { WorkHubResultObservation } from './workhub-result-coordinator.js';
+import { readHostedExecutionMembership } from './hosted-execution-membership.js';
+export { readHostedExecutionMembership as readWorkHubEvidenceExecution } from './hosted-execution-membership.js';
 
 function identity(prefix: string, ...parts: string[]): string {
   return prefix + createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 48);
@@ -56,33 +56,6 @@ function identity(prefix: string, ...parts: string[]): string {
 export const workHubEvidenceRequestId = (turnId: string) => identity('whe_', turnId);
 export const workHubEvidenceResolutionId = (requestId: string) => identity('wher_', requestId);
 export const workHubEvidenceTurnId = (requestId: string) => identity('whet_', requestId);
-
-/** Membership needs immutable prefix proofs, never a full decoded Run transcript. */
-export async function readWorkHubEvidenceExecution(
-  store: ExecutionStoresWriter<'interactive'>['runtimeEventStore'],
-  ref: HostedExecutionRef,
-) {
-  const run = await store.readRunInvocation(ref.sessionId, ref.runId);
-  if (!run || run.turnId !== ref.turnId) return undefined;
-  const rootRunId =
-    run.opening.source.kind === 'handoff' ? run.opening.source.rootRunId : run.runId;
-  return readLogicalRuntimeExecution(
-    {
-      readRunInvocation: store.readRunInvocation,
-      listSessionInvocations: store.listSessionInvocations,
-      readContinuationClaimStateByBoundary: store.readContinuationClaimStateByBoundary,
-      readImmutableRuntimePrefixProof: (input) =>
-        store.readImmutableRuntimePrefixProof(input, {
-          maxEvents: 65536,
-          maxBytes: 256 * 1024 * 1024,
-          maxRecordBytes: DURABLE_TOOL_RESULT_PROJECTION_MAX_BYTES * 2 + 256 * 1024,
-        }),
-    },
-    { ...ref, runId: rootRunId },
-    undefined,
-    { mode: 'membership' },
-  );
-}
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
 const parameters = z.discriminatedUnion('operation', [
@@ -140,7 +113,7 @@ export function createWorkHubEvidenceRuntime(options: {
   const { stores, executions, messages, admission, reader } = options;
   const now = options.now ?? Date.now;
   const membership = (ref: HostedExecutionRef) =>
-    readWorkHubEvidenceExecution(stores.runtimeEventStore, ref);
+    readHostedExecutionMembership(stores.runtimeEventStore, ref);
   async function record(sessionId: string, messageId: string) {
     return (
       await stores.sessionStore.readTranscriptMessagesSnapshot(sessionId, {
@@ -217,6 +190,34 @@ export function createWorkHubEvidenceRuntime(options: {
       throw error;
     }
   }
+  /** One authenticated evidence edge, also used by paginated read-only views. */
+  async function readEvidenceContinuation(
+    assignment: WorkHubDelegationAssignedMessage,
+    tip: HostedExecutionRef,
+  ) {
+    const request = await requestFor(tip);
+    if (
+      !request ||
+      request.delegationId !== assignment.delegationId ||
+      request.actionId !== assignment.actionId ||
+      request.rootMessageId !== assignment.targetMessageId
+    )
+      return undefined;
+    const next = await stores.agentRunStore.readRootTurnAdmission(
+      tip.sessionId,
+      workHubEvidenceTurnId(request.id),
+    );
+    const origin = next?.execution.kind === 'external_message' ? next.execution.origin : undefined;
+    if (!next || origin?.kind !== 'workhub_evidence') return { request };
+    if (
+      origin.requestId !== request.id ||
+      origin.delegationId !== assignment.delegationId ||
+      origin.sourceTurnId !== tip.turnId ||
+      origin.sourceRunId !== request.senderRunId
+    )
+      throw new Error('WorkHub evidence continuation identity conflict');
+    return { request, next: { sessionId: next.sessionId, turnId: next.turnId, runId: next.runId } };
+  }
   async function taskExecution(
     assignment: WorkHubDelegationAssignedMessage,
     original: HostedExecutionRef,
@@ -224,31 +225,13 @@ export function createWorkHubEvidenceRuntime(options: {
     let tip = await executions.readLatestRootTurnLineage(original);
     let round = 0;
     for (;;) {
-      const request = await requestFor(tip);
-      if (
-        !request ||
-        request.delegationId !== assignment.delegationId ||
-        request.actionId !== assignment.actionId ||
-        request.rootMessageId !== assignment.targetMessageId
-      )
-        return { ...tip, round };
-      const next = await stores.agentRunStore.readRootTurnAdmission(
-        tip.sessionId,
-        workHubEvidenceTurnId(request.id),
-      );
-      const origin =
-        next?.execution.kind === 'external_message' ? next.execution.origin : undefined;
-      if (!next || origin?.kind !== 'workhub_evidence')
-        return { ...tip, round, ...((await active(assignment)) ? { request } : {}) };
-      if (
-        origin.requestId !== request.id ||
-        origin.delegationId !== assignment.delegationId ||
-        origin.sourceTurnId !== tip.turnId ||
-        origin.sourceRunId !== request.senderRunId ||
-        ++round > WORKHUB_EVIDENCE_MAX_ROUNDS
-      )
+      const edge = await readEvidenceContinuation(assignment, tip);
+      if (!edge) return { ...tip, round };
+      if (!edge.next)
+        return { ...tip, round, ...((await active(assignment)) ? { request: edge.request } : {}) };
+      if (++round > WORKHUB_EVIDENCE_MAX_ROUNDS)
         throw new Error('WorkHub evidence continuation identity conflict');
-      tip = await executions.readLatestRootTurnLineage(next);
+      tip = await executions.readLatestRootTurnLineage(edge.next);
     }
   }
   async function owned(assignment: WorkHubDelegationAssignedMessage, lease: SessionAdmissionLease) {
@@ -728,6 +711,7 @@ export function createWorkHubEvidenceRuntime(options: {
     tool,
     taskExecution,
     waitingObservation,
+    readEvidenceContinuation,
     notify,
     reconcile,
     async assertSafeTerminal(ref: HostedExecutionRef) {

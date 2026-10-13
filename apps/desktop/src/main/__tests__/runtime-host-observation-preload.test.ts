@@ -26,11 +26,44 @@ import test from 'node:test';
 import { deferred } from '@maka/core/test-only/async-primitives';
 import { build } from 'esbuild';
 import type { MakaBridge } from '../../preload/bridge-contract.js';
+import { executionEventChannel } from '../../shared/execution-observation.js';
 
 const owner = {
   hostId: 'owner-host', targetEpoch: 'owner-epoch', profileId: 'local',
   profileName: 'Local', profileKind: 'local', profileAccess: 'owner', readiness: 'ready',
 };
+
+test('task observation keeps scope through preload and rejects whole-Session seeds and offline cache fallback', async () => {
+  const scope = { turnId: 'task-turn', runId: 'task-run' };
+  const observed = deferred<string>();
+  const calls: string[] = [];
+  const { bridge, events } = await preloadHarness(async (channel, ...args) => {
+    calls.push(channel);
+    if (channel === 'sessions:observe') { assert.deepEqual(args[3], scope); observed.resolve(args[2] as string); return { kind: 'ready' }; }
+    if (channel === 'sessions:transcript:open') { assert.deepEqual(args[5], scope); throw new Error('Host unavailable'); }
+    if (channel === 'sessions:unobserve' || channel === 'sessions:transcript:close') return undefined;
+    if (channel === 'session-local:transcript') assert.fail('An execution view cannot use a whole-Session offline cache');
+    throw new Error('Unexpected channel: ' + channel);
+  });
+  const sessionId = JSON.stringify([owner.hostId, 'session-1']);
+  const output: string[] = [], errors: unknown[] = [], phases: string[] = [];
+  const unsubscribe = bridge.sessions.subscribeEvents(sessionId, event => { if (event.type === 'text_delta') output.push(event.text); }, phase => phases.push(phase), error => errors.push(error), undefined, scope);
+  try {
+    const id = await observed.promise;
+    const seed = { type: 'host_observation_seed', observerIds: [id], execution: { type: 'host_execution', available: true, rootTurn: null }, events: [{ type: 'text_delta', id: 'delta', turnId: scope.turnId, messageId: 'answer', ts: 1, startOffset: 0, text: 'Only this task' }] };
+    events.emit('sessions:event:session-1', {}, owner, seed);
+    assert.deepEqual(output, []);
+    const channel = executionEventChannel('session-1', scope);
+    events.emit(channel, {}, owner, seed);
+    assert.equal(errors.length, 1);
+    assert.deepEqual(phases, []);
+    events.emit(channel, {}, owner, { ...seed, executionScope: scope });
+    assert.deepEqual(output, ['Only this task']);
+    assert.deepEqual(phases, ['ready']);
+    await assert.rejects(bridge.transcripts.open(sessionId, () => assert.fail('No cache'), undefined, 'history', undefined, scope), /Host unavailable/);
+    assert.equal(calls.includes('session-local:transcript'), false);
+  } finally { unsubscribe(); }
+});
 
 test('observation readiness includes its active seed even when the invoke reply overtakes event IPC', async () => {
   const invoked = deferred<string>();
