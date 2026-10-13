@@ -18,6 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { normalizeMessageContent } from '@maka/core/events';
 import type {
@@ -27,6 +28,10 @@ import type {
 import type { PendingMessageAdmission } from '@maka/storage/execution-stores';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { createWorkHubTaskInputRuntime } from '../server/workhub-task-input-runtime.js';
+import {
+  readWorkHubTaskInputBinding,
+  readWorkHubTaskInputContinuation,
+} from '../server/workhub-task-input-lineage.js';
 
 type Options = Parameters<typeof createWorkHubTaskInputRuntime>[0];
 const input: WorkHubTaskInputRequest = {
@@ -240,3 +245,80 @@ function fixture() {
   });
   return Object.assign(f, runtime);
 }
+
+test('folded input lineage owns only a canonical same-work batch, never a mixed/manual or foreign source', async () => {
+  const a = {
+    actionId: 'action',
+    delegationId: 'delegation',
+    coordinationTurnId: 'coordination',
+    targetSessionId: 'target',
+    work: { id: 'work', generationId: 'generation' },
+  };
+  const previous = { sessionId: 'target', turnId: 'previous-turn', runId: 'previous-run' };
+  const fact = (suffix: string): WorkHubTaskInputMessage => ({
+    ...input,
+    inputId: suffix,
+    type: 'workhub_coordination',
+    kind: 'task_input',
+    schemaVersion: 1,
+    id: `whti_${createHash('sha256').update(suffix).digest('hex').slice(0, 48)}`,
+    turnId: 'coordination',
+    ts: 1,
+    targetSessionId: 'target',
+    targetMessageId: `whtm_${createHash('sha256').update(suffix).digest('hex').slice(0, 48)}`,
+    targetContentDigest: `sha256:${'0'.repeat(64)}`,
+    mode: 'steering',
+    execution: { turnId: previous.turnId, runId: previous.runId },
+  });
+  const first = fact('a'),
+    second = fact('b');
+  let facts = [first, second];
+  let messageIds = facts.map((value) => value.targetMessageId);
+  const stores = {
+    sessionStore: {
+      readWorkHubTaskInputSuccessors: async () => facts,
+      readWorkHubTaskInputByMessage: async (id: string) =>
+        facts.find((value) => value.targetMessageId === id),
+      readWorkHubAssignment: async (id: string) => (id === a.actionId ? a : undefined),
+    },
+    agentRunStore: {
+      readRootTurnSourceMessageReceipt: async () => ({
+        admission: {
+          sessionId: 'target',
+          turnId: 'next-turn',
+          runId: 'next-run',
+          execution: { kind: 'external_message' },
+          sourceMessages: messageIds.map((messageId) => ({ messageId })),
+        },
+      }),
+    },
+  } as unknown as Options['stores'];
+  const source = a as Parameters<typeof readWorkHubTaskInputContinuation>[1];
+  assert.deepEqual(await readWorkHubTaskInputContinuation(stores, source, previous), {
+    sessionId: 'target',
+    turnId: 'next-turn',
+    runId: 'next-run',
+  });
+  messageIds.push('unrelated-manual-message');
+  assert.equal(
+    await readWorkHubTaskInputContinuation(stores, source, previous),
+    undefined,
+    'a mixed root is not exclusively controlled by the original work',
+  );
+  messageIds = [first.targetMessageId, second.targetMessageId];
+  for (const patch of [
+    { generationId: 'other' },
+    { sourceDelegationId: 'other' },
+    { targetSessionId: 'other' },
+    { execution: { turnId: 'other-turn', runId: 'other-run' } },
+  ]) {
+    facts = [first, { ...second, ...patch }];
+    assert.equal(await readWorkHubTaskInputContinuation(stores, source, previous), undefined);
+  }
+  facts = [first, second];
+  assert.equal(
+    await readWorkHubTaskInputBinding(stores, 'foreign-session', first.targetMessageId),
+    undefined,
+  );
+  assert.equal(await readWorkHubTaskInputBinding(stores, 'target', 'ordinary-message'), undefined);
+});

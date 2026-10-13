@@ -285,7 +285,10 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
       });
       const clientId = `input-${mode}`;
       const hash = createHash('sha256').update(clientId).digest('hex').slice(0, 48);
-      const text = 'Only supplement A; leave independent C alone';
+      const text =
+        mode === 'steering'
+          ? 'Only A: ' + '\\'.repeat(32 * 1024 - 100)
+          : 'Only supplement A; leave independent C alone';
       const content = normalizeMessageContent({
         text: mode === 'queued_supplement' ? `${original.admission.content.text}\n\n${text}` : text,
       });
@@ -361,7 +364,7 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
       );
       try {
         database.database.exec(`CREATE TEMP TRIGGER workhub_input_rollback BEFORE INSERT ON session_messages
-          WHEN NEW.session_id = 'maka_workhub_coordination' AND json_extract(NEW.record_json, '$.kind') = 'task_input'
+          WHEN NEW.session_id = 'maka_workhub_coordination' AND NEW.message_id GLOB 'whti_*'
           BEGIN SELECT RAISE(ABORT, 'workhub_input_rollback'); END;`);
         await assert.rejects(commit(), /workhub_input_rollback/);
         assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
@@ -398,6 +401,56 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
         database.database.exec('DROP TRIGGER IF EXISTS workhub_input_rollback');
         database.close();
       }
+      if (mode === 'steering') {
+        const execution = storage.execution.agentRunStore;
+        for (const [item, turnId, runId, previousRootTurnId] of [
+          [original.admission, original.admission.turnId, original.admission.runId, null],
+          [admission, 'folded-input-turn', 'folded-input-run', original.admission.turnId],
+        ] as const) {
+          assert.equal(
+            (
+              await execution.admitRootTurn({
+                sessionId: target.id,
+                turnId,
+                proposedRunId: runId,
+                proposedUserMessageId: item.messageId,
+                previousRootTurnId,
+                execution: {
+                  kind: 'external_message',
+                  inputDigest: messageContentDigest(item.content),
+                },
+                normalizedInput: item.content,
+                sourceMessages: [
+                  {
+                    messageId: item.messageId,
+                    content: item.content,
+                    submittedContentDigest: item.submittedContentDigest,
+                    placement: item.placement,
+                    disposition: item.disposition,
+                  },
+                ],
+                admittedAt: item.admittedAt,
+              })
+            ).kind,
+            'admitted',
+          );
+        }
+        const ref = {
+          sessionId: target.id,
+          turnId: original.admission.turnId,
+          runId: original.admission.runId,
+        };
+        assert.deepEqual(await store.readWorkHubTaskInputByMessage(admission.messageId), input);
+        assert.deepEqual(
+          await store.readWorkHubTaskInputSuccessors(ref),
+          [input],
+          'chunked native input facts retain their successor binding',
+        );
+        assert.deepEqual(
+          await store.readWorkHubTaskInputSuccessors({ ...ref, runId: 'foreign-run' }),
+          [],
+        );
+      }
       await storage.close();
       const reopened = await openStorageWriterComposition(owner.lease);
       try {
@@ -409,6 +462,15 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
           await reopened.execution.sessionStore.readHeaderRecordSnapshot(target.id),
           before,
         );
+        if (mode === 'steering')
+          assert.deepEqual(
+            await reopened.execution.sessionStore.readWorkHubTaskInputSuccessors({
+              sessionId: target.id,
+              turnId: original.admission.turnId,
+              runId: original.admission.runId,
+            }),
+            [input],
+          );
       } finally {
         await reopened.close();
       }

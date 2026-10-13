@@ -509,6 +509,13 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
   commitWorkHubTaskInput(request: WorkHubTaskInputCommitRequest): Promise<WorkHubTaskInputMessage>;
   readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined>;
+  readWorkHubTaskInputByMessage(messageId: string): Promise<WorkHubTaskInputMessage | undefined>;
+  /** Only folded input Messages with a canonical successor root-source proof. */
+  readWorkHubTaskInputSuccessors(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  }): Promise<readonly WorkHubTaskInputMessage[]>;
   readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined>;

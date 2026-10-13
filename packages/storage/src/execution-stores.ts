@@ -568,6 +568,10 @@ async function createExecutionStoresForWrite(
       readWorkHubAssignment: (actionId) => run(() => sessionStore.readWorkHubAssignment(actionId)),
       commitWorkHubTaskInput: (request) => run(() => sessionStore.commitWorkHubTaskInput(request)),
       readWorkHubTaskInput: (inputId) => run(() => sessionStore.readWorkHubTaskInput(inputId)),
+      readWorkHubTaskInputByMessage: (messageId) =>
+        run(() => sessionStore.readWorkHubTaskInputByMessage(messageId)),
+      readWorkHubTaskInputSuccessors: (input) =>
+        run(() => sessionStore.readWorkHubTaskInputSuccessors(input)),
       readLatestWorkHubAssignment: (workId) =>
         run(() => sessionStore.readLatestWorkHubAssignment(workId)),
       readWorkHubAssignmentsPage: (request) =>

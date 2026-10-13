@@ -142,7 +142,10 @@ import {
   type ProvenRootMessageHandoff,
   type ProvenSteeringMessageHandoff,
 } from './message-admission-store.js';
-import { rootTurnSourceMessagePayloadsEqual } from './agent-run-store-contract.js';
+import {
+  rootTurnSourceMessagePayloadsEqual,
+  ROOT_TURN_ADMISSION_MAX_SOURCE_MESSAGES,
+} from './agent-run-store-contract.js';
 import { normalizeSubmittedTurnIntent } from './submitted-turn-intent.js';
 import {
   messageContentDigest,
@@ -2117,6 +2120,68 @@ export class SqliteSessionMetadataStore {
       );
       this.updateCatalogProjectionSync(WORKHUB_COORDINATION_SESSION_ID, request.projection, false);
       return { kind: 'assigned' as const, targetCreated, assignment: committedAssignment };
+    });
+  }
+
+  async readWorkHubTaskInputSuccessors(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  }): Promise<readonly WorkHubTaskInputMessage[]> {
+    this.assertOpen();
+    for (const id of [input.sessionId, input.turnId, input.runId]) assertSafeSessionId(id);
+    return this.readTransaction(() => {
+      // Start from admitted native input Message identities, then use the
+      // existing exact coordination-message index. Consumed/cancelled inputs
+      // never occupy a result page; unrelated Session history is not decoded.
+      const rows = this.db
+        .prepare(`
+        SELECT fact.sequence, fact.record_json, payload.record_bytes, payload.sha256
+        FROM core_root_source_message_proofs AS proof
+        CROSS JOIN session_messages AS fact INDEXED BY session_messages_by_identity
+        LEFT JOIN session_message_payloads AS payload
+          ON payload.session_id = fact.session_id AND payload.sequence = fact.sequence
+        WHERE proof.session_id = ? AND proof.turn_id != ?
+          AND proof.message_id GLOB 'whtm_*' AND length(proof.message_id) = 53
+          AND fact.session_id = ? AND fact.message_id = 'whti_' || substr(proof.message_id, 6)
+          AND (payload.record_bytes IS NOT NULL OR (
+            json_extract(fact.record_json, '$.mode') = 'steering'
+            AND json_extract(fact.record_json, '$.targetSessionId') = proof.session_id
+            AND json_extract(fact.record_json, '$.targetMessageId') = proof.message_id
+            AND json_extract(fact.record_json, '$.execution.turnId') = ?
+            AND json_extract(fact.record_json, '$.execution.runId') = ?))
+      `)
+        .iterate(
+          input.sessionId,
+          input.turnId,
+          WORKHUB_COORDINATION_SESSION_ID,
+          input.turnId,
+          input.runId,
+        ) as Iterable<StoredSessionMessagePayloadRow>;
+      const result: WorkHubTaskInputMessage[] = [];
+      for (const row of rows) {
+        const value = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+        if (
+          value.type !== 'workhub_coordination' ||
+          value.kind !== 'task_input' ||
+          value.mode !== 'steering'
+        )
+          continue;
+        if (
+          value.targetSessionId !== input.sessionId ||
+          value.execution?.turnId !== input.turnId ||
+          value.execution.runId !== input.runId
+        )
+          continue;
+        result.push(value);
+        // One finishing root folds at most its bounded Message batch. Do not
+        // silently truncate a contradictory ledger to manufacture ownership.
+        if (result.length > ROOT_TURN_ADMISSION_MAX_SOURCE_MESSAGES)
+          throw new SessionMetadataConflictError(
+            'Task input successor exceeds the root source limit',
+          );
+      }
+      return result;
     });
   }
 

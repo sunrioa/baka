@@ -72,6 +72,7 @@ import {
 import { buildSessionHeader, normalizeSessionHeader, toSummary } from '../session-store-values.js';
 import { isValidConversationCopyTransition } from '../session-conversation-copy.js';
 import { memoryRootSourceReceipt } from './memory-execution-agent.js';
+import { ROOT_TURN_ADMISSION_MAX_SOURCE_MESSAGES } from '../agent-run-store-contract.js';
 import {
   normalizePendingMessageAdmission,
   samePendingMessageAdmission,
@@ -1038,6 +1039,37 @@ export function createMemorySessionStore(
       read((s) => {
         const m = hubMessage(s, 'whti_' + suffix(id));
         return m?.type === 'workhub_coordination' && m.kind === 'task_input' ? m : undefined;
+      }),
+    readWorkHubTaskInputByMessage: async (messageId) =>
+      read((s) => {
+        if (!/^whtm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+        const m = hubMessage(s, 'whti_' + messageId.slice(5));
+        return m?.type === 'workhub_coordination' &&
+          m.kind === 'task_input' &&
+          m.mode === 'steering' &&
+          m.targetMessageId === messageId
+          ? m
+          : undefined;
+      }),
+    readWorkHubTaskInputSuccessors: async (input) =>
+      read((s) => {
+        for (const id of [input.sessionId, input.turnId, input.runId]) assertSafeSessionId(id);
+        const result = (messages(s).get(HUB) ?? []).filter((m): m is WorkHubTaskInputMessage => {
+          if (
+            m.type !== 'workhub_coordination' ||
+            m.kind !== 'task_input' ||
+            m.mode !== 'steering' ||
+            m.targetSessionId !== input.sessionId ||
+            m.execution?.turnId !== input.turnId ||
+            m.execution.runId !== input.runId
+          )
+            return false;
+          const proof = memoryRootSourceReceipt(s, input.sessionId, m.targetMessageId);
+          return !!proof && proof.admission.turnId !== input.turnId;
+        });
+        if (result.length > ROOT_TURN_ADMISSION_MAX_SOURCE_MESSAGES)
+          conflict('Task input successor exceeds the root source limit');
+        return result;
       }),
     commitWorkHubTaskInput: async (request) => {
       const result = write('workhub.input', (s) => {

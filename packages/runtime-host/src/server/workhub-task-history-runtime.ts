@@ -41,6 +41,7 @@ import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js
 import { readHostedExecutionMembership } from './hosted-execution-membership.js';
 import { readCanonicalTurnSnapshot } from './canonical-turn-snapshot.js';
 import type { HostedExecutionRef } from './hosted-execution-authority.js';
+import { readWorkHubTaskInputContinuation } from './workhub-task-input-lineage.js';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u);
 const cursorSchema = z.discriminatedUnion('kind', [
@@ -273,13 +274,17 @@ export function createWorkHubTaskHistoryRuntime(options: {
               throw new Error('Task continuation changed source');
             current = { turnId: next.turnId, runId: next.runId };
           } else {
-            const evidence: { readonly next?: HostedExecutionRef } | undefined =
-              await options.evidence?.readEvidenceContinuation?.(a, ref);
+            const input = await readWorkHubTaskInputContinuation(stores, a, ref);
+            const evidence: { readonly next?: HostedExecutionRef } | undefined = input
+              ? undefined
+              : await options.evidence?.readEvidenceContinuation?.(a, ref);
             if (evidence?.next && ++evidenceRounds > WORKHUB_EVIDENCE_MAX_ROUNDS)
               throw new Error('Task evidence lineage exceeds its bound');
-            current = evidence?.next
-              ? { turnId: evidence.next.turnId, runId: evidence.next.runId }
-              : undefined;
+            current =
+              input ??
+              (evidence?.next
+                ? { turnId: evidence.next.turnId, runId: evidence.next.runId }
+                : undefined);
           }
         }
         return {

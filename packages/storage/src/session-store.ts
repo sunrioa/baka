@@ -393,6 +393,28 @@ class SqliteSessionStore implements SessionAuthorityStore {
       : undefined;
   }
 
+  async readWorkHubTaskInputByMessage(
+    messageId: string,
+  ): Promise<WorkHubTaskInputMessage | undefined> {
+    if (!/^whtm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+    const message = await this.readWorkHubCoordinationMessage(`whti_${messageId.slice(5)}`);
+    return message?.type === 'workhub_coordination' &&
+      message.kind === 'task_input' &&
+      message.mode === 'steering' &&
+      message.targetMessageId === messageId
+      ? message
+      : undefined;
+  }
+
+  async readWorkHubTaskInputSuccessors(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  }): Promise<readonly WorkHubTaskInputMessage[]> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubTaskInputSuccessors(input);
+  }
+
   async readActiveWorkHubAssignmentsByTarget(
     targetSessionIds: readonly string[],
     maxAssignmentsPerTarget?: number,
