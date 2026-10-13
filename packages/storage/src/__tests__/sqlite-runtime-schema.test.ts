@@ -103,7 +103,7 @@ describe('SQLite runtime schema migration', () => {
     }
   });
 
-  it('preserves v1 continuation claims while admitting the v2 replay projection', () => {
+  it('preserves populated v1/v2 claims while admitting the compact-context v3 projection', () => {
     const db = new DatabaseSync(':memory:');
     try {
       db.exec('PRAGMA foreign_keys = ON');
@@ -175,7 +175,46 @@ describe('SQLite runtime schema migration', () => {
         PRAGMA user_version = 14;
       `);
 
-      migrateSqliteRuntimeDatabase(db);
+      let releasedRows: unknown[] = [];
+      const migrating = new Proxy(db, {
+        get(target, property) {
+          if (property === 'exec')
+            return (sql: string) => {
+              if (sql.includes('CREATE TABLE runtime_continuation_claims_v21')) {
+                assert.equal(
+                  (target.prepare('PRAGMA user_version').get() as { user_version: number })
+                    .user_version,
+                  20,
+                );
+                target.exec(`
+                INSERT INTO runtime_continuation_claims VALUES (
+                  'claim-v2', 'session', 'source-invocation', 'source-run', 'source-turn', 2,
+                  'sha256:source-2', 'sha256:boundary-v2', '{}', 2, 'sha256:replay-v2',
+                  'session', 'target-invocation-v2', 'target-run-v2', 'target-turn-v2', '{}',
+                  2, NULL, NULL, 1
+                );
+              `);
+                releasedRows = target
+                  .prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id')
+                  .all();
+              }
+              return target.exec(sql);
+            };
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      migrateSqliteRuntimeDatabase(migrating);
+      assert.equal(releasedRows.length, 2);
+      assert.deepEqual(
+        db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
+        releasedRows,
+      );
+      assert.ok(
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE name = 'runtime_continuation_fresh_turn'")
+          .get(),
+      );
 
       assert.equal(
         (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
@@ -206,18 +245,24 @@ describe('SQLite runtime schema migration', () => {
       );
       db.exec(`
         INSERT INTO runtime_continuation_claims VALUES (
-          'claim-v2', 'session', 'source-invocation', 'source-run', 'source-turn', 2,
-          'sha256:source-2', 'sha256:boundary-v2', '{}', 2, 'sha256:replay-v2',
-          'session', 'target-invocation-v2', 'target-run-v2', 'target-turn-v2', '{}',
-          2, NULL, NULL, 1
+          'claim-v3', 'session', 'source-invocation', 'source-run', 'source-turn', 3,
+          'sha256:source-3', 'sha256:boundary-v3', '{}', 3, 'sha256:replay-v3',
+          'session', 'target-invocation-v3', 'target-run-v3', 'target-turn-v3', '{}',
+          3, NULL, NULL, 1
         );
       `);
       assert.throws(() =>
         db.exec(`
           UPDATE runtime_continuation_claims
-          SET provider_projection_version = 3
-          WHERE claim_id = 'claim-v2'
+          SET provider_projection_version = 4
+          WHERE claim_id = 'claim-v3'
         `),
+      );
+      const after = db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all();
+      migrateSqliteRuntimeDatabase(db);
+      assert.deepEqual(
+        db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
+        after,
       );
     } finally {
       db.close();

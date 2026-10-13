@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   buildImmutableRuntimePrefix,
   type RuntimePrefixIdentityV1,
@@ -31,10 +32,38 @@ import {
 } from '../continuation-replay.js';
 import {
   PROVIDER_REPLAY_PROJECTION_VERSION,
+  WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION,
   type RuntimeEventModelReplayItem,
 } from '../model-history.js';
 
 describe('continuation replay segment', () => {
+  it('rejects a persisted admission from before compact Host-result projection', () => {
+    const identity = { ...runtimeIdentity(), sessionId: WORKHUB_COORDINATION_SESSION_ID };
+    const result = buildContinuationReplaySegment({
+      prefix: buildImmutableRuntimePrefix(identity, [
+        { eventSeq: 1, event: textEvent('legacy-user', 'user', identity) },
+      ]),
+      providerProjectionVersion: 2,
+    });
+    assert.equal(result.kind, 'blocked');
+    if (result.kind !== 'blocked') return;
+    assert.equal(result.reason, 'provider_replay_unsupported');
+    assert.match(result.diagnostics[0]?.message ?? '', /projection 2 is unsupported/);
+  });
+
+  it('keeps ordinary released v2 continuation admissions supported', () => {
+    const identity = runtimeIdentity();
+    assert.equal(
+      buildContinuationReplaySegment({
+        prefix: buildImmutableRuntimePrefix(identity, [
+          { eventSeq: 1, event: textEvent('ordinary-user', 'user', identity) },
+        ]),
+        providerProjectionVersion: 2,
+      }).kind,
+      'replayable',
+    );
+  });
+
   it('rejects a persisted v1 admission under the route-bound v2 projection', () => {
     const identity = runtimeIdentity();
     const result = buildContinuationReplaySegment({
@@ -370,10 +399,10 @@ describe('continuation replay segment', () => {
 });
 
 describe('continuation replay digest', () => {
-  it('keeps the projection v2 digest compatible while excluding internal invocation identity', () => {
-    const digest = (invocationId: string) =>
+  it('keeps the released v2 digest stable while distinguishing the current projection', () => {
+    const digest = (invocationId: string, providerProjectionVersion = 2) =>
       digestProviderReplayAdmission({
-        providerProjectionVersion: PROVIDER_REPLAY_PROJECTION_VERSION,
+        providerProjectionVersion,
         targetProviderStateIdentity: undefined,
         targetModelId: 'test-model',
         items: [
@@ -393,6 +422,14 @@ describe('continuation replay digest', () => {
     assert.equal(
       digest('invocation-a'),
       'sha256:775dac9a0959d888541d9e4930431b60dee89e4f28b62238ddde64dfd5f542ee',
+    );
+    assert.notEqual(
+      digest('invocation-a', WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION),
+      digest('invocation-a', 2),
+    );
+    assert.equal(
+      digest('invocation-a', WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION),
+      digest('invocation-b', WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION),
     );
   });
 });

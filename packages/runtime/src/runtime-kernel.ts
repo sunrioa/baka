@@ -122,7 +122,7 @@ import {
   admitProviderReasoningReplayItems,
   buildRuntimeEventModelReplayPlan,
   compatibleProviderReasoningReplayEventIds,
-  PROVIDER_REPLAY_PROJECTION_VERSION,
+  providerReplayProjectionVersion,
 } from './model-history.js';
 import {
   consumeRuntimeContinuationStartAdmissionProof,
@@ -3036,7 +3036,8 @@ async function revalidateContinuationBoundary(
   if (
     !continuation.boundary ||
     !continuation.providerReplayDigest ||
-    continuation.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION
+    continuation.providerProjectionVersion !==
+      providerReplayProjectionVersion(continuation.sessionId)
   ) {
     throw new RuntimeContinuationRevalidationError(
       'source_identity_changed',
@@ -3094,7 +3095,8 @@ function continuationClaimForExecution(
     !continuation.claimId ||
     !continuation.boundary ||
     !continuation.providerReplayDigest ||
-    continuation.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION
+    continuation.providerProjectionVersion !==
+      providerReplayProjectionVersion(continuation.sessionId)
   ) {
     throw new RuntimeContinuationRevalidationError(
       'source_identity_changed',
@@ -3204,7 +3206,8 @@ function consumeAdmittedRuntimeContinuation(input: {
   if (
     !continuation.claimId ||
     !boundary ||
-    continuation.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION ||
+    continuation.providerProjectionVersion !==
+      providerReplayProjectionVersion(continuation.sessionId) ||
     !continuation.providerReplayDigest ||
     !/^sha256:[0-9a-f]{64}$/.test(continuation.providerReplayDigest) ||
     !isDeepStrictEqual(startAdmissionIdentity, {

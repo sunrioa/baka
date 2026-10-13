@@ -24,6 +24,133 @@ import {
   buildRuntimeEventReplayTimeline,
 } from '../model-history.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+
+test('model history compacts only source-bound Host result notifications without changing the ledger', () => {
+  const origin = {
+    kind: 'workhub_result' as const,
+    eventId: 'host-result',
+    actionId: 'source-action',
+    delegationId: 'source-delegation',
+    targetSessionId: 'source-session',
+    targetTurnId: 'source-turn',
+  };
+  const text =
+    'Host notification: delegated work has new information. This is not a new user request.\n\n' +
+    JSON.stringify({
+      actionId: origin.actionId,
+      delegationId: origin.delegationId,
+      targetSessionId: origin.targetSessionId,
+      targetTurnId: origin.targetTurnId,
+      targetRunId: 'source-run',
+      originalRequest: 'Original objective',
+      status: 'completed',
+      sharedTurn: false,
+      result: '中文😀\\\n"'.repeat(10000) + 'FULL_RESULT_TAIL',
+      resultTruncated: false,
+      details: null,
+    });
+  const notification = {
+    ...event({
+      id: 'host-notification',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text, origin },
+    }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  };
+  const human = {
+    ...event({
+      id: 'human-lookalike',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text },
+    }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  };
+  const raw = JSON.stringify([notification, human]);
+  const plan = buildRuntimeEventModelReplayPlan([notification, human]);
+  assert.equal(JSON.stringify([notification, human]), raw);
+  const compact = plan.items.find((item) => item.eventId === notification.id);
+  const unchanged = plan.items.find((item) => item.eventId === human.id);
+  assert.ok(compact?.kind === 'text');
+  assert.ok(unchanged?.kind === 'text');
+  assert.ok(Buffer.byteLength(JSON.stringify(compact.content), 'utf8') <= 7500);
+  assert.ok(compact.content.includes('"actionId":"source-action"'));
+  assert.ok(compact.content.includes('"resultTruncated":true'));
+  assert.ok(!compact.content.includes('FULL_RESULT_TAIL'));
+  assert.equal(unchanged.content, text, 'human text is never identified by a string prefix');
+  const copy = buildRuntimeEventModelReplayPlan([{ ...notification, sessionId: 'ordinary-copy' }])
+    .items[0];
+  assert.ok(copy?.kind === 'text');
+  assert.equal(copy.content, text, 'ordinary copied conversations retain their source text');
+});
+
+test('malformed or mismatched Host result data cannot substitute another source in replay', () => {
+  const origin = {
+    kind: 'workhub_result' as const,
+    eventId: 'result',
+    actionId: 'actual-action',
+    delegationId: 'actual-delegation',
+    targetSessionId: 'actual-session',
+    targetTurnId: 'actual-turn',
+  };
+  for (const text of [
+    'legacy payload without recognized JSON',
+    JSON.stringify({
+      ...origin,
+      actionId: 'foreign-action',
+      status: 'completed',
+      result: 'foreign',
+    }),
+  ]) {
+    const plan = buildRuntimeEventModelReplayPlan([
+      {
+        ...event({
+          id: 'legacy-notice',
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text, origin },
+        }),
+        sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      },
+    ]);
+    const item = plan.items[0];
+    assert.ok(item?.kind === 'text');
+    assert.ok(item.content.includes('"actionId":"actual-action"'));
+    assert.ok(item.content.includes('"status":"unknown"'));
+    assert.ok(!item.content.includes('foreign'));
+  }
+});
+
+test('compact replay preserves opaque released origin references without tightening their codec', () => {
+  for (const id of ['legacy:action.name', 'a'.repeat(256), '\u0000'.repeat(256)]) {
+    const origin = {
+      kind: 'workhub_result' as const,
+      eventId: 'notice',
+      actionId: id,
+      delegationId: id,
+      targetSessionId: id,
+      targetTurnId: id,
+    };
+    const text = JSON.stringify({
+      actionId: id,
+      delegationId: id,
+      targetSessionId: id,
+      targetTurnId: id,
+      status: 'completed',
+      result: 'Committed source result.',
+    });
+    const projected = projectWorkHubResultContext(text, origin);
+    assert.ok(Buffer.byteLength(JSON.stringify(projected)) <= 6144);
+    const data = JSON.parse(projected.split('\n\n').at(-1)!);
+    assert.equal(data.actionId, id);
+    assert.notEqual(data.sourceUnavailable, true);
+    assert.equal(data.status, data.referenceFieldsOmitted ? 'unknown' : 'completed');
+    assert.equal(projectWorkHubResultContext(projected, origin), projected);
+  }
+});
 
 test('model history drops repaired assistant prefixes by default and diagnoses the boundary', () => {
   const repairedAssistant = {

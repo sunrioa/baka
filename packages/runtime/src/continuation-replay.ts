@@ -34,7 +34,8 @@ import {
   admitProviderReasoningReplayItems,
   buildRuntimeEventModelReplayPlan,
   compatibleProviderReasoningReplayEventIds,
-  PROVIDER_REPLAY_PROJECTION_VERSION,
+  providerReplayProjectionVersion,
+  type ProviderReplayProjectionVersion,
 } from './model-history.js';
 import { resolveRuntimeRecovery } from './recovery-resolver.js';
 
@@ -65,7 +66,7 @@ export type ContinuationReplaySegmentResult =
 
 export interface ContinuationReplayPlanV1 {
   protocol: 'continuation_replay_plan_v1';
-  providerProjectionVersion: typeof PROVIDER_REPLAY_PROJECTION_VERSION;
+  providerProjectionVersion: ProviderReplayProjectionVersion;
   boundary: RuntimeBoundaryCursor;
   providerReplayDigest: RuntimeBoundaryDigest;
   segments: readonly ContinuationReplaySegmentV1[];
@@ -90,7 +91,7 @@ export interface ContinuationReplayAdmissionRoute {
 
 export function buildContinuationReplayPlan(input: {
   prefixes: readonly [ImmutableRuntimePrefixV1, ...ImmutableRuntimePrefixV1[]];
-  providerProjectionVersion: typeof PROVIDER_REPLAY_PROJECTION_VERSION;
+  providerProjectionVersion: ProviderReplayProjectionVersion;
   admissionRoute: ContinuationReplayAdmissionRoute;
 }): ContinuationReplayPlanResult {
   const segmentPlans: ContinuationReplaySegmentPlanV1[] = [];
@@ -163,7 +164,10 @@ export function buildContinuationReplaySegment(input: {
       'immutable RuntimeEvent segment contains unsettled tool recovery facts',
     );
   }
-  if (input.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION) {
+  if (
+    input.providerProjectionVersion !==
+    providerReplayProjectionVersion(input.prefix.identity.sessionId)
+  ) {
     return blocked(
       'provider_replay_unsupported',
       `provider replay projection ${input.providerProjectionVersion} is unsupported`,

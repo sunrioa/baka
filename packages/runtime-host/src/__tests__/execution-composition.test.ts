@@ -2177,7 +2177,12 @@ for (const { restart, armGoalDuringWait } of [
           assert.equal(result.result.goal.status, 'active');
           assert.equal(result.result.goal.iterations, 0);
         }
-        await waitFor(async () => seen.includes('relay-resolve'), 10000);
+        // Source selection and its first HTTP request are independent events.
+        // Observe the actual worker start before testing restart/cancellation.
+        await waitFor(
+          async () => seen.includes('relay-resolve') && seen.includes('producer-start'),
+          10000,
+        );
         if (!restart && !armGoalDuringWait) assert.ok(seen.includes('goal-wait-refused'));
         assert.ok(
           seen.includes('producer-start'),
@@ -2754,6 +2759,315 @@ for (const queuedBehindC of [false, true])
       }
     });
   });
+
+test('production WorkHub keeps full task output out of automatic requests after restart', async (t) => {
+  const releaseWorker = deferred<void>();
+  const sourceText = 'SHORT_HANDOFF ' + '中文😀\\\n"证据'.repeat(10000) + 'FULL_RESULT_TAIL';
+  const requests: Array<{
+    coordinator: boolean;
+    rawBytes: number;
+    messages: unknown[];
+    tools: unknown;
+    observedAt: number;
+    firstResponseMs?: number;
+  }> = [];
+  let dispatchStartedAt = 0;
+  const errors: unknown[] = [];
+  const server = createServer((request, response) => {
+    void (async () => {
+      let raw = '';
+      for await (const chunk of request) raw += chunk.toString();
+      const input = JSON.parse(raw) as {
+        model: string;
+        tools?: { function: { name: string } }[];
+        messages: { role: string; content: unknown }[];
+      };
+      const coordinator =
+        input.tools?.some((tool) => tool.function.name === 'WorkHubResult') === true;
+      const latestUser = input.messages
+        .filter((message) => message.role === 'user')
+        .at(-1)?.content;
+      const observedAt = performance.now();
+      const captured: (typeof requests)[number] = {
+        coordinator,
+        rawBytes: Buffer.byteLength(raw),
+        messages: input.messages,
+        tools: input.tools,
+        observedAt,
+      };
+      requests.push(captured);
+      const chunk = (content: string, finish: string | null) =>
+        'data: ' +
+        JSON.stringify({
+          id: `context-${requests.length}`,
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: input.model,
+          choices: [
+            {
+              index: 0,
+              delta: finish ? {} : { role: 'assistant', content },
+              finish_reason: finish,
+            },
+          ],
+          ...(finish
+            ? {
+                usage: {
+                  prompt_tokens: 900,
+                  completion_tokens: 20,
+                  total_tokens: 920,
+                  prompt_tokens_details: { cached_tokens: 400 },
+                },
+              }
+            : {}),
+        }) +
+        '\n\n';
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      if (coordinator && latestUser === 'Authorize compact-context task.') {
+        response.write(chunk('Admitting the requested task.', null));
+        await new Promise<void>((resolve) => response.on('close', resolve));
+        return;
+      }
+      if (!coordinator) await releaseWorker.promise;
+      captured.firstResponseMs = performance.now() - observedAt;
+      response.write(
+        chunk(
+          coordinator ? 'The task result is available in its execution view.' : sourceText,
+          null,
+        ),
+      );
+      response.write(chunk('', 'stop'));
+      response.end('data: [DONE]\n\n');
+    })().catch((error) => {
+      errors.push(error);
+      response.destroy(error as Error);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        releaseWorker.resolve();
+        server.closeAllConnections();
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  );
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+  await withCompositionRoot(async ({ owner }) => {
+    await configureFakeDefaultTarget(owner, ['fake-model'], `http://127.0.0.1:${address.port}/v1`);
+    let activeOwner = owner;
+    let composition = await createExecutionRuntimeHostComposition(compositionContext(activeOwner));
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'compact-context-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const attach = () =>
+      composition.clientCapabilities!.attachConnection(
+        clientCapabilityConnectionIdentity(context.connectionId),
+        { send: async () => {} },
+      );
+    let desktop = attach();
+    const register = async () => {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+            context,
+          )
+        ).ok,
+      );
+    };
+    let stores = await openInteractiveExecutionStoresForWrite(activeOwner.lease);
+    const completed = async (sessionId: string, turnId: string) => {
+      const state = await composition.handlers['turn.query']({ sessionId, turnId }, context);
+      return state.ok && state.result.status === 'completed';
+    };
+    try {
+      await composition.recover();
+      await register();
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const turnId = 'compact-context-authority';
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId, text: 'Authorize compact-context task.' },
+            context,
+          )
+        ).ok,
+      );
+      dispatchStartedAt = performance.now();
+      const assigned = await composition.handlers['workhub.coordination.actFromTurn'](
+        {
+          turnId,
+          actionId: 'compact-context-worker',
+          delegationText: 'Produce the fixture evidence.',
+          proposal: { disposition: 'create_new', title: 'Context source' },
+          create: { workspace: { kind: 'isolated' } },
+          newWorkDefaults: { permissionMode: 'ask' },
+        },
+        context,
+      );
+      assert.ok(assigned.ok, JSON.stringify(assigned));
+      const source = await stores.sessionStore.readWorkHubAssignment('compact-context-worker');
+      assert.ok(source);
+      const initial = await composition.handlers['turn.query'](
+        { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId },
+        context,
+      );
+      assert.ok(initial.ok);
+      assert.ok(
+        (
+          await composition.handlers['turn.stop'](
+            { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId, runId: initial.result.runId },
+            context,
+          )
+        ).ok,
+      );
+      releaseWorker.resolve();
+      await waitFor(() => completed(source.targetSessionId, source.targetTurnId), 10000);
+      let notification: Extract<StoredMessage, { type: 'user' }> | undefined;
+      await waitFor(async () => {
+        notification = (
+          await readLedgerMessages(stores.runtimeEventStore, WORKHUB_COORDINATION_SESSION_ID)
+        ).find(
+          (message): message is Extract<StoredMessage, { type: 'user' }> =>
+            message.type === 'user' && message.origin?.kind === 'workhub_result',
+        );
+        return !!notification && completed(WORKHUB_COORDINATION_SESSION_ID, notification.turnId);
+      }, 10000);
+      assert.ok(notification);
+      assert.ok(
+        Buffer.byteLength(
+          JSON.stringify({ text: notification.text, displayText: notification.displayText }),
+        ) <= 6144,
+      );
+      assert.ok(notification.text.includes('"resultTruncated":true'));
+      const sourceRuns = await stores.runtimeEventStore.listSessionInvocations(
+        source.targetSessionId,
+      );
+      assert.equal(sourceRuns.length, 1);
+      const sourceRunId = sourceRuns[0]!.runId;
+      const original = await stores.runtimeEventStore.readImmutableRuntimeEvents(
+        source.targetSessionId,
+        sourceRunId,
+      );
+      assert.ok(
+        (await readLedgerMessages(stores.runtimeEventStore, source.targetSessionId)).some(
+          (message) => message.type === 'assistant' && message.text === sourceText,
+        ),
+      );
+      await desktop.close();
+      await composition.close();
+      await activeOwner.close();
+      const reopened = await tryAcquireInteractiveRootOwner(activeOwner.capability);
+      assert.ok(reopened);
+      activeOwner = reopened;
+      composition = await createExecutionRuntimeHostComposition(compositionContext(activeOwner));
+      stores = await openInteractiveExecutionStoresForWrite(activeOwner.lease);
+      desktop = attach();
+      await composition.recover();
+      await register();
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId: 'compact-after-restart', text: 'Which task has a result available?' },
+            context,
+          )
+        ).ok,
+      );
+      await waitFor(
+        () => completed(WORKHUB_COORDINATION_SESSION_ID, 'compact-after-restart'),
+        10000,
+      );
+      assert.deepEqual(errors, []);
+      const coordinatorRequests = requests.filter((request) => request.coordinator);
+      assert.equal(
+        coordinatorRequests.length,
+        3,
+        'one authorizing stream, one result wake, one user follow-up; no summary model',
+      );
+      for (const request of coordinatorRequests.slice(1)) {
+        const text = JSON.stringify(request.messages);
+        assert.ok(text.includes('SHORT_HANDOFF'));
+        assert.ok(!text.includes('FULL_RESULT_TAIL'));
+        assert.ok(!text.includes(sourceText));
+      }
+      assert.deepEqual(coordinatorRequests[1]!.tools, coordinatorRequests[2]!.tools);
+      assert.deepEqual(
+        coordinatorRequests[1]!.messages.filter(
+          (message) => (message as { role: string }).role === 'system',
+        ),
+        coordinatorRequests[2]!.messages.filter(
+          (message) => (message as { role: string }).role === 'system',
+        ),
+      );
+      assert.equal(requests.filter((request) => !request.coordinator).length, 1);
+      assert.deepEqual(
+        await stores.runtimeEventStore.readImmutableRuntimeEvents(
+          source.targetSessionId,
+          sourceRunId,
+        ),
+        original,
+      );
+      assert.equal(
+        (await stores.runtimeEventStore.listSessionInvocations(source.targetSessionId)).length,
+        1,
+      );
+      assert.ok(
+        (await readLedgerMessages(stores.runtimeEventStore, source.targetSessionId)).some(
+          (message) => message.type === 'assistant' && message.text === sourceText,
+        ),
+      );
+      const usages = (
+        await readLedgerMessages(stores.runtimeEventStore, WORKHUB_COORDINATION_SESSION_ID)
+      ).filter(
+        (message): message is Extract<StoredMessage, { type: 'token_usage' }> =>
+          message.type === 'token_usage',
+      );
+      const usage = usages.find((message) => message.turnId === 'compact-after-restart');
+      assert.ok(usage);
+      assert.equal(usage.input, 900);
+      assert.equal(
+        usage.cacheHitInput,
+        400,
+        'the fixture-reported cache sample survives real telemetry',
+      );
+      t.diagnostic(
+        JSON.stringify({
+          measurement: 'local HTTP fixture, not real-provider savings',
+          sourceUtf8Bytes: Buffer.byteLength(sourceText),
+          notificationEncodedBytes: Buffer.byteLength(JSON.stringify(notification.text)),
+          coordinatorRequestBytes: coordinatorRequests.slice(1).map((request) => request.rawBytes),
+          workerRequests: 1,
+          extraSummaryRequests: 0,
+          localDispatchMs:
+            requests.find((request) => !request.coordinator)!.observedAt - dispatchStartedAt,
+          localPostBodyToFirstResponseMs: coordinatorRequests
+            .slice(1)
+            .map((request) => request.firstResponseMs),
+          fixtureReportedUsage: {
+            input: usage.input,
+            cacheHitInput: usage.cacheHitInput,
+            cacheMissInput: usage.cacheMissInput,
+            output: usage.output,
+          },
+          compactionDecisions: usages.flatMap(
+            (message) => message.contextBudget?.compactionDecisions ?? [],
+          ).length,
+          cost: usage.costUsd ?? 'unknown; fake-model has no registered price',
+        }),
+      );
+    } finally {
+      releaseWorker.resolve();
+      await desktop.close();
+      await composition.close();
+      if (activeOwner !== owner) await activeOwner.close();
+    }
+  });
+});
 
 test('production WorkHub inspects an independent Session through its provider tool surface without starting target work', async (t) => {
   const sourceText = 'Tests passed.\nPublishing is still pending. 😀';

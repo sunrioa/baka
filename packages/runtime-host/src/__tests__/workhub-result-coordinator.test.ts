@@ -234,6 +234,91 @@ test('bounds notification text, marks truncation and retains full-result locator
   assert.ok(c.text.includes('"resultTruncated":true'));
   assert.ok(c.text.includes('"actionId":"action"'));
   assert.ok(!c.text.includes('�'));
+  assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
+});
+
+test('notification bounds request and interaction data independently of the full task output', () => {
+  const c = workHubResultContent(
+    {
+      ...assignment,
+      userText: '原请求\\\n"'.repeat(20000),
+      delegationText: '执行要求'.repeat(20000),
+    },
+    {
+      ...observation,
+      status: 'waiting_for_user',
+      result: '结果'.repeat(20000),
+      details: [{ interactionId: 'question', request: { question: '完整问题'.repeat(20000) } }],
+    },
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
+  assert.ok(c.text.includes('"status":"waiting_for_user"'));
+  assert.ok(c.text.includes('"actionId":"action"'));
+  assert.ok(c.text.includes('"detailsTruncated":true'));
+  assert.ok(c.text.includes('"interactionId":"question"'));
+});
+
+test('compact dependency notifications retain the exact request locator rather than the full question', () => {
+  const c = workHubResultContent(assignment, {
+    ...observation,
+    status: 'waiting_for_dependency',
+    details: {
+      requestId: 'evidence-request',
+      sourceActionId: null,
+      question: 'Large evidence requirement '.repeat(10000),
+    },
+  });
+  assert.ok(c.text.includes('"requestId":"evidence-request"'));
+  assert.ok(c.text.includes('"sourceActionId":null'));
+  assert.ok(c.text.includes('"detailsTruncated":true'));
+  assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 6144);
+});
+
+test('large legacy question bodies do not impose a new spelling restriction on their locator', () => {
+  const c = workHubResultContent(assignment, {
+    ...observation,
+    status: 'waiting_for_user',
+    details: [
+      {
+        interactionId: 'legacy:question.name',
+        request: { question: 'Large question '.repeat(10000) },
+      },
+    ],
+  });
+  assert.ok(c.text.includes('"interactionId":"legacy:question.name"'));
+  assert.ok(c.text.includes('"detailsTruncated":true'));
+  assert.ok(Buffer.byteLength(JSON.stringify(c)) <= 6144);
+});
+
+test('maximum source identities and escaped excerpts fit the complete encoded notification budget', () => {
+  const c = workHubResultContent(
+    {
+      ...assignment,
+      actionId: 'a'.repeat(128),
+      delegationId: 'd'.repeat(128),
+      targetSessionId: 's'.repeat(128),
+      targetSessionName: '\\'.repeat(63),
+      userText: '\\'.repeat(127),
+      delegationText: '\\'.repeat(127),
+    },
+    {
+      ...observation,
+      turnId: 't'.repeat(128),
+      runId: 'r'.repeat(128),
+      status: 'waiting_for_dependency',
+      result: '\\'.repeat(383),
+      details: {
+        requestId: 'q'.repeat(128),
+        sourceActionId: 's'.repeat(128),
+        interactionId: 'i'.repeat(128),
+        failureClass: 'f'.repeat(128),
+        question: '\\'.repeat(63),
+        message: '\\'.repeat(63),
+      },
+    },
+  );
+  assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 6144);
+  assert.ok(c.text.includes('"requestId":"' + 'q'.repeat(128) + '"'));
 });
 
 test('a broken target does not block other completed delegations', async () => {
