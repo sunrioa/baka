@@ -203,12 +203,21 @@ describe('continuation-start protocol', () => {
       }).actions?.continuationStart?.providerProjectionVersion,
       2,
     );
+    assert.equal(
+      decodeRuntimeEvent({
+        ...baseEvent({ role: 'system', author: 'system', content: undefined }),
+        actions: {
+          continuationStart: { ...continuationStart, providerProjectionVersion: 3 },
+        },
+      }).actions?.continuationStart?.providerProjectionVersion,
+      3,
+    );
     assert.throws(
       () =>
         decodeRuntimeEvent({
           ...baseEvent({ role: 'system', author: 'system', content: undefined }),
           actions: {
-            continuationStart: { ...continuationStart, providerProjectionVersion: 3 },
+            continuationStart: { ...continuationStart, providerProjectionVersion: 4 },
           },
         }),
       /RuntimeEvent schema/,

@@ -47,7 +47,8 @@ import {
   type ContinuationReplayPlanV1,
 } from './continuation-replay.js';
 import {
-  PROVIDER_REPLAY_PROJECTION_VERSION,
+  providerReplayProjectionVersion,
+  type ProviderReplayProjectionVersion,
   type RuntimeEventModelReplayItem,
 } from './model-history.js';
 import { resolveRuntimeRecovery, type RuntimeRecoveryResolution } from './recovery-resolver.js';
@@ -336,7 +337,7 @@ export interface RuntimeContinuation {
   boundary?: RuntimeBoundaryCursor;
   /** Identity of the exact provider-facing replay projection. */
   providerReplayDigest?: RuntimeBoundaryDigest;
-  providerProjectionVersion?: typeof PROVIDER_REPLAY_PROJECTION_VERSION;
+  providerProjectionVersion?: ProviderReplayProjectionVersion;
   safetySnapshot: RuntimeContinuationSafetySnapshot;
 }
 
@@ -522,7 +523,7 @@ export class RuntimeContinuationPlanner {
     }
     const replay = buildContinuationReplayPlan({
       prefixes,
-      providerProjectionVersion: PROVIDER_REPLAY_PROJECTION_VERSION,
+      providerProjectionVersion: providerReplayProjectionVersion(input.sessionId),
       admissionRoute: input.admissionRoute,
     });
     if (replay.kind === 'blocked') {
@@ -724,7 +725,7 @@ export class RuntimeContinuationPlanner {
       startKind: 'runtime_admission' | 'claim_repair';
       claimId: string;
       boundaryDigest: RuntimeBoundaryDigest;
-      providerProjectionVersion: 1 | typeof PROVIDER_REPLAY_PROJECTION_VERSION;
+      providerProjectionVersion: ContinuationClaimV1['providerProjectionVersion'];
       providerReplayDigest: RuntimeBoundaryDigest;
     }> = [];
     let childInvocation: RuntimeInvocationRecord = {
@@ -883,7 +884,7 @@ export class RuntimeContinuationPlanner {
           `handoff source does not authenticate ${edge.childRunId}`,
         );
       }
-      if (edge.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION) {
+      if (edge.providerProjectionVersion !== providerReplayProjectionVersion(sessionId)) {
         throw new RuntimeLineageError(
           'runtime_lineage_replay_mismatch',
           `continuation provider replay version is unsupported for ${edge.childRunId}`,

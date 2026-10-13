@@ -317,6 +317,20 @@ describe('immutable RuntimeEvent boundary', () => {
     );
   });
 
+  it('decodes released and compact-context claim versions without accepting unknown projections', () => {
+    const claim = claimForBoundary(boundaryForRuns('run-projection'));
+    for (const providerProjectionVersion of [1, 2, 3]) {
+      assert.equal(
+        decodeContinuationClaim({ ...claim, providerProjectionVersion }).providerProjectionVersion,
+        providerProjectionVersion,
+      );
+    }
+    assert.throws(
+      () => decodeContinuationClaim({ ...claim, providerProjectionVersion: 4 }),
+      /Invalid continuation claim/,
+    );
+  });
+
   it('requires a continuation target to remain in the source session', () => {
     const boundary = boundaryForRuns('run-source');
 

@@ -77,8 +77,20 @@ import { MATERIALIZED_IMAGE_TOKENS } from '@maka/core/attachments';
 import { estimateTokens, stableJsonLength, turnKey } from './context-budget-helpers.js';
 import type { DurableToolResultProjection } from '@maka/core/durable-tool-result-projection';
 import { resolveRuntimeRecovery } from './recovery-resolver.js';
+import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 
 export const PROVIDER_REPLAY_PROJECTION_VERSION = 2;
+export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 3;
+export type ProviderReplayProjectionVersion = 2 | 3;
+
+export function providerReplayProjectionVersion(
+  sessionId: string,
+): ProviderReplayProjectionVersion {
+  return sessionId === WORKHUB_COORDINATION_SESSION_ID
+    ? WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION
+    : PROVIDER_REPLAY_PROJECTION_VERSION;
+}
 
 export interface PriorUnknownToolOutcome {
   readonly callEventId: string;
@@ -995,6 +1007,16 @@ export function buildRuntimeEventModelReplayPlan(
           continue;
         }
         const steeringReplay = event.content.steering === true && role === 'user';
+        const content =
+          role === 'user' &&
+          !steeringReplay &&
+          event.sessionId === WORKHUB_COORDINATION_SESSION_ID &&
+          event.content.origin?.kind === 'workhub_result'
+            ? {
+                ...event.content,
+                text: projectWorkHubResultContext(event.content.text, event.content.origin),
+              }
+            : event.content;
         const assistantStepId = role === 'assistant' ? assistantReplayStepId(event) : undefined;
         items.push({
           kind: 'text',
@@ -1003,8 +1025,8 @@ export function buildRuntimeEventModelReplayPlan(
           // A steered user event replays in its canonical provider form (the
           // envelope); the raw text is a UI/transcript projection only.
           content: steeringReplay
-            ? buildSteeringEnvelope(formatTextWithInlineRefs(event.content))
-            : formatTextWithInlineRefs(event.content),
+            ? buildSteeringEnvelope(formatTextWithInlineRefs(content))
+            : formatTextWithInlineRefs(content),
           ...(steeringReplay ? { steering: { eventId: event.id } } : {}),
           ...(event.content.attachments ? { attachments: event.content.attachments } : {}),
           ...(event.content.providerOptions !== undefined

@@ -39,6 +39,8 @@ import {
 import { estimateRuntimeEventsTokens } from '../context-budget.js';
 import { applyRuntimeEventHistoryCompact } from '../history-compaction.js';
 import { sectionedSummary } from './history-compact-test-fixtures.js';
+import { buildRuntimeEventModelReplayPlan } from '../model-history.js';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 
 // Satisfies the sectioned summary contract for marked-checkpoint fixtures.
 const STRUCTURED_SUMMARY = [
@@ -56,6 +58,50 @@ const STRUCTURED_SUMMARY = [
 ].join('\n');
 
 describe('history compact checkpoint', () => {
+  test('compact Host-result replay preserves the raw prefix covered by a checkpoint', () => {
+    const legacy: RuntimeEvent = {
+      ...textEvent(0),
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      role: 'user',
+      author: 'user',
+      content: {
+        kind: 'text',
+        origin: {
+          kind: 'workhub_result',
+          eventId: 'notice',
+          actionId: 'action',
+          delegationId: 'delegation',
+          targetSessionId: 'target',
+          targetTurnId: 'target-turn',
+        },
+        text: JSON.stringify({
+          actionId: 'action',
+          delegationId: 'delegation',
+          targetSessionId: 'target',
+          targetTurnId: 'target-turn',
+          status: 'completed',
+          result: 'long historical result '.repeat(2000),
+        }),
+      },
+    };
+    const events = [legacy, { ...textEvent(1), sessionId: WORKHUB_COORDINATION_SESSION_ID }];
+    const raw = JSON.stringify(events);
+    const checkpoint = buildHistoryCompactCheckpoint({
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      coveredRuntimeEvents: events,
+      summary: sectionedSummary('Source evidence remains on demand.'),
+    });
+    const before = matchHistoryCompactCheckpointPrefix(checkpoint, events);
+    const plan = buildRuntimeEventModelReplayPlan(events);
+    assert.equal(JSON.stringify(events), raw);
+    assert.deepEqual(matchHistoryCompactCheckpointPrefix(checkpoint, events), before);
+    assert.equal(before.coveredEventCount, events.length);
+    const projected = plan.items.find((item) => item.eventId === legacy.id);
+    assert.ok(projected?.kind === 'text');
+    assert.ok(legacy.content?.kind === 'text');
+    assert.ok(projected.content.length < legacy.content.text.length);
+  });
+
   test('rejects provider-native state from a recreated same-slug connection', () => {
     const providerState = {
       kind: 'openai_codex_remote_v2' as const,

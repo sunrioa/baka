@@ -697,3 +697,39 @@ workspace. An uncertain receipt is never automatically replayed; an explicit
 retry retains the same Turn/input identity across same-Host reconnection. A busy
 coordination root rejects the operation without discarding its draft. Restart
 rebuilds task facts from storage; no new execution or permission backend is added.
+
+## Compact coordinator result context (next-phase E1)
+
+Automatic result notifications and user-visible execution output have different
+audiences. `workhub-result-context` bounds the entire encoded notification to
+6 KiB, including JSON escapes and its display label. It keeps the actual
+Action/Delegation/Session/Turn locator, execution status, small request/result
+excerpts and accurate omission flags. These excerpts are unverified task data,
+not semantic summaries, objective acceptance or new permission. Full output stays
+in the original execution ledger and the scoped task view; WorkHubResult and
+WorkHubEvidence remain explicit on-demand read paths. No summarizer model, new
+task store or UI-stream wake is introduced.
+
+Historical notifications are compacted only in canonical provider replay, using
+structured `workhub_result` provenance and matching fixed source identities.
+Human text is not identified by a prose prefix. Unrecognized or conflicting
+legacy payloads retain a bounded source/unknown observation rather than leaking
+another source's purported result. Opaque released references follow their
+existing origin codec, not a new ID spelling rule. If the full locator itself
+cannot fit the encoded budget, keep the exact Action locator with explicit
+unknown/omission state; never truncate an identity or infer that its source
+disappeared. Raw RuntimeEvents, tool arguments and compact checkpoint
+coverage/digests remain unchanged. Text/native replay and applicable
+summarizers share this canonical projection; native compaction remains a fallback.
+
+The Coordination Session's canonical provider replay moves from version 2 to 3.
+Ordinary Sessions retain v2 replay, including released continuation proofs and
+copied notification text. Released v1/v2 facts remain decodable, but a
+Coordination Session proof from an older projection cannot silently authorize
+v3 replay. Compatibility epoch 220 prevents mixed-version Host/peer
+handoff. SQLite runtime schema 21 extends the continuation-claim constraint to
+v3 while preserving released claims, proofs, keys and the fresh-Turn index.
+Stable system/tool prefixes are not
+changed by each result body, but provider-cache savings are not inferred merely
+from smaller payloads. Cold-work fresh-container continuation and actual
+resource/context observations remain the separate E2 step.
