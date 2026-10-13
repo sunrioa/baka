@@ -280,11 +280,11 @@ export function createWorkHubTaskHistoryRuntime(options: {
               : await options.evidence?.readEvidenceContinuation?.(a, ref);
             if (evidence?.next && ++evidenceRounds > WORKHUB_EVIDENCE_MAX_ROUNDS)
               throw new Error('Task evidence lineage exceeds its bound');
-            current =
-              input ??
-              (evidence?.next
+            current = input
+              ? { turnId: input.turnId, runId: input.runId }
+              : evidence?.next
                 ? { turnId: evidence.next.turnId, runId: evidence.next.runId }
-                : undefined);
+                : undefined;
           }
         }
         return {

@@ -5819,6 +5819,99 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
   });
 });
 
+test('native input lineage accepts its own execution history cursor across the 16-root page boundary', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const ready = Array.from({ length: 16 }, () => deferred<void>());
+    const release = Array.from({ length: 16 }, () => deferred<void>());
+    const turns: string[] = [];
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      primaryBackendFactory: (backendContext) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            const index = turns.length;
+            turns.push(input.turnId);
+            if (index < 16) {
+              for await (const event of super.send(input)) {
+                if (event.type === 'complete') {
+                  ready[index]!.resolve();
+                  await release[index]!.promise;
+                }
+                yield event;
+              }
+            } else yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+          }
+        })(backendContext),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'native-input-history-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const target = await manager.createSession({
+        cwd: root,
+        name: 'Native input pages',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      await delegateWorkHubTarget(composition, context, target.id, 'native-page-a', 'R0');
+      const a = await stores.sessionStore.readWorkHubAssignment('native-page-a');
+      assert.ok(a);
+      for (let index = 0; index < 16; index++) {
+        await withTimeout(
+          ready[index]!.promise,
+          10000,
+          `Root ${index} did not reach its final boundary`,
+        );
+        const accepted = await composition.handlers['workhub.tasks.send'](
+          {
+            inputId: `native-page-${index}`,
+            workId: a.work!.id,
+            generationId: a.work!.generationId,
+            sourceActionId: a.actionId,
+            sourceDelegationId: a.delegationId,
+            text: `R${index + 1}`,
+          },
+          context,
+        );
+        assert.ok(accepted.ok, JSON.stringify(accepted));
+        assert.equal(accepted.result.mode, 'steering');
+        release[index]!.resolve();
+      }
+      await waitFor(async () => turns.length === 17, 10000);
+      const read = (cursor?: string) =>
+        composition.handlers['workhub.tasks.executions'](
+          { actionId: a.actionId, delegationId: a.delegationId, ...(cursor ? { cursor } : {}) },
+          context,
+        );
+      const first = await read();
+      assert.ok(first.ok, JSON.stringify(first));
+      assert.equal(first.result.executions.length, 16);
+      assert.ok(first.result.nextCursor);
+      const second = await read(first.result.nextCursor);
+      assert.ok(
+        second.ok,
+        `The Host must accept its own execution history cursor: ${JSON.stringify(second)}`,
+      );
+      assert.equal(second.result.executions.length, 1);
+      assert.equal(second.result.nextCursor, null);
+      assert.deepEqual(
+        [...first.result.executions, ...second.result.executions].map((item) => item.turnId),
+        turns,
+      );
+    } finally {
+      for (const entry of release) entry.resolve();
+      await composition.close();
+    }
+  });
+});
+
 test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
