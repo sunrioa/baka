@@ -24,6 +24,7 @@ import { workspaceNameFromCwd } from './workspace-name.js';
 import type { StoredMessage } from '@maka/core/session';
 
 export interface WorkHubLinkedWork {
+  readonly workId?: string;
   readonly id: string;
   readonly coordinationTurnId: string;
   readonly targetSessionId: string;
@@ -76,6 +77,7 @@ export function workHubLinkedWork(
     }
 
     if (message.type === 'workhub_coordination' && message.kind === 'delegation_assigned') return [{
+      workId: message.work?.id ?? message.actionId,
       id: message.id,
       coordinationTurnId: message.coordinationTurnId,
       targetSessionId: message.targetSessionId,
@@ -90,9 +92,10 @@ export function workHubLinkedWork(
     }
     if (result && typeof result === 'object' && 'structuredContent' in result) result = result.structuredContent;
     if (!result || typeof result !== 'object' || !('disposition' in result) ||
-      !['create_new', 'delegate_existing', 'replace'].includes(String(result.disposition)) ||
+      !['create_new', 'delegate_existing', 'replace', 'continue_work'].includes(String(result.disposition)) ||
       !('targetSessionKey' in result) || typeof result.targetSessionKey !== 'string') return [];
     return [{
+      ...('workId' in result && typeof result.workId === 'string' ? { workId: result.workId } : {}),
       id: message.id,
       coordinationTurnId: message.turnId,
       targetSessionId: result.targetSessionKey,

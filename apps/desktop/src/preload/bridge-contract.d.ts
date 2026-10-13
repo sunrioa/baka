@@ -1136,6 +1136,8 @@ export interface MakaBridge {
     queryInteractions(coordinationSessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
     queryTasks(coordinationSessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
     readTask(coordinationSessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
+    taskHistory(coordinationSessionId: string, input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>>;
+    taskExecutions(coordinationSessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;
     continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
     answerInteraction(coordinationSessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
     revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
@@ -1354,6 +1356,7 @@ export interface MakaBridge {
       onObservationPhase?: (phase: 'pending' | 'ready') => void,
       onSeedError?: (error: unknown) => void,
       onExecution?: (projection: import('../shared/session-execution-projection.js').SessionExecutionProjection | undefined) => void,
+      execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
     ): () => void;
     subscribeChanges(handler: (event: SessionChangedEvent) => void): () => void;
     archive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;
@@ -1451,6 +1454,7 @@ export interface MakaBridge {
       mode?: DesktopTranscriptOpenMode,
       /** The oldest sequence the reader already holds; the first answer reads back down to it. */
       resumeFrom?: number,
+      execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
     ): Promise<DesktopTranscriptHandle>;
   };
   externalSessions: {

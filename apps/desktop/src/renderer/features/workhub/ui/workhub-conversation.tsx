@@ -39,7 +39,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
     const grouped = new Map<string, WorkHubLinkedWork[]>();
     for (const work of assignments) {
       const works = grouped.get(work.coordinationTurnId) ?? [];
-      if (!works.some((item) => item.targetSessionId === work.targetSessionId)) works.push(work);
+      if (!works.some((item) => (item.workId ?? item.targetSessionId) === (work.workId ?? work.targetSessionId))) works.push(work);
       grouped.set(work.coordinationTurnId, works);
     }
     return grouped;
@@ -57,7 +57,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
   const promptTextByTurn = new Map(chat.messages?.flatMap((message) => message.type === 'user' ? [[message.turnId, message.text.slice(0, 80)] as const] : []));
   const turnDecorations = new Map<string, NonNullable<ComponentProps<typeof ChatView>['turnDecorations']> extends ReadonlyMap<string, infer V> ? V : never>([...worksByTurn].map(([turnId, works]) => [turnId, {
     accentColor: promptRailDecorations.get(turnId)?.accentColor ?? 'transparent',
-    messageRail: <>{works.map((work, index) => <Button key={work.targetSessionId}
+    messageRail: <>{works.map((work, index) => <Button key={work.workId ?? work.targetSessionId}
       variant="ghost" isIconOnly icon={<span aria-hidden="true" />} className="workhub-message-rail"
       style={{ insetBlockStart: `${index * 100 / works.length}%`, insetBlockEnd: 'auto', height: `${100 / works.length}%`,
         '--maka-turn-accent': `oklch(var(--workhub-${highlight.sessionId === work.targetSessionId ? 'highlight' : 'tone'}) ${workHubIdentityHue(work.targetSessionId)})`,
@@ -65,17 +65,17 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
       data-work-session-id={work.targetSessionId}
       label={`${copy.filterConversation}: ${work.targetSessionName} · ${promptTextByTurn.get(turnId) ?? turnId}`}
       tooltip={`${copy.filterConversation}: ${work.targetSessionName}`}
-      aria-pressed={highlight.selectedWork?.sessionId === work.targetSessionId}
+      aria-pressed={Boolean(highlight.selectedWork) && (highlight.selectedWork?.workId ?? highlight.selectedWork?.sessionId) === (work.workId ?? work.targetSessionId)}
       data-work-highlighted={highlight.sessionId === work.targetSessionId}
       onMouseEnter={() => highlight.highlight(work.targetSessionId)}
       onMouseLeave={() => highlight.highlight(undefined)}
       onFocus={() => highlight.highlight(work.targetSessionId)}
       onBlur={() => highlight.highlight(undefined)}
-      onClick={() => highlight.toggleWork({ sessionId: work.targetSessionId, name: work.targetSessionName })}
+      onClick={() => highlight.toggleWork({ sessionId: work.targetSessionId, name: work.targetSessionName, workId: work.workId })}
     />)}</>,
     header: <div className="workhub-turn-heading">
       {works.map((work) => <Link
-        key={work.targetSessionId}
+        key={work.workId ?? work.targetSessionId}
         type="supporting" color="secondary"
         className="workhub-turn-label"
         data-work-session-id={work.targetSessionId}

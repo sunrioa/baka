@@ -1,0 +1,115 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { applyLiveTurnBufferEvent, reconcileLiveTurnBuffer, settleLiveTurnBufferStep, useUiLocale, type LiveTurnBuffer } from '@maka/ui';
+import type { SessionSummary } from '@maka/core/session';
+import type { SessionExecutionScope } from '@maka/runtime-host/protocol';
+import { chatTurnActivity, type SessionExecutionProjection } from '../../../application/contracts/session-execution.js';
+import { createWorkHubTaskViewModel, type WorkHubTaskViewSnapshot } from '../model/task-view-model.js';
+import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
+
+const emptyTranscript: WorkHubTranscriptSnapshot = { messages: [], ready: false, hasOlder: false };
+const emptyView: WorkHubTaskViewSnapshot = { assignments: [], historyCursor: null, ready: false, loadingEarlier: false, executions: [], executionsReady: false };
+
+export function useWorkHubTaskView(services: WorkHubServices, owner: string, workId: string) {
+  const [state, setState] = useState(emptyView);
+  const model = useRef<ReturnType<typeof createWorkHubTaskViewModel>>(undefined);
+  useEffect(() => {
+    const current = createWorkHubTaskViewModel(services, owner, workId);
+    model.current = current;
+    setState(current.snapshot());
+    const unsubscribes = [current.subscribe(() => setState(current.snapshot())),
+      services.subscribeSessions(() => { void current.refresh(); }),
+      services.subscribeAvailability(() => current.invalidate())];
+    void current.refresh();
+    return () => {
+      current.close();
+      for (const unsubscribe of unsubscribes) unsubscribe();
+      if (model.current === current) model.current = undefined;
+    };
+  }, [services, owner, workId]);
+  return { ...state, refresh: () => model.current?.refresh(), loadEarlier: () => model.current?.loadEarlier(),
+    selectAssignment: (id: string) => model.current?.selectAssignment(id), selectExecution: (id: string) => model.current?.selectExecution(id),
+    followLatest: () => model.current?.followLatest() };
+}
+
+/** One immutable owned execution. Its parent keys it by Host, Session, Turn and Run. */
+export function useWorkHubExecutionView(services: Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>, sessionId: string, scope: SessionExecutionScope) {
+  const locale = useUiLocale();
+  const localeRef = useRef(locale); localeRef.current = locale;
+  const [session, setSession] = useState<SessionSummary>();
+  const [transcript, setTranscript] = useState(emptyTranscript);
+  const transcriptRef = useRef(emptyTranscript);
+  const settled = useRef(new Set<string>());
+  const [liveTurns, setLiveTurns] = useState<LiveTurnBuffer>();
+  const [execution, setExecution] = useState<SessionExecutionProjection>();
+  const [error, setError] = useState<string>();
+  const [ready, setReady] = useState(false);
+  const range = useRef<WorkHubTranscript>(undefined);
+  useEffect(() => {
+    const abort = new AbortController();
+    let handle: WorkHubTranscript | undefined;
+    let phase: 'pending' | 'ready' = 'pending';
+    const report = (reason: unknown) => { if (!abort.signal.aborted) { setReady(false); setError(reason instanceof Error ? reason.message : String(reason)); } };
+    void services.getTaskSession(sessionId).then(value => { if (!abort.signal.aborted) setSession(value ?? undefined); }).catch(report);
+    const unsubscribe = services.observe(sessionId, event => {
+      if (abort.signal.aborted || event.turnId !== scope.turnId) return;
+      setLiveTurns(previous => {
+        const next = applyLiveTurnBufferEvent(previous, event, localeRef.current);
+        return next ? reconcileLiveTurnBuffer(next, transcriptRef.current.messages) : next;
+      });
+    }, reason => { phase = 'pending'; handle?.observationChanged(phase); report(reason); }, next => {
+      if (abort.signal.aborted) return;
+      phase = next; handle?.observationChanged(next); setReady(next === 'ready');
+      if (next === 'ready') setError(undefined);
+    }, projection => { if (!abort.signal.aborted) setExecution(projection); }, scope);
+    void services.openTranscript(sessionId, snapshot => {
+      if (abort.signal.aborted) return;
+      if (snapshot.messages.some(message => message.turnId !== scope.turnId)) { report(new Error('Task transcript changed execution')); return; }
+      transcriptRef.current = snapshot; setTranscript(snapshot);
+      setLiveTurns(previous => {
+        let next = previous;
+        for (const message of snapshot.messages) {
+          if (next && message.type === 'assistant' && settled.current.delete(message.id)) next = settleLiveTurnBufferStep(next, message.id);
+        }
+        return next ? reconcileLiveTurnBuffer(next, snapshot.messages) : next;
+      });
+    }, abort.signal, report, scope).then(value => {
+      if (abort.signal.aborted) { void value.close(); return; }
+      handle = value; range.current = value; value.observationChanged(phase);
+    }).catch(report);
+    return () => { abort.abort(); unsubscribe(); range.current = undefined; void handle?.close(); };
+  }, [services, sessionId, scope.turnId, scope.runId]);
+  return { session, transcript, liveTurns, activeTurn: chatTurnActivity(execution), ready, error,
+    loadEarlier: async () => {
+      const handle = range.current;
+      try { await handle?.loadEarlier(); }
+      catch (reason) {
+        if (handle && range.current === handle) setError(reason instanceof Error ? reason.message : String(reason));
+      }
+    },
+    streamingSettled: (stepId: string) => {
+      if (!transcriptRef.current.messages.some(message => message.type === 'assistant' && message.id === stepId)) settled.current.add(stepId);
+      setLiveTurns(previous => {
+        const next = previous ? settleLiveTurnBufferStep(previous, stepId) : previous;
+        return next ? reconcileLiveTurnBuffer(next, transcriptRef.current.messages) : next;
+      });
+    } };
+}

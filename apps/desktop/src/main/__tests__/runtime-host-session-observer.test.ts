@@ -48,6 +48,7 @@ import {
   type RuntimeHostTranscriptTarget,
 } from "../runtime-host-session-observer.js";
 import { RuntimeHostSessionSubscriptionOwner } from '../runtime-host-session-subscription-owner.js';
+import { executionEventChannel, executionObservationKey } from '../../shared/execution-observation.js';
 import {
   AsyncFrameQueue,
   continuitySnapshot,
@@ -3637,6 +3638,97 @@ test('does not cache a snapshot published before the replica is installed', asyn
     'only the installed snapshot may be cached',
   );
   await observer.close();
+});
+
+test('scoped Desktop views isolate live channels, cache and read markers from the whole Session', async (t) => {
+  const a = { turnId: 'turn-a', runId: 'run-a' }, b = { turnId: 'turn-b', runId: 'run-b' };
+  const opened: Array<typeof a | undefined> = [];
+  const queues = new Map<string, AsyncFrameQueue>();
+  const closedScopes = new Set<string>();
+  const caches: string[] = [], markers: string[] = [], globals: string[] = [];
+  const observer = new RuntimeHostSessionObserver({
+    client: {
+      openSession: async (_id, execution) => {
+        opened.push(execution);
+        const key = executionObservationKey('session-1', execution);
+        const events = new AsyncFrameQueue(); queues.set(key, events);
+        const history = historyHost([turnRow(0, execution?.turnId ?? 'whole-turn', key)], { pageRows: 1 });
+        return runtimeHostSessionFixture({ execution, snapshot: continuitySnapshot({ rootTurn: null }), events,
+          transcriptBootstrap: { durable: history.bootstrap.durable },
+          loadTranscriptPage: history.loadTranscriptPage, decodeTranscriptPage: history.decodeTranscriptPage,
+          close: async () => { closedScopes.add(key); events.end(); },
+        });
+      },
+      setSessionReadMarker: async (_id, message) => { markers.push(message); return {} as never; },
+    },
+    cacheTranscript: snapshot => { caches.push(...snapshot.durable.map(row => row.message.turnId!)); },
+    emitSessionsChanged: () => {}, emitActiveInteractionsChanged: () => globals.push('interactions'), emitSubscriptionRecovered: () => globals.push('recovered'),
+  });
+  t.after(() => observer.close());
+  const channels: Array<{ channel: string; message: SessionEvent | SessionObservationMessage }> = [];
+  const target = { id: 987, send(channel: string, message: SessionEvent | SessionObservationMessage) { channels.push({ channel, message }); }, once() {}, off() {} };
+  await observer.observe('session-1', 'whole-observer', target);
+  const rawCacheCount = caches.length, globalCount = globals.length;
+  for (const [scope, consumerId] of [[a, 'a-consumer'], [b, 'b-consumer']] as const) {
+    await observer.observe('session-1', consumerId + '-observer', target, false, undefined, scope);
+    const batches: DesktopTranscriptBatch[] = [];
+    const result = await observer.openTranscript('session-1', consumerId, ackingTranscriptTarget(observer, consumerId, 987, batches), 'history', undefined, scope);
+    assert.deepEqual(result.execution, scope);
+    assert.ok(batches.length > 0 && batches.every(batch => JSON.stringify(batch.execution) === JSON.stringify(scope)));
+    observer.acknowledgeTranscriptTail({ consumerId, sessionId: 'session-1', hostEpoch: 'host-1', through: 0 }, 987);
+  }
+  assert.equal(opened.length, 3);
+  assert.equal(caches.length, rawCacheCount, 'partial task data must not poison the offline whole-Session cache');
+  assert.deepEqual(markers, [], 'a scoped ACK proves nothing about unrelated Session rows');
+  assert.equal(globals.length, globalCount, 'scoped interactions cannot overwrite the global Session inbox');
+  for (const scope of [a, b]) {
+    const seed = channels.find(item => item.channel === executionEventChannel('session-1', scope) && item.message.type === 'host_observation_seed');
+    assert.ok(seed && seed.message.type === 'host_observation_seed');
+    assert.deepEqual(seed.message.executionScope, scope);
+  }
+  const before = channels.length;
+  queues.get(executionObservationKey('session-1', a))!.push({
+    kind: 'subscription.session_projection', hostEpoch: 'host-1', subscriptionId: 'scoped-a', sequence: 1,
+    snapshot: continuitySnapshot({ projectionRevision: 2, rootTurn: { sessionId: 'session-1', ...a, status: 'running' } }),
+  });
+  await waitFor(() => channels.length > before);
+  assert.ok(channels.slice(before).every(item => item.channel === executionEventChannel('session-1', a)));
+  await assert.rejects(observer.observe('session-1', 'a-consumer-observer', target, false, undefined, b), /identity was reused/);
+  await assert.rejects(observer.observe('session-1', 'forbidden-admission', target, true, undefined, a), /read-only/);
+  await observer.unobserve('a-consumer-observer');
+  await observer.closeTranscript('a-consumer', 987);
+  assert.ok(closedScopes.has(executionObservationKey('session-1', a)), 'leaving a running read-only attempt releases its subscription');
+  assert.equal(closedScopes.has('session-1'), false, 'the ordinary Session observation is independent');
+});
+
+test('scoped Desktop reconnect restores exact execution intent and never reports an absent Root as Session deletion', async (t) => {
+  const registry = new RuntimeHostSessionObservationRegistry();
+  t.after(() => registry.close());
+  const execution = { turnId: 'original-turn', runId: 'original-run' };
+  const calls: unknown[] = [];
+  const source = () => ({
+    observe: async (...args: Parameters<RuntimeHostSessionObserver['observe']>) => { calls.push(['observe', args[5]]); }, unobserve: async () => {},
+    openTranscript: async (...args: Parameters<RuntimeHostSessionObserver['openTranscript']>) => {
+      calls.push(['transcript', args[5]]);
+      return { sessionId: args[0], generation: 'restored', hostEpoch: 'host-2', readThroughMessageId: null, execution: args[5] };
+    },
+    closeTranscript: async () => {}, acknowledgeTranscriptTail() {}, loadEarlierTranscript: async () => {}, readTranscriptTurn: async () => [],
+  });
+  const first = source(); await registry.attach(first);
+  await registry.observe('session-1', 'observer', eventTarget(111), false, execution);
+  await registry.openTranscript('session-1', 'consumer', { id: 111, send() {}, once() {}, off() {} }, 'history', undefined, execution);
+  registry.detach(first);
+  await registry.attach(source());
+  await waitFor(() => calls.length === 4);
+  assert.deepEqual(calls, [['observe', execution], ['transcript', execution], ['transcript', execution], ['observe', execution]]);
+  const failures: string[] = [];
+  const observer = new RuntimeHostSessionObserver({
+    client: { openSession: async () => { throw new RuntimeHostOperationError('subscription.open', 'not_found', 'Root no longer available'); } },
+    emitSessionsChanged: reason => { failures.push(reason); },
+  });
+  t.after(() => observer.close());
+  await assert.rejects(observer.observe('session-1', 'missing-root', eventTarget(112), false, undefined, execution), /Root no longer available/);
+  assert.equal(failures.includes('deleted'), false);
 });
 
 function rowsThrough(

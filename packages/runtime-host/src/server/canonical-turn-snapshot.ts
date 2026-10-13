@@ -21,11 +21,16 @@ import { type ContextCompactionOutcome } from '@maka/core/events';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import { redactSecrets } from '@maka/core/redaction';
 import { readRunInvocation } from '@maka/core/runtime-event-store';
-import { readLogicalRuntimeExecution } from '@maka/core/runtime-logical-execution';
+import {
+  readLogicalRuntimeExecution,
+  type LogicalRuntimeExecutionMembership,
+} from '@maka/core/runtime-logical-execution';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { RuntimeInvocationRecord } from '@maka/core/runtime-invocation';
 import { classifyTerminalRuntimeLedger } from '@maka/runtime/terminal-run-commit';
 import type { ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import { TURN_FAILURE_MESSAGE_MAX_BYTES, type TurnSnapshot } from '../protocol/index.js';
+import { readHostedExecutionMembership } from './hosted-execution-membership.js';
 
 type CanonicalTurnStores = Pick<
   ExecutionStoresWriter<'interactive'>,
@@ -42,6 +47,7 @@ export async function readCanonicalTurnSnapshot(
   stores: CanonicalTurnStores,
   identity: CanonicalTurnIdentity,
   knownRun?: RuntimeInvocationRecord,
+  options?: { readonly mode: 'summary' },
 ): Promise<TurnSnapshot> {
   const { sessionId, turnId, runId } = identity;
   const run = knownRun ?? (await readInvocationIfPresent(stores, sessionId, runId));
@@ -50,8 +56,20 @@ export async function readCanonicalTurnSnapshot(
     throw new Error('Admitted Turn identity does not match its invocation');
   }
 
-  const logical = await readLogicalRuntimeExecution(stores.runtimeEventStore, identity, run);
+  // Read-only projections use the already canonical opening/terminal facts.
+  // Commands retain the full ledger classification below by default.
+  let logical: LogicalRuntimeExecutionMembership | undefined;
+  let events: readonly RuntimeEvent[];
+  if (options?.mode === 'summary') {
+    logical = await readHostedExecutionMembership(stores.runtimeEventStore, identity, run);
+    events = logical?.tip.terminalEvent ? [logical.tip.terminalEvent] : [];
+  } else {
+    const full = await readLogicalRuntimeExecution(stores.runtimeEventStore, identity, run);
+    logical = full;
+    events = full?.events ?? [];
+  }
   if (!logical) throw new Error('Admitted logical execution disappeared');
+  if (logical.root.runId !== runId) throw new Error('Turn projection changed its logical Root');
   const rootExecutionKind =
     logical.root.opening.root.kind === 'context_compact'
       ? ({ rootExecutionKind: 'context_compact' } as const)
@@ -59,7 +77,7 @@ export async function readCanonicalTurnSnapshot(
   if (logical.pendingHandoff) {
     return { sessionId, turnId, runId, status: 'running', ...rootExecutionKind };
   }
-  const terminal = classifyTerminalRuntimeLedger(logical.tip, logical.events);
+  const terminal = classifyTerminalRuntimeLedger(logical.tip, events);
   if (terminal.kind === 'fact') {
     const fact = terminal.fact;
     if (fact.runStatus === 'handed_off') {

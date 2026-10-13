@@ -22,9 +22,10 @@ import { Button, TextArea, useUiLocale } from '@maka/ui';
 import type { WorkHubTask, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskOverview } from '../controller/use-workhub-task-overview.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
+import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
 type Overview = ReturnType<typeof useWorkHubTaskOverview>;
-export function WorkHubTaskOverview({ overview, onOpen }: { overview: Overview; onOpen(sessionId: string): void }) {
+export function WorkHubTaskOverview({ overview, onOpen, onView }: { overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void }) {
   const t = workHubTaskCopy[useUiLocale()];
   if (overview.ready && !overview.tasks.length && !overview.truncated) return null;
   const ended = (task: WorkHubTask) => ['pending_acceptance', 'failed', 'cancelled', 'stopped', 'unavailable'].includes(task.status);
@@ -37,7 +38,7 @@ export function WorkHubTaskOverview({ overview, onOpen }: { overview: Overview; 
       <div className="workHubTaskRows">
         {groups.flatMap(group => group.tasks.map((task, index) => <div key={JSON.stringify([task.actionId, task.delegationId])}>
           {index === 0 && <h3>{group.label}</h3>}
-          <TaskCard task={task} overview={overview} onOpen={onOpen} />
+          <TaskCard task={task} overview={overview} onOpen={onOpen} onView={onView} />
         </div>))}
       </div>
       {overview.truncated && <p role="status">{t.truncated}</p>}
@@ -45,8 +46,9 @@ export function WorkHubTaskOverview({ overview, onOpen }: { overview: Overview; 
     <Button size="sm" variant="ghost" label={t.refresh} onClick={() => { void overview.refresh(); }} />
   </details>;
 }
-function TaskCard({ task, overview, onOpen }: { task: WorkHubTask; overview: Overview; onOpen(sessionId: string): void }) {
-  const t = workHubTaskCopy[useUiLocale()];
+function TaskCard({ task, overview, onOpen, onView }: { task: WorkHubTask; overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void }) {
+  const locale = useUiLocale();
+  const t = workHubTaskCopy[locale];
   const id = useId();
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<WorkHubTaskDetail>();
@@ -73,6 +75,7 @@ function TaskCard({ task, overview, onOpen }: { task: WorkHubTask; overview: Ove
     {shown.waitReason && <p className="workHubTaskHint">{t[shown.waitReason]}</p>}
     {shown.dependency && <p className="workHubTaskHint">{t.dependency}: {shown.dependency.question}</p>}
     {shown.failure && <p className="workHubTaskFailure">{shown.failure}</p>}
+    {onView && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].open} onClick={() => onView(shown)} />}
     {expanded && <div id={id} className="workHubTaskDetails">
       <h4>{t.source}</h4>
       <dl>

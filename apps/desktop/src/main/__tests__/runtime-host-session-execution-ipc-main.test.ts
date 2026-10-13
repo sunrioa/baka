@@ -61,6 +61,33 @@ test('registers Session observation as one reconnectable operation', () => {
   assert.equal(ipc.reconnectableChannels.has('sessions:observe'), true);
 });
 
+test('task-scoped observation IPC validates and restores the exact read scope without Session-wide admissions', async () => {
+  const observations = new RuntimeHostSessionObservationRegistry();
+  const ipc = ipcHarness();
+  const execution = { turnId: 'task-turn', runId: 'task-run' };
+  const scopes: unknown[] = [];
+  await observations.attach({
+    async observe(_session, _observer, _target, admissions, pty, scope) { assert.equal(admissions, false); assert.equal(pty, undefined); scopes.push(scope); },
+    async unobserve() {},
+    async openTranscript(sessionId, _consumer, _target, _mode, _resume, scope) {
+      scopes.push(scope); return { sessionId, generation: 'generation', hostEpoch: 'epoch', readThroughMessageId: null, execution: scope };
+    },
+    async closeTranscript() {}, async loadEarlierTranscript() {}, async readTranscriptTurn() { return []; }, acknowledgeTranscriptTail() {},
+  });
+  registerRuntimeHostSessionObservationIpc({ observations, resolveSideConversation: async () => { assert.fail('A scoped viewer does not subscribe to Session-wide admissions'); } }, ipc);
+  try {
+    assert.deepEqual(await ipc.invoke('sessions:observe', 'session-1', 'task-observer', execution), { kind: 'ready', value: undefined });
+    const opened = await ipc.invoke('sessions:transcript:open', 'session-1', 'task-consumer', 'history', null, execution);
+    assert.deepEqual(opened, { kind: 'ready', value: { sessionId: 'session-1', generation: 'generation', hostEpoch: 'epoch', readThroughMessageId: null, execution } });
+    assert.deepEqual(scopes, [execution, execution]);
+    for (const scope of [{ ...execution, runId: '' }, { ...execution, hostId: 'other-host' }]) {
+      await assert.rejects(ipc.invoke('sessions:observe', 'session-1', 'malformed', scope));
+      await assert.rejects(ipc.invoke('sessions:transcript:open', 'session-1', 'malformed', 'history', null, scope));
+    }
+    assert.equal(scopes.length, 2);
+  } finally { await observations.close(); }
+});
+
 for (const phase of ['connecting', 'seeding'] as const) {
   for (const cancellation of ['unobserve', 'renderer destruction'] as const) {
     test(`Session observation IPC returns cancellation after ${cancellation} while ${phase}`, async () => {

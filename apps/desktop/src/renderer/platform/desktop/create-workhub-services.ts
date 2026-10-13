@@ -83,6 +83,7 @@ export function createDesktopWorkHubServices(
       return result;
     },
     getSession: (sessionId) => bridge.workHub.getSession(sessionId),
+    getTaskSession: (sessionId) => bridge.sessions.get(sessionId),
     subscribeHosts: (handler) => bridge.runtimeHostProfiles.subscribeChanges(handler),
     subscribeAvailability: (handler) => bridge.connections.subscribeEvents(() => handler()),
     listSessions: () => bridge.sessions.list(),
@@ -102,6 +103,8 @@ export function createDesktopWorkHubServices(
     queryTaskInteractions: (sessionId) => bridge.workHub.queryInteractions(sessionId),
     queryTasks: (sessionId) => bridge.workHub.queryTasks(sessionId),
     readTask: (sessionId, input) => bridge.workHub.readTask(sessionId, input),
+    taskHistory: (sessionId, input) => bridge.workHub.taskHistory(sessionId, input),
+    taskExecutions: (sessionId, input) => bridge.workHub.taskExecutions(sessionId, input),
     continueTask: (sessionId, input) => bridge.workHub.continueTask(sessionId, input),
     answerTaskInteraction: (sessionId, input) => bridge.workHub.answerInteraction(sessionId, input),
     revokeTaskGrant: (sessionId, input) => bridge.workHub.revokeTaskGrant(sessionId, input),
@@ -131,8 +134,8 @@ export function createDesktopWorkHubServices(
     subscribeNewWorkPermissionMode: (sessionId, handler) => bridge.workHub.subscribeNewWorkPermissionMode(sessionId, handler),
     getExecutionConcurrency: (sessionId) => bridge.workHub.getExecutionConcurrency(sessionId),
     setExecutionConcurrency: (sessionId, value) => bridge.workHub.setExecutionConcurrency(sessionId, value),
-    observe: (sessionId, handler, onError, onPhase, onExecution) =>
-      bridge.sessions.subscribeEvents(sessionId, handler, onPhase, onError, onExecution),
+    observe: (sessionId, handler, onError, onPhase, onExecution, execution) =>
+      bridge.sessions.subscribeEvents(sessionId, handler, onPhase, onError, onExecution, execution),
     stop: async (sessionId, turnId) => {
       const result = await bridge.sessions.stop(sessionId, {
         source: 'stop_button',
@@ -141,12 +144,15 @@ export function createDesktopWorkHubServices(
       return result?.kind === 'interrupted' ? result.retractedMessageIds
         : result?.kind === 'retracted' ? [result.messageId] : undefined;
     },
-    async openTranscript(sessionId, handler, cancellation, onError) {
+    async openTranscript(sessionId, handler, cancellation, onError, execution) {
       const store = new DesktopTranscriptRangeStore(sessionId);
       const unsubscribe = store.subscribe(() => handler(store.snapshot()));
       const controller = createDesktopTranscriptRangeController(
         store,
-        openDesktopTranscriptHistory(bridge.transcripts.open, sessionId, (batch) => store.accept(batch)),
+        openDesktopTranscriptHistory(
+          (id, accept, cancel, mode, resumeFrom) => bridge.transcripts.open(id, accept, cancel, mode, resumeFrom, execution),
+          sessionId, (batch) => store.accept(batch),
+        ),
         { onError },
       );
       const cancel = () => { unsubscribe(); void controller.close(); };

@@ -109,7 +109,9 @@ export class CanonicalSessionProjectionReader {
         throw new Error('Owned Root Turn admission is missing from durable storage');
       }
       this.#rootAdmissions.assertKnownAdmission(durableAdmission);
-      rootTurn = await readCanonicalTurnSnapshot(this.#stores, durableAdmission);
+      rootTurn = await readCanonicalTurnSnapshot(this.#stores, durableAdmission, undefined, {
+        mode: 'summary',
+      });
     }
 
     const interactions = projectSessionInteractions(

@@ -49,6 +49,7 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   readonly control: WorkHubControlBridge;
   bindBrowserSession(sessionId: string | null): void;
   getSession(sessionId: string): Promise<SessionSummary & { revision: number }>;
+  getTaskSession(sessionId: string): Promise<SessionSummary | null>;
   subscribeSessions(handler: () => void): () => void;
   listSessions(): Promise<(SessionSummary & { revision: number })[]>;
   modelChoices(sessionId?: string): Promise<ChatModelChoice[]>;
@@ -63,6 +64,8 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   queryTaskInteractions(sessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
   queryTasks(sessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
   readTask(sessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
+  taskHistory(sessionId: string, input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>>;
+  taskExecutions(sessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;
   continueTask(sessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
   answerTaskInteraction(sessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
   revokeTaskGrant(sessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
@@ -96,12 +99,14 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
     onError: (error: unknown) => void,
     onPhase: (phase: 'pending' | 'ready') => void,
     onExecution?: (projection: import('../../../shared/session-execution-projection.js').SessionExecutionProjection | undefined) => void,
+    execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
   ): () => void;
   openTranscript(
     sessionId: string,
     handler: (snapshot: WorkHubTranscriptSnapshot) => void,
     signal: AbortSignal,
     onError: (error: unknown) => void,
+    execution?: import('@maka/runtime-host/protocol').SessionExecutionScope,
   ): Promise<WorkHubTranscript>;
   /** Retracted message IDs, or undefined when the requested Turn was no longer active. */
   stop(sessionId: string, turnId: string): Promise<readonly string[] | undefined>;

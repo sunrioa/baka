@@ -213,6 +213,7 @@ export class DesktopRuntimeHostClientError extends Error {
 }
 
 export interface DesktopRuntimeHostSession {
+  readonly execution?: import('@maka/runtime-host/protocol').SessionExecutionScope;
   setPtyInterests?(refs: readonly string[]): Promise<void>;
   subscribePtyData?(listener: (frame: Extract<SubscriptionFrame, { kind: 'subscription.runtime_resource_pty_data' }>) => void): () => void;
   readonly hostEpoch: string;
@@ -1401,6 +1402,8 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.interactions.query", {});
   }
   queryWorkHubTasks(): Promise<OperationOutput<'workhub.tasks.query'>> { return this.request('workhub.tasks.query', {}); }
+  readWorkHubTaskHistory(input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>> { return this.request('workhub.tasks.history', input); }
+  readWorkHubTaskExecutions(input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>> { return this.request('workhub.tasks.executions', input); }
   readWorkHubTask(input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>> { return this.request('workhub.tasks.read', input); }
   continueWorkHubTask(input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>> { return this.request('workhub.coordination.continue', input); }
 
@@ -1698,11 +1701,12 @@ export class DesktopRuntimeHostClient {
     return this.connection.unregisterClientCapabilities(timeoutMs);
   }
 
-  async openSession(sessionId: string): Promise<DesktopRuntimeHostSession> {
+  async openSession(sessionId: string, execution?: import('@maka/runtime-host/protocol').SessionExecutionScope): Promise<DesktopRuntimeHostSession> {
     this.#assertOpen();
     const subscription = await this.connection.openSessionSubscription({
       sessionId,
       transcript: { kind: "tail", maxBytes: SESSION_TRANSCRIPT_BOOTSTRAP_MAX_BYTES },
+      ...(execution ? { execution } : {}),
     });
     if (this.#closeTask) {
       await subscription.close().catch(() => undefined);
@@ -1891,6 +1895,7 @@ export class DesktopRuntimeHostClient {
 }
 
 class DesktopSessionHandle implements DesktopRuntimeHostSession {
+  readonly execution?: import('@maka/runtime-host/protocol').SessionExecutionScope;
   readonly hostEpoch: string;
   readonly subscriptionId: string;
   readonly snapshot: SessionContinuitySnapshot;
@@ -1910,6 +1915,7 @@ class DesktopSessionHandle implements DesktopRuntimeHostSession {
     }
     this.hostEpoch = subscription.hostEpoch;
     this.subscriptionId = subscription.subscriptionId;
+    this.execution = subscription.execution;
     this.snapshot = subscription.snapshot;
     this.activeAssistantStreams = subscription.activeAssistantStreams;
     this.transcriptBootstrap = subscription.transcriptBootstrap;

@@ -19,8 +19,11 @@
 
 import { defineOperation } from './operation-spec.js';
 import { invalidProtocolFrame } from './errors.js';
+import { decodeTurnSnapshot, type TurnSnapshot } from './turn.js';
+import type { SessionExecutionScope } from './session-continuity.js';
 import {
   requireEntityId,
+  requireCount,
   requireExactRecord,
   requireShapedRecord,
   requireUtf8String,
@@ -48,6 +51,7 @@ export interface WorkHubTaskRef {
   readonly delegationId: string;
 }
 export interface WorkHubTask extends WorkHubTaskRef {
+  readonly workId?: string;
   readonly targetSessionId: string;
   readonly targetSessionName: string;
   readonly targetMessageId: string;
@@ -80,6 +84,90 @@ export interface WorkHubTasksQueryResult {
   readonly tasks: readonly WorkHubTask[];
   readonly truncated: boolean;
 }
+export const WORKHUB_EXECUTION_PAGE_MAX_ITEMS = 16;
+export interface WorkHubTaskAssignment extends WorkHubTaskRef {
+  readonly workId: string;
+  readonly generationId: string;
+  readonly targetSessionId: string;
+  readonly targetSessionName: string;
+  readonly targetMessageId: string;
+  readonly text: string;
+  readonly createdAt: number;
+  readonly state: 'queued' | 'cancelled' | 'owned' | 'shared' | 'unavailable';
+  readonly superseded: boolean;
+  readonly execution?: SessionExecutionScope;
+}
+export interface WorkHubTaskHistoryInput {
+  readonly workId: string;
+  readonly actionId?: string;
+  readonly cursor?: string;
+}
+export interface WorkHubTaskHistoryResult {
+  readonly workId: string;
+  readonly assignments: readonly WorkHubTaskAssignment[];
+  readonly nextCursor: string | null;
+}
+export interface WorkHubTaskExecutionsInput extends WorkHubTaskRef {
+  readonly cursor?: string;
+}
+export interface WorkHubTaskExecutionsResult extends WorkHubTaskRef {
+  readonly targetSessionId: string;
+  readonly executions: readonly TurnSnapshot[];
+  readonly nextCursor: string | null;
+}
+const cursor = (value: unknown) =>
+  value === null ? null : requireUtf8String(value, 'WorkHub history cursor', 2048);
+function decodeAssignment(value: unknown): WorkHubTaskAssignment {
+  const item = requireShapedRecord(
+    value,
+    'WorkHub assignment history',
+    [
+      'workId',
+      'generationId',
+      'actionId',
+      'delegationId',
+      'targetSessionId',
+      'targetSessionName',
+      'targetMessageId',
+      'text',
+      'createdAt',
+      'state',
+      'superseded',
+    ],
+    ['execution'],
+  );
+  if (
+    !['queued', 'cancelled', 'owned', 'shared', 'unavailable'].includes(String(item.state)) ||
+    typeof item.superseded !== 'boolean'
+  )
+    throw invalidProtocolFrame('Invalid WorkHub assignment history state');
+  let execution: SessionExecutionScope | undefined;
+  if (item.execution !== undefined) {
+    const scope = requireExactRecord(item.execution, 'WorkHub owned execution', [
+      'turnId',
+      'runId',
+    ]);
+    execution = {
+      turnId: requireEntityId(scope.turnId, 'WorkHub Turn'),
+      runId: requireEntityId(scope.runId, 'WorkHub Run'),
+    };
+  }
+  if ((item.state === 'owned') !== !!execution)
+    throw invalidProtocolFrame('Invalid WorkHub assignment ownership');
+  return {
+    ...decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId }),
+    workId: requireEntityId(item.workId, 'WorkHub work'),
+    generationId: requireEntityId(item.generationId, 'WorkHub generation'),
+    targetSessionId: requireEntityId(item.targetSessionId, 'WorkHub Session'),
+    targetMessageId: requireEntityId(item.targetMessageId, 'WorkHub Message'),
+    targetSessionName: requireUtf8String(item.targetSessionName, 'WorkHub name', 512),
+    text: requireUtf8String(item.text, 'WorkHub text', WORKHUB_TASK_TEXT_MAX_BYTES),
+    createdAt: requireCount(item.createdAt, 'WorkHub assignment time'),
+    state: item.state as WorkHubTaskAssignment['state'],
+    superseded: item.superseded,
+    ...(execution ? { execution } : {}),
+  };
+}
 export function decodeWorkHubTaskRef(value: unknown): WorkHubTaskRef {
   const item = requireExactRecord(value, 'WorkHub task reference', ['actionId', 'delegationId']);
   return {
@@ -101,7 +189,7 @@ function decodeTask(value: unknown): WorkHubTask {
       'createdAt',
       'status',
     ],
-    ['execution', 'waitReason', 'dependency', 'failure'],
+    ['workId', 'execution', 'waitReason', 'dependency', 'failure'],
   );
   if (
     !WORKHUB_TASK_STATUSES.includes(item.status as WorkHubTaskStatus) ||
@@ -151,6 +239,7 @@ function decodeTask(value: unknown): WorkHubTask {
   }
   return {
     actionId: requireEntityId(item.actionId, 'WorkHub action'),
+    ...(item.workId === undefined ? {} : { workId: requireEntityId(item.workId, 'WorkHub work') }),
     delegationId: requireEntityId(item.delegationId, 'WorkHub delegation'),
     targetSessionId: requireEntityId(item.targetSessionId, 'WorkHub Session'),
     targetMessageId: requireEntityId(item.targetMessageId, 'WorkHub Message'),
@@ -175,6 +264,108 @@ const errors = [
   'internal_failure',
 ] as const;
 export const WORKHUB_TASK_OPERATION_SPECS = {
+  'workhub.tasks.history': defineOperation({
+    mode: 'query',
+    availability: 'ready',
+    errors: [...errors, 'operation_conflict'],
+    decodeInput(value: unknown): WorkHubTaskHistoryInput {
+      const item = requireShapedRecord(
+        value,
+        'WorkHub work history input',
+        ['workId'],
+        ['cursor', 'actionId'],
+      );
+      if (item.cursor !== undefined && item.actionId !== undefined)
+        throw invalidProtocolFrame('Exact assignment reads cannot use a history cursor');
+      return {
+        workId: requireEntityId(item.workId, 'WorkHub work'),
+        ...(item.actionId === undefined
+          ? {}
+          : { actionId: requireEntityId(item.actionId, 'WorkHub action') }),
+        ...(item.cursor === undefined
+          ? {}
+          : { cursor: requireUtf8String(item.cursor, 'WorkHub cursor', 2048) }),
+      };
+    },
+    decodeOutput(value: unknown): WorkHubTaskHistoryResult {
+      const item = requireExactRecord(value, 'WorkHub work history', [
+        'workId',
+        'assignments',
+        'nextCursor',
+      ]);
+      const workId = requireEntityId(item.workId, 'WorkHub work');
+      if (!Array.isArray(item.assignments) || item.assignments.length > 8)
+        throw invalidProtocolFrame('Invalid WorkHub history bounds');
+      const assignments = item.assignments.map(decodeAssignment);
+      if (
+        assignments.some((a) => a.workId !== workId) ||
+        new Set(assignments.map((a) => a.actionId)).size !== assignments.length
+      )
+        throw invalidProtocolFrame('Invalid WorkHub history identity');
+      return { workId, assignments, nextCursor: cursor(item.nextCursor) };
+    },
+    assertOutputForInput(input, output) {
+      if (input.workId !== output.workId)
+        throw invalidProtocolFrame('WorkHub history changed work');
+      if (
+        input.actionId !== undefined &&
+        (output.assignments.length !== 1 ||
+          output.assignments[0]!.actionId !== input.actionId ||
+          output.nextCursor !== null)
+      )
+        throw invalidProtocolFrame('WorkHub history changed selected assignment');
+    },
+  }),
+  'workhub.tasks.executions': defineOperation({
+    mode: 'query',
+    availability: 'ready',
+    errors: [...errors, 'operation_conflict'],
+    decodeInput(value: unknown): WorkHubTaskExecutionsInput {
+      const item = requireShapedRecord(
+        value,
+        'WorkHub execution history input',
+        ['actionId', 'delegationId'],
+        ['cursor'],
+      );
+      return {
+        ...decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId }),
+        ...(item.cursor === undefined
+          ? {}
+          : { cursor: requireUtf8String(item.cursor, 'WorkHub cursor', 2048) }),
+      };
+    },
+    decodeOutput(value: unknown): WorkHubTaskExecutionsResult {
+      const item = requireExactRecord(value, 'WorkHub execution history', [
+        'actionId',
+        'delegationId',
+        'targetSessionId',
+        'executions',
+        'nextCursor',
+      ]);
+      const targetSessionId = requireEntityId(item.targetSessionId, 'WorkHub Session');
+      if (
+        !Array.isArray(item.executions) ||
+        item.executions.length > WORKHUB_EXECUTION_PAGE_MAX_ITEMS
+      )
+        throw invalidProtocolFrame('Invalid WorkHub execution history bounds');
+      const executions = item.executions.map(decodeTurnSnapshot);
+      if (
+        executions.some((e) => e.sessionId !== targetSessionId) ||
+        new Set(executions.map((e) => e.turnId)).size !== executions.length
+      )
+        throw invalidProtocolFrame('Invalid WorkHub execution history identity');
+      return {
+        ...decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId }),
+        targetSessionId,
+        executions,
+        nextCursor: cursor(item.nextCursor),
+      };
+    },
+    assertOutputForInput(input, output) {
+      if (input.actionId !== output.actionId || input.delegationId !== output.delegationId)
+        throw invalidProtocolFrame('WorkHub execution history changed assignment');
+    },
+  }),
   'workhub.tasks.query': defineOperation({
     mode: 'query',
     availability: 'ready',

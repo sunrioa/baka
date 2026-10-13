@@ -45,6 +45,7 @@ export interface DesktopTranscriptFragment {
  * One answer spans batches until `ready`; `hasOlder` is final only there.
  */
 export interface DesktopTranscriptBatchPayload {
+  readonly execution?: import('@maka/runtime-host/protocol').SessionExecutionScope;
   readonly earlierThan?: number;
   readonly coversFrom?: number | null;
   readonly sessionId: string;
@@ -68,6 +69,7 @@ export interface DesktopTranscriptBatch extends DesktopTranscriptBatchPayload {
 }
 
 export interface DesktopTranscriptOpenResult {
+  readonly execution?: import('@maka/runtime-host/protocol').SessionExecutionScope;
   readonly sessionId: string;
   readonly generation: string;
   readonly hostEpoch: string;
@@ -104,6 +106,13 @@ export function assertDesktopTranscriptBatch(value: unknown): DesktopTranscriptB
     throw new Error('Invalid Desktop transcript batch');
   }
   const batch = value as Record<string, unknown>;
+  if (batch.execution !== undefined) {
+    const scope = batch.execution as Record<string, unknown>;
+    if (!scope || typeof scope !== 'object' || Array.isArray(scope) ||
+        typeof scope.turnId !== 'string' || !scope.turnId || typeof scope.runId !== 'string' || !scope.runId) {
+      throw new Error('Invalid Desktop transcript execution scope');
+    }
+  }
   if (
     typeof batch.sessionId !== 'string' ||
     (batch.earlierThan !== undefined && !isSequence(batch.earlierThan)) ||
