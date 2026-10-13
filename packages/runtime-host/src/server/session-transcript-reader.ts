@@ -73,14 +73,15 @@ export function createSessionTranscriptReader(input: {
   ensureTranscriptLedger?: (sessionId: string) => Promise<void>;
 }): SessionTranscriptReader {
   const ledger = createDurableLedgerTranscriptReader(input);
-  const prepared = async (sessionId: string): Promise<typeof ledger> => {
+  const prepared = async (sessionId: string, turnId?: string): Promise<typeof ledger> => {
     await input.ensureTranscriptLedger?.(sessionId);
-    return ledger;
+    return turnId === undefined ? ledger : createDurableLedgerTranscriptReader(input, turnId);
   };
   return {
-    readDurableHighWater: async (sessionId) => (await prepared(sessionId)).readHighWater(sessionId),
-    readDurablePage: async (sessionId, request, project) =>
-      (await prepared(sessionId)).readPage(sessionId, request, project),
+    readDurableHighWater: async (sessionId, turnId) =>
+      (await prepared(sessionId, turnId)).readHighWater(sessionId),
+    readDurablePage: async (sessionId, request, project, turnId) =>
+      (await prepared(sessionId, turnId)).readPage(sessionId, request, project),
     readDurableRecords: async (sessionId, request) =>
       (await prepared(sessionId)).readRecords(sessionId, request),
     readDurableTurnContributions: async (sessionId, throughSequence, position, maxContributions) =>
@@ -128,11 +129,12 @@ export interface SessionTurnLandmarkSnapshot {
 export type TranscriptRowProjection = (message: StoredMessage) => StoredMessage | null;
 
 export interface SessionTranscriptReader {
-  readDurableHighWater(sessionId: string): Promise<number | null>;
+  readDurableHighWater(sessionId: string, turnId?: string): Promise<number | null>;
   readDurablePage(
     sessionId: string,
     request: SessionTranscriptPageRequest,
     project?: TranscriptRowProjection,
+    turnId?: string,
   ): Promise<SessionTranscriptStoragePage>;
   readDurableRecords(
     sessionId: string,
@@ -158,13 +160,16 @@ export interface SessionTranscriptReader {
  * What an event becomes is asked only of the read model. Storage selects Turns
  * by ordinal and hands over their events; it never classifies one.
  */
-function createDurableLedgerTranscriptReader(input: {
-  stores: ExecutionStoresWriter<'interactive'>;
-  canonicalPermissionOutcomes: CanonicalPermissionOutcomeReader;
-}) {
+function createDurableLedgerTranscriptReader(
+  input: {
+    stores: ExecutionStoresWriter<'interactive'>;
+    canonicalPermissionOutcomes: CanonicalPermissionOutcomeReader;
+  },
+  turnId?: string,
+) {
   const store = input.stores.runtimeEventStore;
   const highWater = async (sessionId: string): Promise<number | null> => {
-    const ordinal = await store.readTranscriptHighWater(sessionId);
+    const ordinal = await store.readTranscriptHighWater(sessionId, turnId);
     return ordinal === null ? null : ordinal * EVENT_SEQUENCE_STRIDE + EVENT_SEQUENCE_STRIDE - 1;
   };
 
@@ -235,6 +240,7 @@ function createDurableLedgerTranscriptReader(input: {
       sessionId,
       {
         ...request,
+        ...(turnId === undefined ? {} : { turnId }),
         maxEvents: TRANSCRIPT_SOURCE_MAX_EVENTS,
         maxBytes: TRANSCRIPT_SOURCE_MAX_BYTES,
         maxRecordBytes: TRANSCRIPT_SOURCE_MAX_RECORD_BYTES,
@@ -294,6 +300,7 @@ function createDurableLedgerTranscriptReader(input: {
           !(await store.readTranscriptTurnCrossing(
             sessionId,
             older ? run.lastOrdinal + 1 : run.firstOrdinal,
+            turnId,
           ));
         yield { ...record, between };
       }

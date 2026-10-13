@@ -30,6 +30,7 @@ import {
   requireId,
   requireOpaqueIdentity,
   requireRecord,
+  requireShapedRecord,
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
 import { decodeSessionStatus } from './session-status.js';
@@ -103,12 +104,21 @@ export interface SessionContinuitySnapshot {
   interactions: SessionInteractionProjection;
 }
 
+export interface SessionExecutionScope {
+  readonly turnId: string;
+  /** The Host-admitted logical Root, including its physical handoffs. */
+  readonly runId: string;
+}
+
 export interface SubscriptionOpenInput {
   sessionId: string;
   transcript: { kind: 'none' } | { kind: 'tail'; maxBytes: number };
+  /** Read-only view of one admitted execution, never a whole reused Session. */
+  execution?: SessionExecutionScope;
 }
 
 export interface SubscriptionOpenResult {
+  execution?: SessionExecutionScope;
   hostEpoch: string;
   subscriptionId: string;
   nextSequence: number;
@@ -350,6 +360,11 @@ export const SESSION_CONTINUITY_OPERATION_SPECS = {
     decodeInput: decodeSubscriptionOpenInput,
     decodeOutput: decodeSubscriptionOpenResult,
     assertOutputForInput: (input, output) => {
+      if (
+        input.execution?.turnId !== output.execution?.turnId ||
+        input.execution?.runId !== output.execution?.runId
+      )
+        throw invalidProtocolFrame('Session subscription execution scope changed');
       if (output.snapshot.session.sessionId !== input.sessionId) {
         throw invalidProtocolFrame('Session subscription opened for a different Session');
       }
@@ -631,13 +646,21 @@ export function decodeSessionContinuitySnapshot(value: unknown): SessionContinui
 }
 
 function decodeSubscriptionOpenInput(value: unknown): SubscriptionOpenInput {
-  const record = requireExactRecord(value, 'subscription.open input', ['sessionId', 'transcript']);
+  const record = requireShapedRecord(
+    value,
+    'subscription.open input',
+    ['sessionId', 'transcript'],
+    ['execution'],
+  );
+  const execution =
+    record.execution === undefined ? undefined : decodeExecutionScope(record.execution);
   const transcript = requireRecord(record.transcript, 'subscription transcript policy');
   if (transcript.kind === 'none') {
     requireExactRecord(transcript, 'subscription transcript policy', ['kind']);
     return {
       sessionId: requireEntityId(record.sessionId, 'sessionId'),
       transcript: { kind: 'none' },
+      ...(execution ? { execution } : {}),
     };
   }
   const tail = requireExactRecord(transcript, 'subscription transcript policy', [
@@ -652,30 +675,47 @@ function decodeSubscriptionOpenInput(value: unknown): SubscriptionOpenInput {
   return {
     sessionId: requireEntityId(record.sessionId, 'sessionId'),
     transcript: { kind: 'tail', maxBytes },
+    ...(execution ? { execution } : {}),
   };
 }
 
 function decodeSubscriptionOpenResult(value: unknown): SubscriptionOpenResult {
   requireEncodedByteLimit(value, 'subscription.open result', SUBSCRIPTION_OPEN_RESULT_MAX_BYTES);
-  const record = requireExactRecord(value, 'subscription.open result', [
-    'hostEpoch',
-    'subscriptionId',
-    'nextSequence',
-    'snapshot',
-    'activeAssistantStreams',
-    'transcript',
-  ]);
+  const record = requireShapedRecord(
+    value,
+    'subscription.open result',
+    [
+      'hostEpoch',
+      'subscriptionId',
+      'nextSequence',
+      'snapshot',
+      'activeAssistantStreams',
+      'transcript',
+    ],
+    ['execution'],
+  );
   const hostEpoch = requireId(record.hostEpoch, 'hostEpoch');
   const snapshot = decodeSessionContinuitySnapshot(record.snapshot);
   assertQueueEpoch(snapshot, hostEpoch);
   return {
     hostEpoch,
+    ...(record.execution === undefined
+      ? {}
+      : { execution: decodeExecutionScope(record.execution) }),
     subscriptionId: requireId(record.subscriptionId, 'subscriptionId'),
     nextSequence: requirePositiveCount(record.nextSequence, 'nextSequence'),
     snapshot,
     activeAssistantStreams: decodeActiveAssistantStreams(record.activeAssistantStreams, snapshot),
     transcript:
       record.transcript === null ? null : decodeSessionTranscriptBootstrap(record.transcript),
+  };
+}
+
+function decodeExecutionScope(value: unknown): SessionExecutionScope {
+  const scope = requireExactRecord(value, 'Session execution scope', ['turnId', 'runId']);
+  return {
+    turnId: requireEntityId(scope.turnId, 'execution Turn'),
+    runId: requireEntityId(scope.runId, 'execution Run'),
   };
 }
 

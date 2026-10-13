@@ -35,6 +35,57 @@ import {
 import { projectSharedSessionTranscriptMessage } from '../server/shared-session-transcript.js';
 import { transcriptReader } from './fixtures/session-transcript-reader.js';
 
+test('execution transcript cursors cannot be replayed in another scope or a whole-Session view', async () => {
+  const durable = Array.from({ length: 30 }, (_, i) => ({
+    ...userMessage(i),
+    turnId: i % 2 ? 'other-turn' : 'own-turn',
+    text: 'bounded row '.repeat(20),
+  }));
+  const reader = transcriptReader(durable);
+  const own = await createSessionTranscriptBootstrap({
+    reader,
+    sessionId: 'session-1',
+    subscriptionId: 'own',
+    throughSequence: 28,
+    maxBytes: 1024,
+    projection: 'shared',
+    turnId: 'own-turn',
+  });
+  assert.ok(own.bootstrap.durable.nextCursor);
+  const request = {
+    subscriptionId: 'own',
+    direction: 'older' as const,
+    throughSequence: 28,
+    cursor: own.bootstrap.durable.nextCursor,
+    anchorSequence: null,
+    maxBytes: 1024,
+  };
+  assert.ok(
+    (await readSessionTranscriptPage({ reader, state: own.state, request })).fragments.every(
+      (f) => f.sequence % 2 === 0,
+    ),
+  );
+  for (const turnId of ['other-turn', undefined]) {
+    const other = await createSessionTranscriptBootstrap({
+      reader,
+      sessionId: 'session-1',
+      subscriptionId: 'other',
+      throughSequence: 29,
+      maxBytes: 1024,
+      projection: 'shared',
+      turnId,
+    });
+    await assert.rejects(
+      readSessionTranscriptPage({
+        reader,
+        state: other.state,
+        request: { ...request, subscriptionId: 'other' },
+      }),
+      TranscriptPageRequestError,
+    );
+  }
+});
+
 test('reads newly durable messages forward from an announced watermark', async () => {
   const durable = [userMessage(0), userMessage(1)];
   const reader = transcriptReader(durable);

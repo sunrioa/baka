@@ -24,6 +24,7 @@ import {
   type SessionRuntimeResourcePtyDataFrame,
   type SessionDomainChangedFrame,
   type SessionContinuitySnapshot,
+  type SessionExecutionScope,
   SESSION_TRANSCRIPT_PAGE_MAX_BYTES,
   type SubscriptionClosedFrame,
   type SubscriptionFrame,
@@ -82,6 +83,7 @@ function errorMessage(error: unknown): string {
 }
 
 export interface RuntimeHostSessionSubscription extends AsyncIterable<SubscriptionFrame> {
+  readonly execution?: SessionExecutionScope;
   subscribePtyData(listener: (frame: SessionRuntimeResourcePtyDataFrame) => void): () => void;
   subscribeSessionDomainChanges(listener: (frame: SessionDomainChangedFrame) => void): () => void;
   readonly hostEpoch: string;
@@ -132,6 +134,7 @@ export class ClientSessionSubscription
   implements RuntimeHostSessionSubscription, AsyncIterator<SubscriptionFrame>
 {
   readonly hostEpoch: string;
+  readonly execution?: SessionExecutionScope;
   readonly subscriptionId: string;
   readonly snapshot: SessionContinuitySnapshot;
   readonly activeAssistantStreams: readonly SessionAssistantStreamIdentity[];
@@ -182,6 +185,7 @@ export class ClientSessionSubscription
   ) {
     this.hostEpoch = result.hostEpoch;
     this.subscriptionId = result.subscriptionId;
+    if (result.execution) this.execution = Object.freeze({ ...result.execution });
     this.snapshot = result.snapshot;
     this.activeAssistantStreams = result.activeAssistantStreams;
     this.transcriptBootstrap = result.transcript;

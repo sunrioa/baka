@@ -756,9 +756,9 @@ export class SqliteRuntimeStore
     });
   }
 
-  async readTranscriptHighWater(sessionId: string): Promise<number | null> {
+  async readTranscriptHighWater(sessionId: string, turnId?: string): Promise<number | null> {
     assertRuntimeStorageSafeId(sessionId, 'Invalid session id');
-    return this.readTransaction(() => this.transcriptQuery().highWater(sessionId));
+    return this.readTransaction(() => this.transcriptQuery().highWater(sessionId, turnId));
   }
 
   async readTranscriptRun<T>(
@@ -781,9 +781,13 @@ export class SqliteRuntimeStore
     return this.readTransaction(() => this.transcriptQuery().turns(sessionId, request));
   }
 
-  async readTranscriptTurnCrossing(sessionId: string, ordinal: number): Promise<boolean> {
+  async readTranscriptTurnCrossing(
+    sessionId: string,
+    ordinal: number,
+    turnId?: string,
+  ): Promise<boolean> {
     assertRuntimeStorageSafeId(sessionId, 'Invalid session id');
-    return this.readTransaction(() => this.transcriptQuery().crossing(sessionId, ordinal));
+    return this.readTransaction(() => this.transcriptQuery().crossing(sessionId, ordinal, turnId));
   }
 
   /**

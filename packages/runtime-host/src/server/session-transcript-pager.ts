@@ -45,6 +45,7 @@ interface TranscriptCursorState {
 }
 
 export interface SubscriberTranscriptState {
+  readonly turnId?: string;
   readonly sessionId: string;
   readonly subscriptionId: string;
   readonly cursorSecret: Buffer;
@@ -67,6 +68,7 @@ export async function createSessionTranscriptBootstrap(input: {
   maxBytes: number;
   maxEncodedBytes?: number;
   projection: SessionTranscriptProjection;
+  turnId?: string;
 }): Promise<{ bootstrap: SessionTranscriptBootstrap; state: SubscriberTranscriptState }> {
   const projection = input.projection;
   const cursorSecret = randomBytes(32);
@@ -82,6 +84,7 @@ export async function createSessionTranscriptBootstrap(input: {
       input.sessionId,
       durableRequest,
       projection === 'shared' ? sharedRowProjection(input.sessionId) : undefined,
+      input.turnId,
     );
     if (durableStorage.throughSequence !== input.throughSequence) {
       throw new Error('Session transcript durable watermark changed during bootstrap');
@@ -92,6 +95,7 @@ export async function createSessionTranscriptBootstrap(input: {
       durableThroughSequence: input.throughSequence,
       cursorSecret,
       projection,
+      ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
     };
     const bootstrap: SessionTranscriptBootstrap = {
       durable: pageFromSelection(
@@ -140,6 +144,7 @@ export async function readSessionTranscriptPage(input: {
     state.sessionId,
     durableRequest,
     state.projection === 'shared' ? sharedRowProjection(state.sessionId) : undefined,
+    state.turnId,
   );
   return pageFromSelection(
     state,

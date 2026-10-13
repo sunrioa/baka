@@ -311,6 +311,41 @@ for (const coordination of [false, true])
         stores,
         canonicalPermissionOutcomes: { readPermissionOutcome: async () => undefined },
       });
+      const oldWater = await read.readDurableHighWater(session.id, 'turn-0');
+      assert.ok(oldWater !== null);
+      assert.ok(oldWater < (await read.readDurableHighWater(session.id))!);
+      const scoped = await read.readDurablePage(
+        session.id,
+        {
+          direction: 'older',
+          maxBytes: 1024,
+          maxMessages: 10,
+        },
+        undefined,
+        'turn-0',
+      );
+      assert.equal(scoped.throughSequence, oldWater);
+      assert.equal(scoped.next, null);
+      assert.deepEqual(
+        scoped.fragments.map((f) => JSON.parse(f.data.toString()).turnId),
+        ['turn-0', 'turn-0'],
+      );
+      assert.equal(await read.readDurableHighWater(session.id, 'absent-turn'), null);
+      assert.deepEqual(
+        (
+          await read.readDurablePage(
+            session.id,
+            {
+              direction: 'newer',
+              maxBytes: 1024,
+              maxMessages: 10,
+            },
+            undefined,
+            'absent-turn',
+          )
+        ).fragments,
+        [],
+      );
       const messages: StoredMessage[] = [];
       for (let position: number | null = 0; position !== null; ) {
         const running: Awaited<ReturnType<typeof read.readDurableRecords>> =

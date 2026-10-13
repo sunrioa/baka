@@ -567,6 +567,47 @@ describe('Runtime Host bootstrap protocol', () => {
     assert.throws(() => decodeHostFrame(oversized), isInvalidFrame);
   });
 
+  test('execution-scoped subscription contracts reject changed or missing scope echoes', () => {
+    const spec = HOST_OPERATION_SPECS['subscription.open'];
+    const execution = { turnId: 'turn-1', runId: 'run-1' };
+    const input = { sessionId: 'session-1', transcript: { kind: 'none' as const }, execution };
+    const output = {
+      execution,
+      hostEpoch: 'epoch-1',
+      subscriptionId: 'subscription-1',
+      nextSequence: 1,
+      snapshot: continuitySnapshot('epoch-1'),
+      activeAssistantStreams: [],
+      transcript: null,
+    };
+    assert.deepEqual(spec.decodeInput(input), input);
+    assert.deepEqual(spec.decodeOutput(output), output);
+    assert.doesNotThrow(() => spec.assertOutputForInput?.(input, output));
+    for (const changed of [
+      undefined,
+      { ...execution, runId: 'other-run' },
+      { ...execution, turnId: 'other-turn' },
+    ]) {
+      assert.throws(
+        () => spec.assertOutputForInput?.(input, { ...output, execution: changed }),
+        isInvalidFrame,
+      );
+    }
+    assert.throws(
+      () => spec.assertOutputForInput?.({ ...input, execution: undefined }, output),
+      isInvalidFrame,
+    );
+    for (const invalid of [
+      { turnId: '', runId: 'run-1' },
+      { turnId: 'turn-1' },
+      { ...execution, sessionId: 'unrelated' },
+    ]) {
+      assert.throws(() => spec.decodeInput({ ...input, execution: invalid }), isInvalidFrame);
+      assert.throws(() => spec.decodeOutput({ ...output, execution: invalid }), isInvalidFrame);
+    }
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 213);
+  });
+
   test('normalizes legacy Session statuses in continuity snapshots', () => {
     for (const status of ['review', 'done']) {
       const decoded = decodeSessionContinuitySnapshot({

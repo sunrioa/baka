@@ -70,38 +70,47 @@ const PROTOCOL = {
   max: RUNTIME_HOST_PROTOCOL_VERSION,
 } as const;
 
-test('registers a subscription before receiving a coalesced first frame', async () => {
-  await withProtocolPeer(
-    async (transport, hostEpoch, rootId) => {
-      const request = await acceptConnectionAndReadOpen(transport, hostEpoch, rootId);
-      const opened = openResult(hostEpoch, 'subscription-ordered');
-      await writeRawLocalIpc(
-        transport,
-        Buffer.concat([
-          encodeLocalIpcTestFrame({
-            requestId: request.requestId,
-            operation: 'subscription.open',
-            ok: true,
-            result: opened,
-          }),
-          encodeLocalIpcTestFrame(deltaFrame(hostEpoch, opened.subscriptionId, 1)),
-        ]),
-      );
-      await answerClose(transport, opened.subscriptionId);
-    },
-    async (connection) => {
-      const subscription = await connection.openSessionSubscription({
-        sessionId: 'session-1',
-        transcript: { kind: 'none' },
-      });
-      assert.deepEqual(await subscription[Symbol.asyncIterator]().next(), {
-        done: false,
-        value: deltaFrame(connection.hostEpoch, subscription.subscriptionId, 1),
-      });
-      await subscription.close();
-    },
-  );
-});
+for (const execution of [undefined, { turnId: 'turn-1', runId: 'run-1' }])
+  test(`registers ${execution ? 'an execution-scoped' : 'a'} subscription before receiving a coalesced first frame`, async () => {
+    await withProtocolPeer(
+      async (transport, hostEpoch, rootId) => {
+        const request = await acceptConnectionAndReadOpen(transport, hostEpoch, rootId);
+        assert.equal(request.operation, 'subscription.open');
+        if (request.operation === 'subscription.open')
+          assert.deepEqual(request.input.execution, execution);
+        const opened = {
+          ...openResult(hostEpoch, 'subscription-ordered'),
+          ...(execution ? { execution } : {}),
+        };
+        await writeRawLocalIpc(
+          transport,
+          Buffer.concat([
+            encodeLocalIpcTestFrame({
+              requestId: request.requestId,
+              operation: 'subscription.open',
+              ok: true,
+              result: opened,
+            }),
+            encodeLocalIpcTestFrame(deltaFrame(hostEpoch, opened.subscriptionId, 1)),
+          ]),
+        );
+        await answerClose(transport, opened.subscriptionId);
+      },
+      async (connection) => {
+        const subscription = await connection.openSessionSubscription({
+          sessionId: 'session-1',
+          transcript: { kind: 'none' },
+          ...(execution ? { execution } : {}),
+        });
+        assert.deepEqual(subscription.execution, execution);
+        assert.deepEqual(await subscription[Symbol.asyncIterator]().next(), {
+          done: false,
+          value: deltaFrame(connection.hostEpoch, subscription.subscriptionId, 1),
+        });
+        await subscription.close();
+      },
+    );
+  });
 
 test('unobserved PTY bytes do not consume the Session iterator or sequence', async () => {
   await withProtocolPeer(
