@@ -92,6 +92,7 @@ function fixture() {
         readWorkHubStopRequest: async (id: string) => (stopped.has(id) ? {} : undefined),
         readWorkHubStopResolution: async () => undefined,
         readWorkHubAssignment: async (id: string) => assignments.find((a) => a.actionId === id),
+        readWorkHubTaskInputSuccessors: async () => [],
         readTranscriptHighWaterSnapshot: async () => 1,
         readTranscriptMessagesSnapshot: async (sid: string, input: { messageIds: string[] }) =>
           input.messageIds.map((id) => records.get(sid + '/' + id)).filter(Boolean),

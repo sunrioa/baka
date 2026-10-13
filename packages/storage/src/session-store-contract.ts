@@ -58,6 +58,7 @@ import type {
   WorkHubDelegationSupersededMessage,
 } from '@maka/core/session';
 import type { MessageAdmissionStore, PendingMessageAdmission } from './message-admission-store.js';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 
 /**
  * Local Session persistence contract. Implementations own atomic domain writes;
@@ -198,6 +199,15 @@ export interface WorkHubMessageAssignmentRequest {
   readonly supersession?: WorkHubDelegationSupersededMessage;
   /** Present exactly when the assignment creates its target Session. */
   readonly create?: CreateStableSessionRequest;
+  /** A native task continuation accepts its input in the same transaction. */
+  readonly taskInput?: WorkHubTaskInputMessage;
+}
+
+export interface WorkHubTaskInputCommitRequest {
+  readonly input: WorkHubTaskInputMessage;
+  readonly admission: PendingMessageAdmission;
+  /** Exact queued Message before supplementation; its position and ownership stay unchanged. */
+  readonly expectedAdmission?: PendingMessageAdmission;
 }
 
 export interface WorkHubMessageAssignmentResult {
@@ -497,6 +507,15 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     request: WorkHubMessageAssignmentRequest,
   ): Promise<WorkHubMessageAssignmentResult>;
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
+  commitWorkHubTaskInput(request: WorkHubTaskInputCommitRequest): Promise<WorkHubTaskInputMessage>;
+  readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined>;
+  readWorkHubTaskInputByMessage(messageId: string): Promise<WorkHubTaskInputMessage | undefined>;
+  /** Only folded input Messages with a canonical successor root-source proof. */
+  readWorkHubTaskInputSuccessors(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  }): Promise<readonly WorkHubTaskInputMessage[]>;
   readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined>;

@@ -48,6 +48,7 @@ import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admi
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 import type { WorkHubResultObservation } from './workhub-result-coordinator.js';
 import { readHostedExecutionMembership } from './hosted-execution-membership.js';
+import { readWorkHubTaskInputContinuation } from './workhub-task-input-lineage.js';
 export { readHostedExecutionMembership as readWorkHubEvidenceExecution } from './hosted-execution-membership.js';
 
 function identity(prefix: string, ...parts: string[]): string {
@@ -224,7 +225,15 @@ export function createWorkHubEvidenceRuntime(options: {
   ): Promise<TaskExecution> {
     let tip = await executions.readLatestRootTurnLineage(original);
     let round = 0;
+    const seen = new Set<string>();
     for (;;) {
+      if (seen.has(tip.turnId)) throw new Error('WorkHub task lineage contains a cycle');
+      seen.add(tip.turnId);
+      const input = await readWorkHubTaskInputContinuation(stores, assignment, tip);
+      if (input) {
+        tip = await executions.readLatestRootTurnLineage(input);
+        continue;
+      }
       const edge = await readEvidenceContinuation(assignment, tip);
       if (!edge) return { ...tip, round };
       if (!edge.next)

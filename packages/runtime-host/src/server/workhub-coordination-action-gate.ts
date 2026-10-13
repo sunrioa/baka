@@ -52,12 +52,13 @@ import type {
 import { WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS } from '../protocol/index.js';
 import type { ConnectionContext } from './operation-dispatcher.js';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
+import type { WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
 import type {
   WorkHubTargetExecutionAuthority,
   WorkHubTargetExecutionPreparationInput,
 } from './workhub-target-execution-authority.js';
 
-/** User content is read from the active Host Turn before reaching this gate. */
+/** User content comes from an authenticated native command or the active Coordination Turn. */
 export interface WorkHubAdmittedAction
   extends Omit<WorkHubCoordinationActFromTurnInput, 'turnId' | 'create' | 'proposal'> {
   readonly proposal: Exclude<
@@ -67,6 +68,8 @@ export interface WorkHubAdmittedAction
   readonly sourceMessageId?: string;
   /** Host-resolved work selection; never a second semantic target selection. */
   readonly continuation?: { readonly workId: string; readonly sourceActionId: string };
+  /** Only the native task-input command supplies this accepted user input identity. */
+  readonly taskInput?: WorkHubTaskInputRequest;
   readonly create?: { readonly workspace: WorkspaceTarget };
   readonly userText: string;
   readonly attachments?: AttachmentRef[];
@@ -209,6 +212,7 @@ export interface WorkHubRetirementResult {
 }
 
 export interface WorkHubDelegationAssignmentInput {
+  readonly taskInput?: WorkHubTaskInputRequest;
   readonly work?: WorkHubWorkBinding;
   /** Rechecked under the target admission lease, only before a fresh assignment. */
   readonly validateFreshTarget?: () => Promise<void>;
@@ -1282,6 +1286,7 @@ function delegationAssignment(
     targetSessionName,
     disposition: input.proposal.disposition,
     userText: input.userText,
+    ...(input.taskInput ? { taskInput: input.taskInput } : {}),
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.delegationText === undefined ? {} : { delegationText: input.delegationText }),
   } as const;
@@ -1336,6 +1341,7 @@ function digest(value: unknown): `sha256:${string}` {
 
 function actionFingerprint(input: WorkHubAdmittedAction): `sha256:${string}` {
   const common = {
+    ...(input.taskInput ? { taskInput: input.taskInput } : {}),
     ...(input.continuation
       ? { continuation: input.continuation }
       : input.selectedTarget

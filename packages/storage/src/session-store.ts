@@ -154,6 +154,8 @@ import type {
   PendingMessageAdmission,
 } from './message-admission-store.js';
 import { projectSessionCatalogMessages } from './session-message-projection.js';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type { WorkHubTaskInputCommitRequest } from './session-store-contract.js';
 export { projectSessionCatalogMessages };
 
 export function createSessionStore(workspaceRoot: string): SessionAuthorityStore {
@@ -337,6 +339,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
       assignment: request.assignment,
       admission: request.admission,
       projection: projectSessionCatalogMessages([request.assignment]),
+      ...(request.taskInput ? { taskInput: request.taskInput } : {}),
       ...(request.supersession ? { supersession: request.supersession } : {}),
       ...(create
         ? {
@@ -369,6 +372,47 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return message?.type === 'workhub_coordination' && message.kind === 'delegation_assigned'
       ? message
       : undefined;
+  }
+
+  async commitWorkHubTaskInput(
+    request: WorkHubTaskInputCommitRequest,
+  ): Promise<WorkHubTaskInputMessage> {
+    await this.ensureReady();
+    const result = await this.metadata.commitWorkHubTaskInput(request);
+    for (const listener of this.transcriptChangeListeners)
+      listener(WORKHUB_COORDINATION_SESSION_ID);
+    return result;
+  }
+
+  async readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined> {
+    const message = await this.readWorkHubCoordinationMessage(
+      `whti_${workHubIdentitySuffix(inputId)}`,
+    );
+    return message?.type === 'workhub_coordination' && message.kind === 'task_input'
+      ? message
+      : undefined;
+  }
+
+  async readWorkHubTaskInputByMessage(
+    messageId: string,
+  ): Promise<WorkHubTaskInputMessage | undefined> {
+    if (!/^whtm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+    const message = await this.readWorkHubCoordinationMessage(`whti_${messageId.slice(5)}`);
+    return message?.type === 'workhub_coordination' &&
+      message.kind === 'task_input' &&
+      message.mode === 'steering' &&
+      message.targetMessageId === messageId
+      ? message
+      : undefined;
+  }
+
+  async readWorkHubTaskInputSuccessors(input: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  }): Promise<readonly WorkHubTaskInputMessage[]> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubTaskInputSuccessors(input);
   }
 
   async readActiveWorkHubAssignmentsByTarget(

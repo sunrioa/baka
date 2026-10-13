@@ -18,6 +18,7 @@
  */
 
 import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
+import { readWorkHubTaskInputBinding } from './workhub-task-input-lineage.js';
 import { isWorkHubEvidenceRequest, type WorkHubEvidenceOrigin } from '@maka/core/workhub-evidence';
 import {
   workHubEvidenceRequestId,
@@ -3447,9 +3448,20 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         )
       );
     }
-    return assignments.some((assignment) =>
-      admission.sourceMessages.some((source) => source.messageId === assignment.targetMessageId),
-    );
+    if (
+      assignments.some((assignment) =>
+        admission.sourceMessages.some((source) => source.messageId === assignment.targetMessageId),
+      )
+    )
+      return true;
+    // A late native correction may be folded into a new root without another
+    // delegation. Its accepted binding still participates in the same worker
+    // budget, even when a mixed batch cannot be exclusively controlled by work.
+    for (const source of admission.sourceMessages) {
+      if (await readWorkHubTaskInputBinding(this.stores, admission.sessionId, source.messageId))
+        return true;
+    }
+    return false;
   }
 
   private async materializeAdmittedMessageSources(active: ActiveRootTurn): Promise<void> {
