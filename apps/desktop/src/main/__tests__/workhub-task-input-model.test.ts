@@ -159,6 +159,27 @@ test('unavailable, full or unreadable recovery storage never dispatches or overw
     assert.equal(model.snapshot().error, 'storage'); model.close();
   }
   assert.equal(sends, 0); assert.equal(corrupt.values.get(key), '{unreadable pending input');
+  const saved = memoryStorage(); let capacity = Infinity, submitted!: WorkHubTaskInputRequest;
+  const bounded = { ...saved, setItem: (id: string, value: string) => { if (value.length > capacity) throw new Error('Quota exceeded'); saved.setItem(id, value); } };
+  const pending: Services = { sendTaskInput: async (_owner, input) => { submitted = input; return { kind: 'unknown' }; },
+    readTaskInput: async () => receipt(submitted, a.targetSessionId, 'delivered') };
+  const model = createWorkHubTaskInputModel(pending, owner(), a.workId, () => a, bounded, () => 'quota-input');
+  model.writeDraft('Original reserved input'); await model.send(a, model.readDraft());
+  capacity = saved.values.get(key)!.length;
+  const newer = 'Newer unsaved draft ' + 'x'.repeat(100);
+  model.writeDraft(newer); assert.equal(model.snapshot().error, 'storage');
+  await model.retry(); assert.equal(model.snapshot().error, 'storage', 'an unknown retry does not repair the newer draft');
+  await model.reconcile();
+  assert.equal(model.snapshot().receipt?.delivery, 'delivered'); assert.equal(model.readDraft(), newer);
+  assert.equal(model.snapshot().error, 'storage', 'an old receipt does not prove that the current draft was stored');
+  assert.equal(model.snapshot().recoveryUnsafe, true);
+  assert.equal(JSON.parse(saved.values.get(key)!).draft, 'Original reserved input', 'do not clear an older reservation instead of saving the newer draft');
+  capacity = Infinity; model.writeDraft(newer);
+  assert.equal(model.snapshot().error, undefined, 'only a successful current-draft write dismisses the warning');
+  assert.equal(model.snapshot().recoveryUnsafe, false);
+  const recovered = createWorkHubTaskInputModel(pending, owner(), a.workId, () => a, bounded);
+  assert.equal(recovered.readDraft(), newer); assert.equal(recovered.snapshot().attempt?.input.inputId, submitted.inputId);
+  model.close(); recovered.close();
 });
 
 test('UTF-8 size, current-source identity and same-Host targeting are checked before reserving a command', async () => {

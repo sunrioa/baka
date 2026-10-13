@@ -359,12 +359,16 @@ export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentit
 // Real path: WorkHub → task overview → View task execution. The production
 // WorkHubRoot selects a canonical work, then mounts the real scoped reader.
 // Only Host responses are mocked; the scoped ChatView and direct task Composer are real.
+// A coordinator question/form stays pending in its own scope while this task is usable.
 export const TaskExecutionView: Story = {
-  render: () => <Surface history="usage" taskInbox taskOverview />,
+  render: () => <Surface history="usage" taskInbox taskOverview question selectTarget />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     // The fresh Host fixture has no pre-existing pending input for this work.
     sessionStorage.removeItem(JSON.stringify(['workhub-task-input-v1', sessionId, 'overview-running']));
+    const questionHeading = await canvas.findByRole('heading', { name: '首批发布范围选哪个？' });
+    const coordinatorQuestion = questionHeading.closest<HTMLElement>('.maka-user-question-prompt')!;
+    await userEvent.click(within(coordinatorQuestion).getAllByRole('option')[1]!);
     const heading = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     const view = await canvas.findByRole('region', { name: '任务实时执行' });
@@ -382,6 +386,8 @@ export const TaskExecutionView: Story = {
     expect(within(view).queryByText(/已补充重复投递测试/)).toBeNull();
     const taskComposer = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!;
     expect(taskComposer).toBeVisible();
+    expect(coordinatorQuestion).not.toBeVisible();
+    expect(within(taskComposer).getByRole('button', { name: '停止' })).toBeVisible();
     expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
     const editor = taskComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
     await userEvent.click(editor); expect(editor).toHaveFocus();
@@ -398,14 +404,32 @@ export const TaskExecutionView: Story = {
     expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
     expect(writes.defaults).not.toHaveBeenCalled();
+    expect(writes.question).not.toHaveBeenCalled(); expect(writes.form).not.toHaveBeenCalled();
     await userEvent.click(within(taskComposer).getByRole('button', { name: '返回协调输入' }));
+    await waitFor(() => expect(coordinatorQuestion).toBeVisible());
+    expect(canvasElement.querySelector('.maka-user-question-prompt')).toBe(coordinatorQuestion);
+    expect(within(coordinatorQuestion).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
+    await userEvent.click(within(coordinatorQuestion).getByRole('button', { name: '提交答案' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubComposerContent')).toBeVisible());
+    const coordinatorEditor = canvasElement.querySelector<HTMLElement>('.workHubComposerContent [contenteditable="true"]')!;
+    await userEvent.click(coordinatorEditor); await userEvent.type(coordinatorEditor, '选择后续工作'); await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBeVisible());
+    const coordinatorForm = canvasElement.querySelector<HTMLElement>('.maka-form-interaction-prompt')!;
     const reopened = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(reopened.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer [data-input-delivery="queued"]')).toBeVisible());
+    expect(coordinatorForm).not.toBeVisible();
+    expect(within(canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!).getByRole('button', { name: '停止' })).toBeVisible();
     const restoredEditor = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer [contenteditable="true"]')!;
     await userEvent.click(restoredEditor); expect(restoredEditor).toHaveFocus(); expect(restoredEditor).toHaveTextContent('');
     expect(writes.taskInput).toHaveBeenCalledTimes(1);
+    expect(writes.answer).toHaveBeenCalledTimes(1); expect(writes.question).toHaveBeenCalledTimes(1); expect(writes.form).not.toHaveBeenCalled();
+    await userEvent.click(within(canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!).getByRole('button', { name: '返回协调输入' }));
+    await waitFor(() => expect(coordinatorForm).toBeVisible());
+    expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBe(coordinatorForm);
+    const finalHeading = canvas.getByRole('button', { name: '发布检查清单 执行中' });
+    await userEvent.click(within(finalHeading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toBeVisible());
   },
 };
 // Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native

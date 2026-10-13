@@ -51,6 +51,7 @@ export function WorkHubTaskComposer({ services, owner, workId, name, view, compo
     {input.session && <p className="workHubTaskInputTarget">{input.session.name} · {input.session.model ?? t.unknownModel}</p>}
     {blocked && <p role="status">{blocked}{!input.source && view.ready && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].follow} onClick={view.followLatest} />}</p>}
     {error && <p role="alert">{error}</p>}
+    {state.recoveryUnsafe && state.error !== 'storage' && <p role="alert">{t.error.storage}</p>}
     {state.receipt && <p role="status" data-input-id={state.receipt.inputId} data-input-delivery={state.receipt.delivery}>{t.delivery[state.receipt.delivery]}</p>}
     {state.attempt && <details className="workHubTaskInputDetails">
       <summary>{t.original}</summary>

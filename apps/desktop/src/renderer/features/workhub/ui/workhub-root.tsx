@@ -256,7 +256,7 @@ export function WorkHubRoot() {
     void services.control.getSnapshot().then(acceptControl).catch(controller.report);
     const focus = services.presentation.onFocusComposer((expand) => {
       if (expand) setConversationExpanded(true);
-      const choice = surface.current?.querySelector<HTMLElement>('.maka-choice-panel');
+      const choice = selectedTaskRef.current ? undefined : surface.current?.querySelector<HTMLElement>('.maka-choice-panel');
       if (choice) {
         if (!choice.contains(document.activeElement)) choice.focus();
       } else focusComposer();
@@ -323,6 +323,7 @@ export function WorkHubRoot() {
               {!progress && !selectedTask && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))}
                 onView={task => highlight.selectWork({ sessionId: task.targetSessionId, name: task.targetSessionName, workId: task.workId ?? task.actionId })} />}
             </div>
+            {(controller.activeForm || controller.activeQuestion) && <div hidden={Boolean(selectedTask)}>
             {controller.activeForm && (
               <FormInteractionPrompt
                 request={controller.activeForm}
@@ -335,7 +336,8 @@ export function WorkHubRoot() {
             {controller.activeQuestion && <UserQuestionPrompt key={controller.activeQuestion.requestId}
               request={controller.activeQuestion} onRespond={controller.respondToUserQuestion}
               onStop={controller.stop} stopPending={controller.stopPending} />}
-            {selectedTask && taskOwner && !controller.activeQuestion && !controller.activeForm && <WorkHubTaskComposer
+            </div>}
+            {selectedTask && taskOwner && <WorkHubTaskComposer
               key={JSON.stringify([taskOwner, selectedTask.workId])}
               services={services} owner={taskOwner} workId={selectedTask.workId!} name={selectedTask.name} view={taskView}
               composerRef={taskComposer} onBack={() => highlight.selectWork(undefined)} />}

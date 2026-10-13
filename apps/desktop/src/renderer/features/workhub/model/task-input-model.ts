@@ -31,6 +31,7 @@ interface Recovery { draft: string; draftVersion: number; attempt?: Attempt }
 export interface WorkHubTaskInputSnapshot extends Recovery {
   readonly sending: boolean;
   readonly reconciling: boolean;
+  readonly recoveryUnsafe: boolean;
   readonly receipt?: WorkHubTaskInputResult;
   readonly rejected?: { code: string; message: string };
   readonly error?: 'storage' | 'length' | 'unknown' | 'identity';
@@ -70,8 +71,9 @@ export function createWorkHubTaskInputModel(
   let sending = false;
   let reading: Promise<void> | undefined;
   let corrupt = false;
+  let recoveryError = false;
   let recovery: Recovery = { draft: '', draftVersion: 0 };
-  let state: WorkHubTaskInputSnapshot = { ...recovery, sending: false, reconciling: false };
+  let state: WorkHubTaskInputSnapshot = { ...recovery, sending: false, reconciling: false, recoveryUnsafe: false };
 
   function readRecovery(): Recovery {
     const raw = storage?.getItem(key);
@@ -100,18 +102,22 @@ export function createWorkHubTaskInputModel(
     return result;
   }
   function persist(next: Recovery) {
-    if (!storage) throw new Error('Reload-safe recovery storage unavailable');
-    if (next.draft.length > 120000 || !Number.isSafeInteger(next.draftVersion)) throw new Error('Draft exceeds the recovery bound');
-    const raw = JSON.stringify(next);
-    if (raw.length > 1024 * 1024) throw new Error('Recovery record exceeds its bound');
-    storage.setItem(key, raw);
+    try {
+      if (!storage) throw new Error('Reload-safe recovery storage unavailable');
+      if (next.draft.length > 120000 || !Number.isSafeInteger(next.draftVersion)) throw new Error('Draft exceeds the recovery bound');
+      const raw = JSON.stringify(next);
+      if (raw.length > 1024 * 1024) throw new Error('Recovery record exceeds its bound');
+      storage.setItem(key, raw);
+      recoveryError = false;
+    } catch (error) { recoveryError = true; throw error; }
   }
   function publish(patch: Partial<WorkHubTaskInputSnapshot>) {
-    state = { ...state, ...recovery, ...patch };
+    state = { ...state, ...recovery, ...patch, recoveryUnsafe: recoveryError,
+      ...(recoveryError && patch.error !== 'length' && patch.error !== 'identity' ? { error: 'storage' as const } : {}) };
     if (!closed) for (const listener of listeners) listener();
   }
   try { recovery = readRecovery(); publish({ ...(recovery.attempt ? { error: 'unknown' as const } : {}) }); }
-  catch { corrupt = true; publish({ error: 'storage' }); }
+  catch { corrupt = true; recoveryError = true; publish({ error: 'storage' }); }
 
   function accept(attempt: Attempt, receipt: WorkHubTaskInputResult): boolean {
     if (state.attempt?.input.inputId !== attempt.input.inputId) return false;
@@ -127,14 +133,19 @@ export function createWorkHubTaskInputModel(
     // Read its latest reservation, and clear only this exact, unedited draft.
     try {
       const latest = readRecovery();
-      if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.editorDraft) {
+      if (latest.attempt?.input.inputId === attempt.input.inputId && recovery.draftVersion > latest.draftVersion) {
+        // A newer editor write may have failed quota. Confirming the old input
+        // must preserve this current draft or keep its warning, not clear an
+        // older, smaller storage record and imply that recovery is now safe.
+        persist(recovery); publish({ error: undefined });
+      } else if (latest.attempt?.input.inputId === attempt.input.inputId && latest.draftVersion === attempt.draftVersion && latest.draft === attempt.editorDraft) {
         const next = { ...latest, draft: '', draftVersion: latest.draftVersion + 1 };
         persist(next);
-        if (recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) { recovery = next; publish({}); }
+        if (recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) { recovery = next; publish({ error: undefined }); }
       } else if (latest.attempt?.input.inputId === attempt.input.inputId && !latest.draft && recovery.draftVersion === attempt.draftVersion && recovery.draft === attempt.editorDraft) {
-        recovery = latest; publish({});
+        recovery = latest; recoveryError = false; publish({ error: undefined });
       }
-    } catch { publish({ error: 'storage' }); }
+    } catch { recoveryError = true; publish({ error: 'storage' }); }
     return true;
   }
   async function dispatch(attempt: Attempt): Promise<boolean> {
@@ -159,10 +170,10 @@ export function createWorkHubTaskInputModel(
     subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     readDraft: () => recovery.draft,
     writeDraft(text: string) {
-      if (closed || text === recovery.draft) return;
-      recovery = { ...recovery, draft: text, draftVersion: recovery.draftVersion + 1 };
+      if (closed || (text === recovery.draft && !recoveryError)) return;
+      if (text !== recovery.draft) recovery = { ...recovery, draft: text, draftVersion: recovery.draftVersion + 1 };
       try { if (corrupt) throw new Error('Unreadable recovery must not be overwritten'); persist(recovery); publish({ error: state.error === 'storage' ? undefined : state.error }); }
-      catch { publish({ error: 'storage' }); }
+      catch { recoveryError = true; publish({ error: 'storage' }); }
     },
     async send(source: WorkHubTaskAssignment, text: string): Promise<boolean> {
       const current = currentSource();
@@ -191,7 +202,7 @@ export function createWorkHubTaskInputModel(
       return dispatch(state.attempt);
     },
     reconcile(): Promise<void> {
-      if (closed || !state.attempt || reading || (state.receipt && ['delivered', 'cancelled'].includes(state.receipt.delivery))) return reading ?? Promise.resolve();
+      if (closed || !state.attempt || reading || (!recoveryError && state.receipt && ['delivered', 'cancelled'].includes(state.receipt.delivery))) return reading ?? Promise.resolve();
       const attempt = state.attempt;
       publish({ reconciling: true });
       const task = (async () => {
