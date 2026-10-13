@@ -40,7 +40,7 @@ import { createRunCompositionSnapshot } from '@maka/core/run-composition';
 import type { BackendSendInput } from '@maka/core/backend-types';
 import type { SessionEvent } from '@maka/core/events';
 import { runtimeHandoffPause } from '@maka/core/runtime-handoff';
-import { deferred } from '@maka/core/test-only/async-primitives';
+import { deferred, withTimeout } from '@maka/core/test-only/async-primitives';
 import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-model';
 import { RuntimeInteractionAdmissionRejectedError } from '@maka/runtime/interaction-authority';
 import { parseNoRealConnectionError } from '@maka/core/connection-error-copy';
@@ -4608,6 +4608,331 @@ test('WorkHub concurrency releases failed roots and places same-Session successo
   });
 });
 
+test('one real coordination message can establish distinct objectives and queue a work-bound follow-up', async () => {
+  await withCompositionRoot(async ({ owner }) => {
+    await configureFakeDefaultTarget(owner);
+    const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    const release = deferred<void>();
+    const sends: Array<{ sessionId: string; text: string }> = [];
+    const { composition } = await createCapturedExecutionComposition(owner, {
+      defaultWorkHubRouting: true,
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push({ sessionId: context.sessionId, text: input.text });
+            if (input.text === 'batch objective A') await release.promise;
+            yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'work-objectives-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const desktop = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(context.connectionId),
+      { send: async () => {} },
+    );
+    try {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+            context,
+          )
+        ).ok,
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const userText = 'Inspect A and summarize unrelated B. Then ask A for details.';
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            { turnId: 'batch-objectives', text: userText },
+            context,
+          )
+        ).ok,
+      );
+      for (const [actionId, text] of [
+        ['batch-a', 'batch objective A'],
+        ['batch-b', 'batch objective B'],
+      ]) {
+        const result = await composition.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'batch-objectives',
+            actionId: actionId!,
+            proposal: { disposition: 'create_new', title: 'Same title' },
+            delegationText: text!,
+            create: { workspace: { kind: 'isolated' } },
+            newWorkDefaults: { permissionMode: 'ask' },
+          },
+          context,
+        );
+        assert.ok(result.ok, JSON.stringify(result));
+      }
+      const page = await composition.handlers['workhub.coordination.works']({}, context);
+      assert.ok(page.ok, JSON.stringify(page));
+      assert.deepEqual(page.result.works.map((work) => work.workId).sort(), ['batch-a', 'batch-b']);
+      assert.deepEqual(page.result.works.map((work) => work.objective).sort(), [
+        'batch objective A',
+        'batch objective B',
+      ]);
+      const admission = await stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        'batch-objectives',
+      );
+      assert.ok(admission?.userMessageId);
+      for (const work of page.result.works) {
+        assert.equal(work.originalRequest, userText);
+        assert.equal(work.sourceMessageId, admission.userMessageId);
+      }
+      const a = page.result.works.find((work) => work.workId === 'batch-a')!;
+      const continued = await composition.handlers['workhub.coordination.actFromTurn'](
+        {
+          turnId: 'batch-objectives',
+          actionId: 'batch-a-followup',
+          proposal: {
+            disposition: 'continue_work',
+            workId: a.workId,
+            sourceActionId: a.sourceActionId,
+          },
+          delegationText: 'A follow-up details',
+        },
+        context,
+      );
+      assert.ok(continued.ok, JSON.stringify(continued));
+      if (continued.result.disposition !== 'delegate_existing')
+        assert.fail('Missing work continuation');
+      assert.equal(continued.result.workId, 'batch-a');
+      assert.equal(continued.result.targetSessionId, a.targetSessionId);
+      assert.ok(continued.result.targetMessageId);
+      const pending = await stores.sessionStore.readMessageAdmission(
+        a.targetSessionId,
+        continued.result.targetMessageId,
+      );
+      assert.equal(pending?.placement, 'next_turn');
+      assert.equal(pending?.disposition, 'followup');
+      assert.equal(
+        sends.some((send) => send.text === 'A follow-up details'),
+        false,
+      );
+      const followup = await stores.sessionStore.readWorkHubAssignment('batch-a-followup');
+      assert.equal(followup?.work?.continuesActionId, 'batch-a');
+      const running = await composition.handlers['turn.query'](
+        { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: 'batch-objectives' },
+        context,
+      );
+      assert.ok(running.ok);
+      await composition.handlers['turn.stop'](
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          turnId: 'batch-objectives',
+          runId: running.result.runId,
+        },
+        context,
+      );
+      release.resolve();
+      await waitFor(async () => sends.some((send) => send.text === 'A follow-up details'), 10000);
+      assert.equal(
+        sends.find((send) => send.text === 'A follow-up details')?.sessionId,
+        a.targetSessionId,
+      );
+    } finally {
+      release.resolve();
+      await desktop.close();
+      await composition.close();
+    }
+  });
+});
+
+test('work replacement retires ancestor sources even when the objective returns to its original Session', async () => {
+  await withCompositionRoot(async ({ owner }) => {
+    await configureFakeDefaultTarget(owner);
+    const sends: Array<{ sessionId: string; text: string }> = [];
+    const movedReady = deferred<void>();
+    const { composition } = await createCapturedExecutionComposition(owner, {
+      defaultWorkHubRouting: true,
+      primaryBackendFactory: (context) =>
+        new (class extends FakeBackend {
+          override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+            sends.push({ sessionId: context.sessionId, text: input.text });
+            if (input.text === 'A in a new execution container') {
+              for await (const event of super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT })) {
+                yield event;
+                if (event.type === 'text_delta') movedReady.resolve();
+              }
+            } else yield* super.send(input);
+          }
+        })(context),
+    });
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'work-generation-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    const desktop = composition.clientCapabilities!.attachConnection(
+      clientCapabilityConnectionIdentity(context.connectionId),
+      { send: async () => {} },
+    );
+    try {
+      assert.ok(
+        (
+          await composition.handlers['client.capability.replace'](
+            {
+              registrationId: randomUUID(),
+              offers: workHubDesktopCapabilityOffers(),
+            },
+            context,
+          )
+        ).ok,
+      );
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      assert.ok(
+        (
+          await composition.handlers['workhub.coordination.answer'](
+            {
+              turnId: 'work-generations',
+              text: 'Continue A and move its execution container when requested.',
+            },
+            context,
+          )
+        ).ok,
+      );
+      const act = (
+        actionId: string,
+        proposal: WorkHubCoordinationActFromTurnInput['proposal'],
+        delegationText: string,
+        candidateSetId?: string,
+      ) =>
+        composition.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'work-generations',
+            actionId,
+            proposal,
+            delegationText,
+            ...(candidateSetId ? { candidateSetId } : {}),
+            ...((
+              'disposition' in proposal
+                ? proposal.disposition === 'create_new'
+                : proposal.operation === 'correct' && proposal.target.disposition === 'create_new'
+            )
+              ? {
+                  create: { workspace: { kind: 'isolated' as const } },
+                  newWorkDefaults: { permissionMode: 'ask' as const },
+                }
+              : {}),
+          },
+          context,
+        );
+      const original = await act(
+        'generation-a',
+        { disposition: 'create_new', title: 'A' },
+        'original objective A',
+      );
+      assert.ok(original.ok);
+      const followProposal = {
+        disposition: 'continue_work' as const,
+        workId: 'generation-a',
+        sourceActionId: 'generation-a',
+      };
+      const followed = await act(
+        'generation-a-follow',
+        followProposal,
+        'A follow-up before moving',
+      );
+      assert.ok(followed.ok);
+      await waitFor(async () => sends.some((s) => s.text === 'A follow-up before moving'), 10000);
+      const moved = await act(
+        'generation-a-move',
+        {
+          operation: 'correct',
+          replacesActionId: 'generation-a-follow',
+          target: { disposition: 'create_new', title: 'Moved A' },
+        },
+        'A in a new execution container',
+      );
+      assert.ok(moved.ok, JSON.stringify(moved));
+      assert.notEqual(moved.result.targetSessionId, original.result.targetSessionId);
+      assert.equal(
+        (await act('stale-original', followProposal, 'must never execute in old A')).ok,
+        false,
+      );
+      // Durable retries are still the original action, not fresh stale input.
+      assert.deepEqual(
+        await act('generation-a-follow', followProposal, 'A follow-up before moving'),
+        followed,
+      );
+      let cursor: string | null | undefined;
+      let oldAvailable: boolean | undefined;
+      for (let i = 0; i < 8 && cursor !== null; i++) {
+        const page = await composition.handlers['workhub.coordination.works'](
+          { limit: 1, ...(cursor ? { cursor } : {}) },
+          context,
+        );
+        assert.ok(page.ok);
+        oldAvailable =
+          page.result.works.find((w) => w.sourceActionId === 'generation-a')?.available ??
+          oldAvailable;
+        cursor = page.result.nextCursor;
+      }
+      assert.equal(
+        oldAvailable,
+        false,
+        'older assignment pages must not advertise a retired generation',
+      );
+      // Sample candidates after the moved worker has published its live state,
+      // and hold that state until replacement instead of racing completion.
+      await withTimeout(movedReady.promise, 10000, 'moved worker did not become ready');
+      const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
+      assert.ok(candidates.ok);
+      const oldTarget = candidates.result.candidates.find(
+        (c) => c.sessionId === original.result.targetSessionId,
+      );
+      assert.ok(oldTarget);
+      const returned = await act(
+        'generation-a-return',
+        {
+          operation: 'correct',
+          replacesActionId: 'generation-a-move',
+          target: { disposition: 'delegate_existing', candidateRef: oldTarget.candidateRef },
+        },
+        'A moved back to its first Session',
+        candidates.result.candidateSetId,
+      );
+      assert.ok(returned.ok, JSON.stringify(returned));
+      assert.equal(returned.result.targetSessionId, original.result.targetSessionId);
+      assert.equal(
+        (await act('stale-same-session', followProposal, 'must not revive first generation')).ok,
+        false,
+      );
+      const fresh = await act(
+        'current-generation-follow',
+        {
+          disposition: 'continue_work',
+          workId: 'generation-a',
+          sourceActionId: 'generation-a-return',
+        },
+        'follow the current generation',
+      );
+      assert.ok(fresh.ok, JSON.stringify(fresh));
+      await waitFor(
+        async () => sends.some((s) => s.text === 'follow the current generation'),
+        10000,
+      );
+      assert.equal(sends.filter((s) => s.text === 'A follow-up before moving').length, 1);
+      assert.equal(
+        sends.some((s) => s.text.startsWith('must ')),
+        false,
+      );
+    } finally {
+      await desktop.close();
+      await composition.close();
+    }
+  });
+});
+
 test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
@@ -4675,6 +5000,12 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       );
       const source = await stores.sessionStore.readWorkHubAssignment('overview-source');
       assert.ok(source);
+      assert.equal(source.work?.id, 'overview-source');
+      const sourceAdmission = await stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        source.coordinationTurnId,
+      );
+      assert.equal(source.work?.sourceMessageId, sourceAdmission?.userMessageId ?? undefined);
       const query = async () => {
         const page = await composition.handlers['workhub.tasks.query']({}, context);
         assert.ok(page.ok, JSON.stringify(page));
@@ -4703,6 +5034,18 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       const first = await composition.handlers['workhub.coordination.continue'](input, context);
       assert.ok(first.ok, JSON.stringify(first));
       assert.equal(first.result.targetSessionId, target.id);
+      assert.ok('workId' in first.result);
+      assert.equal(first.result.workId, source.work!.id);
+      const workPage = await composition.handlers['workhub.coordination.works'](
+        { query: 'original-task' },
+        context,
+      );
+      assert.ok(workPage.ok, JSON.stringify(workPage));
+      assert.equal(workPage.result.works[0]?.workId, source.work!.id);
+      const continuationSource = await stores.sessionStore.readWorkHubAssignment(
+        workPage.result.works[0]!.sourceActionId,
+      );
+      assert.equal(continuationSource?.work?.continuesActionId, source.actionId);
       assert.deepEqual(
         sends.map((s) => s.text),
         ['original-task'],

@@ -373,6 +373,19 @@ function hubMessage(s: MemoryState, id: string): StoredMessage | undefined {
     .get(HUB)
     ?.find((m) => m.id === id);
 }
+function latestWorkAssignment(
+  s: MemoryState,
+  workId: string,
+): WorkHubDelegationAssignedMessage | undefined {
+  return [...(messages(s).get(HUB) ?? [])]
+    .reverse()
+    .find(
+      (m): m is WorkHubDelegationAssignedMessage =>
+        m.type === 'workhub_coordination' &&
+        m.kind === 'delegation_assigned' &&
+        (m.work?.id ?? m.actionId) === workId,
+    );
+}
 function remove(s: MemoryState, id: string, group: Set<string>): void {
   const record = requireHeader(s, id);
   const provisions = [...rows<AgentGraphOperatorProvision>(s, 'graphProvisions').values()];
@@ -606,6 +619,30 @@ export function createMemorySessionStore(
           if (bytes + n > request.maxStoredBytes) break;
           bytes += n;
           records.push(r);
+        }
+        return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
+    readWorkHubAssignmentsPage: async (request) =>
+      read((s) => {
+        requireHeader(s, HUB);
+        const all = messages(s).get(HUB)!;
+        let selected = all
+          .map((message, sequence) => ({ message, sequence }))
+          .filter(
+            (r) =>
+              r.message.type === 'workhub_coordination' &&
+              r.message.kind === 'delegation_assigned' &&
+              r.sequence > (request.afterSequence ?? -1) &&
+              r.sequence < (request.beforeSequence ?? Infinity),
+          );
+        if (request.beforeSequence !== undefined) selected.reverse();
+        let bytes = 0;
+        const records = [];
+        for (const r of selected.slice(0, request.maxMessages)) {
+          const size = Buffer.byteLength(JSON.stringify(r.message));
+          if (records.length && bytes + size > request.maxStoredBytes) break;
+          records.push(r);
+          bytes += size;
         }
         return { records, highWaterSequence: all.length ? all.length - 1 : null };
       }),
@@ -917,6 +954,7 @@ export function createMemorySessionStore(
           ? m
           : undefined;
       }),
+    readLatestWorkHubAssignment: async (id) => read((s) => latestWorkAssignment(s, id)),
     readWorkHubReplacement: async (id) =>
       read((s) => {
         const m = hubMessage(s, 'whp_' + suffix(id));
@@ -1073,6 +1111,28 @@ export function createMemorySessionStore(
           if (!equal(assignmentIdentity(prior), assignmentIdentity(v)))
             conflict('Action identity conflict');
           return { kind: 'existing' as const, targetCreated: false, assignment: prior };
+        }
+        if (v.work) {
+          const sourceActionId = v.work.continuesActionId ?? v.replacesActionId;
+          if (sourceActionId) {
+            const source = hubMessage(s, 'wha_' + suffix(sourceActionId));
+            const latest = latestWorkAssignment(s, v.work.id);
+            if (
+              source?.type !== 'workhub_coordination' ||
+              source.kind !== 'delegation_assigned' ||
+              (source.work?.id ?? source.actionId) !== v.work.id ||
+              !latest ||
+              (latest.work?.generationId ?? latest.actionId) !==
+                (source.work?.generationId ?? source.actionId) ||
+              v.work.generationId !==
+                (v.work.continuesActionId
+                  ? (source.work?.generationId ?? source.actionId)
+                  : v.actionId) ||
+              (v.work.continuesActionId && source.targetSessionId !== v.targetSessionId)
+            )
+              conflict('WorkHub continuation source does not own this work');
+          } else if (v.work.id !== v.actionId || v.work.generationId !== v.actionId)
+            conflict('WorkHub work requires its original action');
         }
         if ((v.disposition === 'create_new') !== Boolean(request.create))
           conflict('Create disposition mismatch');
@@ -1370,6 +1430,7 @@ export function createMemorySessionStore(
 function assignmentIdentity(v: WorkHubDelegationAssignedMessage) {
   return {
     actionId: v.actionId,
+    work: v.work,
     actionFingerprint: v.actionFingerprint,
     coordinationTurnId: v.coordinationTurnId,
     targetSessionId: v.targetSessionId,

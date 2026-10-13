@@ -1002,6 +1002,19 @@ export interface TurnStateMessage {
 export const WORKHUB_COORDINATION_RECORD_SCHEMA_VERSION = 1 as const;
 export const WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION = 2 as const;
 export const WORKHUB_COORDINATION_STOP_SCHEMA_VERSION = 3 as const;
+export const WORKHUB_COORDINATION_WORK_SCHEMA_VERSION = 4 as const;
+
+/** A continuing objective, independent of the Session used to execute it. */
+export interface WorkHubWorkBinding {
+  /** The action that first established the objective; legacy assignments use their actionId. */
+  readonly id: string;
+  /** First assignment in the current execution container; changes on replacement. */
+  readonly generationId: string;
+  /** Exact prior assignment continued by this input, not a title/path inference. */
+  readonly continuesActionId?: string;
+  /** Actual source user Message when the Host can prove that identity. */
+  readonly sourceMessageId?: string;
+}
 
 export type WorkHubDelegationDisposition = 'delegate_existing' | 'create_new';
 
@@ -1078,7 +1091,8 @@ interface WorkHubCoordinationMessageEnvelope {
   ts: number;
   schemaVersion:
     | typeof WORKHUB_COORDINATION_RECORD_SCHEMA_VERSION
-    | typeof WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION;
+    | typeof WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION
+    | typeof WORKHUB_COORDINATION_WORK_SCHEMA_VERSION;
   actionId: string;
   actionFingerprint: `sha256:${string}`;
   coordinationTurnId: string;
@@ -1099,6 +1113,8 @@ interface WorkHubCoordinationMessageEnvelope {
  */
 export interface WorkHubDelegationAssignedMessage extends WorkHubCoordinationMessageEnvelope {
   kind: 'delegation_assigned';
+  /** Absent on legacy records: do not guess that equal Session identities mean equal work. */
+  work?: WorkHubWorkBinding;
   /** New delegations opt into Host-owned asynchronous result delivery. */
   returnResults?: true;
   delegationId: string;
@@ -1461,6 +1477,7 @@ const WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE =
       'replacesActionId',
       'replacesDelegationId',
       'delegationText',
+      'work',
     ],
   );
 const WORKHUB_DELEGATION_REPLACEMENT_REQUESTED_MESSAGE_SHAPE =
@@ -1836,7 +1853,8 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
   const common =
     hasMessageEnvelope(message, true) &&
     (message.schemaVersion === WORKHUB_COORDINATION_RECORD_SCHEMA_VERSION ||
-      message.schemaVersion === WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION) &&
+      message.schemaVersion === WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION ||
+      message.schemaVersion === WORKHUB_COORDINATION_WORK_SCHEMA_VERSION) &&
     typeof message.actionId === 'string' &&
     typeof message.actionFingerprint === 'string' &&
     /^sha256:[a-f0-9]{64}$/u.test(message.actionFingerprint) &&
@@ -1879,6 +1897,9 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
     message.targetSessionName.trim().length > 0 &&
     (message.returnResults === undefined || message.returnResults === true) &&
     (message.steered === undefined || message.steered === true) &&
+    (message.schemaVersion === WORKHUB_COORDINATION_WORK_SCHEMA_VERSION
+      ? isWorkHubWorkBinding(message.work, message.actionId, message.replacesActionId)
+      : message.work === undefined) &&
     ((message.schemaVersion === WORKHUB_COORDINATION_RECORD_SCHEMA_VERSION &&
       message.replacesActionId === undefined &&
       message.replacesDelegationId === undefined) ||
@@ -1886,7 +1907,40 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
         typeof message.replacesActionId === 'string' &&
         message.replacesActionId.length > 0 &&
         typeof message.replacesDelegationId === 'string' &&
-        message.replacesDelegationId.length > 0))
+        message.replacesDelegationId.length > 0) ||
+      (message.schemaVersion === WORKHUB_COORDINATION_WORK_SCHEMA_VERSION &&
+        ((message.replacesActionId === undefined && message.replacesDelegationId === undefined) ||
+          (typeof message.replacesActionId === 'string' &&
+            message.replacesActionId.length > 0 &&
+            typeof message.replacesDelegationId === 'string' &&
+            message.replacesDelegationId.length > 0))))
+  );
+}
+
+function isWorkHubWorkBinding(
+  value: unknown,
+  actionId: unknown,
+  replacesActionId: unknown,
+): boolean {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !['id', 'generationId', 'continuesActionId', 'sourceMessageId'].includes(key),
+    )
+  )
+    return false;
+  const identity = (v: unknown) => typeof v === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(v);
+  return (
+    identity(value.id) &&
+    identity(value.generationId) &&
+    (value.sourceMessageId === undefined || identity(value.sourceMessageId)) &&
+    (value.continuesActionId === undefined ||
+      (identity(value.continuesActionId) && value.continuesActionId !== actionId)) &&
+    (value.continuesActionId === undefined || replacesActionId === undefined) &&
+    (value.continuesActionId !== undefined || value.generationId === actionId) &&
+    (value.id === actionId ||
+      value.continuesActionId !== undefined ||
+      replacesActionId !== undefined)
   );
 }
 

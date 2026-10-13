@@ -31,6 +31,7 @@ export type WorkHubActionResult =
   | { readonly disposition: 'clarify'; readonly coordinationTurnId: string }
   | {
       readonly disposition: 'delegate_existing';
+      readonly workId?: string;
       readonly targetSessionId: string;
       readonly targetTurnId?: string;
       readonly targetMessageId?: string;
@@ -38,6 +39,7 @@ export type WorkHubActionResult =
     }
   | {
       readonly disposition: 'create_new';
+      readonly workId?: string;
       readonly targetSessionId: string;
       readonly targetTurnId?: string;
       readonly targetMessageId?: string;
@@ -45,6 +47,7 @@ export type WorkHubActionResult =
     }
   | {
       readonly disposition: 'replace';
+      readonly workId?: string;
       readonly replacementDisposition: 'delegate_existing' | 'create_new';
       readonly targetSessionId: string;
       readonly targetTurnId?: string;
@@ -107,9 +110,11 @@ export function isWorkHubActionResult(r: unknown): r is WorkHubActionResult {
         'targetTurnId',
         'targetMessageId',
         'steered',
+        'workId',
         ...(r.disposition === 'replace' ? ['replacementDisposition'] : []),
       ]) &&
       text('targetSessionId') &&
+      (r.workId === undefined || text('workId')) &&
       (r.targetTurnId !== undefined || r.targetMessageId !== undefined) &&
       (r.targetTurnId === undefined || text('targetTurnId')) &&
       (r.targetMessageId === undefined || text('targetMessageId')) &&

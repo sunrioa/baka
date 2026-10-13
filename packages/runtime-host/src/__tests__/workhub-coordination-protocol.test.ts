@@ -33,6 +33,55 @@ import {
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
 } from '../protocol/index.js';
 
+test('work continuation selects an exact objective and source, never caller execution authority', () => {
+  const input = {
+    turnId: 'active',
+    actionId: 'follow-up',
+    delegationText: 'Explain the evidence',
+    proposal: { disposition: 'continue_work', workId: 'original', sourceActionId: 'source' },
+  };
+  assert.deepEqual(decodeWorkHubCoordinationActFromTurnInput(input), input);
+  for (const extra of [
+    { candidateSetId: `sha256:${'a'.repeat(64)}` },
+    { create: { workspace: { kind: 'isolated' } } },
+    { newWorkDefaults: { permissionMode: 'bypass' } },
+    { sourceMessageId: 'invented-user-message' },
+    { proposal: { ...input.proposal, targetSessionId: 'another-session' } },
+    { proposal: { ...input.proposal, sourceActionId: '../invalid' } },
+  ])
+    assert.throws(
+      () => decodeWorkHubCoordinationActFromTurnInput({ ...input, ...extra }),
+      RuntimeHostProtocolError,
+    );
+  const result = {
+    disposition: 'delegate_existing',
+    workId: 'original',
+    targetSessionId: 'target',
+    targetMessageId: 'message',
+  };
+  assert.deepEqual(decodeWorkHubCoordinationActResult(result), result);
+  assert.throws(
+    () => decodeWorkHubCoordinationActResult({ ...result, workId: '../other' }),
+    RuntimeHostProtocolError,
+  );
+  const spec = HOST_OPERATION_SPECS['workhub.coordination.works'];
+  assert.equal(spec.mode, 'query');
+  assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.coordination.works'), true);
+  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 212);
+  for (const invalid of [
+    { limit: 9 },
+    { limit: 0 },
+    { cursor: '' },
+    { sessionId: 'foreign' },
+    { query: 'x'.repeat(1025) },
+  ])
+    assert.throws(() => spec.decodeInput(invalid), RuntimeHostProtocolError);
+  assert.deepEqual(spec.decodeOutput({ works: [], nextCursor: null }), {
+    works: [],
+    nextCursor: null,
+  });
+});
+
 test('WorkHub Coordination resolve has a closed empty input and bounded identity result', () => {
   assert.deepEqual(decodeWorkHubCoordinationResolveInput({}), {});
   assert.deepEqual(decodeWorkHubCoordinationResolveResult({ sessionId: 'coordination' }), {

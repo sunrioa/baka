@@ -4302,6 +4302,11 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
       );
       assert.ok(started.ok, JSON.stringify(started));
       await backend?.started.promise;
+      const admission = await fixture.stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        turnId,
+      );
+      assert.ok(admission?.userMessageId);
       assert.deepEqual(
         await fixture.coordinator.readActiveWorkHubRequest(turnId),
         toolProfile === 'workhub-coordination-v2' ? content : undefined,
@@ -4312,6 +4317,7 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
           ? {
               content,
               runId: started.result.runId,
+              sourceMessageId: admission.userMessageId,
               decision: { kind: 'routing', disposition: 'answer_here' },
             }
           : undefined,
@@ -4345,6 +4351,7 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
           {
             content: { text: 'workhub-followup' },
             runId: sent[1]!.runId,
+            sourceMessageId: 'workhub-followup',
             decision: { kind: 'routing', disposition: 'answer_here' },
           },
         );

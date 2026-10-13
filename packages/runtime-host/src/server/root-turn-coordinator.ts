@@ -2123,6 +2123,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         readonly content: MessageContent;
         readonly runId: string;
         readonly decision?: WorkHubRoutingDecision;
+        readonly sourceMessageId?: string;
       }
     | undefined
   > {
@@ -2159,6 +2160,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       return {
         runId: active.runId,
         content,
+        ...(admission.userMessageId && !admission.execution.feedback
+          ? { sourceMessageId: admission.userMessageId }
+          : {}),
         ...(admission.execution.routingDecision
           ? { decision: admission.execution.routingDecision }
           : {}),

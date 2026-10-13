@@ -42,6 +42,7 @@ import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import type { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import type { HostWorkHubRoutingModel } from '../server/execution-model-authority.js';
+import type { WorkHubCoordinationActFromTurnInput } from '../protocol/workhub-coordination.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import {
   SessionOperationFailure,
@@ -69,6 +70,149 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('Host WorkHub Coordination coordinator', () => {
+  test('binds A/B/A follow-ups to this round of work across restart and unrelated Session activity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workhub-objectives-'));
+    let store = createSessionStore(root);
+    const makeHost = () =>
+      coordinator(root, store, undefined, undefined, undefined, undefined, {
+        assign: persistTestAssignmentAction(store, (input) => `turn-${input.actionId}`),
+      });
+    try {
+      let host = makeHost();
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const createTarget = () =>
+        store.create({
+          cwd: root,
+          name: 'Same folder',
+          llmConnectionSlug: 'test',
+          model: 'worker-model',
+          permissionMode: 'ask',
+        });
+      const old = await createTarget();
+      const a = await createTarget();
+      const b = await createTarget();
+      const delegate = async (actionId: string, targetSessionId: string, userText: string) => {
+        const page = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+        assert.ok(page.ok);
+        const candidate = page.result.candidates.find((item) => item.sessionId === targetSessionId);
+        assert.ok(candidate);
+        const result = await host.act(
+          {
+            actionId,
+            userText,
+            candidateSetId: page.result.candidateSetId,
+            proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+          },
+          CONTEXT,
+        );
+        assert.ok(result.ok, JSON.stringify(result));
+        return result;
+      };
+      await delegate('historical-a', old.id, 'Old A: inspect /same/folder and its SKILL.md');
+      await delegate('current-a', a.id, 'R4-A: inspect /same/folder and its SKILL.md');
+      await delegate('unrelated-b', b.id, 'R4-B: a completely unrelated question');
+      const original = await store.readWorkHubAssignment('current-a');
+      assert.ok(original);
+      // Discovery recency cannot replace the stable objective with an old same-topic Session.
+      for (let i = 0; i < 40; i++) await createTarget();
+      const candidates = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+      assert.ok(candidates.ok);
+      assert.equal(
+        candidates.result.candidates.some((item) => item.sessionId === a.id),
+        false,
+      );
+      const workPage = await host.handlers['workhub.coordination.works'](
+        { query: 'R4-A', limit: 1 },
+        CONTEXT,
+      );
+      assert.ok(workPage.ok);
+      assert.equal(workPage.result.works.length, 1);
+      const work = workPage.result.works[0]!;
+      assert.equal(work.workId, 'current-a');
+      assert.equal(work.sourceActionId, 'current-a');
+      assert.equal(work.targetSessionId, a.id);
+      assert.equal(work.originalRequest, original.userText);
+      assert.equal(work.createdAt, original.ts);
+      assert.equal(work.available, true);
+      const continuation = {
+        actionId: 'current-a-followup',
+        userText: 'Read the complete skill file now',
+        proposal: {
+          disposition: 'continue_work' as const,
+          workId: work.workId,
+          sourceActionId: work.sourceActionId,
+        },
+      };
+      const result = await host.act(continuation, CONTEXT);
+      assert.ok(result.ok, JSON.stringify(result));
+      assert.equal(result.result.targetSessionId, a.id);
+      assert.ok('workId' in result.result);
+      assert.equal(result.result.workId, 'current-a');
+      const followup = await store.readWorkHubAssignment('current-a-followup');
+      assert.deepEqual(followup?.work, {
+        id: 'current-a',
+        generationId: 'current-a',
+        continuesActionId: 'current-a',
+      });
+      assert.equal((await store.readWorkHubAssignment('unrelated-b'))?.work?.id, 'unrelated-b');
+      const bad = await host.act(
+        {
+          ...continuation,
+          actionId: 'mismatched-work',
+          proposal: {
+            disposition: 'continue_work',
+            workId: 'unrelated-b',
+            sourceActionId: 'current-a',
+          },
+        },
+        CONTEXT,
+      );
+      assert.equal(bad.ok, false);
+      assert.equal(await store.readWorkHubAssignment('mismatched-work'), undefined);
+      const before = await store.readHeaderSnapshot(a.id);
+      assert.equal(before.model, 'worker-model');
+      assert.equal(before.permissionMode, 'ask');
+      assert.equal(before.cwd, root);
+      await store.updateHeader(a.id, { cwd: join(root, 'moved-workspace') });
+      assert.deepEqual(
+        await host.act(continuation, CONTEXT),
+        result,
+        'committed replay retains work identity after workspace metadata changes',
+      );
+      const pageBeforeRestart = await host.handlers['workhub.coordination.works'](
+        { limit: 1 },
+        CONTEXT,
+      );
+      assert.ok(pageBeforeRestart.ok);
+      assert.ok(pageBeforeRestart.result.nextCursor);
+      const cursor = pageBeforeRestart.result.nextCursor;
+      const changedQuery = await host.handlers['workhub.coordination.works'](
+        { query: 'B', cursor },
+        CONTEXT,
+      );
+      assert.equal(changedQuery.ok, false);
+      await store.close?.();
+      store = createSessionStore(root);
+      host = makeHost();
+      const replay = await host.act(continuation, CONTEXT);
+      assert.deepEqual(replay, result);
+      const expired = await host.handlers['workhub.coordination.works']({ cursor }, CONTEXT);
+      assert.equal(expired.ok, false);
+      const restored = await host.handlers['workhub.coordination.works'](
+        { query: 'R4-A' },
+        CONTEXT,
+      );
+      assert.ok(restored.ok);
+      assert.equal(restored.result.works[0]?.workId, 'current-a');
+      assert.equal(restored.result.works[0]?.sourceActionId, 'current-a-followup');
+      assert.equal(restored.result.works[0]?.originalRequest, original.userText);
+      assert.equal(restored.result.works[0]?.createdAt, original.ts);
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('isolated task creation rejects substituted directory roots before any assignment effect', async () => {
     for (const replaceRoot of [true, false]) {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-isolated-')));
@@ -849,6 +993,7 @@ describe('Host WorkHub Coordination coordinator', () => {
           disposition: 'delegate_existing',
           targetSessionId: candidates.result.candidates[0]!.sessionId,
           targetTurnId: 'payments-turn',
+          workId: 'payments-action',
         },
       });
       assert.deepEqual(
@@ -2438,9 +2583,15 @@ function coordinator(
   return {
     handlers: host.handlers,
     prepareRoutingDecision: host.prepareRoutingDecision.bind(host),
-    async act(input: WorkHubAdmittedAction, context: ConnectionContext) {
+    async act(
+      input:
+        | WorkHubAdmittedAction
+        | (Omit<WorkHubCoordinationActFromTurnInput, 'turnId'> & { userText: string }),
+      context: ConnectionContext,
+    ) {
       const turnId = randomUUID();
-      const { userText, attachments, ...action } = input;
+      const { userText, ...action } = input;
+      const attachments = 'attachments' in input ? input.attachments : undefined;
       activeRequests.set(turnId, { text: userText, ...(attachments ? { attachments } : {}) });
       try {
         return await host.handlers['workhub.coordination.actFromTurn'](
@@ -2467,9 +2618,10 @@ async function persistTestAssignment(
       id: `wha_${suffix}`,
       turnId: input.actionId,
       ts: Date.now(),
-      schemaVersion: 1,
+      schemaVersion: input.work ? 4 : 1,
       kind: 'delegation_assigned',
       actionId: input.actionId,
+      ...(input.work ? { work: input.work } : {}),
       actionFingerprint: input.actionFingerprint,
       coordinationTurnId: input.actionId,
       targetSessionId: input.targetSessionId,
@@ -2504,6 +2656,7 @@ function persistTestAssignmentAction(
   targetTurnId: string | ((input: Parameters<WorkHubActionGateEffects['assign']>[0]) => string),
 ): HostWorkHubCoordinationCoordinatorOptions['sessionActions']['assign'] {
   return async (input) => {
+    await input.validateFreshTarget?.();
     const result = await persistTestAssignment(
       store,
       input,
