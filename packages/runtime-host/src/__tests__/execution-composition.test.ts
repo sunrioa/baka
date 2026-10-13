@@ -40,7 +40,7 @@ import { createRunCompositionSnapshot } from '@maka/core/run-composition';
 import type { BackendSendInput } from '@maka/core/backend-types';
 import type { SessionEvent } from '@maka/core/events';
 import { runtimeHandoffPause } from '@maka/core/runtime-handoff';
-import { deferred } from '@maka/core/test-only/async-primitives';
+import { deferred, withTimeout } from '@maka/core/test-only/async-primitives';
 import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-model';
 import { RuntimeInteractionAdmissionRejectedError } from '@maka/runtime/interaction-authority';
 import { parseNoRealConnectionError } from '@maka/core/connection-error-copy';
@@ -4750,13 +4750,19 @@ test('work replacement retires ancestor sources even when the objective returns 
   await withCompositionRoot(async ({ owner }) => {
     await configureFakeDefaultTarget(owner);
     const sends: Array<{ sessionId: string; text: string }> = [];
+    const movedReady = deferred<void>();
     const { composition } = await createCapturedExecutionComposition(owner, {
       defaultWorkHubRouting: true,
       primaryBackendFactory: (context) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
             sends.push({ sessionId: context.sessionId, text: input.text });
-            yield* super.send(input);
+            if (input.text === 'A in a new execution container') {
+              for await (const event of super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT })) {
+                yield event;
+                if (event.type === 'text_delta') movedReady.resolve();
+              }
+            } else yield* super.send(input);
           }
         })(context),
     });
@@ -4876,6 +4882,9 @@ test('work replacement retires ancestor sources even when the objective returns 
         false,
         'older assignment pages must not advertise a retired generation',
       );
+      // Sample candidates after the moved worker has published its live state,
+      // and hold that state until replacement instead of racing completion.
+      await withTimeout(movedReady.promise, 10000, 'moved worker did not become ready');
       const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
       assert.ok(candidates.ok);
       const oldTarget = candidates.result.candidates.find(
