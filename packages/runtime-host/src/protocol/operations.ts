@@ -393,6 +393,8 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.interactions.revoke',
   'workhub.tasks.query',
   'workhub.tasks.read',
+  'workhub.tasks.history',
+  'workhub.tasks.executions',
   'workhub.coordination.continue',
 ] as const satisfies readonly OperationKey[]);
 

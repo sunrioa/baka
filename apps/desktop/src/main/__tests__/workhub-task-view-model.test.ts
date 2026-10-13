@@ -105,6 +105,33 @@ for (const revisit of ['refresh', 'loadEarlier'] as const) test(`a selected old 
   model.close();
 });
 
+test('a late failed exact assignment read cannot mark a newly selected assignment unavailable', async () => {
+  const delayed = deferred<Awaited<ReturnType<WorkHubServices['taskHistory']>>>();
+  const old = assignment('old', { state: 'queued', execution: undefined });
+  const current = assignment('current');
+  let exactStarted = false;
+  const model = createWorkHubTaskViewModel({
+    taskHistory: async (_owner, input) => {
+      if (input.actionId) { exactStarted = true; return delayed.promise; }
+      return input.cursor ? { workId: 'work', assignments: [old], nextCursor: null }
+        : { workId: 'work', assignments: [current], nextCursor: 'old-page' };
+    },
+    taskExecutions: async () => ({ actionId: current.actionId, delegationId: current.delegationId, targetSessionId: current.targetSessionId, executions: [{ ...turn('turn-current'), runId: 'run-current' }], nextCursor: null }),
+  }, 'host-a-coordinator', 'work');
+  await model.refresh(); await model.loadEarlier(); model.selectAssignment('old');
+  const refreshing = model.refresh();
+  await waitFor(() => exactStarted);
+  model.selectAssignment('current');
+  await waitFor(() => model.snapshot().executionsReady);
+  delayed.reject(new Error('Old assignment query failed'));
+  await refreshing;
+  assert.equal(model.snapshot().assignment?.actionId, 'current');
+  assert.equal(model.snapshot().execution?.turnId, 'turn-current');
+  assert.equal(model.snapshot().ready, true);
+  assert.equal(model.snapshot().error, undefined);
+  model.close();
+});
+
 test('task view follows the exact assignment and paged lineage, not a shared Session name or path', async () => {
   const original = assignment('a'), replacement = assignment('b', { generationId: 'replacement', targetSessionId: 'another-session' });
   const reads: string[] = [];

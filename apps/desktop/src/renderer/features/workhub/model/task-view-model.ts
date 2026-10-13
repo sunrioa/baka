@@ -127,7 +127,13 @@ export function createWorkHubTaskViewModel(
           let assignments = [...page.rows, ...state.assignments.filter(item => !ids.has(item.actionId))];
           const selected = manualAction;
           if (selected && !ids.has(selected)) {
-            const exact = await services.taskHistory(owner, { workId, actionId: selected });
+            let exact: Awaited<ReturnType<typeof services.taskHistory>>;
+            try { exact = await services.taskHistory(owner, { workId, actionId: selected }); }
+            catch (reason) {
+              if (closed) return;
+              if (generation !== version || manualAction !== selected) { dirty = true; continue; }
+              throw reason;
+            }
             if (closed) return;
             if (generation !== version || manualAction !== selected) { dirty = true; continue; }
             const row = exact.assignments[0];
