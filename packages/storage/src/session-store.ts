@@ -23,6 +23,10 @@ import {
   toSummary,
 } from './session-store-values.js';
 import type {
+  WorkHubPeerQuestionMessage,
+  WorkHubPeerSettlementMessage,
+} from '@maka/core/workhub-evidence';
+import type {
   TaskExecutionGrantRecord,
   TaskGrantClosureReason,
 } from '@maka/core/task-execution-grant';
@@ -391,6 +395,40 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return message?.type === 'workhub_coordination' && message.kind === 'task_input'
       ? message
       : undefined;
+  }
+
+  async commitWorkHubPeerQuestion(
+    question: WorkHubPeerQuestionMessage,
+  ): Promise<WorkHubPeerQuestionMessage> {
+    await this.ensureReady();
+    const result = await this.metadata.commitWorkHubPeerQuestion(question);
+    for (const listener of this.transcriptChangeListeners) {
+      listener(result.sender.sessionId);
+      listener(result.recipient.sessionId);
+    }
+    return result;
+  }
+
+  async commitWorkHubPeerSettlement(
+    settlement: WorkHubPeerSettlementMessage,
+  ): Promise<WorkHubPeerSettlementMessage> {
+    await this.ensureReady();
+    const result = await this.metadata.commitWorkHubPeerSettlement(settlement);
+    for (const listener of this.transcriptChangeListeners) {
+      listener(result.requesterSessionId);
+      if (result.actor.sessionId !== result.requesterSessionId) listener(result.actor.sessionId);
+    }
+    return result;
+  }
+
+  async readWorkHubPeerInboxPage(
+    sessionId: string,
+    actionId: string,
+    now: number,
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubPeerInboxPage(sessionId, actionId, now, request);
   }
 
   async readWorkHubTaskInputByMessage(

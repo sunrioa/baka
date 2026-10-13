@@ -366,6 +366,9 @@ export function backfillRuntimeEventsFromStoredMessages(
       case 'workhub_coordination':
       case 'workhub_evidence':
       case 'workhub_evidence_resolution':
+      case 'workhub_peer_question':
+      case 'workhub_peer_inbox':
+      case 'workhub_peer_settlement':
         break;
 
       // A note that names a turn is that invocation's own fact, so it converts.

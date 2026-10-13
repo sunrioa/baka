@@ -59,6 +59,10 @@ import type {
 } from '@maka/core/session';
 import type { MessageAdmissionStore, PendingMessageAdmission } from './message-admission-store.js';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type {
+  WorkHubPeerQuestionMessage,
+  WorkHubPeerSettlementMessage,
+} from '@maka/core/workhub-evidence';
 
 /**
  * Local Session persistence contract. Implementations own atomic domain writes;
@@ -508,6 +512,20 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
   ): Promise<WorkHubMessageAssignmentResult>;
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
   commitWorkHubTaskInput(request: WorkHubTaskInputCommitRequest): Promise<WorkHubTaskInputMessage>;
+  /** Atomic question in A plus a small inbox reference in B; no execution admission. */
+  commitWorkHubPeerQuestion(
+    question: WorkHubPeerQuestionMessage,
+  ): Promise<WorkHubPeerQuestionMessage>;
+  /** Reply/cancel share one terminal identity in B: the first committed outcome wins. */
+  commitWorkHubPeerSettlement(
+    settlement: WorkHubPeerSettlementMessage,
+  ): Promise<WorkHubPeerSettlementMessage>;
+  readWorkHubPeerInboxPage(
+    sessionId: string,
+    actionId: string,
+    now: number,
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage>;
   readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined>;
   readWorkHubTaskInputByMessage(messageId: string): Promise<WorkHubTaskInputMessage | undefined>;
   /** Only folded input Messages with a canonical successor root-source proof. */

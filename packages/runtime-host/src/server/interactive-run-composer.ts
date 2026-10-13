@@ -115,6 +115,10 @@ export interface InteractiveRunComposerInput {
     context: HostModelPromptContext,
     baseText: string | undefined,
   ) => Promise<ResolvedRunPrompt>;
+  /** Host-owned ephemeral execution data sampled outside the stable base-prompt cache. */
+  readonly resolveExecutionContexts?: (
+    context: HostModelPromptContext,
+  ) => Promise<NonNullable<ResolvedRunPrompt['contexts']>>;
   readonly scheduledTaskTool?: MakaTool;
   readonly goalTools?: readonly MakaTool[];
   readonly parentAgentTools?: readonly MakaTool[];
@@ -292,11 +296,20 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
     context: HostModelPromptContext,
   ): Promise<ResolvedRunPrompt> => {
     const base = await resolveBaseSystemPrompt(context);
-    if (!input.resolveAdditionalSystemPrompt || runProfile) return base;
-    const plugin = await input.resolveAdditionalSystemPrompt(context, base.text);
+    const plugin =
+      input.resolveAdditionalSystemPrompt && !runProfile
+        ? await input.resolveAdditionalSystemPrompt(context, base.text)
+        : base;
+    const executionContexts =
+      input.resolveExecutionContexts && !runProfile && !hasToolCeiling
+        ? await input.resolveExecutionContexts(context)
+        : [];
+    if (plugin === base && !executionContexts.length) return base;
     return Object.freeze({
       text: plugin.text,
-      ...(plugin.contexts ? { contexts: plugin.contexts } : {}),
+      ...(plugin.contexts?.length || executionContexts.length
+        ? { contexts: [...(plugin.contexts ?? []), ...executionContexts] }
+        : {}),
       sourceRevisions: mergeSourceRevisions(base.sourceRevisions, plugin.sourceRevisions),
     });
   };
@@ -473,6 +486,11 @@ export function createInteractiveRunComposerFactory(
               resolveAdditionalSystemPrompt: (context, baseText) =>
                 input.resolvePluginSystemPrompt!(backendContext.sessionId, context, baseText),
             }
+          : {}),
+        ...(input.resolveExecutionContexts &&
+        !backendContext.tools &&
+        !backendContext.header.subagentParent
+          ? { resolveExecutionContexts: input.resolveExecutionContexts }
           : {}),
         ...(input.scheduledTaskTool ? { scheduledTaskTool: input.scheduledTaskTool } : {}),
         ...(input.goalTools ? { goalTools: input.goalTools } : {}),

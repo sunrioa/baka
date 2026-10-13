@@ -37,6 +37,16 @@ import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import {
+  workHubPeerQuestionIdentity,
+  workHubPeerInboxId,
+  workHubPeerSettlementId,
+  WORKHUB_EVIDENCE_MAX_ROUNDS,
+  type WorkHubPeerTaskRef,
+  type WorkHubPeerQuestionMessage,
+  type WorkHubPeerSettlementMessage,
+  type WorkHubPeerInboxMessage,
+} from '@maka/core/workhub-evidence';
 import type { WorkHubTaskInputCommitRequest } from './session-store-contract.js';
 import {
   decodeTaskExecutionGrant,
@@ -2329,6 +2339,215 @@ export class SqliteSessionMetadataStore {
     });
   }
 
+  private assertWorkHubPeerTaskSync(ref: WorkHubPeerTaskRef): WorkHubDelegationAssignedMessage {
+    const suffix = (id: string) => createHash('sha256').update(id).digest('hex').slice(0, 48);
+    const assignment = this.readMessageByIdSync(
+      WORKHUB_COORDINATION_SESSION_ID,
+      `wha_${suffix(ref.actionId)}`,
+    );
+    const target = this.readRecordSync(ref.sessionId)?.header;
+    const coordinator = this.readRecordSync(WORKHUB_COORDINATION_SESSION_ID)?.header;
+    const terminal = (prefix: string) =>
+      this.readMessageByIdSync(
+        WORKHUB_COORDINATION_SESSION_ID,
+        `${prefix}_${suffix(ref.delegationId)}`,
+      );
+    const stop = terminal('whq');
+    const stopResolution = terminal('whzt') ?? terminal('whz');
+    if (
+      assignment?.type !== 'workhub_coordination' ||
+      assignment.kind !== 'delegation_assigned' ||
+      (assignment.work?.id ?? assignment.actionId) !== ref.workId ||
+      (assignment.work?.generationId ?? assignment.actionId) !== ref.generationId ||
+      assignment.delegationId !== ref.delegationId ||
+      assignment.targetSessionId !== ref.sessionId ||
+      assignment.targetMessageId !== ref.messageId ||
+      !assignment.returnResults ||
+      !target ||
+      target.isArchived ||
+      target.subagentParent ||
+      target.role !== undefined ||
+      target.labels.includes('mode:side_conversation') ||
+      coordinator?.role !== WORKHUB_COORDINATION_SESSION_ROLE ||
+      coordinator.isArchived ||
+      terminal('whp') ||
+      terminal('whx') ||
+      terminal('whb') ||
+      (stop &&
+        !(
+          stopResolution?.type === 'workhub_coordination' &&
+          stopResolution.kind === 'delegation_stop_resolved' &&
+          stopResolution.outcome === 'not_owned'
+        ))
+    )
+      throw new SessionMetadataConflictError('Peer task identity is unavailable or retired');
+    return assignment;
+  }
+
+  private appendPeerFactSync(
+    sessionId: string,
+    message: WorkHubPeerQuestionMessage | WorkHubPeerInboxMessage | WorkHubPeerSettlementMessage,
+  ): void {
+    const row = this.db
+      .prepare(
+        'SELECT COALESCE(MAX(sequence), -1) AS last_sequence FROM session_messages WHERE session_id = ?',
+      )
+      .get(sessionId) as { last_sequence: number };
+    this.insertSessionMessagesSync(sessionId, row.last_sequence + 1, [
+      { message, json: JSON.stringify(message) },
+    ]);
+  }
+
+  async commitWorkHubPeerQuestion(
+    input: WorkHubPeerQuestionMessage,
+  ): Promise<WorkHubPeerQuestionMessage> {
+    this.assertOpen();
+    const question = decodeCanonicalMessage(JSON.parse(JSON.stringify(input)) as unknown);
+    if (
+      question.type !== 'workhub_peer_question' ||
+      question.id !==
+        `whpq_${createHash('sha256').update(workHubPeerQuestionIdentity(question)).digest('hex').slice(0, 48)}`
+    )
+      throw new SessionMetadataConflictError('Invalid peer question invocation identity');
+    return this.transaction(() => {
+      const old = this.readMessageByIdSync(question.sender.sessionId, question.id);
+      if (old) {
+        if (
+          old.type !== 'workhub_peer_question' ||
+          !isDeepStrictEqual(old, { ...question, ts: old.ts, expiresAt: old.expiresAt })
+        )
+          throw new SessionMetadataConflictError('Peer question identity conflict');
+        const inbox = this.readMessageByIdSync(old.recipient.sessionId, workHubPeerInboxId(old.id));
+        if (
+          inbox?.type !== 'workhub_peer_inbox' ||
+          inbox.questionId !== old.id ||
+          inbox.requesterSessionId !== old.sender.sessionId ||
+          inbox.expiresAt !== old.expiresAt ||
+          !isDeepStrictEqual(inbox.target, old.recipient)
+        )
+          throw new SessionMetadataConflictError('Peer question inbox identity conflict');
+        return old;
+      }
+      this.assertWorkHubPeerTaskSync(question.sender);
+      const recipient = this.assertWorkHubPeerTaskSync(question.recipient);
+      if (this.readMessageByIdSync(question.recipient.sessionId, workHubPeerInboxId(question.id)))
+        throw new SessionMetadataConflictError('Peer inbox identity conflict');
+      if (question.expiresAt <= this.now() || question.ts > this.now())
+        throw new SessionMetadataConflictError(
+          'Peer question has expired or has a future timestamp',
+        );
+      // Typed questions are bounded well below the inline chunk threshold.
+      const count = this.db
+        .prepare(`SELECT COUNT(*) AS total FROM session_messages
+        WHERE session_id = ? AND message_type = 'workhub_peer_question'
+          AND json_extract(record_json, '$.turnId') = ?`)
+        .get(question.sender.sessionId, question.turnId) as { total: number };
+      if (count.total >= WORKHUB_EVIDENCE_MAX_ROUNDS)
+        throw new SessionMetadataConflictError('Peer question limit reached');
+      const inbox: WorkHubPeerInboxMessage = {
+        type: 'workhub_peer_inbox',
+        schemaVersion: 1,
+        id: workHubPeerInboxId(question.id),
+        turnId: recipient.targetTurnId,
+        ts: question.ts,
+        expiresAt: question.expiresAt,
+        requesterSessionId: question.sender.sessionId,
+        questionId: question.id,
+        target: question.recipient,
+      };
+      this.appendPeerFactSync(question.sender.sessionId, question);
+      this.appendPeerFactSync(question.recipient.sessionId, inbox);
+      return question;
+    });
+  }
+
+  async commitWorkHubPeerSettlement(
+    input: WorkHubPeerSettlementMessage,
+  ): Promise<WorkHubPeerSettlementMessage> {
+    this.assertOpen();
+    const settlement = decodeCanonicalMessage(JSON.parse(JSON.stringify(input)) as unknown);
+    if (settlement.type !== 'workhub_peer_settlement')
+      throw new SessionMetadataConflictError('Invalid peer settlement');
+    return this.transaction(() => {
+      const question = this.readMessageByIdSync(
+        settlement.requesterSessionId,
+        settlement.questionId,
+      );
+      if (
+        question?.type !== 'workhub_peer_question' ||
+        question.sender.sessionId !== settlement.requesterSessionId
+      )
+        throw new SessionMetadataConflictError('Peer question is unavailable');
+      const actor = settlement.actor;
+      const inbox = this.readMessageByIdSync(
+        question.recipient.sessionId,
+        workHubPeerInboxId(question.id),
+      );
+      if (
+        inbox?.type !== 'workhub_peer_inbox' ||
+        inbox.questionId !== question.id ||
+        inbox.requesterSessionId !== question.sender.sessionId ||
+        !isDeepStrictEqual(inbox.target, question.recipient)
+      )
+        throw new SessionMetadataConflictError('Peer settlement inbox identity conflict');
+      if (
+        settlement.outcome === 'reply'
+          ? !isDeepStrictEqual(actor, question.recipient)
+          : actor.sessionId !== question.sender.sessionId ||
+            actor.workId !== question.sender.workId ||
+            actor.generationId !== question.sender.generationId
+      )
+        throw new SessionMetadataConflictError('Peer settlement actor identity conflict');
+      const old = this.readMessageByIdSync(
+        question.recipient.sessionId,
+        workHubPeerSettlementId(question.id),
+      );
+      if (old) {
+        if (
+          old.type !== 'workhub_peer_settlement' ||
+          old.questionId !== question.id ||
+          old.requesterSessionId !== question.sender.sessionId
+        )
+          throw new SessionMetadataConflictError('Peer settlement identity conflict');
+        if (old.outcome === settlement.outcome && old.answer !== settlement.answer)
+          throw new SessionMetadataConflictError('Peer answer identity conflict');
+        return old;
+      }
+      this.assertWorkHubPeerTaskSync(actor);
+      if (settlement.outcome === 'reply') this.assertWorkHubPeerTaskSync(question.sender);
+      if (
+        question.expiresAt <= this.now() ||
+        settlement.ts < question.ts ||
+        settlement.ts > this.now()
+      )
+        throw new SessionMetadataConflictError(
+          'Peer question has expired or settlement timestamp is invalid',
+        );
+      this.appendPeerFactSync(question.recipient.sessionId, settlement);
+      return settlement;
+    });
+  }
+
+  async readWorkHubPeerInboxPage(
+    sessionId: string,
+    actionId: string,
+    now: number,
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    assertSafeSessionId(actionId);
+    if (
+      !Number.isSafeInteger(now) ||
+      now < 0 ||
+      request.maxMessages > 64 ||
+      request.maxStoredBytes > 256 * 1024 ||
+      [request.afterSequence, request.beforeSequence].some(
+        (n) => n !== undefined && (!Number.isSafeInteger(n) || n < 0),
+      )
+    )
+      throw new Error('Invalid peer inbox page bound');
+    return this.readMessageScanPage(sessionId, request, { peerActionId: actionId, now });
+  }
+
   async readMessageAdmission(
     sessionId: string,
     messageId: string,
@@ -3217,7 +3436,7 @@ export class SqliteSessionMetadataStore {
   private async readMessageScanPage(
     sessionId: string,
     request: SessionMessageScanRequest,
-    assignmentsOnly: boolean,
+    filter: boolean | { readonly peerActionId: string; readonly now: number },
   ): Promise<SessionMessageScanPage> {
     this.assertOpen();
     assertSafeSessionId(sessionId);
@@ -3231,6 +3450,7 @@ export class SqliteSessionMetadataStore {
       throw new Error('Invalid Session message scan bounds');
     }
     const backward = request.beforeSequence !== undefined;
+    const peer = typeof filter === 'object' ? filter : undefined;
     return this.readTransaction(() => {
       if (!this.readRecordSync(sessionId)) throw new SessionNotFoundError(sessionId);
       const rows = this.db
@@ -3240,13 +3460,23 @@ export class SqliteSessionMetadataStore {
           LEFT JOIN session_message_payloads AS payload
             ON payload.session_id = message.session_id AND payload.sequence = message.sequence
           WHERE message.session_id = ? AND message.sequence ${backward ? '<' : '>'} ?
-            ${assignmentsOnly ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
+            ${filter === true ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
+            ${
+              peer
+                ? `AND message.message_type = 'workhub_peer_inbox' AND message.message_id GLOB 'whpi_*' AND length(message.message_id) = 53
+              AND json_extract(message.record_json, '$.target.actionId') = ?
+              AND json_extract(message.record_json, '$.expiresAt') > ?
+              AND NOT EXISTS (SELECT 1 FROM session_messages AS settled
+                WHERE settled.session_id = message.session_id AND settled.message_id = 'whps_' || substr(message.message_id, 6))`
+                : ''
+            }
           ORDER BY message.sequence ${backward ? 'DESC' : 'ASC'}
           LIMIT ?
         `)
         .all(
           sessionId,
           backward ? request.beforeSequence : (request.afterSequence ?? -1),
+          ...(peer ? [peer.peerActionId, peer.now] : []),
           request.maxMessages,
         ) as StoredSessionMessagePayloadRow[];
       const records: SessionMessageScanRecord[] = [];

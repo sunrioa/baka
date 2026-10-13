@@ -1192,6 +1192,8 @@ export async function createExecutionRuntimeHostComposition(
               ],
         resolvePluginTools: (sessionId, coreTools) =>
           pluginTools.resolveContributions(sessionId, coreTools),
+        resolveExecutionContexts: (scope) =>
+          workHubEvidence?.peerContexts(scope) ?? Promise.resolve([]),
         resolvePluginSystemPrompt: async (sessionId, promptContext, baseText) => {
           const assembly = await pluginSystemPrompt.assemble(
             {

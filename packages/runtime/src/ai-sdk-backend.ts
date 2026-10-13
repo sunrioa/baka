@@ -253,6 +253,9 @@ export interface ResolvedSystemPrompt {
 export interface SystemPromptContext {
   sessionId: string;
   turnId: string;
+  /** Fixed live BackendSendInput identity; absent for non-live prompt inspection. */
+  runId?: string;
+  invocationId?: string;
   cwd: string;
   /** Sampled once for this execution; absent during prompt inspection without a live turn. */
   turnStartedAt?: number;

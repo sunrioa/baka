@@ -207,6 +207,46 @@ test('the composer preserves scoped dynamic contexts for each model step', async
   assert.deepEqual(prompt.contexts, contexts);
 });
 
+test('Host execution notices are resampled without changing stable system/tool prefixes or plugin contexts', async () => {
+  let notice = 'first notice';
+  const seen: unknown[] = [];
+  const plugin = [{ name: 'plugin:context', text: 'plugin data' }];
+  const composer = createFixtureComposer({
+    resolveAdditionalSystemPrompt: async (_ctx, baseText) => ({
+      text: baseText,
+      contexts: plugin,
+      sourceRevisions: [],
+    }),
+    resolveExecutionContexts: async (scope) => {
+      seen.push(scope);
+      return [{ name: 'peer', text: notice }];
+    },
+  });
+  const scope = {
+    sessionId: 's',
+    turnId: 't',
+    runId: 'fixed-run',
+    invocationId: 'fixed-invocation',
+    cwd: '/workspace',
+  };
+  const tools = composer.tools;
+  const first = await composer.resolveSystemPrompt(scope);
+  notice = 'second notice';
+  const second = await composer.resolveSystemPrompt(scope);
+  assert.equal(first.text, second.text);
+  assert.equal(composer.tools, tools);
+  assert.deepEqual(seen, [scope, scope]);
+  assert.deepEqual(first.contexts, [...plugin, { name: 'peer', text: 'first notice' }]);
+  assert.deepEqual(second.contexts, [...plugin, { name: 'peer', text: 'second notice' }]);
+  const bounded = createFixtureComposer({
+    boundTools: [tool('only')],
+    resolveExecutionContexts: async () => {
+      assert.fail('bound child cannot sample peer inbox');
+    },
+  });
+  await bounded.resolveSystemPrompt(scope);
+});
+
 test('scoped Plugin Skill contributions join the canonical model inventory', async () => {
   const composer = createFixtureComposer({
     skills: {

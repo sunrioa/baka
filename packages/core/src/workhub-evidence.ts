@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { isRecord } from './record-schema.js';
+import { defineObjectShape, hasExactShape, isRecord } from './record-schema.js';
 
 export const WORKHUB_EVIDENCE_TOOL = 'WorkHubEvidence' as const;
 export const WORKHUB_EVIDENCE_MAX_ROUNDS = 8;
@@ -40,6 +40,8 @@ export interface WorkHubEvidenceRequestMessage {
   readonly rootMessageId: string;
   readonly question: string;
   readonly round: number;
+  /** An explicit wait on an already accepted peer question; absent for legacy evidence. */
+  readonly peerQuestionId?: string;
 }
 
 /** One immutable WorkHub reply binds a request to a visible task, not arbitrary agent text. */
@@ -106,7 +108,7 @@ export function isWorkHubEvidenceRequest(value: unknown): value is WorkHubEviden
     ...ids,
   ];
   return (
-    Object.keys(value).length === keys.length &&
+    Object.keys(value).every((key) => keys.includes(key) || key === 'peerQuestionId') &&
     keys.every((key) => Object.hasOwn(value, key)) &&
     value.type === 'workhub_evidence' &&
     value.schemaVersion === 1 &&
@@ -129,8 +131,221 @@ export function isWorkHubEvidenceRequest(value: unknown): value is WorkHubEviden
     value.round <= WORKHUB_EVIDENCE_MAX_ROUNDS &&
     typeof value.question === 'string' &&
     value.question.trim().length > 0 &&
-    value.question.length <= 4000
+    value.question.length <= 4000 &&
+    (value.peerQuestionId === undefined || isWorkHubPeerQuestionId(value.peerQuestionId))
   );
+}
+
+/** Fixed task lineage, not a permission or a mutable Session selection. */
+export interface WorkHubPeerTaskRef {
+  readonly workId: string;
+  readonly generationId: string;
+  readonly actionId: string;
+  readonly delegationId: string;
+  readonly sessionId: string;
+  readonly messageId: string;
+}
+
+export interface WorkHubPeerQuestionMessage {
+  readonly type: 'workhub_peer_question';
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly turnId: string;
+  readonly ts: number;
+  readonly expiresAt: number;
+  readonly sender: WorkHubPeerTaskRef;
+  readonly recipient: WorkHubPeerTaskRef;
+  readonly senderRunId: string;
+  readonly senderInvocationId: string;
+  readonly toolCallId: string;
+  readonly question: string;
+  readonly round: number;
+}
+
+/** Small reference in B; the question body remains in A's existing store. */
+export interface WorkHubPeerInboxMessage {
+  readonly type: 'workhub_peer_inbox';
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly turnId: string;
+  readonly ts: number;
+  readonly expiresAt: number;
+  readonly requesterSessionId: string;
+  readonly questionId: string;
+  readonly target: WorkHubPeerTaskRef;
+}
+
+/** Reply and cancellation compete for the same immutable terminal fact. */
+export interface WorkHubPeerSettlementMessage {
+  readonly type: 'workhub_peer_settlement';
+  readonly schemaVersion: 1;
+  readonly id: string;
+  readonly turnId: string;
+  readonly ts: number;
+  readonly requesterSessionId: string;
+  readonly questionId: string;
+  readonly actor: WorkHubPeerTaskRef;
+  readonly senderRunId: string;
+  readonly senderInvocationId: string;
+  readonly toolCallId: string;
+  readonly outcome: 'reply' | 'cancelled';
+  readonly answer?: string;
+}
+
+export type WorkHubPeerMessage =
+  | WorkHubPeerQuestionMessage
+  | WorkHubPeerInboxMessage
+  | WorkHubPeerSettlementMessage;
+
+export const WORKHUB_PEER_QUESTION_MAX_BYTES = 2048;
+export const WORKHUB_PEER_ANSWER_MAX_BYTES = 3072;
+const validPeerId = (value: unknown): value is string =>
+  typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
+const validPeerTime = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+const taskShape = defineObjectShape<WorkHubPeerTaskRef>()(
+  ['workId', 'generationId', 'actionId', 'delegationId', 'sessionId', 'messageId'],
+  [],
+);
+export function isWorkHubPeerTaskRef(value: unknown): value is WorkHubPeerTaskRef {
+  return (
+    isRecord(value) && hasExactShape(value, taskShape) && Object.values(value).every(validPeerId)
+  );
+}
+
+export function isWorkHubPeerQuestionId(value: unknown): value is string {
+  return typeof value === 'string' && /^whpq_[a-f0-9]{48}$/u.test(value);
+}
+export const workHubPeerInboxId = (questionId: string) => `whpi_${questionId.slice(5)}`;
+export const workHubPeerSettlementId = (questionId: string) => `whps_${questionId.slice(5)}`;
+/** The Host and storage hash this true invocation identity. Payload is deliberately excluded. */
+export function workHubPeerQuestionIdentity(
+  value: Pick<
+    WorkHubPeerQuestionMessage,
+    'sender' | 'turnId' | 'senderRunId' | 'senderInvocationId' | 'toolCallId'
+  >,
+): string {
+  return JSON.stringify([
+    value.sender.sessionId,
+    value.turnId,
+    value.senderRunId,
+    value.senderInvocationId,
+    value.toolCallId,
+  ]);
+}
+export function isWorkHubPeerText(value: unknown, maxBytes: number): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    new TextEncoder().encode(JSON.stringify(value)).byteLength <= maxBytes
+  );
+}
+const questionShape = defineObjectShape<WorkHubPeerQuestionMessage>()(
+  [
+    'type',
+    'schemaVersion',
+    'id',
+    'turnId',
+    'ts',
+    'expiresAt',
+    'sender',
+    'recipient',
+    'senderRunId',
+    'senderInvocationId',
+    'toolCallId',
+    'question',
+    'round',
+  ],
+  [],
+);
+const inboxShape = defineObjectShape<WorkHubPeerInboxMessage>()(
+  [
+    'type',
+    'schemaVersion',
+    'id',
+    'turnId',
+    'ts',
+    'expiresAt',
+    'requesterSessionId',
+    'questionId',
+    'target',
+  ],
+  [],
+);
+const settlementShape = defineObjectShape<WorkHubPeerSettlementMessage>()(
+  [
+    'type',
+    'schemaVersion',
+    'id',
+    'turnId',
+    'ts',
+    'requesterSessionId',
+    'questionId',
+    'actor',
+    'senderRunId',
+    'senderInvocationId',
+    'toolCallId',
+    'outcome',
+  ],
+  ['answer'],
+);
+export function isWorkHubPeerMessage(value: unknown): value is WorkHubPeerMessage {
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    !validPeerId(value.turnId) ||
+    !validPeerTime(value.ts)
+  )
+    return false;
+  const lifetime = () =>
+    validPeerTime(value.expiresAt) &&
+    value.expiresAt > (value.ts as number) &&
+    value.expiresAt - (value.ts as number) <= WORKHUB_EVIDENCE_LIFETIME_MS;
+  const invocation = () =>
+    validPeerId(value.senderRunId) &&
+    validPeerId(value.senderInvocationId) &&
+    typeof value.toolCallId === 'string' &&
+    /^[A-Za-z0-9_.:-]{1,256}$/u.test(value.toolCallId);
+  switch (value.type) {
+    case 'workhub_peer_question':
+      return (
+        hasExactShape(value, questionShape) &&
+        isWorkHubPeerQuestionId(value.id) &&
+        lifetime() &&
+        invocation() &&
+        isWorkHubPeerTaskRef(value.sender) &&
+        isWorkHubPeerTaskRef(value.recipient) &&
+        value.sender.sessionId !== value.recipient.sessionId &&
+        validPeerTime(value.round) &&
+        value.round >= 1 &&
+        value.round <= WORKHUB_EVIDENCE_MAX_ROUNDS &&
+        isWorkHubPeerText(value.question, WORKHUB_PEER_QUESTION_MAX_BYTES)
+      );
+    case 'workhub_peer_inbox':
+      return (
+        hasExactShape(value, inboxShape) &&
+        isWorkHubPeerQuestionId(value.questionId) &&
+        value.id === workHubPeerInboxId(value.questionId) &&
+        lifetime() &&
+        validPeerId(value.requesterSessionId) &&
+        isWorkHubPeerTaskRef(value.target) &&
+        value.requesterSessionId !== value.target.sessionId
+      );
+    case 'workhub_peer_settlement':
+      return (
+        hasExactShape(value, settlementShape) &&
+        isWorkHubPeerQuestionId(value.questionId) &&
+        value.id === workHubPeerSettlementId(value.questionId) &&
+        validPeerId(value.requesterSessionId) &&
+        isWorkHubPeerTaskRef(value.actor) &&
+        invocation() &&
+        ((value.outcome === 'reply' &&
+          isWorkHubPeerText(value.answer, WORKHUB_PEER_ANSWER_MAX_BYTES)) ||
+          (value.outcome === 'cancelled' && value.answer === undefined))
+      );
+    default:
+      return false;
+  }
 }
 
 export function isWorkHubEvidenceResolution(

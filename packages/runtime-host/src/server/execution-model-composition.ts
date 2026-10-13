@@ -296,11 +296,15 @@ async function buildHostAiSdkBackend(
   };
   const resolveRunPrompt = async (context: {
     readonly turnId: string;
+    readonly runId?: string;
+    readonly invocationId?: string;
     readonly emitSkillCatalogTrace?: (message: string, data?: Record<string, unknown>) => void;
   }) => {
     const resolved = await modelComposition.resolveSystemPrompt({
       sessionId: input.context.sessionId,
       turnId: context.turnId,
+      ...(context.runId ? { runId: context.runId } : {}),
+      ...(context.invocationId ? { invocationId: context.invocationId } : {}),
       cwd: input.context.header.cwd,
       ...(context.emitSkillCatalogTrace
         ? { emitSkillCatalogTrace: context.emitSkillCatalogTrace }
@@ -473,6 +477,8 @@ async function buildHostAiSdkBackend(
         systemPrompt: async (context) => {
           const resolved = await resolveRunPrompt({
             turnId: context.turnId,
+            ...(context.runId ? { runId: context.runId } : {}),
+            ...(context.invocationId ? { invocationId: context.invocationId } : {}),
             ...(context.emitSkillCatalogTrace
               ? { emitSkillCatalogTrace: context.emitSkillCatalogTrace }
               : {}),

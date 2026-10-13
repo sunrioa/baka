@@ -2945,6 +2945,10 @@ export class AiSdkTurn {
       const resolved = await this.deps.backend.systemPrompt({
         sessionId: this.deps.backend.sessionId,
         turnId,
+        ...(this.request.runId ? { runId: this.request.runId } : {}),
+        ...((this.request.invocationId ?? this.request.runId)
+          ? { invocationId: this.request.invocationId ?? this.request.runId }
+          : {}),
         cwd: this.deps.backend.header.cwd,
         turnStartedAt: this.startedAt,
         emitSkillCatalogTrace: (message, data) =>
