@@ -99,6 +99,7 @@ export interface WorkHubTaskAssignment extends WorkHubTaskRef {
 }
 export interface WorkHubTaskHistoryInput {
   readonly workId: string;
+  readonly actionId?: string;
   readonly cursor?: string;
 }
 export interface WorkHubTaskHistoryResult {
@@ -268,9 +269,19 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
     availability: 'ready',
     errors: [...errors, 'operation_conflict'],
     decodeInput(value: unknown): WorkHubTaskHistoryInput {
-      const item = requireShapedRecord(value, 'WorkHub work history input', ['workId'], ['cursor']);
+      const item = requireShapedRecord(
+        value,
+        'WorkHub work history input',
+        ['workId'],
+        ['cursor', 'actionId'],
+      );
+      if (item.cursor !== undefined && item.actionId !== undefined)
+        throw invalidProtocolFrame('Exact assignment reads cannot use a history cursor');
       return {
         workId: requireEntityId(item.workId, 'WorkHub work'),
+        ...(item.actionId === undefined
+          ? {}
+          : { actionId: requireEntityId(item.actionId, 'WorkHub action') }),
         ...(item.cursor === undefined
           ? {}
           : { cursor: requireUtf8String(item.cursor, 'WorkHub cursor', 2048) }),
@@ -296,6 +307,13 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
     assertOutputForInput(input, output) {
       if (input.workId !== output.workId)
         throw invalidProtocolFrame('WorkHub history changed work');
+      if (
+        input.actionId !== undefined &&
+        (output.assignments.length !== 1 ||
+          output.assignments[0]!.actionId !== input.actionId ||
+          output.nextCursor !== null)
+      )
+        throw invalidProtocolFrame('WorkHub history changed selected assignment');
     },
   }),
   'workhub.tasks.executions': defineOperation({

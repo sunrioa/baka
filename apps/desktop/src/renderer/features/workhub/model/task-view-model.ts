@@ -124,7 +124,20 @@ export function createWorkHubTaskViewModel(
           if (closed) return;
           if (generation !== version) continue;
           const ids = new Set(page.rows.map(item => item.actionId));
-          const assignments = [...page.rows, ...state.assignments.filter(item => !ids.has(item.actionId))];
+          let assignments = [...page.rows, ...state.assignments.filter(item => !ids.has(item.actionId))];
+          const selected = manualAction;
+          if (selected && !ids.has(selected)) {
+            const exact = await services.taskHistory(owner, { workId, actionId: selected });
+            if (closed) return;
+            if (generation !== version || manualAction !== selected) { dirty = true; continue; }
+            const row = exact.assignments[0];
+            const known = assignments.find(item => item.actionId === selected);
+            if (exact.workId !== workId || exact.assignments.length !== 1 || exact.nextCursor !== null ||
+                row?.workId !== workId || row.actionId !== selected || !known || row.delegationId !== known.delegationId) {
+              throw new Error('Selected task assignment changed identity');
+            }
+            assignments = assignments.map(item => item.actionId === selected ? row : item);
+          }
           const assignment = assignments.find(item => item.actionId === manualAction) ??
             page.rows.find(item => item.state === 'owned') ?? page.rows[0];
           publish({ assignments, historyCursor: page.cursor, ready: true, loadingEarlier: false, error: undefined });
@@ -148,7 +161,10 @@ export function createWorkHubTaskViewModel(
         const page = await history(cursor);
         if (closed || generation !== version) return;
         const ids = new Set(state.assignments.map(item => item.actionId));
-        publish({ assignments: [...state.assignments, ...page.rows.filter(item => !ids.has(item.actionId))], historyCursor: page.cursor });
+        const refreshed = new Map(page.rows.map(item => [item.actionId, item]));
+        publish({ assignments: [...state.assignments.map(item => refreshed.get(item.actionId) ?? item), ...page.rows.filter(item => !ids.has(item.actionId))], historyCursor: page.cursor });
+        const selected = state.assignment && refreshed.get(state.assignment.actionId);
+        if (selected) await readExecutions(selected);
       } catch (reason) { if (!closed && generation === version) fail(reason); }
       finally { if (!closed && generation === version) publish({ loadingEarlier: false }); }
     },

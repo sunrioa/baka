@@ -79,6 +79,32 @@ const assignment = (actionId: string, patch: Partial<WorkHubTaskAssignment> = {}
 });
 const turn = (id: string, sessionId = 'same-session'): TurnSnapshot => ({ sessionId, turnId: id, runId: `run-${id}`, status: 'completed', terminalEventId: `terminal-${id}` });
 
+for (const revisit of ['refresh', 'loadEarlier'] as const) test(`a selected old queued assignment becomes readable after ${revisit}`, async () => {
+  let owned = false;
+  const original = assignment('old', { state: 'queued', execution: undefined });
+  const latest = Array.from({ length: 8 }, (_, index) => assignment(`new-${index}`, { state: 'queued', execution: undefined }));
+  const current = () => owned ? assignment('old') : original;
+  const exactReads: string[] = [];
+  const model = createWorkHubTaskViewModel({
+    taskHistory: async (_owner, input) => {
+      if (input.actionId) { exactReads.push(input.actionId); return { workId: 'work', assignments: [current()], nextCursor: null }; }
+      return input.cursor ? { workId: 'work', assignments: [current()], nextCursor: owned ? null : 'old-page-again' }
+        : { workId: 'work', assignments: latest, nextCursor: 'old-page' };
+    },
+    taskExecutions: async (_owner, input) => ({ actionId: input.actionId, delegationId: input.delegationId, targetSessionId: 'same-session', executions: [{ sessionId: 'same-session', turnId: 'turn-old', runId: 'run-old', status: 'running' }], nextCursor: null }),
+  }, 'host-a-coordinator', 'work');
+  await model.refresh(); await model.loadEarlier(); model.selectAssignment('old');
+  assert.equal(model.snapshot().assignment?.state, 'queued');
+  owned = true;
+  await model[revisit]();
+  assert.equal(model.snapshot().assignment?.actionId, 'old');
+  assert.equal(model.snapshot().assignment?.state, 'owned');
+  assert.equal(model.snapshot().assignments.find(item => item.actionId === 'old')?.state, 'owned');
+  assert.deepEqual(model.snapshot().execution, { turnId: 'turn-old', runId: 'run-old' });
+  if (revisit === 'refresh') assert.deepEqual(exactReads, ['old'], 'refresh uses a bounded exact read, not an unbounded history walk');
+  model.close();
+});
+
 test('task view follows the exact assignment and paged lineage, not a shared Session name or path', async () => {
   const original = assignment('a'), replacement = assignment('b', { generationId: 'replacement', targetSessionId: 'another-session' });
   const reads: string[] = [];

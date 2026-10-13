@@ -3302,6 +3302,16 @@ test('WorkHub task history separates same-Session work and exposes only original
         [followupAction, 'view-work-a'],
       );
       assert.equal(new Set(history.result.assignments.map((item) => item.generationId)).size, 1);
+      const selected = await composition.handlers['workhub.tasks.history'](
+        { workId: 'view-work-a', actionId: source.actionId },
+        context,
+      );
+      assert.ok(selected.ok, JSON.stringify(selected));
+      assert.deepEqual(
+        selected.result.assignments.map((item) => item.actionId),
+        [source.actionId],
+      );
+      assert.deepEqual(selected.result.assignments[0]!.execution, source.execution);
       for (const assignment of history.result.assignments) {
         const executions = await composition.handlers['workhub.tasks.executions'](
           { actionId: assignment.actionId, delegationId: assignment.delegationId },

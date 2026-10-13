@@ -44,6 +44,13 @@ test('task history and execution pages enforce bounded, exact work/assignment ow
   const { status: _status, ...row } = assignment;
   const result = history.decodeOutput({ workId: 'work', assignments: [row], nextCursor: null });
   history.assertOutputForInput!({ workId: 'work' }, result);
+  history.assertOutputForInput!({ workId: 'work', actionId: row.actionId }, result);
+  assert.throws(() =>
+    history.assertOutputForInput!({ workId: 'work', actionId: 'another' }, result),
+  );
+  assert.throws(() =>
+    history.decodeInput({ workId: 'work', actionId: 'action', cursor: 'old-page' }),
+  );
   assert.throws(() => history.assertOutputForInput!({ workId: 'foreign' }, result));
   for (const patch of [
     { workId: 'foreign' },

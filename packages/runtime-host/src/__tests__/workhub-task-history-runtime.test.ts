@@ -65,6 +65,25 @@ test('task history pages sparse canonical assignments with bounded reads and pre
   const first = await read();
   assert.ok(first.ok);
   assert.ok(first.result.assignments.some((item) => item.superseded));
+  const pageReads = f.reads.length;
+  const exact = await f.runtime.handlers['workhub.tasks.history']({
+    workId: 'work',
+    actionId: 'action-10',
+  });
+  assert.ok(exact.ok, JSON.stringify(exact));
+  assert.equal(exact.result.assignments[0]!.actionId, 'action-10');
+  assert.equal(exact.result.assignments.length, 1);
+  assert.equal(exact.result.nextCursor, null);
+  assert.equal(
+    f.reads.length,
+    pageReads,
+    'refreshing a selected assignment does not scan global pages',
+  );
+  const wrongWork = await f.runtime.handlers['workhub.tasks.history']({
+    workId: 'work',
+    actionId: 'action-11',
+  });
+  assert.ok(!wrongWork.ok && wrongWork.error.code === 'not_found');
 });
 
 test('task history never exposes an exclusive execution for queued, shared, cancelled or unavailable messages', async () => {

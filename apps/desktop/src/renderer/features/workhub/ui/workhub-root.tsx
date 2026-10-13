@@ -41,6 +41,8 @@ import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { workHubLinkedWork } from '../model/linked-work.js';
 import { WorkHubTaskView } from './workhub-task-view.js';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
+import { formatUiMessage } from '@maka/core/ui-locale';
+import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
 function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
   if (!owner || !target) return false;
@@ -120,6 +122,7 @@ export function WorkHubRoot() {
   const locale = useUiLocale();
   const toast = useToast();
   const t = workHubLiveCopy[locale];
+  const taskCopy = workHubTaskViewCopy[locale];
   const permissionLabel = controller.newWorkPermissionMode && getPermissionModeMeta(locale)[controller.newWorkPermissionMode].label;
   const shortcutLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘⇧K' : 'Ctrl+Shift+K';
   const composerSurface = useRef<HTMLDivElement>(null);
@@ -305,7 +308,7 @@ export function WorkHubRoot() {
               </div>
             )}
             <div className="workHubTaskPanels">
-              {selectedTask ? <details className="workHubTaskViewInbox"><summary>{locale === 'zh-CN' ? '待处理的问题与权限' : 'Pending questions and permissions'}</summary>
+              {selectedTask ? <details className="workHubTaskViewInbox"><summary>{taskCopy.pendingInteractions}</summary>
                 <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
               </details> : <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />}
               {!progress && !selectedTask && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))}
@@ -324,8 +327,8 @@ export function WorkHubRoot() {
               request={controller.activeQuestion} onRespond={controller.respondToUserQuestion}
               onStop={controller.stop} stopPending={controller.stopPending} />}
             {selectedTask && <div className="workHubTaskReadOnly" role="status">
-              <p>{locale === 'zh-CN' ? `正在查看「${selectedTask.name}」的执行。此阶段为只读视图，尚未启用直接纠正发送。` : `Viewing execution for “${selectedTask.name}”. This stage is read-only; direct corrections are not enabled yet.`}</p>
-              <Button size="sm" variant="ghost" label={locale === 'zh-CN' ? '返回协调输入' : 'Return to coordinator input'} onClick={() => highlight.selectWork(undefined)} />
+              <p>{formatUiMessage(taskCopy.readOnly, { name: selectedTask.name }, locale)}</p>
+              <Button size="sm" variant="ghost" label={taskCopy.coordinatorInput} onClick={() => highlight.selectWork(undefined)} />
             </div>}
             <div className="workHubComposerContent" hidden={Boolean(selectedTask || controller.activeQuestion || controller.activeForm)}>
             <WorkHubComposer

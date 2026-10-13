@@ -151,7 +151,30 @@ export function createWorkHubTaskHistoryRuntime(options: {
       throw error;
     }
   }
-  async function readHistory(workId: string, token?: string): Promise<WorkHubTaskHistoryResult> {
+  async function readHistory(
+    workId: string,
+    token?: string,
+    actionId?: string,
+  ): Promise<WorkHubTaskHistoryResult> {
+    if (actionId !== undefined) {
+      if (token !== undefined)
+        throw new HistoryCursorError('Exact assignment reads cannot use a history cursor');
+      const assignment = await admission.run(WORKHUB_COORDINATION_SESSION_ID, async () => {
+        const origin = await stores.sessionStore.readWorkHubAssignment(workId);
+        if (!origin || (origin.work?.id ?? origin.actionId) !== workId)
+          throw new HistoryUnavailableError('The original work is unavailable');
+        const source =
+          actionId === workId ? origin : await stores.sessionStore.readWorkHubAssignment(actionId);
+        if (!source || (source.work?.id ?? source.actionId) !== workId)
+          throw new HistoryUnavailableError('The selected assignment does not belong to this work');
+        return source;
+      });
+      const projected = await admission.runMany(
+        [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
+        (lease) => projectAssignment(assignment, lease),
+      );
+      return { workId, assignments: [projected], nextCursor: null };
+    }
     const cursor = decode(token);
     if (cursor && (cursor.kind !== 'assignments' || cursor.workId !== workId))
       throw new HistoryCursorError('Task history cursor changed work');
@@ -297,7 +320,8 @@ export function createWorkHubTaskHistoryRuntime(options: {
   }
   return {
     handlers: {
-      'workhub.tasks.history': (input) => query(() => readHistory(input.workId, input.cursor)),
+      'workhub.tasks.history': (input) =>
+        query(() => readHistory(input.workId, input.cursor, input.actionId)),
       'workhub.tasks.executions': (input) =>
         query(() => readExecutions(input.actionId, input.delegationId, input.cursor)),
     } satisfies Pick<OperationHandlerMap, 'workhub.tasks.history' | 'workhub.tasks.executions'>,
