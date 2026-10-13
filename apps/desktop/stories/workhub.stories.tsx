@@ -141,7 +141,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     bindBrowserSession: () => {},
     resolve: async () => sessionId, subscribeHosts: listener => { if (taskOverview) overviewHostListeners.add(listener); return () => { overviewHostListeners.delete(listener); }; }, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
     getSession: async () => session,
-    listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? repairChoices : choices,
+    listSessions: async () => coloredHistory ? [target, secondTarget] : [target], subscribeSessions: (handler) => { sessionListeners.add(handler); return () => { sessionListeners.delete(handler); }; }, modelChoices: async () => repairModel ? [...choices, ...repairChoices] : choices,
     setDefaultModel: async () => {},
     attachments: { pickFiles: async () => ({ ok: true, files: [{ approvalId: 'file-1', name: 'requirements.txt', size: 12, mimeType: 'text/plain' }] }), previewApproval: async () => ({ ok: false, reason: 'not-image' }) },
     readAttachmentBytes: async () => { throw new Error('Not an image'); },
@@ -243,8 +243,8 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       publish(); return { kind: 'admitted', turnId: input.turnId };
     },
     configureModel: async (id, input) => {
-      writes.model(id, input); session = { ...session, revision: session.revision + 1, model: input.modelTarget.model, thinkingLevel: input.thinkingLevel ?? undefined }; updateSessions?.();
-      return { kind: 'committed', session: { ...session, workspace: { target: { kind: 'host_path', path: '/projects/maka' }, hostCwd: '/projects/maka' }, createdAt: 0, activityAt: 0, labelsTruncated: false, llmConnectionId: 'connection-test', collaborationMode: 'agent', orchestrationMode: 'default' } };
+      writes.model(id, input); session = { ...session, revision: session.revision + 1, llmConnectionId: input.modelTarget.connectionId, llmConnectionSlug: input.modelTarget.connectionSlug, model: input.modelTarget.model, thinkingLevel: input.thinkingLevel ?? undefined }; updateSessions?.();
+      return { kind: 'committed', session: { ...session, workspace: { target: { kind: 'host_path', path: '/projects/maka' }, hostCwd: '/projects/maka' }, createdAt: 0, activityAt: 0, labelsTruncated: false, llmConnectionId: session.llmConnectionId!, collaborationMode: 'agent', orchestrationMode: 'default' } };
     },
     getNewWorkDefaults: async () => newWorkDefaults,
     setNewWorkDefaults: async (id, defaults) => {
@@ -462,7 +462,7 @@ export const UsageInspector: Story = {
     expect(editor).toHaveTextContent('再检查一下并发回调。');
   },
 };
-// Real path: the docked WorkHub composer opens its model picker before sending.
+// Real path: docked WorkHub selects its coordination model independently of its new-task model before sending.
 export const StandardComposer: Story = {
   render: () => <Surface />,
   play: async ({ canvasElement }) => {
@@ -470,6 +470,17 @@ export const StandardComposer: Story = {
     const canvas = within(canvasElement); const page = within(canvasElement.ownerDocument.body);
     await waitFor(() => expect(canvas.getByRole('button', { name: /切换当前任务模型/ })).toBeEnabled());
     await waitFor(() => expect(canvas.getByRole('button', { name: '打开用量追踪' }).textContent).toContain('1%'));
+    const coordination = canvas.getByRole('combobox', { name: '协调模型' });
+    await waitFor(() => expect(coordination).toBeEnabled());
+    await userEvent.click(coordination);
+    await userEvent.click(page.getByRole('option', { name: 'model-b · Test' }));
+    await waitFor(() => expect(writes.model).toHaveBeenCalledWith(sessionId, {
+      expectedRevision: 1,
+      modelTarget: { kind: 'explicit', connectionId: 'connection-test', connectionSlug: 'test', model: 'model-b' },
+      thinkingLevel: null,
+    }));
+    await waitFor(() => expect(coordination.textContent).toContain('model-b'));
+    expect(writes.defaults).not.toHaveBeenCalled();
     const concurrency = canvas.getByRole('combobox', { name: '并发' });
     await waitFor(() => expect(concurrency).toBeEnabled());
     await userEvent.click(concurrency);
@@ -477,10 +488,11 @@ export const StandardComposer: Story = {
     await waitFor(() => expect(writes.concurrency).toHaveBeenCalledWith(sessionId, 1));
     await waitFor(() => expect(concurrency.textContent).toBe('1'));
     await userEvent.click(canvas.getByRole('button', { name: /切换当前任务模型/ }));
-    await userEvent.click(page.getByRole('option', { name: /model-b/ }));
+    await userEvent.click(page.getByRole('option', { name: /model-a/ }));
     await waitFor(() => expect(writes.defaults).toHaveBeenCalledWith(sessionId, {
-      model: { llmConnectionId: 'connection-test', llmConnectionSlug: 'test', model: 'model-b' },
+      model: { llmConnectionId: 'connection-test', llmConnectionSlug: 'test', model: 'model-a' },
     }));
+    expect(coordination.textContent).toContain('model-b');
     await userEvent.click(canvas.getByRole('button', { name: '添加上下文' }));
     await userEvent.click(page.getByRole('menuitem', { name: /添加文件/ }));
     const editor = canvasElement.querySelector('[contenteditable="true"]') as HTMLElement;

@@ -21,6 +21,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChatSurfaceLayout, UserQuestionPrompt, MakaWordmark, PermissionModeSelect, getPermissionModeMeta, useToast, useUiLocale, type ComposerHandle } from '@maka/ui';
 import { Button, IconButton, Selector } from '@astryxdesign/core';
 import { WORKHUB_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
+import { connectionModelChoiceValue } from '@maka/core/llm-connections';
 import { ChevronDown, PictureInPicture2, Undo2, Workflow, X } from '@maka/ui/icons';
 import { useLiveContextUsage } from '../../../application/contracts/session-inspector/use-live-context-usage.js';
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
@@ -290,11 +291,40 @@ export function WorkHubRoot() {
             {(controller.error || control?.error) && (
               <div className="workHubLiveError" role="alert">
                 {controller.error ?? t.controlFailed}
-                {controller.canRetry && (
+                {controller.canRetry && !controller.coordinationModelUnavailable && (
                   <Button label={t.retry} variant="ghost" onClick={controller.retry} />
                 )}
               </div>
             )}
+            {controller.coordinationModelUnavailable && <div className="workHubLiveError" role="alert">
+              {t.coordinationModelUnavailable}
+              {controller.choices.length === 0 && <Button label={t.configureModels} variant="ghost" onClick={() => call(services.presentation.openSettings('models'))} />}
+            </div>}
+            {session && <div className="workHubCoordinationModel" title={t.coordinationModelHint}>
+              <span>{t.coordinationModel}</span>
+              <Selector
+                label={t.coordinationModel}
+                isLabelHidden
+                variant="ghost"
+                size="sm"
+                placement="above"
+                value={session.llmConnectionId && session.llmConnectionSlug && session.model
+                  ? connectionModelChoiceValue(session.llmConnectionId, session.llmConnectionSlug, session.model)
+                  : undefined}
+                placeholder={session.model || t.selectModelToSend}
+                options={controller.choices.map((choice) => ({
+                  value: connectionModelChoiceValue(choice.connectionId, choice.connectionSlug, choice.model),
+                  label: `${choice.label} · ${choice.connectionName ?? choice.providerLabel}`,
+                }))}
+                isDisabled={busy || controller.configuringModel || !controller.modelSetupChoicesReady || Boolean(controller.activeInteraction)}
+                onChange={(value) => {
+                  const choice = controller.choices.find((candidate) =>
+                    connectionModelChoiceValue(candidate.connectionId, candidate.connectionSlug, candidate.model) === value,
+                  );
+                  if (choice) return controller.changeCoordinationModel(choice);
+                }}
+              />
+            </div>}
             <div className="workHubTaskPanels">
               <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
               {!progress && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))} />}
@@ -325,8 +355,8 @@ export function WorkHubRoot() {
               draftRestore={draftRestore}
               sessionId={controller.sessionId}
               streaming={busy}
-              sendBlocked={!controller.sessionId || controller.sending || !session?.model}
-              sendBlockedReason={controller.modelSetupRequired
+              sendBlocked={!controller.sessionId || controller.sending || controller.configuringModel || !session?.model || (!busy && !controller.coordinationModelAvailable)}
+              sendBlockedReason={controller.coordinationModelUnavailable ? t.coordinationModelUnavailable : controller.modelSetupRequired
                 ? controller.modelSetupChoicesReady
                   ? controller.choices.length > 0
                     ? t.selectModelToSend

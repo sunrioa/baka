@@ -20,10 +20,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
-import type { ProjectCatalogProjectDetails } from '@maka/runtime-host/protocol';
+import type { ProjectCatalogProjectDetails, SessionCatalogProjection } from '@maka/runtime-host/protocol';
 import { decodeWorkHubCoordinationActFromTurnInput, decodeWorkHubCoordinationSelectAndDelegateInput } from '@maka/runtime-host/protocol';
 import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { createWorkHubRuntime } from '../workhub-runtime.js';
+import { readWorkHubNewWorkDefaults, resolveWorkHubNewWorkDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
 
 const scope = { hostId: 'host', targetEpoch: 'epoch' };
 function fixture() {
@@ -61,6 +62,71 @@ test('task delegation binds the tool action to the Host turn and trusted creatio
   assert.ok('actionId' in result);
   assert.equal(result.actionId, 'tool-call');
   assert.deepEqual(f.changes, [[scope, 'created', 'target']]);
+});
+
+test('task creation uses the displayed coordinator fallback and respects explicit model or executor choices', async () => {
+  const f = fixture();
+  const client = {
+    hostId: 'dispatch-model-defaults',
+    getWorkHubSession: async () => ({
+      id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: 'coord-connection',
+      llmConnectionSlug: 'coord-slug', model: 'coord-model',
+    } as SessionCatalogProjection),
+  };
+  f.deps.createDefaults = async () => ({ permissionMode: 'ask', ...(await resolveWorkHubNewWorkDefaults(client)) });
+  const fallback = { model: { llmConnectionId: 'coord-connection', llmConnectionSlug: 'coord-slug', model: 'coord-model' } };
+  const explicit = { model: { llmConnectionId: 'worker-connection', llmConnectionSlug: 'worker-slug', model: 'worker-model' }, thinkingLevel: 'high' as const };
+  const executor = { executorId: 'codex.app-server', executorModel: 'gpt-6-astra' };
+  for (const [index, defaults] of [{}, explicit, executor].entries()) {
+    writeWorkHubNewWorkDefaults(client.hostId, defaults);
+    await f.runtime.actTasks(scope, 'turn', `model-${index}`, { operation: 'create_new', title: 'Inspect files', text: 'Read only' });
+    await f.runtime.actTasks(scope, 'turn', `correction-${index}`, {
+      operation: 'correct', replacesActionId: `model-${index}`,
+      target: { disposition: 'create_new', title: 'Inspect another path' }, text: 'Read only',
+    });
+    for (const request of f.requests.slice(-2)) {
+      const input = decodeWorkHubCoordinationActFromTurnInput(request);
+      assert.deepEqual(input.newWorkDefaults, { permissionMode: 'ask', ...(index === 0 ? fallback : defaults) });
+    }
+    assert.deepEqual(readWorkHubNewWorkDefaults(client.hostId), defaults, 'fallback resolution never changes saved task preferences');
+  }
+  client.getWorkHubSession = async () => { throw new Error('Coordinator is unavailable'); };
+  assert.deepEqual(await resolveWorkHubNewWorkDefaults(client), executor, 'an explicit executor does not depend on the coordinator model');
+  writeWorkHubNewWorkDefaults(client.hostId, explicit);
+  assert.deepEqual(await resolveWorkHubNewWorkDefaults(client), explicit);
+  f.deps.createDefaults = async () => { assert.fail('existing tasks keep their execution settings'); };
+  await f.runtime.actTasks(scope, 'turn', 'existing', {
+    operation: 'delegate_existing', candidateSetId: `sha256:${'a'.repeat(64)}`, candidateRef: 'candidate', text: 'Continue',
+  });
+  assert.equal(decodeWorkHubCoordinationActFromTurnInput(f.requests.at(-1)).newWorkDefaults, undefined);
+});
+
+test('model fallback reads stay Host-scoped and a newer user selection wins an in-flight read', async () => {
+  let resolve!: (session: SessionCatalogProjection) => void;
+  const pending = new Promise<SessionCatalogProjection>((complete) => { resolve = complete; });
+  const client = { hostId: 'dispatch-model-race', getWorkHubSession: () => pending };
+  const fallback = resolveWorkHubNewWorkDefaults(client);
+  const explicit = { model: { llmConnectionId: 'worker-connection', llmConnectionSlug: 'worker-slug', model: 'worker-model' } };
+  writeWorkHubNewWorkDefaults(client.hostId, explicit);
+  const session = { id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: 'coord-connection', llmConnectionSlug: 'coord-slug', model: 'coord-model' } as SessionCatalogProjection;
+  resolve(session);
+  assert.deepEqual(await fallback, explicit);
+  assert.deepEqual(await resolveWorkHubNewWorkDefaults({ ...client, hostId: 'dispatch-model-other-host' }), {
+    model: { llmConnectionId: session.llmConnectionId, llmConnectionSlug: session.llmConnectionSlug, model: session.model },
+  });
+});
+
+test('an unavailable fallback model fails before task admission with a model-specific error', async () => {
+  const f = fixture();
+  f.deps.createDefaults = async () => ({
+    permissionMode: 'ask',
+    ...(await resolveWorkHubNewWorkDefaults({ hostId: 'dispatch-model-unavailable', getWorkHubSession: async () => ({
+      id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: null, llmConnectionSlug: '', model: '',
+    } as SessionCatalogProjection) })),
+  });
+  await assert.rejects(f.runtime.actTasks(scope, 'turn', 'missing-model', { operation: 'create_new', title: 'Inspect files', text: 'Read only' }), /Choose a model for new WorkHub tasks/u);
+  assert.deepEqual(f.requests, []);
+  assert.deepEqual(f.changes, []);
 });
 
 test('nested tool calls produce stable task identities accepted by both Host action paths', async () => {

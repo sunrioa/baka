@@ -225,9 +225,12 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
   }
   const services = {
     resolve: async () => sessionId,
-    getSession: async () => ({ id: sessionId, runningTurnIds: [] }),
+    getSession: async () => ({ id: sessionId, revision: 1, runningTurnIds: [],
+      llmConnectionId: 'connection', llmConnectionSlug: 'provider', model: 'model-a' }),
     listSessions: async () => [],
-    modelChoices: async () => [],
+    modelChoices: async () => [{ connectionId: 'connection', connectionSlug: 'provider',
+      connectionName: 'Provider', providerType: 'openai', providerLabel: 'OpenAI',
+      model: 'model-a', label: 'Model A', isDefault: false, thinkingLevels: [] }],
     setDefaultModel: async () => {},
     getNewWorkDefaults: async () => newWorkDefaults,
     setNewWorkDefaults: async (_id: string, defaults: typeof newWorkDefaults) => {
@@ -309,6 +312,7 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
 test('WorkHub presents model setup instead of a retry-only resolution error', async () => {
   const h = await mountController(false, {
     resolve: async () => { throw new WorkHubModelConfigurationRequiredError(); },
+    modelChoices: async () => [],
   });
 
   assert.equal(h.controller.modelSetupRequired, true);
@@ -421,6 +425,110 @@ test('WorkHub model selection configures only newly created work', async () => {
   await act(async () => { h.admit('busy-turn'); });
   await act(async () => { await h.controller.changeThinkingLevel('high'); });
   assert.equal(requests.length, count, 'running coordination turns freeze new-work defaults');
+});
+
+test('an unavailable coordination model cannot send using the new-task model', async () => {
+  const choice: ChatModelChoice = {
+    connectionId: 'connection', connectionSlug: 'provider', connectionName: 'Provider',
+    providerType: 'openai', providerLabel: 'OpenAI', model: 'enabled-model',
+    label: 'Enabled model', isDefault: false, thinkingLevels: [],
+  };
+  const requests: unknown[] = [];
+  const h = await mountController(false, {
+    getSession: async () => ({
+      id: JSON.stringify(['host-1', 'workhub-coordination']), revision: 1,
+      model: 'disabled-model', llmConnectionId: choice.connectionId,
+      llmConnectionSlug: choice.connectionSlug, runningTurnIds: [],
+    }) as unknown as Awaited<ReturnType<WorkHubServices['getSession']>>,
+    modelChoices: async () => [choice],
+    getNewWorkDefaults: async () => ({ model: {
+      llmConnectionId: choice.connectionId, llmConnectionSlug: choice.connectionSlug,
+      model: choice.model,
+    } }),
+    answer: async (_sessionId, input) => {
+      requests.push(input);
+      return { kind: 'admitted', turnId: input.turnId };
+    },
+  });
+  await act(async () => { assert.equal(await h.controller.send('hi', []), false); });
+  assert.deepEqual(requests, [], 'invalid configuration is rejected before Host admission');
+  assert.equal(h.controller.transientMessages.length, 0);
+  assert.match(h.controller.error!, /coordination model.*unavailable/i);
+});
+
+test('coordination model recovery uses the versioned Host API without changing task defaults', async () => {
+  type Session = Awaited<ReturnType<WorkHubServices['getSession']>>;
+  let saved = { id: JSON.stringify(['host-1', 'workhub-coordination']), revision: 6,
+    model: 'disabled-model', llmConnectionId: 'connection', llmConnectionSlug: 'provider',
+    runningTurnIds: [] } as unknown as Session;
+  const requests: Array<Parameters<WorkHubServices['configureModel']>> = [];
+  const defaults = { executorId: 'codex.app-server', executorModel: 'gpt-6-astra' };
+  const h = await mountController(false, {
+    getSession: async () => saved,
+    getNewWorkDefaults: async () => defaults,
+    setNewWorkDefaults: async () => { assert.fail('coordinator recovery cannot write worker defaults'); },
+    setNewWorkPermissionMode: async () => { assert.fail('coordinator recovery cannot write permissions'); },
+    setExecutionConcurrency: async () => { assert.fail('coordinator recovery cannot write concurrency'); },
+    configureModel: async (...input) => {
+      requests.push(input);
+      saved = { ...saved, revision: 7, model: input[1].modelTarget.model };
+      return { kind: 'committed', session: {} } as Awaited<ReturnType<WorkHubServices['configureModel']>>;
+    },
+  });
+  assert.equal(h.controller.coordinationModelUnavailable, true);
+  await act(async () => { await h.controller.changeCoordinationModel(h.controller.choices[0]!); });
+  assert.deepEqual(requests, [[h.sessionId, {
+    expectedRevision: 6,
+    modelTarget: { kind: 'explicit', connectionId: 'connection', connectionSlug: 'provider', model: 'model-a' },
+    thinkingLevel: null,
+  }]]);
+  assert.equal(h.controller.session?.model, 'model-a');
+  assert.equal(h.controller.session?.revision, 7);
+  assert.equal(h.controller.coordinationModelAvailable, true);
+  assert.deepEqual(h.controller.newWorkDefaults, defaults);
+  assert.equal(h.controller.newWorkPermissionMode, 'ask');
+  assert.equal(h.controller.executionConcurrency, 3);
+  assert.deepEqual(h.queueMutations, []);
+  await act(async () => { h.admit('running'); });
+  await act(async () => { await h.controller.changeCoordinationModel(h.controller.choices[0]!); });
+  assert.equal(requests.length, 1, 'running coordination cannot be reconfigured');
+});
+
+test('coordination selection rejects stale identities and revision conflicts without optimistic updates', async () => {
+  const requests: unknown[] = [];
+  const h = await mountController(false, {
+    configureModel: async (...input) => {
+      requests.push(input);
+      return { kind: 'revision_conflict', expectedRevision: 1, actualRevision: 2 };
+    },
+  });
+  const choice = h.controller.choices[0]!;
+  await act(async () => { await h.controller.changeCoordinationModel({ ...choice, connectionId: 'replaced-connection' }); });
+  assert.deepEqual(requests, [], 'the same model under another connection identity is not authorized');
+  await act(async () => { await h.controller.changeCoordinationModel(choice); });
+  assert.equal(requests.length, 1);
+  assert.equal(h.controller.session?.revision, 1);
+  assert.equal(h.controller.error, 'WorkHub changed. Try selecting the model again.');
+  assert.equal(h.controller.configuringModel, false);
+});
+
+test('model availability changes block only new coordinator turns, not running follow-up queues', async () => {
+  let enabled = true;
+  const listeners = new Set<() => void>();
+  const h = await mountController(false, {
+    modelChoices: async () => enabled ? [{ connectionId: 'connection', connectionSlug: 'provider',
+      connectionName: 'Provider', providerType: 'openai', providerLabel: 'OpenAI',
+      model: 'model-a', label: 'Model A', isDefault: false, thinkingLevels: [] }] : [],
+    subscribeAvailability: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  });
+  assert.equal(h.controller.coordinationModelAvailable, true);
+  await act(async () => { h.admit('running'); enabled = false; for (const listener of listeners) listener(); });
+  assert.equal(h.controller.coordinationModelUnavailable, true);
+  await act(async () => { assert.equal(await h.controller.send('next task', []), true); });
+  assert.equal(h.steers[0]?.[4], 'next_turn', 'existing follow-up placement is unchanged');
+  await act(async () => { h.complete('running'); });
+  await act(async () => { assert.equal(await h.controller.send('new turn', []), false); });
+  assert.deepEqual(h.requests, []);
 });
 
 test('WorkHub concurrency saves Host policy and ignores stale reads and invalid controls', async () => {

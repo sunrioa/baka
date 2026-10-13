@@ -262,6 +262,22 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   assert.match(prompt, /call the tasks candidates operation before choosing/u);
   assert.match(prompt, /clearly independent execution goal/u);
   assert.match(prompt, /without requiring the user to say create a Session/u);
+  assert.match(prompt, /Prefer delegate_existing for a related follow-up/u);
+  assert.match(prompt, /the user does not need to say continue/u);
+  assert.match(prompt, /even if unrelated tasks intervened/u);
+  assert.match(prompt, /newest compatible original user request/u);
+  assert.match(
+    prompt,
+    /A closer historical title or a later reply in a historical Session must not override that source/u,
+  );
+  assert.match(
+    prompt,
+    /An explicit user selection of a historical Session or a newer correction takes precedence/u,
+  );
+  assert.match(prompt, /an explicit request to start a separate task/u);
+  assert.match(prompt, /Sharing a directory alone does not make unrelated goals a continuation/u);
+  assert.match(prompt, /the Host queues it for the next Turn/u);
+  assert.match(prompt, /do not alter its model, permissions or workspace/u);
   assert.match(prompt, /continuation lookup requires clarification; it never implies create_new/u);
   assert.match(prompt, /Admit all clear goals before asking about an ambiguous remainder/u);
   assert.match(prompt, /private task workspace, not the selected project/u);

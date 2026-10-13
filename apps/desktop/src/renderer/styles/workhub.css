@@ -69,6 +69,7 @@
   .workHubLiveError { padding: var(--space-3); }
   .workHubComposerSurface { position: relative; width: 100%; }
   .workHubComposerContent { position: relative; }
+  .workHubCoordinationModel { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding: 0 var(--space-3); color: var(--muted-foreground); font-size: var(--text-xs); }
   /* Compact WorkHub keeps its original inline wheel footprint. Other hosts
      keep the button footprint and paint the same wheel over that position. */
   .workHubLive[data-placement='floating'][data-conversation-expanded='false'] .maka-model-wheel-anchor[data-open='true'] {

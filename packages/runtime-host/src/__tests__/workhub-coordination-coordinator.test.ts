@@ -69,6 +69,322 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('Host WorkHub Coordination coordinator', () => {
+  test('task origins retain creation identity across unrelated work, historical activity and restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workhub-task-origins-'));
+    const store = createSessionStore(root);
+    let scanRequest: Parameters<SessionAuthorityStore['readMessagesAfter']>[1] | undefined;
+    const stores = new Proxy(store, {
+      get(authority, property, receiver) {
+        if (property === 'readMessagesAfter') {
+          return async (...args: Parameters<SessionAuthorityStore['readMessagesAfter']>) => {
+            scanRequest = args[1];
+            return authority.readMessagesAfter(...args);
+          };
+        }
+        const value = Reflect.get(authority, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(authority) : value;
+      },
+    }) as SessionAuthorityStore;
+    const effects = { assign: persistTestAssignmentAction(store, (input) => input.actionId) };
+    const host = coordinator(root, stores, undefined, undefined, undefined, undefined, effects);
+    try {
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const requests = [
+        ['historical-skill', 'Read SKILL.md', 'Read /same-directory/SKILL.md'],
+        ['current-directory', 'Directory test A', 'Inspect /same-directory and wait 120 seconds'],
+        ['unrelated-hash', 'Hash test B', 'Compute the SHA-256 of unrelated text'],
+      ] as const;
+      for (const [actionId, title, userText] of requests) {
+        const outcome = await host.act(
+          {
+            actionId,
+            userText,
+            proposal: { disposition: 'create_new', title },
+            create: { workspace: { kind: 'host_path', path: root } },
+            newWorkDefaults: { permissionMode: 'ask' },
+          },
+          CONTEXT,
+        );
+        assert.ok(outcome.ok, JSON.stringify(outcome));
+      }
+      const page = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+      assert.ok(page.ok);
+      const historical = page.result.candidates.find(
+        (c) => c.sessionId === workHubCreatedSessionId('historical-skill'),
+      );
+      assert.ok(historical);
+      const activity = await host.act(
+        {
+          actionId: 'historical-activity',
+          userText: 'Read the same SKILL.md again',
+          candidateSetId: page.result.candidateSetId,
+          proposal: { disposition: 'delegate_existing', candidateRef: historical.candidateRef },
+        },
+        CONTEXT,
+      );
+      assert.ok(activity.ok, JSON.stringify(activity));
+      const context = await host.readTaskOrigins();
+      assert.deepEqual(
+        context.taskOrigins.map(({ actionId }) => actionId),
+        ['unrelated-hash', 'current-directory', 'historical-skill'],
+      );
+      assert.equal(context.taskOrigins[1]?.sessionId, workHubCreatedSessionId('current-directory'));
+      assert.equal(context.taskOrigins[1]?.request, requests[1][2]);
+      assert.equal(context.truncated, false);
+      assert.deepEqual(scanRequest, {
+        beforeSequence: Number.MAX_SAFE_INTEGER,
+        maxMessages: WORKHUB_ROUTING_HISTORY_MAX_MESSAGES,
+        maxStoredBytes: WORKHUB_ROUTING_HISTORY_MAX_STORED_BYTES,
+      });
+      const fresh = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+      assert.ok(fresh.ok);
+      const current = fresh.result.candidates.find(
+        (c) => c.sessionId === workHubCreatedSessionId('current-directory'),
+      );
+      const old = fresh.result.candidates.find((c) => c.sessionId === historical.sessionId);
+      assert.ok(current);
+      assert.ok(old);
+      const followup = {
+        actionId: 'source-bound-followup',
+        userText: '刚才做目录检查的那个 same-directory，读取里面的说明文件正文。',
+        candidateSetId: fresh.result.candidateSetId,
+        proposal: { disposition: 'delegate_existing' as const, candidateRef: old.candidateRef },
+      };
+      const misrouted = await host.act(followup, CONTEXT);
+      assert.equal(
+        misrouted.ok,
+        false,
+        'a model choosing a historical Session must not dispatch there',
+      );
+      if (misrouted.ok) return;
+      assert.equal(misrouted.error.code, 'operation_conflict');
+      assert.ok(misrouted.error.message.includes(current.sessionId));
+      assert.equal(await store.readWorkHubActionClaim(followup.actionId), undefined);
+      assert.equal(await store.readWorkHubAssignment(followup.actionId), undefined);
+      const corrected = await host.act(
+        {
+          ...followup,
+          proposal: { disposition: 'delegate_existing', candidateRef: current.candidateRef },
+        },
+        CONTEXT,
+      );
+      assert.ok(corrected.ok, JSON.stringify(corrected));
+      assert.equal(
+        (await store.readWorkHubAssignment(followup.actionId))?.targetSessionId,
+        current.sessionId,
+      );
+      const explicit = await host.act(
+        {
+          ...followup,
+          actionId: 'explicit-history',
+          userText: `请向 ${old.sessionId} 追加 same-directory 的读取任务。`,
+        },
+        CONTEXT,
+      );
+      assert.ok(explicit.ok, JSON.stringify(explicit));
+      const restarted = coordinator(root, store);
+      assert.deepEqual(await restarted.readTaskOrigins(), context);
+      assert.equal(
+        (await store.readHeaderSnapshot(workHubCreatedSessionId('current-directory')))
+          .permissionMode,
+        'ask',
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('task origin context is bounded and excludes unavailable Sessions', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workhub-origin-bounds-'));
+    const store = createSessionStore(root);
+    const host = coordinator(root, store, undefined, undefined, undefined, undefined, {
+      assign: persistTestAssignmentAction(store, (input) => input.actionId),
+    });
+    try {
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      for (let index = 0; index < 10; index++) {
+        const outcome = await host.act(
+          {
+            actionId: `origin-${index}`,
+            userText: `Inspect path ${index} ${'😀'.repeat(1100)}`,
+            proposal: { disposition: 'create_new', title: `Task ${index}` },
+            create: { workspace: { kind: 'host_path', path: root } },
+          },
+          CONTEXT,
+        );
+        assert.ok(outcome.ok, JSON.stringify(outcome));
+      }
+      const context = await host.readTaskOrigins();
+      assert.equal(context.taskOrigins.length, 8);
+      assert.equal(context.truncated, true);
+      assert.equal(context.taskOrigins[0]?.actionId, 'origin-9');
+      for (const origin of context.taskOrigins) {
+        assert.equal(Array.from(origin.request).length, 1024);
+        assert.equal(Buffer.from(origin.request).toString('utf8'), origin.request);
+      }
+      const archivedId = workHubCreatedSessionId('origin-9');
+      const snapshot = await store.readCatalogRecord(archivedId);
+      await store.setSessionsArchivedVersioned(
+        [{ sessionId: archivedId, expectedVersion: snapshot.revision }],
+        true,
+      );
+      assert.equal(
+        (await host.readTaskOrigins()).taskOrigins.some((o) => o.actionId === 'origin-9'),
+        false,
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const path of ['/Users/test/Turbo 获客流程包', 'C:\\Users\\test\\Turbo 获客流程包']) {
+    test(`follow-up source binding handles ${path}, replay and unavailable or ambiguous sources`, async () => {
+      const root = await mkdtemp(join(tmpdir(), 'maka-workhub-source-binding-'));
+      const store = createSessionStore(root);
+      const host = coordinator(root, store, undefined, undefined, undefined, undefined, {
+        assign: persistTestAssignmentAction(store, (input) => input.actionId),
+      });
+      const create = async (actionId: string, userText: string) => {
+        const outcome = await host.act(
+          {
+            actionId,
+            userText,
+            proposal: { disposition: 'create_new', title: actionId },
+            create: { workspace: { kind: 'host_path', path: root } },
+          },
+          CONTEXT,
+        );
+        assert.ok(outcome.ok, JSON.stringify(outcome));
+      };
+      const followup = async (actionId: string, targetActionId: string) => {
+        const page = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+        assert.ok(page.ok, JSON.stringify(page));
+        const target = page.result.candidates.find(
+          (c) => c.sessionId === workHubCreatedSessionId(targetActionId),
+        );
+        assert.ok(target);
+        return {
+          actionId,
+          userText: '刚才检查的那个 Turbo 获客流程包，读取里面的 SKILL.md。',
+          // A model-written instruction cannot manufacture a user-selected historical target.
+          delegationText: `Read the file in historical Session ${target.sessionId}.`,
+          candidateSetId: page.result.candidateSetId,
+          proposal: {
+            disposition: 'delegate_existing' as const,
+            candidateRef: target.candidateRef,
+          },
+        };
+      };
+      const rejectsWithoutClaim = async (input: WorkHubAdmittedAction, message: RegExp) => {
+        const outcome = await host.act(input, CONTEXT);
+        assert.equal(outcome.ok, false, JSON.stringify(outcome));
+        if (outcome.ok) return;
+        assert.equal(outcome.error.code, 'operation_conflict');
+        assert.match(outcome.error.message, message);
+        assert.equal(await store.readWorkHubActionClaim(input.actionId), undefined);
+        assert.equal(await store.readWorkHubAssignment(input.actionId), undefined);
+      };
+      try {
+        assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+        await create('history', `Read "${path}"`);
+        await create('current', `${'Context. '.repeat(150)}Inspect "${path}"`);
+        await create('independent', 'Compute SHA-256 of independent text');
+        await rejectsWithoutClaim(
+          await followup('wrong-history', 'history'),
+          /Follow-up source mismatch/u,
+        );
+        const correct = await followup('correct-source', 'current');
+        assert.ok((await host.act(correct, CONTEXT)).ok);
+        await create('newer', `Inspect "${path}" again as a separate task`);
+        assert.ok(
+          (await host.act(correct, CONTEXT)).ok,
+          'replay must retain its acknowledged source',
+        );
+        assert.equal(
+          (await store.readWorkHubAssignment(correct.actionId))?.targetSessionId,
+          workHubCreatedSessionId('current'),
+        );
+        const newest = await store.readCatalogRecord(workHubCreatedSessionId('newer'));
+        await store.setSessionsArchivedVersioned(
+          [{ sessionId: newest.header.id, expectedVersion: newest.revision }],
+          true,
+        );
+        await rejectsWithoutClaim(
+          await followup('unavailable-source', 'history'),
+          /Original source Session .* is unavailable/u,
+        );
+        const explicit = await followup('explicit-source', 'history');
+        assert.ok(
+          (
+            await host.act(
+              { ...explicit, userText: '请向 "history" 追加 Turbo 获客流程包 的读取任务。' },
+              CONTEXT,
+            )
+          ).ok,
+        );
+        await create('ambiguous', `Read "/another-parent/Turbo 获客流程包"`);
+        await rejectsWithoutClaim(
+          await followup('ambiguous-source', 'history'),
+          /several task sources/u,
+        );
+      } finally {
+        await store.close?.();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test('task creation preserves typed model configuration failures without exposing unexpected errors', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workhub-create-error-'));
+    const store = createSessionStore(root);
+    try {
+      for (const [index, failure] of [
+        new SessionOperationFailure(
+          'operation_unavailable',
+          'No default Session model is configured',
+        ),
+        new SessionOperationFailure('invalid_request', 'Selected Session model is not enabled'),
+        new SessionOperationFailure('operation_conflict', 'Session model changed'),
+        new SessionOperationFailure('persistence_failed', 'Connection catalog is unavailable'),
+        new Error('Unexpected private detail'),
+      ].entries()) {
+        const host = coordinator(root, store, undefined, undefined, undefined, undefined, {
+          assign: async () => {
+            throw failure;
+          },
+        });
+        const outcome = await host.act(
+          {
+            actionId: `model-failure-${index}`,
+            proposal: { disposition: 'create_new', title: 'Inspect files' },
+            userText: 'Inspect the supplied path',
+            create: { workspace: { kind: 'host_path', path: root } },
+          },
+          CONTEXT,
+        );
+        assert.deepEqual(outcome, {
+          ok: false,
+          error:
+            failure instanceof SessionOperationFailure
+              ? {
+                  code: failure.code === 'invalid_request' ? 'operation_conflict' : failure.code,
+                  message: failure.message,
+                }
+              : {
+                  code: 'persistence_failed',
+                  message: 'WorkHub task action could not be completed',
+                },
+        });
+        assert.equal(await store.readWorkHubAssignment(`model-failure-${index}`), undefined);
+      }
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('isolated task creation rejects substituted directory roots before any assignment effect', async () => {
     for (const replaceRoot of [true, false]) {
       const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-isolated-')));
@@ -2437,6 +2753,7 @@ function coordinator(
   });
   return {
     handlers: host.handlers,
+    readTaskOrigins: host.readTaskOrigins.bind(host),
     prepareRoutingDecision: host.prepareRoutingDecision.bind(host),
     async act(input: WorkHubAdmittedAction, context: ConnectionContext) {
       const turnId = randomUUID();
@@ -2462,6 +2779,24 @@ async function persistTestAssignment(
   const suffix = createHash('sha256').update(input.actionId, 'utf8').digest('hex').slice(0, 48);
   const content = normalizeMessageContent({ text: input.delegationText ?? input.userText });
   const result = await store.assignWorkHubMessage({
+    ...(input.create
+      ? {
+          create: {
+            sessionId: input.targetSessionId,
+            requestFingerprint: input.actionFingerprint,
+            input: {
+              cwd:
+                input.create.workspace.kind === 'host_path'
+                  ? input.create.workspace.path
+                  : assert.fail('This fixture requires a host path'),
+              name: input.targetSessionName,
+              llmConnectionSlug: 'test',
+              model: 'test',
+              permissionMode: input.create.defaults?.permissionMode ?? 'ask',
+            },
+          },
+        }
+      : {}),
     assignment: {
       type: 'workhub_coordination',
       id: `wha_${suffix}`,

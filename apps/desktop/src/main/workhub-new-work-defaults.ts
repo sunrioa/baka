@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { WorkHubCreateDefaults } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
 import { isChatDefaultPermissionMode, isWorkHubMaxConcurrentSessions, WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS, type ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
@@ -32,6 +32,29 @@ const defaultsByHost = new Map<string, WorkHubExecutionDefaults>();
 
 export function readWorkHubNewWorkDefaults(hostId: string): WorkHubExecutionDefaults {
   return defaultsByHost.get(hostId) ?? {};
+}
+
+/** Match the composer's coordinator fallback without changing saved task preferences. */
+export async function resolveWorkHubNewWorkDefaults(
+  client: Pick<DesktopRuntimeHostClient, 'hostId' | 'getWorkHubSession'>,
+): Promise<WorkHubExecutionDefaults> {
+  const defaults = readWorkHubNewWorkDefaults(client.hostId);
+  if (defaults.model || defaults.executorId) return defaults;
+  const session = await client.getWorkHubSession();
+  // A user selection made during the read outranks the display fallback.
+  const latest = readWorkHubNewWorkDefaults(client.hostId);
+  if (latest.model || latest.executorId) return latest;
+  if (session.id !== WORKHUB_COORDINATION_SESSION_ID || !session.llmConnectionId || !session.llmConnectionSlug || !session.model) {
+    throw new Error('Choose a model for new WorkHub tasks');
+  }
+  return {
+    ...latest,
+    model: {
+      llmConnectionId: session.llmConnectionId,
+      llmConnectionSlug: session.llmConnectionSlug,
+      model: session.model,
+    },
+  };
 }
 
 export function writeWorkHubNewWorkDefaults(

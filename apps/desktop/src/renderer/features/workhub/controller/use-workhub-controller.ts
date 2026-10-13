@@ -352,6 +352,7 @@ export function useWorkHubController(
 
   useEffect(() => {
     setChoices([]);
+    setModelSetupChoicesReady(false);
     setNewWorkDefaults({});
     transcriptRef.current = emptyTranscript;
     settledBeforePublication.current.clear();
@@ -475,14 +476,20 @@ export function useWorkHubController(
       if (!disposed) setReadError(reason instanceof Error ? reason.message : String(reason));
     };
     const transcriptAbort = new AbortController();
+    let modelsRevision = 0;
     const refreshModels = () => {
+      const revision = ++modelsRevision;
+      setModelSetupChoicesReady(false);
       void services
         .modelChoices(sessionId)
         .then((next) => {
-          if (!disposed) setChoices(next);
+          if (!disposed && revision === modelsRevision) {
+            setChoices(next);
+            setModelSetupChoicesReady(true);
+          }
         })
         .catch((reason: unknown) => {
-          if (!disposed) report(reason);
+          if (!disposed && revision === modelsRevision) report(reason);
         });
     };
     const unsubscribeModels = services.subscribeAvailability(refreshModels);
@@ -621,6 +628,11 @@ export function useWorkHubController(
   const runningTurnId =
     pendingTurnId ?? activeHostTurn(execution)?.turnId;
   const busy = sending || Boolean(runningTurnId);
+  const coordinationModelAvailable = Boolean(session && modelSetupChoicesReady && choices.some((choice) =>
+    choice.connectionId === session.llmConnectionId &&
+    choice.connectionSlug === session.llmConnectionSlug && choice.model === session.model,
+  ));
+  const coordinationModelUnavailable = Boolean(session && modelSetupChoicesReady && !coordinationModelAvailable);
   async function send(text: string, attachments: AttachmentRef[], requestedMode?: FollowUpMode) {
     if (!sessionId || !text.trim() || sendingRef.current) return false;
     const target = sessionId;
@@ -634,6 +646,11 @@ export function useWorkHubController(
       return false;
     }
     const queuedTurnId = sameQueued?.turnId ?? runningTurnId;
+    if (!queuedTurnId && configuringModelRef.current) return false;
+    if (!queuedTurnId && !coordinationModelAvailable) {
+      setError(workHubLiveCopy[localeRef.current][modelSetupChoicesReady ? 'coordinationModelUnavailable' : 'loadingModels']);
+      return false;
+    }
     onSubmit?.();
     sendingRef.current = true;
     setSending(true);
@@ -736,6 +753,48 @@ export function useWorkHubController(
     } catch (reason) {
       if (currentSessionId.current !== sessionId) return;
       report(reason);
+    } finally {
+      configuringModelRef.current = false;
+      setConfiguringModel(false);
+    }
+  }
+  async function changeCoordinationModel(choice: ChatModelChoice) {
+    if (!sessionId || !session || busy || configuringModelRef.current) return;
+    if (!modelSetupChoicesReady || !choices.some((candidate) =>
+      candidate.connectionId === choice.connectionId && candidate.connectionSlug === choice.connectionSlug &&
+      candidate.model === choice.model,
+    )) {
+      setError(workHubLiveCopy[localeRef.current].coordinationModelUnavailable);
+      return;
+    }
+    const target = sessionId;
+    configuringModelRef.current = true;
+    setConfiguringModel(true);
+    try {
+      const result = await services.configureModel(target, {
+        expectedRevision: session.revision,
+        modelTarget: {
+          kind: 'explicit', connectionId: choice.connectionId,
+          connectionSlug: choice.connectionSlug, model: choice.model,
+        },
+        thinkingLevel: null,
+      });
+      if (currentSessionId.current !== target) return;
+      if (result.kind === 'revision_conflict') {
+        refreshSessions.current();
+        setError(workHubLiveCopy[localeRef.current].modelConflict);
+        return;
+      }
+      const saved = await services.getSession(target);
+      if (currentSessionId.current !== target) return;
+      setSessions((previous) => {
+        const known = previous.find((entry) => entry.id === target);
+        if (known && known.revision > saved.revision) return previous;
+        return [...previous.filter((entry) => entry.id !== target), saved];
+      });
+      setError(undefined);
+    } catch (reason) {
+      if (currentSessionId.current === target) report(reason);
     } finally {
       configuringModelRef.current = false;
       setConfiguringModel(false);
@@ -904,6 +963,9 @@ export function useWorkHubController(
     send,
     stop,
     changeModel,
+    changeCoordinationModel,
+    coordinationModelAvailable,
+    coordinationModelUnavailable,
     changeExecutor,
     selectSetupModel,
     configuringModel,

@@ -19,7 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, join, posix, win32 } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { normalizeMessageContent } from '@maka/core/events';
 import type { SessionConfigurationTransitionRequest } from '@maka/runtime/session-manager';
@@ -814,6 +814,9 @@ export class HostWorkHubCoordinationCoordinator {
       'disposition' in action.proposal ||
       ('operation' in action.proposal && action.proposal.operation === 'correct');
     try {
+      if (!selectedTarget && !request.decision) {
+        await this.#assertFollowupSource(input, request.content.text);
+      }
       const resolvedCreate =
         create === undefined
           ? undefined
@@ -841,11 +844,11 @@ export class HostWorkHubCoordinationCoordinator {
         ),
       };
     } catch (error) {
-      if (error instanceof WorkHubActionEffectFailure) {
+      if (error instanceof WorkHubActionEffectFailure || error instanceof SessionOperationFailure) {
         return {
           ok: false,
           error: {
-            code: error.code,
+            code: error.code === 'invalid_request' ? 'operation_conflict' : error.code,
             message: error.message,
           },
         };
@@ -868,7 +871,7 @@ export class HostWorkHubCoordinationCoordinator {
         ok: false,
         error: {
           code: 'persistence_failed',
-          message: 'WorkHub action authority is unavailable',
+          message: 'WorkHub task action could not be completed',
         },
       };
     }
@@ -1116,6 +1119,88 @@ export class HostWorkHubCoordinationCoordinator {
     return outcome.ok ? { ok: true, result: { turnId: input.turnId } } : outcome;
   }
 
+  /** Creation provenance, not recent worker activity, anchors conversational follow-ups. */
+  readTaskOrigins() {
+    return this.#readTaskOrigins(false);
+  }
+
+  async #readTaskOrigins(forBinding: boolean) {
+    const [page, candidates] = await Promise.all([
+      this.#stores.readMessagesAfter(WORKHUB_COORDINATION_SESSION_ID, {
+        beforeSequence: Number.MAX_SAFE_INTEGER,
+        maxMessages: WORKHUB_ROUTING_HISTORY_MAX_MESSAGES,
+        maxStoredBytes: WORKHUB_ROUTING_HISTORY_MAX_STORED_BYTES,
+      }),
+      forBinding ? undefined : this.#actionGate.candidates(),
+    ]);
+    const visible = new Set(candidates?.candidates.map(({ sessionId }) => sessionId));
+    const origins = page.records.flatMap(({ message }) =>
+      message.type === 'workhub_coordination' &&
+      message.kind === 'delegation_assigned' &&
+      message.disposition === 'create_new' &&
+      (forBinding || visible.has(message.targetSessionId))
+        ? [
+            {
+              sessionId: message.targetSessionId,
+              actionId: message.actionId,
+              coordinationTurnId: message.coordinationTurnId,
+              createdAt: message.ts,
+              request: forBinding
+                ? message.userText
+                : Array.from(message.userText).slice(0, 1024).join(''),
+            },
+          ]
+        : [],
+    );
+    return {
+      taskOrigins: forBinding ? origins : origins.slice(0, 8),
+      truncated: origins.length > 8 || (page.records.at(-1)?.sequence ?? 0) > 0,
+    };
+  }
+
+  async #assertFollowupSource(input: WorkHubCoordinationActFromTurnInput, userText: string) {
+    const proposal = input.proposal;
+    if (!('disposition' in proposal) || proposal.disposition !== 'delegate_existing') return;
+    // An acknowledged action keeps its original owner, even if newer work exists now.
+    if (await this.#stores.readWorkHubAssignment(input.actionId)) return;
+    const page = await this.#actionGate.candidates();
+    if (page.candidateSetId !== input.candidateSetId) return; // The Gate reports stale discovery.
+    const target = page.candidates.find((c) => c.candidateRef === proposal.candidateRef);
+    if (
+      !target ||
+      userText.includes(target.sessionId) ||
+      quotedTaskName(userText, target.sessionName)
+    )
+      return;
+    const { taskOrigins } = await this.#readTaskOrigins(true);
+    const matches = new Map<string, (typeof taskOrigins)[number]>();
+    for (const origin of taskOrigins) {
+      for (const path of referencedTaskPaths(origin.request, userText)) {
+        if (!matches.has(path)) matches.set(path, origin); // Creation order, not title or activity.
+      }
+    }
+    if (!matches.size) return; // No literal source identity: do not invent a semantic binding.
+    if (matches.size !== 1) {
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        'The named object matches several task sources. Use select_and_delegate to clarify the original task; do not guess a historical Session.',
+      );
+    }
+    const source = [...matches.values()][0]!;
+    if (!page.candidates.some((c) => c.sessionId === source.sessionId)) {
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        `Original source Session ${source.sessionId} is unavailable. Clarify the target instead of delegating to an older Session.`,
+      );
+    }
+    if (source.sessionId !== target.sessionId) {
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        `Follow-up source mismatch: this request refers to original Session ${source.sessionId}, action ${source.actionId}. Rediscover candidates and delegate to that source, or use select_and_delegate for an explicit different target. Do not create a replacement task.`,
+      );
+    }
+  }
+
   async prepareRoutingDecision(
     input: HostWorkHubRoutingDecisionPreparation,
   ): Promise<WorkHubRoutingDecision | undefined> {
@@ -1268,6 +1353,44 @@ export class HostWorkHubCoordinationCoordinator {
       ? success()
       : identityConflict();
   }
+}
+
+/** Only literal objects from the original user request can bind a follow-up, never model text. */
+function referencedTaskPaths(source: string, request: string): Set<string> {
+  const paths = new Set<string>();
+  const literals =
+    /(["'`])((?:\/|[A-Za-z]:[\\/])[^"'`\r\n]+)\1|(?:^|\s)((?:\/|[A-Za-z]:[\\/])[^\s"'`<>()[\]{},;，。！？]+)/gu;
+  for (const match of source.matchAll(literals)) {
+    const raw = (match[2] ?? match[3]!).normalize('NFC');
+    const windows = /^[A-Za-z]:[\\/]/u.test(raw);
+    const path = windows
+      ? win32.normalize(raw).replace(/\\/g, '/').toLowerCase()
+      : posix.normalize(raw);
+    const name = posix.basename(path);
+    if (Array.from(name).length < 3) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (
+      new RegExp(
+        `(?:^|[^\\p{L}\\p{N}_.-])${escaped}(?=$|[^\\p{L}\\p{N}_.-])`,
+        windows ? 'iu' : 'u',
+      ).test(request.normalize('NFC'))
+    )
+      paths.add(path);
+  }
+  return paths;
+}
+
+function quotedTaskName(text: string, name: string): boolean {
+  return (
+    name.trim().length > 0 &&
+    [
+      ['"', '"'],
+      ["'", "'"],
+      ['`', '`'],
+      ['“', '”'],
+      ['「', '」'],
+    ].some(([open, close]) => text.includes(`${open}${name}${close}`))
+  );
 }
 
 /** Keeps a model-authority gap distinguishable from a failed authority read. */
