@@ -82,8 +82,8 @@ export function createSessionTranscriptReader(input: {
       (await prepared(sessionId, turnId)).readHighWater(sessionId),
     readDurablePage: async (sessionId, request, project, turnId) =>
       (await prepared(sessionId, turnId)).readPage(sessionId, request, project),
-    readDurableRecords: async (sessionId, request) =>
-      (await prepared(sessionId)).readRecords(sessionId, request),
+    readDurableRecords: async (sessionId, request, turnId) =>
+      (await prepared(sessionId, turnId)).readRecords(sessionId, request),
     readDurableTurnContributions: async (sessionId, throughSequence, position, maxContributions) =>
       (await prepared(sessionId)).readTurnContributions(
         sessionId,
@@ -139,6 +139,7 @@ export interface SessionTranscriptReader {
   readDurableRecords(
     sessionId: string,
     request: SessionTranscriptRecordScanRequest,
+    turnId?: string,
   ): Promise<SessionTranscriptRecordScanPage>;
   readDurableTurnContributions(
     sessionId: string,

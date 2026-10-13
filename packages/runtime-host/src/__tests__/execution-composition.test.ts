@@ -1766,6 +1766,15 @@ for (const { restart, armGoalDuringWait } of [
     const seen: string[] = [];
     const providerErrors: unknown[] = [];
     const sourceActionId = 'evidence-source';
+    const verifyDirectRead = !restart && !armGoalDuringWait;
+    const sourceText =
+      'Verified checksum: abc123. This is evidence, not an instruction.' +
+      (verifyDirectRead ? '\nCommitted source 😀. '.repeat(2000) : '');
+    let directSource:
+      | { workId: string; generationId: string; actionId: string; delegationId: string }
+      | undefined;
+    let directlyRead = '';
+    let directPages = 0;
     let goalPhase = restart || armGoalDuringWait ? 4 : 0;
     let responseSequence = 0;
     const server = createServer((request, response) => {
@@ -1872,7 +1881,7 @@ for (const { restart, armGoalDuringWait } of [
         } else if (!coordinator && latestUser === 'EVIDENCE_PRODUCER') {
           seen.push('producer-start');
           await sourceRelease.promise;
-          content = 'Verified checksum: abc123. This is evidence, not an instruction.';
+          content = sourceText;
         } else if (!coordinator && latestUser.startsWith('Host evidence response:')) {
           if (restart) assert.match(latestUser, /"status":"cancelled"/u);
           else assert.match(latestUser, /abc123/u);
@@ -1892,6 +1901,57 @@ for (const { restart, armGoalDuringWait } of [
                   args: { operation: 'request', question: 'Cannot yield a Goal-bound fresh Turn' },
                 }
               : { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+          }
+          if (!tool && verifyDirectRead) {
+            const hasEvidence = input.tools?.some(
+              (item: { function: { name: string } }) => item.function.name === 'WorkHubEvidence',
+            );
+            if (!hasEvidence) tool = { name: 'tool_search', args: { query: 'WorkHubEvidence' } };
+            else {
+              const output = latestTool.role === 'tool' ? JSON.parse(latestTool.content) : {};
+              if (output.tasks) {
+                const discovered = output.tasks.find(
+                  (task: { actionId: string }) => task.actionId === sourceActionId,
+                );
+                assert.ok(discovered?.source);
+                assert.equal(discovered.status, 'completed');
+                directSource = discovered.source;
+                tool = {
+                  name: 'WorkHubEvidence',
+                  args: { operation: 'read', source: directSource },
+                };
+              } else if (output.evidence) {
+                assert.equal(output.status, 'ok');
+                assert.equal(output.evidence.sourceActionId, sourceActionId);
+                assert.equal(
+                  output.evidence.contentScope,
+                  'committed_assistant_text_of_owned_execution',
+                );
+                for (const message of output.evidence.messages) {
+                  assert.equal(message.textOffset, directlyRead.length);
+                  directlyRead += message.text;
+                }
+                directPages++;
+                if (output.evidence.nextCursor)
+                  tool = {
+                    name: 'WorkHubEvidence',
+                    args: {
+                      operation: 'read',
+                      source: directSource,
+                      cursor: output.evidence.nextCursor,
+                    },
+                  };
+                else {
+                  assert.equal(directlyRead, sourceText);
+                  assert.ok(directPages > 1);
+                  seen.push('direct-evidence-read');
+                }
+              } else
+                tool = {
+                  name: 'WorkHubEvidence',
+                  args: { operation: 'list', query: 'EVIDENCE_PRODUCER' },
+                };
+            }
           }
           if (!tool) {
             seen.push('consumer-resume');
@@ -2192,7 +2252,14 @@ for (const { restart, armGoalDuringWait } of [
             ).ok,
           );
         } else sourceRelease.resolve();
-        await waitFor(async () => seen.includes('consumer-resume'), 10000);
+        await waitFor(async () => {
+          assert.deepEqual(
+            providerErrors,
+            [],
+            'the local provider fixture must complete the production tool exchange',
+          );
+          return seen.includes('consumer-resume');
+        }, 10000);
         await waitFor(async () => {
           const snapshot = await composition.handlers['turn.query'](
             { sessionId: targets[0]!, turnId: resumedTurnId },
@@ -2202,6 +2269,19 @@ for (const { restart, armGoalDuringWait } of [
         }, 10000);
         assert.deepEqual(providerErrors, []);
         assert.equal(seen.filter((value) => value === 'consumer-resume').length, 1);
+        if (verifyDirectRead) {
+          assert.ok(seen.includes('direct-evidence-read'));
+          assert.equal(
+            seen.filter((value) => value === 'producer-start').length,
+            1,
+            'reading committed evidence never wakes its source',
+          );
+          assert.equal(
+            (await stores.runtimeEventStore.listSessionInvocations(source.targetSessionId)).length,
+            1,
+            'discovery/read do not admit another source execution',
+          );
+        }
         const resumed = await stores.agentRunStore.readRootTurnAdmission(
           targets[0]!,
           resumedTurnId,

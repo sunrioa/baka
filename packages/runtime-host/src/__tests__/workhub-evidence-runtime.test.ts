@@ -19,10 +19,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { StoredMessage, WorkHubDelegationAssignedMessage } from '@maka/core/session';
+import type {
+  StoredMessage,
+  WorkHubDelegationAssignedMessage,
+  SessionHeader,
+} from '@maka/core/session';
 import { WORKHUB_COORDINATION_SESSION_ID, decodeCanonicalMessage } from '@maka/core/session';
 import { testInvocationRecord } from '@maka/runtime/test-only/invocation-fixture';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
+import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
 import type { WorkHubEvidenceOrigin } from '@maka/core/workhub-evidence';
 import { normalizeRootTurnAdmissionPayload } from '@maka/storage/agent-run-store';
 import {
@@ -41,7 +46,16 @@ function fixture() {
     { sessionId: string; turnId: string; runId: string; execution: unknown }
   >();
   const runs = new Map<string, ReturnType<typeof testInvocationRecord>>();
-  const assignments = ['a', 'b', 'c'].map((key) => ({
+  const assignments: WorkHubDelegationAssignedMessage[] = ['a', 'b', 'c'].map((key) => ({
+    type: 'workhub_coordination',
+    kind: 'delegation_assigned',
+    schemaVersion: 4,
+    id: 'assignment-' + key,
+    turnId: 'coordination-' + key,
+    coordinationTurnId: 'coordination-' + key,
+    ts: 1,
+    actionFingerprint: `sha256:${'0'.repeat(64)}`,
+    disposition: 'delegate_existing',
     actionId: key,
     delegationId: 'delegation-' + key,
     targetSessionId: key,
@@ -50,15 +64,27 @@ function fixture() {
     targetSessionName: key,
     returnResults: true,
     userText: 'Original user task ' + key,
-  })) as WorkHubDelegationAssignedMessage[];
+  }));
   const active = new Set(['a', 'b', 'c']);
   const archived = new Set<string>();
+  const headerOverrides = new Map<string, Partial<SessionHeader>>();
   const resources = new Set<string>();
   const stopped = new Set<string>();
   const replaced = new Set<string>();
   const outputs = new Map<string, StoredMessage[]>();
   const cancelledMessages = new Set<string>();
   const deliveries: Array<{ sessionId: string; text: string }> = [];
+  const catalogReads: Array<{
+    beforeSequence?: number;
+    maxMessages: number;
+    maxStoredBytes: number;
+  }> = [];
+  const transcriptReads: Array<{
+    sessionId: string;
+    turnId?: string;
+    maxMessages: number;
+    maxStoredBytes: number;
+  }> = [];
   let timestamp = 1000;
   for (const sessionId of ['a', 'b', 'c', WORKHUB_COORDINATION_SESSION_ID]) {
     const turnId = 'turn-' + sessionId,
@@ -80,18 +106,42 @@ function fixture() {
     stores: {
       sessionStore: {
         listHeaders: async () =>
-          ['a', 'b', 'c', 'private', WORKHUB_COORDINATION_SESSION_ID].map((id) => ({
+          [
+            ...new Set([
+              ...assignments.map((a) => a.targetSessionId),
+              'private',
+              WORKHUB_COORDINATION_SESSION_ID,
+            ]),
+          ].map((id) => ({
             id,
             isArchived: archived.has(id),
             name: id,
           })),
-        readHeaderSnapshot: async (id: string) => ({ id, isArchived: archived.has(id) }),
+        readHeaderSnapshot: async (id: string) => ({
+          id,
+          labels: [],
+          isArchived: archived.has(id),
+          ...headerOverrides.get(id),
+        }),
         readActiveWorkHubAssignmentsByTarget: async (ids: readonly string[]) =>
           assignments.filter((a) => ids.includes(a.targetSessionId) && active.has(a.actionId)),
         readWorkHubReplacement: async (id: string) => (replaced.has(id) ? {} : undefined),
         readWorkHubStopRequest: async (id: string) => (stopped.has(id) ? {} : undefined),
         readWorkHubStopResolution: async () => undefined,
         readWorkHubAssignment: async (id: string) => assignments.find((a) => a.actionId === id),
+        readLatestWorkHubAssignment: async (id: string) =>
+          [...assignments].reverse().find((a) => (a.work?.id ?? a.actionId) === id),
+        readWorkHubAssignmentsPage: async (input: (typeof catalogReads)[number]) => {
+          catalogReads.push(input);
+          return {
+            highWaterSequence: assignments.length - 1,
+            records: assignments
+              .map((message, sequence) => ({ sequence, message }))
+              .filter((row) => row.sequence < (input.beforeSequence ?? Number.MAX_SAFE_INTEGER))
+              .reverse()
+              .slice(0, input.maxMessages),
+          };
+        },
         readWorkHubTaskInputSuccessors: async () => [],
         readTranscriptHighWaterSnapshot: async () => 1,
         readTranscriptMessagesSnapshot: async (sid: string, input: { messageIds: string[] }) =>
@@ -153,12 +203,33 @@ function fixture() {
     } as unknown as Options['messages'],
     admission: lane,
     reader: {
-      readDurableHighWater: async () => 99,
-      readDurableRecords: async (sid: string) => ({
-        throughSequence: 99,
-        records: (outputs.get(sid) ?? []).map((message, index) => ({ sequence: index, message })),
-        nextPosition: null,
-      }),
+      readDurableHighWater: async (sid: string) => (outputs.get(sid)?.length ?? 1) - 1,
+      readDurableRecords: async (sid, request, turnId?: string) => {
+        transcriptReads.push({
+          sessionId: sid,
+          turnId,
+          maxMessages: request.maxMessages,
+          maxStoredBytes: request.maxStoredBytes,
+        });
+        const throughSequence = request.throughSequence ?? (outputs.get(sid)?.length ?? 1) - 1;
+        const rows = (outputs.get(sid) ?? [])
+          .map((message, sequence) => ({ sequence, message }))
+          .filter(
+            (row) =>
+              row.sequence <= throughSequence &&
+              row.sequence <= (request.position ?? throughSequence) &&
+              (turnId === undefined || row.message.turnId === turnId),
+          )
+          .reverse();
+        const records: typeof rows = [];
+        let bytes = 0;
+        for (const row of rows) {
+          if (records.length >= request.maxMessages || bytes >= request.maxStoredBytes) break;
+          records.push(row);
+          bytes += Buffer.byteLength(JSON.stringify(row.message));
+        }
+        return { throughSequence, records, nextPosition: rows[records.length]?.sequence ?? null };
+      },
     },
     hasLiveResources: async (sid) => resources.has(sid),
     hasBlockingGoal: () => false,
@@ -210,6 +281,7 @@ function fixture() {
     terminal,
     active,
     archived,
+    headerOverrides,
     resources,
     stopped,
     replaced,
@@ -220,11 +292,243 @@ function fixture() {
     assignments,
     deliveries,
     cancelledMessages,
+    catalogReads,
+    transcriptReads,
     expire() {
       timestamp += 3600001;
     },
   };
 }
+
+test('evidence discovery pages the canonical work catalog beyond 32 sources without retargeting its snapshot', async () => {
+  const f = fixture();
+  for (let index = 0; index < 140; index++) {
+    const key = `catalog-${index}`;
+    f.assignments.push({
+      ...f.assignments[1]!,
+      id: `assignment-${key}`,
+      actionId: key,
+      delegationId: `delegation-${key}`,
+      targetSessionId: key,
+      targetMessageId: `message-${key}`,
+      targetSessionName: index === 139 ? '\u0000'.repeat(256) : `Task ${index}`,
+      userText:
+        index === 139
+          ? '\u0000'.repeat(1000)
+          : index === 0
+            ? 'needle😀 objective'
+            : `Independent objective ${index}`,
+      work: { id: key, generationId: key },
+    });
+    f.active.add(key);
+  }
+  type Page = {
+    status: 'ok';
+    tasks: Array<{
+      actionId: string;
+      workId: string;
+      generationId: string;
+      source: { actionId: string; delegationId: string };
+    }>;
+    nextCursor: string | null;
+    truncated: boolean;
+  };
+  const read = async (input: object, runtime = f.runtime) =>
+    (await runtime.tool.impl({ operation: 'list', ...input } as never, f.caller())) as Page;
+  const first = await read({});
+  assert.equal(first.status, 'ok');
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= READ_PAGE_MAX_BYTES);
+  assert.ok(first.tasks.length <= 16);
+  assert.equal(typeof first.nextCursor, 'string');
+  const found = first.tasks.map((task) => task.actionId);
+  const firstCursor = first.nextCursor!;
+  f.assignments.push({
+    ...f.assignments[1]!,
+    actionId: 'after-snapshot',
+    delegationId: 'after-delegation',
+    targetSessionId: 'after',
+  });
+  f.active.add('after-snapshot');
+  for (let cursor = first.nextCursor; cursor; ) {
+    const page = await read({ cursor });
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAGE_MAX_BYTES);
+    assert.equal(page.truncated, page.nextCursor !== null);
+    for (const task of page.tasks) {
+      assert.equal(task.source.actionId, task.actionId);
+      assert.ok(task.workId && task.generationId && task.source.delegationId);
+      found.push(task.actionId);
+    }
+    cursor = page.nextCursor;
+  }
+  assert.equal(found.length, 143);
+  assert.equal(new Set(found).size, found.length);
+  assert.ok(!found.includes('after-snapshot'));
+  const sparse = await read({ query: 'needle😀' });
+  assert.equal(sparse.tasks.length, 0);
+  assert.ok(sparse.nextCursor, 'an empty bounded scan is not the end of discovery');
+  const matches: string[] = [];
+  for (let cursor: string | null = sparse.nextCursor; cursor; ) {
+    const page = await read({ query: 'needle😀', cursor });
+    matches.push(...page.tasks.map((task) => task.actionId));
+    cursor = page.nextCursor;
+  }
+  assert.deepEqual(matches, ['catalog-0']);
+  for (const [input, runtime] of [
+    [{ cursor: firstCursor, query: 'changed' }, f.runtime],
+    [{ cursor: firstCursor + 'bad' }, f.runtime],
+    [{ cursor: firstCursor }, f.restart()],
+  ] as const)
+    await assert.rejects(() => read(input, runtime), /Invalid or expired/u);
+  await assert.rejects(
+    async () => f.runtime.tool.impl({ operation: 'list', cursor: firstCursor }, f.caller('c')),
+    /Invalid or expired/u,
+  );
+  await assert.rejects(
+    async () =>
+      f.runtime.tool.impl(
+        { operation: 'read', sourceActionId: 'b', cursor: firstCursor },
+        f.caller(),
+      ),
+    /Invalid or expired/u,
+  );
+  assert.ok(
+    f.catalogReads.every(
+      (input) => input.maxMessages === 64 && input.maxStoredBytes === 256 * 1024,
+    ),
+  );
+  assert.equal(f.deliveries.length, 0);
+  assert.equal(f.records.size, 0);
+});
+
+test('direct evidence reads reconstruct oversized escaped Unicode from one owned execution without waking its Session', async () => {
+  const f = fixture();
+  const text = '\u0000😀\\"'.repeat(40000);
+  f.outputs.set('b', [
+    { type: 'user', id: 'hidden', turnId: 'turn-b', ts: 1, text: 'PRIVATE USER' },
+    { type: 'assistant', id: 'reply', turnId: 'turn-b', ts: 2, text, modelId: 'test' },
+    {
+      type: 'assistant',
+      id: 'unrelated',
+      turnId: 'other-turn',
+      ts: 3,
+      text: 'PRIVATE OTHER TURN',
+      modelId: 'test',
+    },
+  ]);
+  f.terminal('b');
+  type Page = {
+    status: 'ok';
+    evidence: {
+      sourceRunId: string;
+      sourceTurnId: string;
+      throughSequence: number;
+      messages: Array<{
+        messageId: string;
+        text: string;
+        textOffset: number;
+        totalTextChars: number;
+      }>;
+      nextCursor: string | null;
+    };
+  };
+  const source = { workId: 'b', generationId: 'b', actionId: 'b', delegationId: 'delegation-b' };
+  const read = async (input: object, runtime = f.runtime) =>
+    (await runtime.tool.impl(
+      { operation: 'read', sourceActionId: 'b', ...input } as never,
+      f.caller(),
+    )) as Page;
+  let page = await read({ source });
+  assert.equal(page.status, 'ok');
+  assert.ok(page.evidence.nextCursor);
+  const firstCursor = page.evidence.nextCursor!;
+  const watermark = page.evidence.throughSequence;
+  f.outputs.get('b')!.push({
+    type: 'assistant',
+    id: 'later',
+    turnId: 'another-turn',
+    ts: 4,
+    text: 'LATER COMMIT',
+    modelId: 'test',
+  });
+  let reconstructed = '';
+  for (let count = 0; ; count++) {
+    assert.ok(count < 200, 'every page makes progress without losing or repeating text');
+    assert.equal(page.evidence.throughSequence, watermark);
+    assert.equal(page.evidence.sourceRunId, 'run-b');
+    assert.equal(page.evidence.sourceTurnId, 'turn-b');
+    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAGE_MAX_BYTES);
+    for (const message of page.evidence.messages) {
+      assert.equal(message.messageId, 'reply');
+      assert.equal(message.textOffset, reconstructed.length);
+      assert.equal(message.totalTextChars, text.length);
+      assert.ok(!/[\uD800-\uDBFF]$/u.test(message.text));
+      reconstructed += message.text;
+    }
+    if (!page.evidence.nextCursor) break;
+    page = await read({ source, cursor: page.evidence.nextCursor });
+  }
+  assert.equal(reconstructed, text);
+  assert.equal(
+    (await read({})).evidence.sourceRunId,
+    'run-b',
+    'legacy exact action reads remain supported',
+  );
+  const multipart = fixture();
+  multipart.outputs.set(
+    'b',
+    Array.from({ length: 25 }, (_, index) => ({
+      type: 'assistant' as const,
+      id: `fragment-${index}`,
+      turnId: 'turn-b',
+      ts: index,
+      text: `Text ${index}:` + '\u0000😀'.repeat(400),
+      modelId: 'test',
+    })),
+  );
+  multipart.terminal('b');
+  const readMultipart = async (cursor?: string) =>
+    (await multipart.runtime.tool.impl(
+      { operation: 'read', source, ...(cursor ? { cursor } : {}) },
+      multipart.caller(),
+    )) as Page;
+  const fragments = new Map<string, string>();
+  for (
+    let value = await readMultipart();
+    ;
+    value = await readMultipart(value.evidence.nextCursor ?? undefined)
+  ) {
+    assert.ok(Buffer.byteLength(JSON.stringify(value)) <= READ_PAGE_MAX_BYTES);
+    for (const message of value.evidence.messages) {
+      const previous = fragments.get(message.messageId) ?? '';
+      assert.equal(message.textOffset, previous.length);
+      fragments.set(message.messageId, previous + message.text);
+    }
+    if (!value.evidence.nextCursor) break;
+  }
+  assert.equal(fragments.size, 25);
+  for (const message of multipart.outputs.get('b')!) {
+    assert.ok(message.type === 'assistant');
+    assert.equal(fragments.get(message.id), message.text);
+  }
+  for (const [input, runtime] of [
+    [{ source: { ...source, generationId: 'changed' }, cursor: firstCursor }, f.runtime],
+    [{ source, cursor: firstCursor + 'bad' }, f.runtime],
+    [{ source, cursor: firstCursor }, f.restart()],
+  ] as const)
+    await assert.rejects(() => read(input, runtime), /Invalid or expired|source.*changed/u);
+  f.archived.add('b');
+  assert.deepEqual(await read({ source, cursor: firstCursor }), { status: 'unavailable' });
+  assert.ok(
+    f.transcriptReads.every(
+      (input) =>
+        input.turnId === 'turn-b' &&
+        input.maxMessages === 64 &&
+        input.maxStoredBytes === 256 * 1024,
+    ),
+  );
+  assert.equal(f.deliveries.length, 0);
+  assert.equal(f.records.size, 0);
+});
 
 test('evidence requests persist fixed sender identity and continue once from bounded source results after restart', async () => {
   const f = fixture();
@@ -398,6 +702,29 @@ test('evidence fails closed on foreign fields, non-root or stale senders, hidden
     { status: 'unavailable' },
   );
   f.archived.delete('b');
+  for (const hidden of [
+    { role: 'workhub_coordination' },
+    { labels: ['mode:side_conversation'] },
+    {
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: 'a',
+        spawnedBy: { parentRunId: 'run-a', parentTurnId: 'turn-a', toolCallId: 'spawn' },
+        lifecycle: 'foreground',
+      },
+    },
+  ] satisfies Partial<SessionHeader>[]) {
+    f.headerOverrides.set('b', hidden);
+    assert.deepEqual(
+      await f.runtime.tool.impl({ operation: 'read', sourceActionId: 'b' }, f.caller()),
+      { status: 'unavailable' },
+    );
+    const result = (await f.runtime.tool.impl({ operation: 'list' }, f.caller())) as {
+      tasks: { actionId: string }[];
+    };
+    assert.ok(result.tasks.every((task) => task.actionId !== 'b'));
+  }
+  f.headerOverrides.delete('b');
   f.resources.add('a');
   await assert.rejects(
     async () =>

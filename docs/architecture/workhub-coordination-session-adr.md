@@ -536,10 +536,44 @@ Aggregated task UI and new Windows execution backends remain subsequent steps.
 assignments on this Host. It lists bounded task references and reads committed
 assistant output from the exact owned task execution. It does not expose arbitrary
 Session history, user messages, child Sessions, foreign Hosts or filesystem
-contents. The returned excerpt preserves action, delegation, original Message,
-Turn, Run and assistant-message provenance and marks truncation (16 KB of text,
-at most eight bounded transcript pages). A terminal source is not proof of
-artifact correctness; references or paths in its text are not verified files.
+contents. A terminal source is not proof of artifact correctness; references or
+paths in its text are not verified files.
+
+Discovery pages the existing canonical assignment ledger (64 records / 256 KiB
+scan budget per request), not a second work index. `list` accepts a bounded query,
+an opaque `cursor` and a result limit (default 8, maximum 16). Each item retains
+the legacy action/delegation fields and adds the stable work/generation `source`
+reference, short original objective, assignment text, creation provenance and
+observed owned-execution state. Several still-eligible assignments can belong
+to one work; a source reference selects that exact assignment, not a mutable
+latest Session reply. Titles and text are retrieval hints, never authority.
+Sparse pages can contain no matches with a non-null `nextCursor`. Catalog bounds
+are fixed at the initial high-water mark, while current source eligibility is
+rechecked on every call. New work requires a fresh discovery snapshot.
+
+Direct `read` accepts the discovered `source` or the legacy exact `sourceActionId`.
+`evidence.nextCursor` continues a fixed committed transcript snapshot of the
+selected terminal owned execution. Pages contain assistant text only, newest
+messages first, with message/Turn/sequence provenance and UTF-16 offsets that do
+not split surrogate pairs. The source Run identifies the execution tip, not a
+newly invented per-message Run field. The reader seeks the owned Turn directly
+instead of scanning unrelated Turns in a reused Session. One oversized projected
+record can exceed the storage scan budget to make progress, within the existing
+bounded Turn projection capacity; text is still served in small continuations.
+Projection/capacity failures are explicit, not empty evidence. Each entire JSON
+result, including escaped text and a reserved continuation token, fits the
+existing `READ_PAGE_MAX_BYTES` (7,500-byte) tool-result boundary, so normal archive
+pruning does not hide its cursor behind another result read. At most eight
+assistant fragments are returned per page.
+
+Both page types use Host-local signed cursors, bound to the reader Session and
+query or exact work/generation/action/delegation/Session/Message/Turn/Run snapshot.
+They expire on Host restart. Changed sources or invalid cursors fail explicitly;
+archived, stopped, replaced, private/special-role or child sources remain hidden.
+Cursors never replace the current hosted-root and source-ownership checks.
+Discovery/read have no admission, model dispatch, configuration or grant writer,
+and do not wake a cold source. The dependency response below retains its separate
+16 KB excerpt / eight transcript-page limit and encoded admission budget.
 
 A worker may ask a bounded question, optionally selecting a discovered source.
 Without one, WorkHub receives a result notification and selects a visible source
@@ -547,6 +581,9 @@ or reports unavailable. Selecting a queued source does not dispatch more work.
 Supplemental execution still goes through the existing user-authorized Action
 Gate. Neither the question nor the source output is permission or a user message.
 WorkHub must finish coordination promptly, not poll or block on the worker.
+This request/resolve path still waits for committed source evidence or asks the
+coordinator to select it; it does not yet deliver the question to the peer model.
+Correlated peer inbox/reply delivery is a separate next-phase change.
 
 The Host fixes sender Session, Turn, Run, invocation, tool-call, assignment and
 original Message identities. It persists one typed request and immutable reply
