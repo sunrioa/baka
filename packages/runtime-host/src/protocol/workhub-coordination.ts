@@ -180,6 +180,37 @@ export interface WorkHubWorksQueryInput {
   readonly limit?: number;
 }
 
+export interface WorkHubContextObservation {
+  readonly currentModelId: string;
+  readonly currentConnectionId: string | null;
+  readonly currentConnectionSlug: string;
+  readonly configuredInputLimit: number | null;
+  readonly lastRequest:
+    | {
+        readonly status: 'unknown';
+        readonly reason:
+          | 'not_observed'
+          | 'scan_limit'
+          | 'record_limit'
+          | 'unknown_route'
+          | 'invalid_observation'
+          | 'unsupported_store';
+      }
+    | {
+        readonly status: 'observed';
+        readonly eventId: string;
+        readonly runId: string;
+        readonly observedAt: number;
+        readonly modelId: string;
+        readonly connectionId: string;
+        readonly connectionSlug: string;
+        readonly inputTokens: number;
+        readonly outputTokens?: number;
+        /** null when the current connection identity cannot be resolved. */
+        readonly matchesCurrentRoute: boolean | null;
+      };
+}
+
 /** Source-backed objective identity; Session activity is not creation provenance. */
 export interface WorkHubWorkSummary {
   readonly workId: string;
@@ -196,6 +227,7 @@ export interface WorkHubWorkSummary {
   readonly objective: string;
   readonly objectiveTruncated: boolean;
   readonly available: boolean;
+  readonly context?: WorkHubContextObservation;
 }
 
 export interface WorkHubWorksQueryResult {
@@ -212,6 +244,8 @@ export type WorkHubRoutingProposal =
       readonly disposition: 'continue_work';
       readonly workId: string;
       readonly sourceActionId: string;
+      /** Resource choice only; the Host resolves the original workspace and new identity. */
+      readonly container?: 'reuse' | 'fresh';
     }
   | { readonly disposition: 'create_new'; readonly title: string };
 
@@ -342,7 +376,7 @@ export const WORKHUB_COORDINATION_OPERATION_SPECS = {
             'objectiveTruncated',
             'available',
           ],
-          ['sourceMessageId'],
+          ['sourceMessageId', 'context'],
         );
         if (
           typeof work.requestTruncated !== 'boolean' ||
@@ -370,6 +404,9 @@ export const WORKHUB_COORDINATION_OPERATION_SPECS = {
           objective: requireUtf8String(work.objective, 'WorkHub original objective', 8192),
           objectiveTruncated: work.objectiveTruncated,
           available: work.available,
+          ...(work.context === undefined
+            ? {}
+            : { context: decodeWorkHubContextObservation(work.context) }),
         };
       });
       return {
@@ -640,7 +677,9 @@ function decodeWorkHubCoordinationActionFields(
     input.newWorkDefaults !== undefined &&
     (!isWorkHubCreateDefaults(input.newWorkDefaults) ||
       !(
-        ('disposition' in proposal && proposal.disposition === 'create_new') ||
+        ('disposition' in proposal &&
+          (proposal.disposition === 'create_new' ||
+            (proposal.disposition === 'continue_work' && proposal.container === 'fresh'))) ||
         ('operation' in proposal &&
           proposal.operation === 'correct' &&
           proposal.target.disposition === 'create_new')
@@ -681,10 +720,10 @@ function decodeWorkHubCoordinationActionFields(
     if (
       input.create !== undefined ||
       input.candidateSetId !== undefined ||
-      input.newWorkDefaults !== undefined
+      (input.newWorkDefaults !== undefined && proposal.container !== 'fresh')
     )
       throw invalidProtocolFrame(
-        'A work continuation cannot select a different Session or creation defaults',
+        'A work continuation cannot select a target Session/workspace or change reuse defaults',
       );
     return base;
   }
@@ -760,15 +799,19 @@ function decodeWorkHubCoordinationProposal(value: unknown): WorkHubCoordinationP
   const proposal = requireRecord(value, 'WorkHub Coordination proposal');
 
   if (proposal.disposition === 'continue_work') {
-    const exact = requireExactRecord(proposal, 'WorkHub work continuation', [
-      'disposition',
-      'workId',
-      'sourceActionId',
-    ]);
+    const exact = requireShapedRecord(
+      proposal,
+      'WorkHub work continuation',
+      ['disposition', 'workId', 'sourceActionId'],
+      ['container'],
+    );
+    if (exact.container !== undefined && exact.container !== 'reuse' && exact.container !== 'fresh')
+      throw invalidProtocolFrame('Invalid WorkHub execution container');
     return {
       disposition: 'continue_work',
       workId: requireEntityId(exact.workId, 'WorkHub work ID'),
       sourceActionId: requireEntityId(exact.sourceActionId, 'WorkHub source action'),
+      ...(exact.container === undefined ? {} : { container: exact.container }),
     };
   }
 
@@ -874,6 +917,93 @@ function decodeWorkHubCoordinationCreateContext(value: unknown): WorkHubCoordina
   }
   return {
     workspace: decodeWorkspaceTarget(context.workspace),
+  };
+}
+
+function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservation {
+  const context = requireExactRecord(value, 'WorkHub context observation', [
+    'currentModelId',
+    'currentConnectionId',
+    'currentConnectionSlug',
+    'configuredInputLimit',
+    'lastRequest',
+  ]);
+  const raw = requireRecord(context.lastRequest, 'WorkHub last request');
+  let lastRequest: WorkHubContextObservation['lastRequest'];
+  if (raw.status === 'unknown') {
+    const unknown = requireExactRecord(raw, 'WorkHub unknown context', ['status', 'reason']);
+    const reason = unknown.reason;
+    if (
+      reason !== 'not_observed' &&
+      reason !== 'scan_limit' &&
+      reason !== 'record_limit' &&
+      reason !== 'unknown_route' &&
+      reason !== 'invalid_observation' &&
+      reason !== 'unsupported_store'
+    )
+      throw invalidProtocolFrame('Invalid WorkHub context reason');
+    lastRequest = { status: 'unknown', reason };
+  } else {
+    const observed = requireShapedRecord(
+      raw,
+      'WorkHub observed context',
+      [
+        'status',
+        'eventId',
+        'runId',
+        'observedAt',
+        'modelId',
+        'connectionId',
+        'connectionSlug',
+        'inputTokens',
+        'matchesCurrentRoute',
+      ],
+      ['outputTokens'],
+    );
+    if (
+      observed.status !== 'observed' ||
+      (observed.matchesCurrentRoute !== null && typeof observed.matchesCurrentRoute !== 'boolean')
+    )
+      throw invalidProtocolFrame('Invalid WorkHub context state');
+    const inputTokens = requireCount(observed.inputTokens, 'WorkHub request input tokens');
+    if (inputTokens === 0) throw invalidProtocolFrame('Invalid WorkHub request input tokens');
+    lastRequest = {
+      status: 'observed',
+      eventId: requireEntityId(observed.eventId, 'WorkHub usage event'),
+      runId: requireEntityId(observed.runId, 'WorkHub usage Run'),
+      observedAt: requireCount(observed.observedAt, 'WorkHub usage time'),
+      modelId: requireUtf8String(observed.modelId, 'WorkHub observed model', 4096),
+      connectionId: requireEntityId(observed.connectionId, 'WorkHub observed connection'),
+      connectionSlug: requireUtf8String(
+        observed.connectionSlug,
+        'WorkHub observed connection slug',
+        256,
+      ),
+      inputTokens,
+      ...(observed.outputTokens === undefined
+        ? {}
+        : { outputTokens: requireCount(observed.outputTokens, 'WorkHub request output tokens') }),
+      matchesCurrentRoute: observed.matchesCurrentRoute,
+    };
+  }
+  const limit =
+    context.configuredInputLimit === null
+      ? null
+      : requireCount(context.configuredInputLimit, 'WorkHub configured input limit');
+  if (limit === 0) throw invalidProtocolFrame('Invalid WorkHub configured input limit');
+  return {
+    currentModelId: requireUtf8String(context.currentModelId, 'WorkHub current model', 4096),
+    currentConnectionId:
+      context.currentConnectionId === null
+        ? null
+        : requireEntityId(context.currentConnectionId, 'WorkHub current connection'),
+    currentConnectionSlug: requireUtf8String(
+      context.currentConnectionSlug,
+      'WorkHub current connection slug',
+      256,
+    ),
+    configuredInputLimit: limit,
+    lastRequest,
   };
 }
 

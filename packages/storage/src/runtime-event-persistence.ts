@@ -30,6 +30,7 @@ import type {
   RuntimeInvocationSearchResult,
 } from '@maka/core/runtime-invocation';
 import type { BoundedEvidenceReadResult, EvidenceReadBudget } from './agent-run-store.js';
+import type { SessionRequestObservation } from './runtime-event-store-contract.js';
 import { createSqliteRuntimeStore, type SqliteRuntimeStore } from './sqlite-runtime-store.js';
 import {
   acquireOperationalStateDatabase,
@@ -50,6 +51,7 @@ export type RuntimeEventReadPersistence = {
 };
 
 export interface RuntimeEventReadStore {
+  readLatestSessionRequestObservation?(sessionId: string): Promise<SessionRequestObservation>;
   readSessionRuntimeSnapshot?(sessionId: string): Promise<RuntimeSessionEventSnapshot>;
   listSessionInvocations(sessionId: string): Promise<RuntimeInvocationRecord[]>;
   listInvocationRecoveryInventory(
@@ -121,6 +123,8 @@ export async function openRuntimeEventReadPersistence(input: {
         store.listInvocationRecoveryInventory(sessionIds),
       readRunInvocation: (sessionId: string, runId: string) =>
         store.readRunInvocation(sessionId, runId),
+      readLatestSessionRequestObservation: (sessionId: string) =>
+        store.readLatestSessionRequestObservation(sessionId),
       listSessionInvocationsBounded: (sessionId: string, limit: number) =>
         store.listSessionInvocationsBounded(sessionId, limit),
       listSessionInvocationsPage: (sessionId: string, input: RuntimeInvocationPageInput) =>

@@ -431,6 +431,13 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.readWorkHubPeerInboxPage(sessionId, actionId, now, request);
   }
 
+  async hasUnsettledWorkHubPeerCommunication(
+    input: Parameters<SessionAuthorityStore['hasUnsettledWorkHubPeerCommunication']>[0],
+  ): Promise<boolean> {
+    await this.ensureReady();
+    return this.metadata.hasUnsettledWorkHubPeerCommunication(input);
+  }
+
   async readWorkHubTaskInputByMessage(
     messageId: string,
   ): Promise<WorkHubTaskInputMessage | undefined> {

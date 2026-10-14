@@ -103,6 +103,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
     a: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
   ): Promise<WorkHubTaskAssignment> {
+    const latest = await stores.sessionStore.readLatestWorkHubAssignment(a.work?.id ?? a.actionId);
     const base = {
       workId: a.work?.id ?? a.actionId,
       generationId: a.work?.generationId ?? a.actionId,
@@ -113,7 +114,10 @@ export function createWorkHubTaskHistoryRuntime(options: {
       targetSessionName: truncateUtf8(a.targetSessionName, 512, '…'),
       createdAt: a.ts,
       text: truncateUtf8(a.delegationText ?? a.userText, WORKHUB_TASK_TEXT_MAX_BYTES, '…'),
-      superseded: !!(await stores.sessionStore.readWorkHubSupersession(a.delegationId)),
+      superseded:
+        !!(await stores.sessionStore.readWorkHubSupersession(a.delegationId)) ||
+        (!!latest &&
+          (latest.work?.generationId ?? latest.actionId) !== (a.work?.generationId ?? a.actionId)),
     };
     try {
       const h = await stores.sessionStore.readHeaderSnapshot(a.targetSessionId);

@@ -1012,7 +1012,7 @@ export const WORKHUB_COORDINATION_WORK_SCHEMA_VERSION = 4 as const;
 export interface WorkHubWorkBinding {
   /** The action that first established the objective; legacy assignments use their actionId. */
   readonly id: string;
-  /** First assignment in the current execution container; changes on replacement. */
+  /** First assignment in the execution container; changes on replacement or fresh continuation. */
   readonly generationId: string;
   /** Exact prior assignment continued by this input, not a title/path inference. */
   readonly continuesActionId?: string;

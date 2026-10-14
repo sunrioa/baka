@@ -23,7 +23,7 @@ import { act, createElement, StrictMode } from 'react';
 import { LocaleProvider } from '@maka/ui';
 import { deferred, waitFor } from '@maka/core/test-only/async-primitives';
 import type { WorkHubTaskAssignment, WorkHubTaskExecutionsResult, TurnSnapshot } from '@maka/runtime-host/protocol';
-import { createWorkHubTaskViewModel, useWorkHubExecutionView, useWorkHubTaskView, useWorkHubTaskInput } from '../../renderer/features/workhub/testing.js';
+import { createWorkHubTaskViewModel, workHubTaskInputSource, useWorkHubExecutionView, useWorkHubTaskView, useWorkHubTaskInput } from '../../renderer/features/workhub/testing.js';
 import type { SessionSummary } from '@maka/core/session';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
@@ -165,6 +165,39 @@ test('task view follows the exact assignment and paged lineage, not a shared Ses
   model.followLatest();
   await waitFor(() => model.snapshot().assignment?.actionId === 'c' && model.snapshot().executionsReady);
   assert.ok(reads.every(id => ['a', 'b', 'c'].includes(id)));
+  model.close();
+});
+
+test('a fresh queued generation becomes the current source while old Session history stays inspectable and read-only', async () => {
+  const old = assignment('old');
+  const fresh = assignment('fresh', { generationId: 'fresh-generation', targetSessionId: 'new-session', state: 'queued', execution: undefined });
+  let rows = [old];
+  const model = createWorkHubTaskViewModel({
+    taskHistory: async () => ({ workId: 'work', assignments: rows, nextCursor: null }),
+    taskExecutions: async (_owner, input) => {
+      const selected = rows.find(row => row.actionId === input.actionId)!;
+      return { actionId: selected.actionId, delegationId: selected.delegationId, targetSessionId: selected.targetSessionId,
+        executions: [{ ...turn(selected.execution!.turnId, selected.targetSessionId), runId: selected.execution!.runId }], nextCursor: null };
+    },
+  }, 'host-a-coordinator', 'work');
+  await model.refresh();
+  rows = [fresh, { ...old, superseded: true }];
+  await model.refresh();
+  assert.equal(model.snapshot().assignment?.actionId, 'fresh');
+  assert.equal(model.snapshot().execution, undefined);
+  assert.equal(workHubTaskInputSource(model.snapshot())?.targetSessionId, 'new-session', 'queueing does not fall back to the retired owned Session');
+  model.selectAssignment('old');
+  await waitFor(() => model.snapshot().executionsReady);
+  assert.equal(model.snapshot().assignment?.targetSessionId, old.targetSessionId);
+  assert.equal(workHubTaskInputSource(model.snapshot()), undefined);
+  const owned = { ...fresh, state: 'owned' as const, execution: { turnId: 'fresh-turn', runId: 'fresh-run' } };
+  rows = [owned, { ...old, superseded: true }];
+  await model.refresh();
+  assert.equal(model.snapshot().assignment?.actionId, 'old', 'new progress does not steal an explicit historical inspection');
+  model.followLatest();
+  await waitFor(() => model.snapshot().assignment?.actionId === 'fresh' && model.snapshot().executionsReady);
+  assert.equal(model.snapshot().execution?.runId, 'fresh-run');
+  assert.equal(workHubTaskInputSource(model.snapshot())?.targetSessionId, 'new-session');
   model.close();
 });
 

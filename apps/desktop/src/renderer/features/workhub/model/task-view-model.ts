@@ -145,7 +145,7 @@ export function createWorkHubTaskViewModel(
             assignments = assignments.map(item => item.actionId === selected ? row : item);
           }
           const assignment = assignments.find(item => item.actionId === manualAction) ??
-            page.rows.find(item => item.state === 'owned') ?? page.rows[0];
+            page.rows.find(item => item.generationId === page.rows[0]?.generationId && !item.superseded && item.state === 'owned') ?? page.rows[0];
           publish({ assignments, historyCursor: page.cursor, ready: true, loadingEarlier: false, error: undefined });
           await readExecutions(assignment);
         } catch (reason) { if (!closed && generation === version) { publish({ ready: false }); fail(reason); } }

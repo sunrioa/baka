@@ -22,6 +22,7 @@ import { z } from 'zod';
 import type { ExecutionSessionWriter } from '@maka/storage/execution-stores';
 import type {
   WorkHubWorkSummary,
+  WorkHubContextObservation,
   WorkHubWorksQueryInput,
   WorkHubWorksQueryResult,
 } from '../protocol/workhub-coordination.js';
@@ -45,6 +46,7 @@ export function createWorkHubWorkIndex(options: {
     | 'readActiveWorkHubAssignmentsByTarget'
   >;
   isEligible(sessionId: string): Promise<boolean>;
+  readContext?(sessionId: string): Promise<WorkHubContextObservation>;
 }) {
   const secret = randomBytes(32);
   const sign = (payload: string) => createHmac('sha256', secret).update(payload).digest();
@@ -132,6 +134,9 @@ export function createWorkHubWorkIndex(options: {
         objective: objective.slice(0, 1024).join(''),
         objectiveTruncated: objective.length > 1024,
         available,
+        ...(available && options.readContext
+          ? { context: await options.readContext(message.targetSessionId) }
+          : {}),
       });
       if (works.length >= (input.limit ?? 8)) break;
     }

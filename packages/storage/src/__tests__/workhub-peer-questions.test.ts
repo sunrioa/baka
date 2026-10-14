@@ -104,7 +104,23 @@ test('peer publication is atomic, scoped, bounded and durable without changing a
         maxStoredBytes: 256 * 1024,
       });
     const q = make('ask');
+    const pending = (sessionId: string, workId: string, generationId = workId, now = Date.now()) =>
+      store.hasUnsettledWorkHubPeerCommunication({ sessionId, workId, generationId, now });
+    assert.equal(await pending(a.id, 'a'), false);
     assert.deepEqual(await store.commitWorkHubPeerQuestion(q), q);
+    assert.equal(
+      await pending(a.id, 'a'),
+      true,
+      'the sender cannot silently retire its unanswered question',
+    );
+    assert.equal(
+      await pending(b.id, 'b'),
+      true,
+      'the recipient cannot silently retire its pending inbox',
+    );
+    assert.equal(await pending(a.id, 'unrelated'), false);
+    assert.equal(await pending(a.id, 'a', 'another-generation'), false);
+    assert.equal(await pending(a.id, 'a', 'a', q.expiresAt), false);
     assert.deepEqual(
       await store.commitWorkHubPeerQuestion({ ...q, ts: q.ts + 1, expiresAt: q.expiresAt + 1 }),
       q,
@@ -159,6 +175,8 @@ test('peer publication is atomic, scoped, bounded and durable without changing a
       answer: 'abc123',
     };
     assert.deepEqual(await store.commitWorkHubPeerSettlement(reply), reply);
+    assert.equal(await pending(a.id, 'a'), false);
+    assert.equal(await pending(b.id, 'b'), false);
     assert.deepEqual(
       await store.commitWorkHubPeerSettlement({ ...reply, toolCallId: 'retry' }),
       reply,
@@ -190,6 +208,8 @@ test('peer publication is atomic, scoped, bounded and durable without changing a
       answer: undefined,
     };
     await store.commitWorkHubPeerSettlement(cancel);
+    assert.equal(await pending(a.id, 'a'), false);
+    assert.equal(await pending(b.id, 'b'), false);
     assert.equal(
       (
         await store.commitWorkHubPeerSettlement({

@@ -49,7 +49,10 @@ import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admi
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 import type { WorkHubResultObservation } from './workhub-result-coordinator.js';
 import { readHostedExecutionMembership } from './hosted-execution-membership.js';
-import { readWorkHubTaskInputContinuation } from './workhub-task-input-lineage.js';
+import {
+  readWorkHubTaskInputBinding,
+  readWorkHubTaskInputContinuation,
+} from './workhub-task-input-lineage.js';
 import {
   createWorkHubEvidenceReader,
   workHubEvidenceListParameters,
@@ -107,6 +110,8 @@ interface Evidence {
   readonly messages: readonly { messageId: string; text: string }[];
   readonly truncated: boolean;
 }
+
+export class WorkHubFreshSourceUnavailableError extends Error {}
 
 /** Host-local evidence relay. Only WorkHub-owned result-enabled tasks are visible.
  * Requests/replies live in the existing Session store; root admission is delivery's receipt.
@@ -419,6 +424,36 @@ export function createWorkHubEvidenceRuntime(options: {
     reader,
     admission,
     active,
+    readable: async (source, ctx, lease) => {
+      if (await active(source)) return true;
+      const workId = source.work?.id ?? source.actionId;
+      const latest = await stores.sessionStore.readLatestWorkHubAssignment(workId);
+      if (
+        !latest ||
+        (latest.work?.generationId ?? latest.actionId) ===
+          (source.work?.generationId ?? source.actionId) ||
+        !(await active(latest)) ||
+        !source.returnResults
+      )
+        return false;
+      const h = await stores.sessionStore.readHeaderSnapshot(source.targetSessionId);
+      if (
+        h.isArchived ||
+        h.subagentParent ||
+        h.role !== undefined ||
+        h.labels.includes('mode:side_conversation')
+      )
+        return false;
+      const actor = await caller(
+        ctx,
+        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([ctx.sessionId]),
+        lease,
+      );
+      return (
+        ctx.sessionId === WORKHUB_COORDINATION_SESSION_ID ||
+        (actor?.assignment.work?.id ?? actor?.assignment.actionId) === workId
+      );
+    },
     authorize: async (ctx, lease) => {
       await caller(
         ctx,
@@ -857,6 +892,74 @@ export function createWorkHubEvidenceRuntime(options: {
   return {
     tool,
     taskExecution,
+    async assertFreshContainerSource(
+      source: WorkHubDelegationAssignedMessage,
+      lease: SessionAdmissionLease,
+    ) {
+      function blocked(reason: string): never {
+        throw new WorkHubFreshSourceUnavailableError(reason);
+      }
+      const header = await stores.sessionStore.readHeaderSnapshot(source.targetSessionId);
+      if (
+        header.isArchived ||
+        header.subagentParent ||
+        header.role !== undefined ||
+        header.labels.includes('mode:side_conversation')
+      )
+        blocked('The source Session is not eligible for WorkHub continuation');
+      const workId = source.work?.id ?? source.actionId;
+      const generationId = source.work?.generationId ?? source.actionId;
+      const current = (
+        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([source.targetSessionId])
+      ).filter(
+        (a) =>
+          (a.work?.id ?? a.actionId) === workId &&
+          (a.work?.generationId ?? a.actionId) === generationId,
+      );
+      if (
+        !current.some(
+          (a) => a.actionId === source.actionId && a.delegationId === source.delegationId,
+        )
+      )
+        blocked('The source work generation changed');
+      // Metadata/owned execution queries only, never the cold Session transcript.
+      // Every assignment in this generation matters, not just an old named Action.
+      for (const assignment of current) {
+        const tip = await owned(assignment, lease);
+        if (!tip || tip.request)
+          blocked('The source work is queued, unproven or waiting for evidence');
+        const snapshot = await executions.read(tip);
+        if (
+          !['completed', 'failed', 'cancelled'].includes(snapshot.status) ||
+          options.hasBlockingGoal(tip)
+        )
+          blocked('The source work still owns an execution, question or Goal');
+      }
+      for (const input of await stores.sessionStore.listMessageAdmissions(source.targetSessionId)) {
+        const binding = await readWorkHubTaskInputBinding(
+          stores,
+          source.targetSessionId,
+          input.messageId,
+        );
+        if (!binding && /^whtm_[a-f0-9]{48}$/u.test(input.messageId))
+          blocked('The source Session has unproven queued direct input');
+        if (binding?.workId === workId && binding.generationId === generationId)
+          blocked('The source work still owns queued direct input');
+      }
+      if (
+        await stores.sessionStore.hasUnsettledWorkHubPeerCommunication({
+          sessionId: source.targetSessionId,
+          workId,
+          generationId,
+          now: now(),
+        })
+      )
+        blocked(
+          'The source work still has an unsettled peer question; resolve or cancel it before choosing a fresh container',
+        );
+      if (await options.hasLiveResources(source.targetSessionId))
+        blocked('The source Session still has live resources; no work was stopped or moved');
+    },
     waitingObservation,
     readEvidenceContinuation,
     peerContexts: (context: SystemPromptContext) => peers.contexts(context),

@@ -72,6 +72,11 @@ test('task history pages sparse canonical assignments with bounded reads and pre
   });
   assert.ok(exact.ok, JSON.stringify(exact));
   assert.equal(exact.result.assignments[0]!.actionId, 'action-10');
+  assert.equal(
+    exact.result.assignments[0]!.superseded,
+    true,
+    'an old generation is read-only even without a correction record',
+  );
   assert.equal(exact.result.assignments.length, 1);
   assert.equal(exact.result.nextCursor, null);
   assert.equal(
@@ -144,6 +149,8 @@ function fixture() {
       sessionStore: {
         readWorkHubAssignment: async (id: string) =>
           rows.find((row) => row.message.actionId === id)?.message,
+        readLatestWorkHubAssignment: async (id: string) =>
+          rows.find((row) => (row.message.work?.id ?? row.message.actionId) === id)?.message,
         readWorkHubAssignmentsPage: async (input: (typeof reads)[number]) => {
           reads.push(input);
           return {

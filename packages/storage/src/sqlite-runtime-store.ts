@@ -25,6 +25,7 @@ import type {
   ToolOperationRecord,
   UnsettledToolOperationRecord,
   ImmutableRuntimePrefixProofReadBudget,
+  SessionRequestObservation,
 } from './runtime-event-store-contract.js';
 export type {
   CommitToolPreparedInput,
@@ -34,6 +35,7 @@ export type {
   ToolOperationRecord,
   UnsettledToolOperationRecord,
   ImmutableRuntimePrefixProofReadBudget,
+  SessionRequestObservation,
 } from './runtime-event-store-contract.js';
 
 import { mkdirSync } from 'node:fs';
@@ -85,12 +87,14 @@ import {
 } from '@maka/core/runtime-event-store';
 import {
   mayBeTranscriptLedgerInvocationId,
+  isSessionInlineInvocation,
   type RuntimeInvocationPageCursor,
   type RuntimeInvocationPageInput,
   type RuntimeInvocationPageResult,
   type RuntimeInvocationRecord,
   type RuntimeInvocationSearchResult,
 } from '@maka/core/runtime-invocation';
+import { isLastRequestAnchor } from '@maka/core/usage-record-schema';
 import type { ToolRecoveryDecisionFact } from '@maka/core/tool-recovery-fact';
 import { stableJsonStringify } from '@maka/core/tool-args-identity';
 import {
@@ -662,6 +666,97 @@ export class SqliteRuntimeStore
 
   async readRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]> {
     return this.readRuntimeEventsSync(sessionId, runId);
+  }
+
+  async readLatestSessionRequestObservation(sessionId: string): Promise<SessionRequestObservation> {
+    assertRuntimeStorageSafeId(sessionId, 'Invalid session id');
+    return this.readTransaction(() => {
+      // Fixed lookback and byte ceilings: no transcript load, JSON index rebuild,
+      // provider call, or fallback to an older matching model. Only the small
+      // anchor and opening metadata cross the SQLite/JS boundary.
+      const rows = this.db
+        .prepare(`
+        SELECT e.event_id, e.invocation_id, e.run_id,
+          length(CAST(e.payload_json AS BLOB)) AS stored_bytes
+        FROM runtime_session_event_ordinals o
+        JOIN runtime_events e ON e.event_id = o.event_id
+        WHERE o.session_id = ? AND e.session_id = ?
+        ORDER BY o.ordinal DESC LIMIT 65
+      `)
+        .all(sessionId, sessionId) as Array<{
+        event_id: string;
+        invocation_id: string;
+        run_id: string;
+        stored_bytes: number;
+      }>;
+      let inspectedBytes = 0;
+      for (const row of rows.slice(0, 64)) {
+        inspectedBytes += row.stored_bytes;
+        if (row.stored_bytes > 8 * 1024 * 1024 || inspectedBytes > 16 * 1024 * 1024)
+          return { status: 'unknown', reason: 'record_limit' };
+        const fact = this.db
+          .prepare(`
+          SELECT CASE WHEN length(CAST(json_extract(payload_json, '$.actions.tokenUsage.lastRequestAnchor') AS BLOB)) <= 4096
+              THEN json_extract(payload_json, '$.actions.tokenUsage.lastRequestAnchor')
+              ELSE NULL END AS anchor,
+            json_type(payload_json, '$.actions.tokenUsage.lastRequestAnchor') AS anchor_kind,
+            json_extract(payload_json, '$.ts') AS observed_at
+          FROM runtime_events WHERE event_id = ? AND session_id = ?
+        `)
+          .get(row.event_id, sessionId) as {
+          anchor: string | null;
+          anchor_kind: string | null;
+          observed_at: number;
+        };
+        if (fact.anchor_kind === null) continue; // Includes manual /compact's synthetic usage.
+        const openingRow = this.db
+          .prepare(`
+          SELECT event_id, session_id, invocation_id, run_id, turn_id,
+            CASE WHEN length(CAST(payload_json AS BLOB)) <= 65536 THEN payload_json ELSE NULL END AS payload_json
+          FROM runtime_events
+          WHERE session_id = ? AND invocation_id = ? AND run_id = ? AND event_kind = 'invocation_opened'
+          LIMIT 1
+        `)
+          .get(sessionId, row.invocation_id, row.run_id) as RuntimeEventStorageRow | undefined;
+        if (!openingRow?.payload_json) return { status: 'unknown', reason: 'unknown_route' };
+        const opening = runtimeEventInvocationOpening(decodeRuntimeEventStorageRow(openingRow));
+        if (!opening) return { status: 'unknown', reason: 'unknown_route' };
+        if (!isSessionInlineInvocation(opening) || opening.root.kind === 'context_compact')
+          continue;
+        const route = opening.route;
+        if (route.provenance !== 'runtime' || route.backendKind === 'plugin-executor')
+          return { status: 'unknown', reason: 'unknown_route' };
+        if (
+          fact.anchor_kind !== 'object' ||
+          typeof fact.anchor !== 'string' ||
+          Buffer.byteLength(fact.anchor) > 4096
+        )
+          return { status: 'unknown', reason: 'invalid_observation' };
+        const anchor: unknown = JSON.parse(fact.anchor);
+        if (
+          !isLastRequestAnchor(anchor) ||
+          !Number.isSafeInteger(anchor.inputTokens) ||
+          (anchor.outputTokens !== undefined && !Number.isSafeInteger(anchor.outputTokens)) ||
+          !Number.isSafeInteger(fact.observed_at) ||
+          fact.observed_at < 0 ||
+          (anchor.modelId !== undefined && anchor.modelId !== route.modelId) ||
+          (anchor.connectionId !== undefined && anchor.connectionId !== route.llmConnectionId)
+        )
+          return { status: 'unknown', reason: 'invalid_observation' };
+        return {
+          status: 'observed',
+          eventId: row.event_id,
+          runId: row.run_id,
+          observedAt: fact.observed_at,
+          modelId: route.modelId,
+          connectionId: route.llmConnectionId,
+          connectionSlug: route.llmConnectionSlug,
+          inputTokens: anchor.inputTokens,
+          ...(anchor.outputTokens === undefined ? {} : { outputTokens: anchor.outputTokens }),
+        };
+      }
+      return { status: 'unknown', reason: rows.length > 64 ? 'scan_limit' : 'not_observed' };
+    });
   }
 
   async readSessionRuntimeSnapshot(sessionId: string): Promise<RuntimeSessionEventSnapshot> {

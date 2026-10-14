@@ -526,6 +526,13 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     now: number,
     request: SessionMessageScanRequest,
   ): Promise<SessionMessageScanPage>;
+  /** Typed peer metadata only; unresolved communication cannot silently change generation. */
+  hasUnsettledWorkHubPeerCommunication(input: {
+    readonly sessionId: string;
+    readonly workId: string;
+    readonly generationId: string;
+    readonly now: number;
+  }): Promise<boolean>;
   readWorkHubTaskInput(inputId: string): Promise<WorkHubTaskInputMessage | undefined>;
   readWorkHubTaskInputByMessage(messageId: string): Promise<WorkHubTaskInputMessage | undefined>;
   /** Only folded input Messages with a canonical successor root-source proof. */

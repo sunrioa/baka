@@ -56,6 +56,71 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('WorkHub Coordination Action Gate', () => {
+  test('fresh continuation fixes its source and revalidates generation and workspace at final admission', async () => {
+    for (const changed of ['none', 'workspace', 'generation'] as const) {
+      const effects = fakeEffects([session('original')]);
+      const source = assignmentRecord(
+        {
+          actionId: 'source',
+          actionFingerprint: `sha256:${'a'.repeat(64)}`,
+          targetSessionId: 'original',
+          targetSessionName: 'Original',
+          disposition: 'delegate_existing',
+          userText: 'Original task',
+        },
+        'original-turn',
+      );
+      effects.assignmentRecords.set(source.actionId, source);
+      const gate = new WorkHubCoordinationActionGate(effects);
+      const target = await gate.nativeTaskCandidate(source.targetSessionId);
+      assert.ok(target);
+      const assign = effects.assign;
+      effects.assign = async (input) => {
+        if (changed === 'workspace') effects.sessions[0]!.cwd = '/moved-source';
+        if (changed === 'generation')
+          effects.assignmentRecords.set('changed-source', {
+            ...source,
+            actionId: 'changed-source',
+            work: { id: source.actionId, generationId: 'changed-generation' },
+          });
+        await input.validateFreshTarget?.();
+        return assign.call(effects, input);
+      };
+      const operation = gate.act(
+        {
+          actionId: 'fresh',
+          userText: 'Continue this exact task',
+          proposal: { disposition: 'create_new', title: 'Fresh task' },
+          continuation: {
+            workId: source.actionId,
+            sourceActionId: source.actionId,
+            container: 'fresh',
+          },
+          create: { workspace: { kind: 'host_path', path: target.workspace.hostCwd } },
+          selectedTarget: {
+            sessionId: source.targetSessionId,
+            workspaceDigest: `sha256:${createHash('sha256').update(JSON.stringify(target.workspace)).digest('hex')}`,
+            sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+          },
+        },
+        CONTEXT,
+      );
+      if (changed !== 'none') {
+        await assert.rejects(operation, /workspace changed|task was retired/);
+        assert.deepEqual(effects.assignments, []);
+      } else {
+        assert.notEqual((await operation).targetSessionId, source.targetSessionId);
+        assert.deepEqual(effects.assignments[0]?.work, {
+          id: 'source',
+          generationId: 'fresh',
+          continuesActionId: 'source',
+        });
+        assert.equal(effects.assignments[0]?.freshSource?.assignment.actionId, source.actionId);
+        assert.deepEqual(effects.retirements, [], 'fresh continuation never stops the old Session');
+      }
+    }
+  });
+
   test('native continuation uses the exact task outside discovery and revalidates its source at admission', async () => {
     for (const retireBeforeAdmission of [false, true]) {
       const effects = fakeEffects([

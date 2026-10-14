@@ -96,19 +96,20 @@ test('A → B → A and reload retain source-bound IDs, drafts and newer edits a
 test('an unknown send and absent receipt never become a new ID; explicit retry keeps the old payload across a generation change', async () => {
   const a = task('a'), storage = memoryStorage(), calls: WorkHubTaskInputRequest[] = [];
   let current = a;
-  const services: Services = { sendTaskInput: async (_id, input) => { calls.push(input); return calls.length === 1 ? { kind: 'unknown' } : { kind: 'accepted', receipt: receipt(input, a.targetSessionId, 'delivered') }; },
+  const services: Services = { sendTaskInput: async (_id, input) => { calls.push(input); return calls.length === 1 ? { kind: 'unknown' } : { kind: 'accepted', receipt: receipt(input, input.sourceActionId === a.actionId ? a.targetSessionId : current.targetSessionId, 'delivered') }; },
     readTaskInput: async () => { throw new Error('not_found while the original command may still be arriving'); } };
   const model = createWorkHubTaskInputModel(services, owner(), a.workId, () => current, storage, () => `input-${calls.length + 1}`);
   model.writeDraft('Original payload'); assert.equal(await model.send(a, model.readDraft()), false);
   model.writeDraft('Edited next input'); await model.reconcile();
   assert.equal(model.snapshot().attempt?.input.inputId, 'input-1');
   assert.equal(await model.send(a, model.readDraft()), false); assert.equal(calls.length, 1);
-  current = { ...a, generationId: 'new-generation', actionId: 'new-action', delegationId: 'new-delegation' };
+  current = { ...a, generationId: 'new-generation', actionId: 'new-action', delegationId: 'new-delegation', targetSessionId: desktopSessionKey({ hostId: 'host-a', sessionId: 'fresh-session' }) };
   assert.equal(await model.retry(), true);
   assert.deepEqual(calls[1], calls[0]);
   assert.equal(calls[1]!.generationId, a.generationId);
   assert.equal(model.readDraft(), 'Edited next input');
   assert.equal(model.snapshot().receipt?.delivery, 'delivered');
+  assert.equal(model.snapshot().receipt?.targetSessionId, a.targetSessionId, 'an old unknown receipt stays bound to its old container');
   assert.equal(await model.send(a, 'stale callback'), false);
   assert.equal(await model.send(current, model.readDraft()), true);
   assert.equal(calls[2]!.sourceActionId, 'new-action'); assert.notEqual(calls[2]!.inputId, 'input-1');

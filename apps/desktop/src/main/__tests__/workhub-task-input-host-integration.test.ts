@@ -28,6 +28,10 @@ import { connectRuntimeHost, type RuntimeHostConnection } from '@maka/runtime-ho
 import { startExecutionRuntimeHostService } from '@maka/runtime-host/server';
 import { RUNTIME_HOST_PROTOCOL_VERSION, type OperationInput, type WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import { DesktopRuntimeHostClient } from '../runtime-host-client.js';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { createWorkHubRuntime } from '../workhub-runtime.js';
+import { readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
+import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import type { WorkHubTaskSendResult } from '../../shared/workhub-conversation.js';
@@ -36,14 +40,14 @@ test('Desktop task input reaches the real native provider, supplements queued A 
   const base = await mkdtemp(join(tmpdir(), 'maka-desktop-task-input-'));
   const root = join(base, 'root');
   const firstWorker = deferred<void>(), releaseFirst = deferred<void>(), releaseB = deferred<void>();
-  const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+  const requests: Array<{ model: string; messages: Array<{ role: string; content: unknown }> }> = [];
   const queueOrder: string[] = [], errors: unknown[] = [];
   // Native requests append an environment message with role=user. Select the
   // latest fixture goal, not that trailing environment or an older goal.
   const goalText = (input: (typeof requests)[number]) => input.messages.filter(message => message.role === 'user').map(message =>
     typeof message.content === 'string' ? message.content : Array.isArray(message.content)
       ? message.content.map(part => typeof part?.text === 'string' ? part.text : '').join('\n') : '',
-  ).reverse().find(text => /^(?:NATIVE_TASK_INPUT|CORRECTION_INPUT|UNRELATED_B|QUEUED_A|INDEPENDENT_C|ENDED_CONTINUATION)\b/u.test(text)) ?? '';
+  ).reverse().find(text => /^(?:NATIVE_TASK_INPUT|CORRECTION_INPUT|UNRELATED_B|QUEUED_A|INDEPENDENT_C|ENDED_CONTINUATION|FRESH_MODEL_FALLBACK)\b/u.test(text)) ?? '';
   let coordinatorRequests = 0;
   const server = createServer((request, response) => {
     void (async () => {
@@ -155,6 +159,34 @@ test('Desktop task input reaches the real native provider, supplements queued A 
     assert.equal(coordinatorRequests, 1, 'direct input never waits for or starts another coordinator request');
     const after = await client.getSession(source.targetSessionId); assert.ok(after);
     assert.deepEqual({ model: after.model, workspace: after.workspace, permission: after.permissionMode }, { model: before.model, workspace: before.workspace, permission: before.permissionMode });
+    const currentSource = (await client.readWorkHubTaskHistory({ workId: queuedA.workId })).assignments[0]!;
+    const currentExecution = (await client.readWorkHubTaskExecutions({ actionId: currentSource.actionId, delegationId: currentSource.delegationId })).executions.at(-1)!;
+    await waitFor(async () => (await client!.queryTurn({ sessionId: currentSource.targetSessionId, turnId: currentExecution.turnId })).status === 'completed', { timeoutMs: 10000, pollMs: 10 });
+    const currentCatalog = await connection.request('connection.catalog.query', { kind: 'start' });
+    assert.equal(currentCatalog.kind, 'page'); if (currentCatalog.kind !== 'page') assert.fail('No current catalog');
+    const other = await connection.request('connection.catalog.create', { expectedCatalogRevision: currentCatalog.revision, connection: {
+      slug: 'different-global', name: 'Different global route', providerType: 'ollama', baseUrl: `http://127.0.0.1:${address.port}/v1`, enabled: true, enabledModelIds: ['different-global-model'],
+    } });
+    assert.equal(other.kind, 'committed'); if (other.kind !== 'committed') assert.fail('No other route');
+    assert.equal((await connection.request('connection.catalog.set-default-target', { expectedCatalogRevision: other.catalogRevision, target: { connectionId: other.connection.connectionId, modelId: 'different-global-model' } })).kind, 'committed');
+    const visibleFallback = await client.getWorkHubSession(); assert.equal(visibleFallback.id, WORKHUB_COORDINATION_SESSION_ID);
+    assert.equal(visibleFallback.model, 'fake-model', 'the visible coordination fallback stays on its own route after the global default changes');
+    writeWorkHubNewWorkDefaults(client.hostId, {});
+    const workhub = createWorkHubRuntime({ client: () => client!, isCurrent: () => true,
+      createDefaults: () => readWorkHubCreationDefaults(client!), changed() {} });
+    const fresh = await workhub.actTasks({ hostId: client.hostId, targetEpoch: 'native-fixture-target' }, coordinationTurn, 'native-fresh-model', workHubTasksSchema.parse({
+      operation: 'continue_work', workId: queuedA.workId, sourceActionId: currentSource.actionId, container: 'fresh', text: 'FRESH_MODEL_FALLBACK: continue in a fresh context.',
+    }));
+    assert.ok('targetSessionId' in fresh && typeof fresh.targetSessionId === 'string');
+    await waitFor(() => requests.some(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK')), { timeoutMs: 10000, pollMs: 10 });
+    assert.equal(requests.find(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK'))!.model, visibleFallback.model, 'the actual HTTP request uses the displayed fallback, not the different global model');
+    const freshHeader = await client.getSession(fresh.targetSessionId); assert.ok(freshHeader);
+    assert.equal(freshHeader.llmConnectionId, visibleFallback.llmConnectionId);
+    assert.equal(freshHeader.permissionMode, 'ask', 'new work never inherits the coordinator bypass');
+    assert.notEqual(freshHeader.id, source.targetSessionId);
+    const retained = await client.getSession(source.targetSessionId); assert.ok(retained);
+    assert.deepEqual({ model: retained.model, workspace: retained.workspace, permission: retained.permissionMode }, { model: after.model, workspace: after.workspace, permission: after.permissionMode }, 'fresh creation does not reconfigure the old worker');
+    assert.equal(coordinatorRequests, 1, 'default inspection does not call or restart the coordinator model');
     assert.deepEqual(errors, []);
   } finally {
     releaseFirst.resolve(); releaseB.resolve();

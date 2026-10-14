@@ -55,6 +55,7 @@ import {
   type WorkHubCoordinationSelectAndDelegateInput,
   type WorkHubTaskContinueInput,
   type WorkHubWorksQueryInput,
+  type WorkHubContextObservation,
 } from '../protocol/workhub-coordination.js';
 import { createWorkHubWorkIndex, WorkHubWorkCursorError } from './workhub-work-index.js';
 import type {
@@ -183,6 +184,7 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
   readonly routingModel?: HostWorkHubRoutingModel;
   readonly requestForm?: HostInteractionCoordinator['requestForm'];
   readonly targetExecution?: WorkHubTargetExecutionAuthority;
+  readonly readWorkContext?: (sessionId: string) => Promise<WorkHubContextObservation>;
 }
 
 /** Resolves the one durable Coordination Session owned by this Runtime Host. */
@@ -289,6 +291,7 @@ export class HostWorkHubCoordinationCoordinator {
     });
     this.#workIndex = createWorkHubWorkIndex({
       stores: this.#stores,
+      ...(options.readWorkContext ? { readContext: options.readWorkContext } : {}),
       isEligible: async (sessionId) =>
         Boolean(await this.#actionGate.nativeTaskCandidate(sessionId)),
     });
@@ -847,6 +850,7 @@ export class HostWorkHubCoordinationCoordinator {
     }
     let proposal: WorkHubAdmittedAction['proposal'];
     let continuation: WorkHubAdmittedAction['continuation'];
+    let continuationCreate: WorkHubAdmittedAction['create'];
     if ('disposition' in input.proposal && input.proposal.disposition === 'continue_work') {
       try {
         const source = await this.#stores.readWorkHubAssignment(input.proposal.sourceActionId);
@@ -862,13 +866,32 @@ export class HostWorkHubCoordinationCoordinator {
             'candidate_unavailable',
             'The selected work is unavailable; query its source instead of substituting a historical Session',
           );
-        continuation = { workId: input.proposal.workId, sourceActionId: source.actionId };
+        const fresh = input.proposal.container === 'fresh';
+        continuation = {
+          workId: input.proposal.workId,
+          sourceActionId: source.actionId,
+          ...(fresh ? { container: 'fresh' as const } : {}),
+        };
         selectedTarget = {
           sessionId: source.targetSessionId,
           workspaceDigest: target ? digest(target.workspace) : digest({ replay: input.actionId }),
           sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
         };
-        proposal = { disposition: 'delegate_existing', candidateRef: source.actionId };
+        if (fresh) {
+          const workspace = committed?.create?.workspace ?? target?.workspace.target;
+          if (!workspace)
+            throw new WorkHubActionGateFailure(
+              'candidate_unavailable',
+              'The original workspace is unavailable',
+            );
+          continuationCreate = { workspace };
+          proposal = {
+            disposition: 'create_new',
+            title:
+              committed?.create?.title ??
+              (Array.from(source.targetSessionName).slice(0, 64).join('') || 'Continue work'),
+          };
+        } else proposal = { disposition: 'delegate_existing', candidateRef: source.actionId };
       } catch (error) {
         return {
           ok: false,
@@ -900,14 +923,15 @@ export class HostWorkHubCoordinationCoordinator {
       ('operation' in action.proposal && action.proposal.operation === 'correct');
     try {
       const resolvedCreate =
-        create === undefined
+        continuationCreate ??
+        (create === undefined
           ? undefined
           : {
               workspace:
                 create.workspace.kind === 'isolated'
                   ? await this.#isolatedTaskWorkspace(input.actionId)
                   : create.workspace,
-            };
+            });
       return {
         ok: true,
         result: await this.#actionGate.act(

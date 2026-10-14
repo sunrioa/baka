@@ -119,6 +119,12 @@ export function createWorkHubEvidenceReader(options: {
   admission: SessionAdmissionGate;
   authorize(ctx: MakaToolContext, lease: SessionAdmissionLease): Promise<void>;
   active(source: WorkHubDelegationAssignedMessage): Promise<boolean>;
+  /** Read-only historical access is distinct from active communication authority. */
+  readable?(
+    source: WorkHubDelegationAssignedMessage,
+    ctx: MakaToolContext,
+    lease: SessionAdmissionLease,
+  ): Promise<boolean>;
   execution(
     source: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
@@ -278,7 +284,10 @@ export function createWorkHubEvidenceReader(options: {
     if (!a) return { status: 'unavailable' };
     return options.admission.runMany(lanes(ctx, [a.targetSessionId]), async (lease) => {
       await options.authorize(ctx, lease);
-      if (!(await options.active(a))) return { status: 'unavailable' };
+      const canRead = () =>
+        options.readable ? options.readable(a, ctx, lease) : options.active(a);
+      if (!(await canRead())) return { status: 'unavailable' };
+      const historical = !(await options.active(a));
       const source = reference(a);
       if (input.source && !sameReference(input.source, source))
         throw new Error('Evidence source changed; discover the work again');
@@ -329,6 +338,7 @@ export function createWorkHubEvidenceReader(options: {
       ctx.abortSignal.throwIfAborted();
       const base = {
         source,
+        ...(historical ? { historical: true } : {}),
         workId: source.workId,
         generationId: source.generationId,
         sourceActionId: a.actionId,
@@ -420,7 +430,7 @@ export function createWorkHubEvidenceReader(options: {
         )
           break;
       }
-      if (!(await options.active(a))) return { status: 'unavailable' };
+      if (!(await canRead())) return { status: 'unavailable' };
       const latest = await options.execution(a, lease);
       if (!sameExecution(latest) || latest!.status !== execution.status)
         throw new Error('Evidence source execution changed while reading');

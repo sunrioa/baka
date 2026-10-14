@@ -24,6 +24,7 @@ import type {
   WorkHubDelegationAssignedMessage,
   SessionHeader,
 } from '@maka/core/session';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import { WORKHUB_COORDINATION_SESSION_ID, decodeCanonicalMessage } from '@maka/core/session';
 import { testInvocationRecord } from '@maka/runtime/test-only/invocation-fixture';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
@@ -79,6 +80,8 @@ function fixture() {
   const deleted = new Set<string>();
   const headerOverrides = new Map<string, Partial<SessionHeader>>();
   const resources = new Set<string>();
+  const peerPending = new Set<string>();
+  const queuedInputs: string[] = [];
   const stopped = new Set<string>();
   const replaced = new Set<string>();
   const outputs = new Map<string, StoredMessage[]>();
@@ -146,6 +149,8 @@ function fixture() {
         readWorkHubAssignment: async (id: string) => assignments.find((a) => a.actionId === id),
         readLatestWorkHubAssignment: async (id: string) =>
           [...assignments].reverse().find((a) => (a.work?.id ?? a.actionId) === id),
+        hasUnsettledWorkHubPeerCommunication: async ({ workId }: { workId: string }) =>
+          peerPending.has(workId),
         readWorkHubAssignmentsPage: async (input: (typeof catalogReads)[number]) => {
           catalogReads.push(input);
           return {
@@ -158,6 +163,14 @@ function fixture() {
           };
         },
         readWorkHubTaskInputSuccessors: async () => [],
+        listMessageAdmissions: async () => queuedInputs.map((messageId) => ({ messageId })),
+        readWorkHubTaskInputByMessage: async (id: string) =>
+          [...records.values()].find(
+            (message) =>
+              message.type === 'workhub_coordination' &&
+              message.kind === 'task_input' &&
+              message.targetMessageId === id,
+          ),
         commitWorkHubPeerQuestion: async (q: WorkHubPeerQuestionMessage) => {
           const old = records.get(q.sender.sessionId + '/' + q.id);
           if (old) {
@@ -372,6 +385,8 @@ function fixture() {
     deleted,
     headerOverrides,
     resources,
+    peerPending,
+    queuedInputs,
     stopped,
     replaced,
     outputs,
@@ -389,6 +404,159 @@ function fixture() {
     },
   };
 }
+
+test('fresh container admission waits for every owned assignment and checks resources without reading history', async () => {
+  const f = fixture();
+  const source = f.assignments[0]!;
+  const check = () =>
+    f.options.admission.runMany([WORKHUB_COORDINATION_SESSION_ID, 'a'], (lease) =>
+      f.runtime.assertFreshContainerSource(source, lease),
+    );
+  await assert.rejects(check(), /execution/);
+  f.terminal('a');
+  await check();
+  const later = {
+    ...source,
+    id: 'assignment-later',
+    actionId: 'later',
+    delegationId: 'delegation-later',
+    targetMessageId: 'message-later',
+    work: { id: 'a', generationId: 'a', continuesActionId: 'a' },
+  };
+  f.assignments.push(later);
+  f.active.add('later');
+  f.dispositions.set(later.targetMessageId, { kind: 'pending' });
+  await assert.rejects(check(), /queued/);
+  f.assignments.pop();
+  f.active.delete('later');
+  f.resources.add('a');
+  await assert.rejects(check(), /resources/);
+  f.resources.clear();
+  f.options.hasBlockingGoal = () => true;
+  await assert.rejects(check(), /Goal/);
+  f.options.hasBlockingGoal = () => false;
+  const pendingInput: WorkHubTaskInputMessage = {
+    type: 'workhub_coordination',
+    kind: 'task_input',
+    schemaVersion: 1,
+    id: 'pending-input',
+    turnId: source.coordinationTurnId,
+    ts: 1000,
+    inputId: 'pending-correction',
+    workId: 'a',
+    generationId: 'a',
+    sourceActionId: source.actionId,
+    sourceDelegationId: source.delegationId,
+    text: 'Unconsumed direct correction',
+    targetSessionId: 'a',
+    targetMessageId: `whtm_${'a'.repeat(48)}`,
+    targetContentDigest: `sha256:${'0'.repeat(64)}`,
+    mode: 'steering',
+    execution: { turnId: 'turn-a', runId: 'run-a' },
+  };
+  f.records.set('pending-input', pendingInput);
+  f.queuedInputs.push(pendingInput.targetMessageId);
+  await assert.rejects(check(), /queued direct input/);
+  f.queuedInputs.length = 0;
+  const unrelated = { ...f.assignments[1]!, targetSessionId: 'a' };
+  f.assignments[1] = unrelated;
+  const bInput: WorkHubTaskInputMessage = {
+    ...pendingInput,
+    id: 'b-input',
+    turnId: unrelated.coordinationTurnId,
+    workId: 'b',
+    generationId: 'b',
+    sourceActionId: unrelated.actionId,
+    sourceDelegationId: unrelated.delegationId,
+    targetMessageId: `whtm_${'b'.repeat(48)}`,
+  };
+  f.records.set('b-input', bInput);
+  f.queuedInputs.push(bInput.targetMessageId);
+  await check();
+  f.queuedInputs.push(`whtm_${'c'.repeat(48)}`);
+  await assert.rejects(check(), /unproven queued direct input/);
+  f.queuedInputs.length = 0;
+  f.peerPending.add('a');
+  await assert.rejects(check(), /peer question/);
+  f.peerPending.clear();
+  f.active.delete('a');
+  await assert.rejects(check(), /generation changed/);
+  assert.deepEqual(f.transcriptReads, []);
+  assert.deepEqual(f.deliveries, []);
+});
+
+test('only the current same-work generation or coordinator can explicitly read retired-generation evidence', async () => {
+  const f = fixture();
+  f.terminal('a');
+  const old = f.assignments[0]!;
+  f.outputs.set('a', [
+    {
+      type: 'assistant',
+      id: 'old-evidence',
+      turnId: 'turn-a',
+      ts: 1,
+      text: 'SELECTED_OLD_EVIDENCE',
+      modelId: 'test',
+    },
+  ]);
+  const fresh = {
+    ...f.assignments[2]!,
+    actionId: 'fresh-a',
+    work: { id: 'a', generationId: 'fresh-a', continuesActionId: 'a' },
+  };
+  f.assignments[2] = fresh;
+  f.active.delete('a');
+  f.active.delete('c');
+  f.active.add('fresh-a');
+  const read = async (sid: string) =>
+    f.runtime.tool.impl({ operation: 'read', sourceActionId: 'a' }, f.caller(sid));
+  const result = await read('c');
+  assert.match(JSON.stringify(result), /SELECTED_OLD_EVIDENCE/);
+  assert.equal((result as { evidence: { historical?: boolean } }).evidence.historical, true);
+  assert.match(
+    JSON.stringify(await read(WORKHUB_COORDINATION_SESSION_ID)),
+    /SELECTED_OLD_EVIDENCE/,
+  );
+  assert.deepEqual(await read('b'), { status: 'unavailable' });
+  await assert.rejects(read('a'), /current root invocation/);
+  assert.deepEqual(
+    await f.runtime.tool.impl(
+      {
+        operation: 'ask',
+        source: {
+          workId: 'a',
+          generationId: 'a',
+          actionId: old.actionId,
+          delegationId: old.delegationId,
+        },
+        question: 'Do not wake old work',
+      },
+      f.caller('c'),
+    ),
+    { status: 'unavailable' },
+  );
+  for (const overrides of [
+    { labels: ['mode:side_conversation'] },
+    { role: 'workhub_coordination' as const },
+    {
+      subagentParent: {
+        kind: 'subagent' as const,
+        parentSessionId: 'parent',
+        spawnedBy: { parentRunId: 'parent-run', parentTurnId: 'parent-turn', toolCallId: 'spawn' },
+        lifecycle: 'foreground' as const,
+      },
+    },
+    { isArchived: true },
+  ]) {
+    f.headerOverrides.set('a', overrides);
+    assert.deepEqual(await read('c'), { status: 'unavailable' });
+  }
+  f.headerOverrides.clear();
+  f.active.delete('fresh-a');
+  await assert.rejects(read('c'), /active WorkHub task/);
+  assert.deepEqual(f.deliveries, []);
+  assert.equal(f.runs.size, 4, 'historical reads do not create an invocation');
+});
 
 const peerSource = (a: WorkHubDelegationAssignedMessage) => ({
   workId: a.work?.id ?? a.actionId,
