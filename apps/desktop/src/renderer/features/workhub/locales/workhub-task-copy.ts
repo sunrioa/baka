@@ -21,6 +21,7 @@ import type { WorkHubTaskStatus } from '@maka/runtime-host/protocol';
 export const workHubTaskCopy = {
   "en": {
     "title": "Recent tasks",
+    "close": "Close task sidebar",
     "progress": "In progress",
     "delivery": "Recent deliveries",
     "hint": "Execution ending is not verified goal or artifact completion.",
@@ -61,6 +62,7 @@ export const workHubTaskCopy = {
   },
   "zh-CN": {
     "title": "近期任务",
+    "close": "收起任务侧栏",
     "progress": "执行进度",
     "delivery": "最新交付",
     "hint": "执行结束不代表目标或产物已验证完成。",
@@ -101,6 +103,7 @@ export const workHubTaskCopy = {
   },
   "zh-TW": {
     "title": "近期任務",
+    "close": "收起任務側欄",
     "progress": "執行進度",
     "delivery": "最新交付",
     "hint": "執行結束不代表目標或產物已驗證完成。",
@@ -139,4 +142,4 @@ export const workHubTaskCopy = {
       "unavailable": "執行資訊不可用"
     }
   }
-} satisfies UiCatalog<{title: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;
+} satisfies UiCatalog<{title: string; close: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;

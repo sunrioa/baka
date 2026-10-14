@@ -35,6 +35,9 @@ import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import type { WorkHubTaskSendResult } from '../../shared/workhub-conversation.js';
+import { RuntimeHostSessionObserver } from '../runtime-host-session-observer.js';
+import { DesktopTranscriptRangeStore } from '../../renderer/platform/desktop/desktop-transcript-range-store.js';
+import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 
 test('Desktop task input reaches the real native provider, supplements queued A in FIFO, and continues ended work while the coordinator is busy', { timeout: 30_000 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'maka-desktop-task-input-'));
@@ -114,6 +117,15 @@ test('Desktop task input reaches the real native provider, supplements queued A 
     const read = async (inputId: string, workId: string) => await handlers.get('workhub:readTaskInput')!(event, { inputId, workId }) as Awaited<ReturnType<DesktopRuntimeHostClient['readWorkHubTaskInput']>>;
     const input = (a: WorkHubTaskAssignment, inputId: string, text: string): OperationInput<'workhub.tasks.send'> => ({ workId: a.workId, generationId: a.generationId, sourceActionId: a.actionId, sourceDelegationId: a.delegationId, inputId, text });
     await withTimeout(firstWorker.promise, 10_000, 'Native worker did not request its first step');
+    const observer = new RuntimeHostSessionObserver({ client, emitSessionsChanged() {} });
+    try {
+      const store = new DesktopTranscriptRangeStore(desktopSessionKey({ hostId: client.hostId, sessionId: source.targetSessionId }));
+      await withTimeout(observer.openTranscript(source.targetSessionId, 'running-worker-history', {
+        id: 99, send(_channel, batch) { store.accept(batch); queueMicrotask(() => observer.acknowledgeTranscript('running-worker-history', batch.generation, batch.deliverySequence, 99)); }, once() {}, off() {},
+      }, 'history'), 10_000, 'Opening a running worker transcript waited for its provider to finish');
+      assert.equal(store.snapshot().ready, true);
+      assert.ok(store.snapshot().messages.some(message => message.type === 'user' && message.text === 'NATIVE_TASK_INPUT'), 'a sidebar reader receives the original task while the worker is still running');
+    } finally { await observer.close(); }
     assert.doesNotMatch(JSON.stringify(requests[0]), /CORRECTION_INPUT/);
     const correction = input(source, 'desktop-correction', 'CORRECTION_INPUT: use the new user evidence.');
     const accepted = await send(correction); assert.equal(accepted.kind, 'accepted');

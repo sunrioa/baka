@@ -116,6 +116,23 @@ verify('a turn in flight turns the same single control into Stop', () => {
   assertOnlySendSlot(true, 'Stop');
 });
 
+verify('task consoles can show visible action text without changing Send/Stop gates', () => {
+  for (const streaming of [false, true]) {
+    const label = streaming ? 'Stop' : 'Send';
+    const markup = renderToStaticMarkup(
+      <LocaleProvider locale="en">
+        <Composer showActionLabels streaming={streaming} onSend={noop} onStop={noop} />
+      </LocaleProvider>,
+    );
+    const document = parseMarkup(`<html><body>${markup}</body></html>`).document;
+    assert.deepEqual(sendSlotControls(markup), [label]);
+    const button = document.querySelector(`button[aria-label="${label}"]`);
+    assert.equal(button?.textContent, label);
+    assert.equal(button?.getAttribute('type'), streaming ? 'button' : 'submit');
+    if (!streaming) assert.equal(button?.getAttribute('aria-disabled'), 'true');
+  }
+});
+
 verify('a Host-confirmed resume offer replaces Send while the draft is empty', () => {
   const markup = renderToStaticMarkup(
     <LocaleProvider locale="en">

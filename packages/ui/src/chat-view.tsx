@@ -183,8 +183,10 @@ export function ChatView(props: {
    * Host-owned execution identity. Buffered content and the session catalog
    * never decide which Turn owns the activity footer.
    */
-  activeTurn?: { readonly turnId: string; readonly awaitingInput?: boolean; readonly compacting?: boolean };
+  activeTurn?: { readonly turnId: string; readonly awaitingInput?: boolean; readonly compacting?: boolean; readonly queued?: boolean };
   activeSession?: SessionSummary;
+  /** False for earlier Session sections in a continuous multi-Session view. */
+  scrollOwner?: boolean;
   /** Personalized user label shown on user messages. Falls back to "你". */
   userLabel?: string;
   /**
@@ -543,13 +545,15 @@ export function ChatView(props: {
           turnId={pendingTurnId}
           startedAt={activeContent?.startedAt}
           running={runningStatus}
+          queued={props.activeTurn?.queued}
           providerRetry={activeContent?.providerRetry}
         />
       )}
     </VStack>
   ) : null;
-  const { startMargin, listRef, measureStartMargin } = useTranscriptStartMargin(scrollRef);
+  const { startMargin, listRef, measureStartMargin } = useTranscriptStartMargin(scrollRef, props.scrollOwner !== false);
   const { highlightedTurnId, placed, commandTurnId, revealTurnAtStart, measurement } = useChatScroll({
+    enabled: props.scrollOwner,
     scrollRef,
     measureStartMargin,
     virtualizerRef,
@@ -927,12 +931,12 @@ export function ChatView(props: {
       />
       <div className="maka-chat-shell">
         {/* ChatSurfaceLayout hosts the rail outside bounded transcript columns. */}
-        <PromptAnchorRail
+        {props.scrollOwner !== false && <PromptAnchorRail
           turns={promptRailTurns}
           onHighlightTurn={props.onPromptRailHighlight ? (turn) => props.onPromptRailHighlight?.(turn?.turnId) : undefined}
           scrollRef={scrollRef}
           onNavigateTurn={navigatePromptRail}
-        />
+        />}
         <ChatMessageList
           className="maka-chat-message-list maka-chatContent"
           data-turn-source-count={turns.length}

@@ -59,7 +59,7 @@
     width: max(100%, var(--maka-conversation-min-width));
     min-width: var(--maka-conversation-min-width);
   }
-  .workHubWorkspace { display: flex; flex: 1; min-height: 0; }
+  .workHubWorkspace { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .workHubWorkspace > .mainColumn { display: flex; flex: 1; min-width: 0; min-height: 0; }
   .workHubWorkspace > .mainColumn > .maka-chat-layout { flex: 1; min-height: 0; }
   .workHubLiveWelcome, .workHubDockPlaceholder { display: grid; justify-items: center; align-content: center; gap: var(--space-3); padding: var(--space-6); min-height: 220px; text-align: center; }
@@ -69,23 +69,45 @@
   .workHubLiveError { padding: var(--space-3); }
   .workHubComposerSurface { position: relative; width: 100%; }
   .workHubTaskView { display: flex; flex-direction: column; min-height: 0; flex: 1; gap: var(--space-3); }
-  .workHubTaskView > :not(.workHubExecutionTranscript) { width: 100%; max-width: var(--maka-reading-measure, 800px); margin-inline: auto; padding-inline: var(--maka-transcript-gutter, 16px); box-sizing: border-box; }
-  .workHubTaskViewHeader { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); position: sticky; top: 0; background: var(--background); z-index: 2; }
-  .workHubTaskViewHeader h2 { font-size: 1rem; margin: 0; }
-  .workHubTaskViewHeader p, .workHubTaskComposer > p, .workHubTaskInputHeader, .workHubTaskSource { color: var(--muted-foreground); font-size: .875rem; }
-  .workHubTaskViewActions, .workHubTaskExecutionChoices { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-  .workHubTaskAttempts { max-height: 180px; overflow: auto; flex: none; }
-  .workHubTaskAttempts h3 { font-size: .875rem; color: var(--muted-foreground); }
-  .workHubTaskAttempt { display: block; max-width: 100%; overflow-wrap: anywhere; }
-  .workHubTaskAttempt[aria-pressed='true'] { background: var(--muted); }
-  .workHubExecutionTranscript { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  .workHubTaskSource { margin: 0; max-height: 3.6em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; flex: none; }
-  .workHubTaskInputHeader, .workHubTaskInputRecovery { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
-  .workHubTaskInputHeader { justify-content: space-between; }
-  .workHubTaskInputTarget, .workHubTaskInputHeader p { margin: var(--space-1) 0; overflow-wrap: anywhere; }
-  .workHubTaskInputDetails { font-size: .875rem; color: var(--muted-foreground); }
-  .workHubTaskInputDetails > div { max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .workHubTaskViewInbox { padding: var(--space-2); font-size: .875rem; }
+  /* Match ChatSurfaceLayout's balanced dock gutters, including narrow windows. */
+  .workHubTaskView > :not(.workHubExecutionTranscript) { width: calc(100% - 2 * var(--space-3, 12px)); max-width: var(--maka-reading-measure, 800px); margin-inline: auto; padding-inline: var(--maka-transcript-gutter, 16px); box-sizing: border-box; }
+  .workHubTaskViewHeader { display: grid; gap: 12px; position: sticky; top: 0; padding-block: 12px 16px; background: var(--background); border-bottom: 1px solid var(--border-subtle); z-index: 2; }
+  .workHubTaskHeadingRow, .workHubTaskTitleRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+  .workHubTaskTitleRow > div { min-width: 0; }
+  .workHubTaskViewHeader h2 { font-size: 1.25rem; line-height: 1.4; font-weight: 650; margin: 2px 0 0; overflow-wrap: anywhere; }
+  .workHubTaskEyebrow { color: var(--muted-foreground); font-size: 11px; line-height: 1.5; margin: 0; }
+  .workHubTaskViewDescription { color: var(--muted-foreground); font-size: 12px; line-height: 1.6; margin: 0; }
+  .workHubTaskStatusBadge { display: inline-flex; align-items: center; flex-shrink: 0; max-width: 50%; padding: 5px 10px; border: 1px solid var(--border-subtle); border-radius: 999px; font-size: 12px; line-height: 1.5; background: var(--muted); overflow-wrap: anywhere; }
+  .workHubTaskStatusBadge[data-status='running'], .workHubTaskStatusBadge[data-status='waiting_for_user'] { color: var(--foreground); border-color: color-mix(in oklch, var(--maka-brand) 45%, var(--border-subtle)); background: color-mix(in oklch, var(--maka-brand) 10%, var(--background)); }
+  .workHubTaskStatusBadge[data-status='failed'] { color: var(--destructive); border-color: color-mix(in oklch, var(--destructive) 30%, transparent); }
+  .workHubTaskStatusBadge[data-status='historical'] { color: var(--muted-foreground); }
+  .workHubTaskInstructions summary, .workHubTaskInputDetails > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; min-height: 36px; padding: 6px 10px; box-sizing: border-box; color: var(--muted-foreground); }
+  .workHubTaskInstructions summary::-webkit-details-marker, .workHubTaskInputDetails > summary::-webkit-details-marker { display: none; }
+  .workHubTaskInstructions summary > svg:last-child, .workHubTaskInputDetails > summary > svg:last-child { margin-inline-start: auto; flex-shrink: 0; }
+  .workHubTaskInstructions[open] > summary > svg:last-child, .workHubTaskInputDetails[open] > summary > svg:last-child { transform: rotate(180deg); }
+  .workHubTaskInstructions summary:focus-visible, .workHubTaskInputDetails > summary:focus-visible { outline: 2px solid var(--maka-brand); outline-offset: 2px; border-radius: 8px; }
+  .workHubTaskSource { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; padding: 4px 10px 10px; }
+  .workHubExecutionTranscript { display: flex; flex-direction: column; min-height: 0; padding-block: 12px 24px; }
+  .workHubTaskSessionLabel { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: calc(100% - 24px); max-width: var(--maka-reading-measure, 800px); box-sizing: border-box; margin: 0 auto 20px; padding: 8px var(--maka-transcript-gutter, 16px); border-block: 1px solid var(--border-subtle); color: var(--muted-foreground); font-size: 12px; }
+  .workHubTaskSessionLabel span { overflow-wrap: anywhere; }
+  .workHubTaskSessionLabel code { font-size: 10px; flex-shrink: 0; }
+  .workHubTaskSource { margin: 0; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--foreground); }
+  .workHubTaskComposer { width: 100%; max-width: var(--maka-reading-measure, 800px); margin-inline: auto; }
+  .workHubTaskInstructions { border: 1px solid var(--border-subtle); border-radius: 10px; font-size: 12px; }
+  .workHubTaskInputRecovery { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+  .workHubTaskInputDetails { font-size: 12px; color: var(--muted-foreground); border: 1px solid var(--border-subtle); border-radius: 10px; margin-block: 8px 10px; }
+  .workHubTaskInputDetails > div { max-height: 180px; overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0 12px 10px; }
+  .workHubTaskInputDetails h4 { font-size: 11px; font-weight: 500; margin: 8px 0; }
+  .workHubTaskInputDetails code { font-size: 10px; }
+  .workHubTaskReceipt { margin-inline-start: auto; border-radius: 5px; background: var(--muted); padding: 2px 6px; font-size: 11px; color: var(--foreground); }
+  .workHubTaskInputDetails > summary > svg:last-child { margin-inline-start: 0; }
+  .workHubTaskInputHint { margin: 8px 2px 0; font-size: 11px; line-height: 1.5; color: var(--muted-foreground); }
+  .workHubTaskViewInbox { padding: 8px 12px; font-size: 12px; border: 1px solid var(--border-subtle); border-radius: 10px; margin: 0 var(--maka-transcript-gutter, 16px) 10px; }
+  .workHubTaskViewInbox > summary { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  @media (max-width: 600px) {
+    .workHubTaskTitleRow { align-items: flex-start; flex-direction: column; gap: 8px; }
+    .workHubTaskStatusBadge { max-width: 100%; }
+  }
   .workHubComposerContent { position: relative; }
   /* Compact WorkHub keeps its original inline wheel footprint. Other hosts
      keep the button footprint and paint the same wheel over that position. */
@@ -263,9 +285,17 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
 }
 .workHubTaskInbox p { margin: 8px; }
 
-.workHubTaskOverview { margin: 8px 0; border: 1px solid color-mix(in oklch, var(--foreground) 12%, transparent); border-radius: 12px; padding: 8px 12px; font-size: 12px; }
-.workHubTaskOverview > summary { cursor: pointer; font-weight: 600; }
-.workHubTaskRows { max-height: 240px; overflow-y: auto; scrollbar-gutter: stable; }
+.workHubTaskRail { width: 300px; flex: 0 0 300px; min-height: 0; border-inline-start: 1px solid var(--border-subtle); background: var(--background-elevated, var(--background)); z-index: 5; overflow-y: auto; overscroll-behavior: contain; }
+.workHubTaskRail[hidden] { display: none; }
+.workHubTaskRailToggle { position: absolute; top: 8px; right: 12px; z-index: 4; }
+.workHubTaskOverview { padding: 0 16px 16px; font-size: 12px; }
+.workHubTaskRailHeader { display: flex; align-items: center; gap: 4px; position: sticky; top: 0; background: var(--background-elevated, var(--background)); z-index: 1; padding-block: 12px; }
+.workHubTaskRailHeader h2 { flex: 1; font-size: 13px; font-weight: 600; margin: 0; }
+.workHubTaskRows { min-width: 0; }
+.workHubTaskText[data-expanded='false'] { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+@media (max-width: 999px) {
+  .workHubTaskRail { position: absolute; inset: 0 0 0 auto; width: min(300px, calc(100% - 48px)); box-shadow: -12px 0 32px color-mix(in oklch, var(--foreground) 8%, transparent); }
+}
 .workHubTaskRows h3, .workHubTaskDetails h4 { margin: 10px 0 6px; font-size: 12px; }
 .workHubTaskCard { border-top: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent); padding: 8px 0; }
 .workHubTaskHeading { justify-content: space-between; height: auto; text-align: start; white-space: normal; }

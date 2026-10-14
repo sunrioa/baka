@@ -230,6 +230,13 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
           .poll(() => ({ routed: seen.includes('routed'), errors }))
           .toEqual({ routed: true, errors: [] });
         expect(seen).toContain('producer');
+        // Leaving the persistent native WorkHub view must expose the main
+        // renderer's live transcript before the worker's provider is released.
+        const expandSidebar = page.getByRole('button', { name: 'Expand sidebar', exact: true });
+        if (await expandSidebar.isVisible()) await expandSidebar.click();
+        await page.locator('.maka-session-row').filter({ hasText: 'Evidence producer' }).locator('button.astryx-side-nav-item').click();
+        await expect(page.locator('.maka-user-message').filter({ hasText: 'EVIDENCE_PRODUCER' })).toBeVisible();
+        await page.getByRole('button', { name: 'WorkHub', exact: true }).click();
         await send('Can I send an unrelated request now?');
         await expect(
           hub
@@ -256,6 +263,8 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
           .toEqual({ finished: 1, errors: [] });
         expect(seen.filter((value) => value === 'resumed')).toHaveLength(1);
         await expect(inbox).toBeHidden();
+        const showTasks = hub.getByRole('button', { name: 'Recent tasks', exact: true });
+        if (await showTasks.isVisible()) await showTasks.click();
         const consumer = hub.locator('.workHubTaskCard').filter({ hasText: 'EVIDENCE_CONSUMER' });
         await expect(consumer).toHaveAttribute('data-status', 'pending_acceptance');
         await consumer.locator('.workHubTaskHeading').click();

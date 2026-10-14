@@ -154,11 +154,16 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     taskHistory: async (_owner, input) => {
       const task = tasks.find(item => item.actionId === input.workId);
       const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.workId);
-      if (task) return { workId: input.workId, assignments: [{ ...task, workId: input.workId, generationId: input.workId, state: task.execution ? 'owned' : 'queued', superseded: false }], nextCursor: null };
+      if (task) return { workId: input.workId, assignments: [
+        { ...task, workId: input.workId, generationId: input.workId, state: task.execution ? 'owned' : 'queued', superseded: false },
+        ...(task.actionId === 'overview-running' ? [{ ...task, workId: input.workId, generationId: input.workId, actionId: 'overview-initial', delegationId: 'overview-initial-delegation', targetMessageId: 'initial-message', state: 'owned' as const, superseded: false, execution: { turnId: 'initial-turn', runId: 'run-initial-turn' } }] : []),
+        ...(task.actionId === 'overview-running' ? [{ ...task, workId: input.workId, generationId: 'older-generation', actionId: 'overview-cold', delegationId: 'overview-cold-delegation', targetSessionId: targetId, targetSessionName: target.name, targetMessageId: 'cold-message', state: 'owned' as const, superseded: true, execution: { turnId: 'cold-turn', runId: 'run-cold-turn' } }] : []),
+      ], nextCursor: null };
       if (link?.type !== 'workhub_coordination' || link.kind !== 'delegation_assigned') throw new Error('No canonical task');
       return { workId: input.workId, assignments: [{ workId: input.workId, generationId: input.workId, actionId: link.actionId, delegationId: link.delegationId, targetSessionId: link.targetSessionId, targetSessionName: link.targetSessionName, targetMessageId: link.targetMessageId, text: link.userText, createdAt: link.ts, state: 'owned', superseded: false, execution: { turnId: link.targetTurnId, runId: `run-${link.targetTurnId}` } }], nextCursor: null };
     },
     taskExecutions: async (_owner, input) => {
+      if (input.actionId === 'overview-initial') return { actionId: input.actionId, delegationId: input.delegationId, targetSessionId: secondTarget.id, executions: [{ sessionId: secondTarget.id, turnId: 'initial-turn', runId: 'run-initial-turn', status: 'completed', terminalEventId: 'complete-initial-turn' }], nextCursor: null };
       const task = tasks.find(item => item.actionId === input.actionId);
       const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.actionId);
       const targetSessionId = task?.targetSessionId ?? (link?.type === 'workhub_coordination' && link.kind === 'delegation_assigned' ? link.targetSessionId : undefined);
@@ -288,18 +293,20 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     getExecutionConcurrency: async () => executionConcurrency,
     setExecutionConcurrency: async (id, value) => { writes.concurrency(id, value); executionConcurrency = value; permissionChanged?.(); return value; },
     observe: (id, _event, _error, phase, execution, scope) => {
-      if (scope) { phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: scope.turnId === 'running-turn' ? { sessionId: id, ...scope, status: 'running' } : null }); return () => {}; }
+      if (id !== sessionId) { phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: id === secondTarget.id ? { sessionId: id, turnId: 'running-turn', runId: 'running-run', status: 'running' } : null }); return () => {}; }
       updateExecution = execution; publishExecution(); return () => { updateExecution = undefined; };
     },
-    openTranscript: async (_id, handler, _signal, _error, scope) => {
-      if (scope) {
-        handler({ messages: [
-          { type: 'user', id: `user-${scope.turnId}`, turnId: scope.turnId, ts: 1, text: '核对当前任务，不改变权限和工作目录。' },
-          { type: 'tool_call', id: `tool-${scope.turnId}`, turnId: scope.turnId, ts: 2, toolName: 'Read', args: { path: '/projects/maka/package.json' } },
-          { type: 'tool_result', id: `result-${scope.turnId}`, turnId: scope.turnId, ts: 3, toolUseId: `tool-${scope.turnId}`, isError: false, content: { kind: 'text', text: '{ "name": "maka" }' } },
-          { type: 'assistant', id: `answer-${scope.turnId}`, turnId: scope.turnId, ts: 4, modelId: 'model-a', text: `任务公开输出 ${scope.turnId}：已读取依赖，未更改文件。` },
-          ...(scope.turnId === 'running-turn' ? [] : [{ type: 'turn_state' as const, id: `complete-${scope.turnId}`, turnId: scope.turnId, ts: 5, status: 'completed' as const }]),
-        ], hasOlder: false, ready: true });
+    openTranscript: async (id, handler, _signal, _error, scope) => {
+      if (id !== sessionId) {
+        if (scope) throw new Error('Full Session history must not be execution-filtered');
+        const turns = id === secondTarget.id ? ['initial-turn', 'intervening-turn', 'running-turn'] : ['cold-turn'];
+        handler({ messages: turns.flatMap((turnId, index): StoredMessage[] => [
+          { type: 'user', id: `user-${turnId}`, turnId, ts: index * 5 + 1, text: turnId === 'intervening-turn' ? '同 Session 的其他任务也在这里。' : `${turnId}：核对当前任务，不改变权限和工作目录。` },
+          { type: 'tool_call', id: `tool-${turnId}`, turnId, ts: index * 5 + 2, toolName: 'Read', args: { path: '/projects/maka/package.json' } },
+          { type: 'tool_result', id: `result-${turnId}`, turnId, ts: index * 5 + 3, toolUseId: `tool-${turnId}`, isError: false, content: { kind: 'text', text: '{ "name": "maka" }' } },
+          { type: 'assistant', id: `answer-${turnId}`, turnId, ts: index * 5 + 4, modelId: 'model-a', text: `任务公开输出 ${turnId}：已读取依赖，未更改文件。` },
+          ...(turnId === 'running-turn' ? [] : [{ type: 'turn_state' as const, id: `complete-${turnId}`, turnId, ts: index * 5 + 5, status: 'completed' as const }]),
+        ]), hasOlder: false, ready: true });
         return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => {} };
       }
       updateTranscript = handler; publish(); return { observationChanged: () => {}, loadEarlier: async () => {}, close: async () => { updateTranscript = undefined; } };
@@ -356,9 +363,13 @@ export const FullConversationAndWorkIdentity: Story = {
   },
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
+async function openTaskSidebar(canvasElement: HTMLElement) {
+  const toggle = within(canvasElement).queryByRole('button', { name: '近期任务' });
+  if (toggle) await userEvent.click(toggle);
+}
 // Real path: WorkHub → task overview → View task execution. The production
-// WorkHubRoot selects a canonical work, then mounts the real scoped reader.
-// Only Host responses are mocked; the scoped ChatView and direct task Composer are real.
+// WorkHubRoot selects a canonical work, then reads its full Session histories.
+// Only Host responses are mocked; ChatView and the task-bound Composer are real.
 // A coordinator question/form stays pending in its own scope while this task is usable.
 export const TaskExecutionView: Story = {
   render: () => <Surface history="usage" taskInbox taskOverview question selectTarget />,
@@ -369,29 +380,41 @@ export const TaskExecutionView: Story = {
     const questionHeading = await canvas.findByRole('heading', { name: '首批发布范围选哪个？' });
     const coordinatorQuestion = questionHeading.closest<HTMLElement>('.maka-user-question-prompt')!;
     await userEvent.click(within(coordinatorQuestion).getAllByRole('option')[1]!);
+    await openTaskSidebar(canvasElement);
     const heading = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     const view = await canvas.findByRole('region', { name: '任务实时执行' });
     await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
+    expect(within(view).getByText(/任务公开输出 initial-turn/)).toBeInTheDocument();
     const header = view.querySelector('.workHubTaskViewHeader')!;
     expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
     expect(header.getBoundingClientRect().bottom).toBeLessThan(window.innerHeight);
+    expect(view.querySelector('.workHubTaskAttempts')).toBeNull();
+    expect(view.querySelector('.workHubTaskExecutionChoices')).toBeNull();
+    expect(view.querySelector('.workHubTaskInstructions')).not.toHaveAttribute('open');
+    expect(view.querySelectorAll('[data-task-session-id]')).toHaveLength(2);
+    expect(within(view).getByTitle(targetId)).toHaveTextContent('Session · payments');
+    expect(within(view).getByText('同 Session 的其他任务也在这里。')).toBeInTheDocument();
+    expect(within(view).getByText(/任务公开输出 cold-turn/)).toBeInTheDocument();
+    expect(view.querySelector('.workHubTaskStatusBadge')).toHaveTextContent('执行中');
     const inboxToggle = canvasElement.querySelector('.workHubTaskViewInbox summary')!;
     expect(inboxToggle).toBeVisible();
     await userEvent.click(inboxToggle);
     await waitFor(() => expect(canvas.getByRole('region', { name: '待你处理' })).toBeVisible());
     await userEvent.click(inboxToggle);
-    expect(canvasElement.querySelector('.workHubTaskOverview')).toBeNull();
-    expect(view.querySelector('[data-task-turn-id]')).toHaveAttribute('data-task-turn-id', 'running-turn');
+    expect(canvasElement.querySelector('.workHubTaskPanels .workHubTaskOverview')).toBeNull();
     expect(within(view).queryByText(/已补充重复投递测试/)).toBeNull();
     const taskComposer = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!;
     expect(taskComposer).toBeVisible();
     expect(coordinatorQuestion).not.toBeVisible();
     expect(within(taskComposer).getByRole('button', { name: '停止' })).toBeVisible();
+    expect(taskComposer.querySelector('.workHubTaskInputHeader')).toBeNull();
+    expect(within(taskComposer).queryByRole('button', { name: '返回协调输入' })).toBeNull();
     expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
     const editor = taskComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
     await userEvent.click(editor); expect(editor).toHaveFocus();
     await userEvent.type(editor, '只核对协议，不更改权限。');
+    expect(within(taskComposer).getByRole('button', { name: '发送' })).toBeVisible();
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(writes.taskInput).toHaveBeenCalledWith(sessionId, expect.objectContaining({
       workId: 'overview-running', generationId: 'overview-running', sourceActionId: 'overview-running', sourceDelegationId: 'overview-running-delegation', text: '只核对协议，不更改权限。',
@@ -399,13 +422,14 @@ export const TaskExecutionView: Story = {
     await waitFor(() => expect(taskComposer.querySelector('[data-input-delivery="queued"]')).toBeVisible());
     expect(editor).toHaveFocus(); expect(editor).toHaveTextContent('');
     expect(taskComposer.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+    expect(Math.abs(taskComposer.getBoundingClientRect().left - header.getBoundingClientRect().left)).toBeLessThan(2);
     expect(view.scrollWidth).toBeLessThanOrEqual(view.clientWidth);
     expect(writes.answer).not.toHaveBeenCalled();
     expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
     expect(writes.defaults).not.toHaveBeenCalled();
     expect(writes.question).not.toHaveBeenCalled(); expect(writes.form).not.toHaveBeenCalled();
-    await userEvent.click(within(taskComposer).getByRole('button', { name: '返回协调输入' }));
+    await userEvent.click(within(view).getByRole('button', { name: '返回 WorkHub' }));
     await waitFor(() => expect(coordinatorQuestion).toBeVisible());
     expect(canvasElement.querySelector('.maka-user-question-prompt')).toBe(coordinatorQuestion);
     expect(within(coordinatorQuestion).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
@@ -415,6 +439,7 @@ export const TaskExecutionView: Story = {
     await userEvent.click(coordinatorEditor); await userEvent.type(coordinatorEditor, '选择后续工作'); await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBeVisible());
     const coordinatorForm = canvasElement.querySelector<HTMLElement>('.maka-form-interaction-prompt')!;
+    await openTaskSidebar(canvasElement);
     const reopened = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(reopened.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer [data-input-delivery="queued"]')).toBeVisible());
@@ -424,9 +449,10 @@ export const TaskExecutionView: Story = {
     await userEvent.click(restoredEditor); expect(restoredEditor).toHaveFocus(); expect(restoredEditor).toHaveTextContent('');
     expect(writes.taskInput).toHaveBeenCalledTimes(1);
     expect(writes.answer).toHaveBeenCalledTimes(1); expect(writes.question).toHaveBeenCalledTimes(1); expect(writes.form).not.toHaveBeenCalled();
-    await userEvent.click(within(canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!).getByRole('button', { name: '返回协调输入' }));
+    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
     await waitFor(() => expect(coordinatorForm).toBeVisible());
     expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBe(coordinatorForm);
+    await openTaskSidebar(canvasElement);
     const finalHeading = canvas.getByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(finalHeading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toBeVisible());
@@ -439,6 +465,7 @@ export const TaskOverviewAndContinuation: Story = {
   render: () => <Surface history="usage" taskInbox taskOverview />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    await openTaskSidebar(canvasElement);
     await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
     let overview = canvas.getByLabelText('近期任务');
     const inbox = await canvas.findByRole('region', { name: '待你处理' });
@@ -450,7 +477,13 @@ export const TaskOverviewAndContinuation: Story = {
     let editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
     await userEvent.click(editor);
     expect(editor).toHaveFocus();
-    expect(inbox.getBoundingClientRect().top).toBeLessThan(overview.getBoundingClientRect().top);
+    const rail = overview.closest<HTMLElement>('.workHubTaskRail')!;
+    expect(rail).toBeVisible();
+    expect(rail.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
+    expect(rail.getBoundingClientRect().top).toBe(0);
+    expect(rail.getBoundingClientRect().height).toBe(window.innerHeight);
+    expect(canvasElement.querySelector('.workHubTaskPanels')).not.toContainElement(overview);
+    if (window.innerWidth >= 1000) expect(canvasElement.querySelector('.mainColumn')!.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
     const panels = canvasElement.querySelector('.workHubTaskPanels')!;
     expect(panels.getBoundingClientRect().bottom).toBeLessThanOrEqual(editor.getBoundingClientRect().top);
     expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
@@ -500,8 +533,12 @@ export const TaskOverviewAndContinuation: Story = {
     expect(writes.open).toHaveBeenCalledWith(desktopSessionKey({ hostId: 'story-host', sessionId: 'release' }));
     await userEvent.click(done);
     // Restore the reachable top-of-list view for the visual evidence.
-    overview.querySelector('.workHubTaskRows')!.scrollTo({ top: 0 });
+    rail.scrollTo({ top: 0 });
     panels.scrollTo({ top: 0 });
+    await userEvent.click(within(overview).getByRole('button', { name: '收起任务侧栏' }));
+    expect(rail).not.toBeVisible();
+    await openTaskSidebar(canvasElement);
+    expect(rail).toBeVisible();
   },
 };
 // Real path: delegated task roots wait on questions/forms/grants; WorkHub's
@@ -595,7 +632,11 @@ export const StandardComposer: Story = {
     const concurrency = canvas.getByRole('combobox', { name: '并发' });
     await waitFor(() => expect(concurrency).toBeEnabled());
     await userEvent.click(concurrency);
-    await userEvent.click(page.getByRole('option', { name: '1' }));
+    const menu = page.getByRole('listbox');
+    expect(menu.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+    expect(menu.getBoundingClientRect().bottom).toBeLessThanOrEqual(concurrency.getBoundingClientRect().top + 1);
+    await waitFor(() => expect(page.getByRole('option', { name: '并发 8' })).toBeVisible());
+    await userEvent.click(page.getByRole('option', { name: '并发 1' }));
     await waitFor(() => expect(writes.concurrency).toHaveBeenCalledWith(sessionId, 1));
     await waitFor(() => expect(concurrency.textContent).toBe('1'));
     await userEvent.click(canvas.getByRole('button', { name: /切换当前任务模型/ }));
@@ -1028,7 +1069,7 @@ export const SendWhileWorkFiltered: Story = {
     await userEvent.click(canvasElement.querySelector('.workhub-message-rail') as HTMLElement);
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
     expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
-    await userEvent.click(canvas.getByRole('button', { name: '返回协调输入' }));
+    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
     const editor = canvasElement.querySelector('[contenteditable="true"]') as HTMLElement;
     await userEvent.click(editor);
     await userEvent.keyboard('FILTERED_SEND_PROBE{Enter}');

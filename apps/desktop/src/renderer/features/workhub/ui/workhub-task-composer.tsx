@@ -19,15 +19,15 @@
 
 import { useEffect, useRef, type RefObject } from 'react';
 import { Composer, Button, useUiLocale, type ComposerHandle } from '@maka/ui';
-import { formatUiMessage } from '@maka/core/ui-locale';
+import { ChevronDown } from 'lucide-react';
 import type { WorkHubServices } from '../ports.js';
 import type { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useWorkHubTaskInput } from '../controller/use-workhub-task-input.js';
 import { workHubTaskInputCopy } from '../locales/workhub-task-input-copy.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
-export function WorkHubTaskComposer({ services, owner, workId, name, view, composerRef, onBack }: {
-  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; composerRef?: RefObject<ComposerHandle | null>; onBack(): void;
+export function WorkHubTaskComposer({ services, owner, workId, view, composerRef }: {
+  services: WorkHubServices; owner: string; workId: string; view: ReturnType<typeof useWorkHubTaskView>; composerRef?: RefObject<ComposerHandle | null>;
 }) {
   const locale = useUiLocale(), t = workHubTaskInputCopy[locale];
   const input = useWorkHubTaskInput(services, owner, workId, view);
@@ -43,19 +43,13 @@ export function WorkHubTaskComposer({ services, owner, workId, name, view, compo
   const unknown = !!state.attempt && !state.receipt && !state.rejected;
   const error = state.error ? t.error[state.error] : state.rejected?.message;
   const blocked = !view.ready ? t.unavailable : !input.source ? t.history : input.session?.backend === 'plugin-executor' ? t.unsupported : !input.ready ? t.sessionUnavailable : undefined;
-  return <div className="workHubTaskComposer" data-work-input={workId}>
-    <div className="workHubTaskInputHeader">
-      <p>{formatUiMessage(t.address, { name }, locale)}</p>
-      <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].coordinatorInput} onClick={onBack} />
-    </div>
-    {input.session && <p className="workHubTaskInputTarget">{input.session.name} · {input.session.model ?? t.unknownModel}</p>}
+  return <section className="workHubTaskComposer" data-work-input={workId} aria-label={t.title}>
     {blocked && <p role="status">{blocked}{!input.source && view.ready && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].follow} onClick={view.followLatest} />}</p>}
     {error && <p role="alert">{error}</p>}
     {state.recoveryUnsafe && state.error !== 'storage' && <p role="alert">{t.error.storage}</p>}
-    {state.receipt && <p role="status" data-input-id={state.receipt.inputId} data-input-delivery={state.receipt.delivery}>{t.delivery[state.receipt.delivery]}</p>}
     {state.attempt && <details className="workHubTaskInputDetails">
-      <summary>{t.original}</summary>
-      <div><p>{state.attempt.input.text}</p><code>{state.attempt.input.generationId} / {state.attempt.input.sourceActionId}</code></div>
+      <summary><span>{t.lastInput}</span>{state.receipt && <span className="workHubTaskReceipt" role="status" data-input-id={state.receipt.inputId} data-input-delivery={state.receipt.delivery}>{t.delivery[state.receipt.delivery]}</span>}<ChevronDown size={14} aria-hidden="true" /></summary>
+      <div><h4>{t.original}</h4><p>{state.attempt.input.text}</p><p className="workHubTaskHint">{t.deliveryHint}</p><code>{state.attempt.input.generationId} / {state.attempt.input.sourceActionId}</code></div>
     </details>}
     {unknown && <div className="workHubTaskInputRecovery">
       <p>{t.pending}</p>
@@ -70,5 +64,6 @@ export function WorkHubTaskComposer({ services, owner, workId, name, view, compo
       activeSession={input.session} activeModel={input.session?.model} pickersReadOnly
       activeModelConnectionId={input.session?.llmConnectionId} activeModelConnectionSlug={input.session?.llmConnectionSlug}
       showStaticModelUnavailableStatus={false} />
-  </div>;
+    <p className="workHubTaskInputHint">{t.scopeHint}</p>
+  </section>;
 }

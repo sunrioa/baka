@@ -972,6 +972,7 @@ export function PendingTurnAnswer(props: {
   turnId?: string;
   startedAt?: number;
   running: boolean;
+  queued?: boolean;
   providerRetry?: LiveProviderRetry;
 }) {
   const locale = useUiLocale();
@@ -985,7 +986,7 @@ export function PendingTurnAnswer(props: {
       className="maka-chat-message maka-assistant-answer"
     >
       <VStack gap={2} width="100%" className="maka-assistant-answer-content">
-        <TurnStatusBar status="running" running={props.running} startedAt={startedAt} providerRetry={props.providerRetry} />
+        <TurnStatusBar status="running" running={props.running} queued={props.queued} startedAt={startedAt} providerRetry={props.providerRetry} />
         {props.providerRetry && <ModelProviderRetryIndicator retry={props.providerRetry} />}
       </VStack>
       <TurnFooter turnId={props.turnId} actions={[]} live context={context} />
@@ -1001,6 +1002,7 @@ export function PendingTurnAnswer(props: {
  */
 export interface TurnStatusRowProps {
   status: TurnViewModel['status'];
+  queued?: boolean;
   startedAt?: number;
   durationMs?: number;
   /** Work is actually arriving. Only consulted for the running arm. */
@@ -1016,6 +1018,9 @@ function TurnStatusRow(props: TurnStatusRowProps): ReactNode {
   const copy = getConversationCopy(locale).messages;
 
   if (props.status === 'running') {
+    if (props.queued) {
+      return <span className="maka-turn-statusbar-text">{copy.turnStatusQueued}</span>;
+    }
     const retry = props.providerRetry?.event;
     if (retry) {
       // The banner below the row owns the countdown and the reason; the row
@@ -1056,7 +1061,7 @@ function TurnStatusRow(props: TurnStatusRowProps): ReactNode {
 /** Standalone status row for a turn with no process disclosure to carry it. */
 function TurnStatusBar(props: TurnStatusRowProps) {
   return (
-    <div className="maka-turn-statusbar" data-turn-status={props.status}>
+    <div className="maka-turn-statusbar" data-turn-status={props.queued ? 'queued' : props.status}>
       <TurnStatusRow {...props} />
     </div>
   );

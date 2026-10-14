@@ -59,6 +59,8 @@ export function classifyTurnListChange(
 }
 
 export function useChatScroll(input: {
+  /** Other transcript sections share this scrollport; only its tail owns scrolling. */
+  enabled?: boolean;
   scrollRef: RefObject<HTMLElement | null>;
   virtualizerRef: RefObject<VirtualizerHandle | null>;
   sessionId?: string;
@@ -170,8 +172,8 @@ export function useChatScroll(input: {
   // an ancestor, and React attaches a parent's ref after its children's layout
   // effects have already run.
   useEffect(
-    () => authority.attach(input.scrollRef.current, layout),
-    [authority, input.scrollRef, layout],
+    () => input.enabled !== false ? authority.attach(input.scrollRef.current, layout) : undefined,
+    [authority, input.scrollRef, layout, input.enabled],
   );
 
   // A new conversation either resumes a semantic reading position or arrives
@@ -180,9 +182,10 @@ export function useChatScroll(input: {
   // identity. Runs before the command below so it is not followed by a tail
   // write.
   useLayoutEffect(() => {
+    if (input.enabled === false) return;
     if (activation.current?.restoreTurnId) authority.releasePin();
     else authority.pinToTail();
-  }, [input.sessionId]);
+  }, [input.sessionId, input.enabled]);
 
   // A conversation that opens with its list is measured and moved over its
   // first frames; it is shown on the frame it reaches its place, not the frame
@@ -190,18 +193,20 @@ export function useChatScroll(input: {
   // nothing to hold back.
   const [placedSessionId, setPlacedSessionId] = useState<string>();
   useEffect(() => {
+    if (input.enabled === false) return;
     if (turnIdsRef.current.length === 0) {
       setPlacedSessionId(input.sessionId);
       return;
     }
     return authority.whenInPlace(() => setPlacedSessionId(input.sessionId));
-  }, [authority, input.sessionId]);
+  }, [authority, input.sessionId, input.enabled]);
 
   useLayoutEffect(() => {
-    authority.turnsChanged(list.current.change);
-  }, [authority, input.turnIds]);
+    if (input.enabled !== false) authority.turnsChanged(list.current.change);
+  }, [authority, input.turnIds, input.enabled]);
 
   useEffect(() => input.viewportNavigation?.subscribe((sessionId) => {
+    if (input.enabled === false) return;
     if (activation.current?.sessionId !== sessionId) return;
     // A send supersedes both a captured bookmark and a search that has not
     // landed yet.
@@ -209,9 +214,10 @@ export function useChatScroll(input: {
     activation.current = { sessionId };
     commandTarget.current = null;
     authority.pinToTail();
-  }), [authority, input.viewportNavigation]);
+  }), [authority, input.viewportNavigation, input.enabled]);
 
   useEffect(() => {
+    if (input.enabled === false) return;
     const report = (measure: boolean): void => {
       // Until a command has landed, the viewport says nothing about where the
       // reader intended to be.
@@ -240,16 +246,17 @@ export function useChatScroll(input: {
       if (reportReadingAnchor.current === reportNow) reportReadingAnchor.current = undefined;
       stop();
     };
-  }, [authority, input.sessionId]);
+  }, [authority, input.sessionId, input.enabled]);
 
   useEffect(() => {
-    authority.measureReadingTurn();
-  }, [authority, input.turnIds]);
+    if (input.enabled !== false) authority.measureReadingTurn();
+  }, [authority, input.turnIds, input.enabled]);
 
   // Runs on every render: a target can arrive with any render, and is handed
   // to the authority once. A Turn not in the list yet is taken to when it
   // arrives.
   useLayoutEffect(() => {
+    if (input.enabled === false) return;
     const explicitTarget = input.target?.turnId
       ? {
           kind: 'search' as const,
@@ -308,12 +315,12 @@ export function useChatScroll(input: {
   });
 
   const revealTurnAtStart = useCallback((turnId: string, arrival: PromiseLike<unknown>): void => {
-    authority.navigate({ turnId, align: 'start', arrival });
-  }, [authority]);
+    if (input.enabled !== false) authority.navigate({ turnId, align: 'start', arrival });
+  }, [authority, input.enabled]);
 
   return {
     highlightedTurnId,
-    placed: placedSessionId === input.sessionId,
+    placed: input.enabled === false || placedSessionId === input.sessionId,
     /** The Turn a pending or landing command is about; its row must stay mounted. */
     commandTurnId: input.target?.turnId ?? activation.current?.restoreTurnId,
     revealTurnAtStart,
@@ -332,6 +339,7 @@ export function useChatScroll(input: {
  */
 export function useTranscriptStartMargin(
   scrollRef: RefObject<HTMLElement | null>,
+  manageScroll = true,
 ): {
   startMargin: number;
   listRef: (element: HTMLElement | null) => void;
@@ -354,7 +362,7 @@ export function useTranscriptStartMargin(
       if (next === previous) return;
       const { pinned, positioning } = authority.getSnapshot();
       // A positioning places its Turn from the live margin itself.
-      if (previous !== undefined && !pinned && !positioning && root.scrollTop > previous) {
+      if (manageScroll && previous !== undefined && !pinned && !positioning && root.scrollTop > previous) {
         root.scrollTop += next - previous;
       }
       previous = next;
@@ -365,7 +373,7 @@ export function useTranscriptStartMargin(
     observer.observe(root);
     if (root.firstElementChild) observer.observe(root.firstElementChild);
     return () => observer.disconnect();
-  }, [authority, list, measureStartMargin, scrollRef]);
+  }, [authority, list, measureStartMargin, scrollRef, manageScroll]);
   return { startMargin, listRef: setList, measureStartMargin };
 }
 

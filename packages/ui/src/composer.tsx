@@ -304,6 +304,8 @@ export const Composer = forwardRef<
   {
     disabled?: boolean;
     placeholder?: string;
+    /** Opt-in visible action text for task consoles; default chat controls stay icon-only. */
+    showActionLabels?: boolean;
     /**
      * Prevent submission while leaving the draft and recovery controls usable.
      * Hosts use this for configuration failures that the model picker can fix.
@@ -1652,6 +1654,7 @@ export const Composer = forwardRef<
     resumeOffered: props.resumeAction !== undefined,
   });
   const { sendDisabled, stopShown, resumeShown } = sendPolicy;
+  const ActionButton = props.showActionLabels ? UiButton : IconButton;
   // Hosts can explain a disabled Send without adding a second visible notice;
   // other disabled reasons (empty draft, in-flight import) keep the neutral label.
   const sendTitle = props.sendBlocked && props.sendBlockedReason?.trim()
@@ -2601,11 +2604,13 @@ export const Composer = forwardRef<
             </div>
           )}
           sendButton={stopShown ? (
-            <IconButton
+            <ActionButton
+              className={props.showActionLabels ? 'maka-composer-action-label' : undefined}
               variant="secondary"
               type="button"
               isDisabled={props.stopPending}
               label={props.stopPending ? copy.stopping : copy.stopLabel}
+              aria-label={props.stopPending ? copy.stopping : copy.stopLabel}
               aria-busy={props.stopPending ? 'true' : undefined}
               data-pending={props.stopPending ? 'true' : undefined}
               tooltip={props.stopPending ? copy.stopping : copy.stopLabel}
@@ -2616,11 +2621,13 @@ export const Composer = forwardRef<
               icon={<Square size={ICON_SIZE.control} aria-hidden="true" />}
             />
           ) : resumeShown && props.resumeAction ? (
-            <IconButton
+            <ActionButton
+              className={props.showActionLabels ? 'maka-composer-action-label' : undefined}
               variant="primary"
               type="button"
               isDisabled={props.resumeAction.pending}
               label={props.resumeAction.pending ? copy.resumePending : copy.resumeLabel}
+              aria-label={props.resumeAction.pending ? copy.resumePending : copy.resumeLabel}
               aria-busy={props.resumeAction.pending ? 'true' : undefined}
               data-pending={props.resumeAction.pending ? 'true' : undefined}
               tooltip={props.resumeAction.pending ? copy.resumePending : copy.resumeTitle}
@@ -2631,11 +2638,13 @@ export const Composer = forwardRef<
               icon={<Play size={ICON_SIZE.chrome} aria-hidden="true" />}
             />
           ) : (
-            <IconButton
+            <ActionButton
+              className={props.showActionLabels ? 'maka-composer-action-label' : undefined}
               variant="primary"
               type="submit"
               isDisabled={sendDisabled}
               label={copy.sendLabel}
+              aria-label={copy.sendLabel}
               aria-busy={sendPending ? 'true' : undefined}
               data-pending={sendPending ? 'true' : undefined}
               tooltip={sendTitle}

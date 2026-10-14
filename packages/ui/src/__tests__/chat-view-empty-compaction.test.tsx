@@ -100,6 +100,10 @@ test('shows one waiting indicator before a named live Turn reaches the transcrip
   });
   assert.equal((committed.match(/class="maka-turn-processing"/g) ?? []).length, 1);
   assert.match(committed, /data-transcript-turn-id="pending-turn"/);
+  const queued = await renderChat(undefined, { activeTurn: { turnId: 'queued-turn', queued: true } });
+  assert.match(queued, /Accepted, waiting to start/);
+  assert.match(queued, /data-turn-status="queued"/);
+  assert.doesNotMatch(queued, /Pondering|maka-turn-processing|maka-turn-elapsed/);
 });
 
 test('a new Host Turn owns its waiting footer while the previous answer remains buffered', async () => {
