@@ -1789,6 +1789,68 @@ test('creation resolves a Project alias and records Host-owned usage', async () 
   }
 });
 
+test('fresh WorkHub containers retain the actual source worktree and registered Project, not its moved preferred root', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-fresh-worktree-')));
+  const preferredPath = join(root, 'main'),
+    worktree = join(root, 'source-worktree');
+  await mkdir(preferredPath);
+  await mkdir(worktree);
+  try {
+    let available = true;
+    const fixture = createFixture({
+      projectCatalog: {
+        list: async () => [
+          {
+            id: 'project-current',
+            aliases: ['old-alias'],
+            name: 'Source project',
+            locations: [
+              { path: preferredPath, isWorktree: false },
+              { path: worktree, isWorktree: true },
+            ],
+            available,
+            preferredPath,
+          },
+        ],
+        touch: async () => ({}),
+      } as never,
+    });
+    const input = {
+      sessionId: 'fresh-worktree',
+      workspace: { kind: 'host_path' as const, path: preferredPath },
+      modelTarget: { kind: 'default' as const },
+      permissionMode: 'ask' as const,
+    };
+    const prepared = await fixture.coordinator.prepareWorkHubCreate(input, {
+      cwd: worktree,
+      projectId: 'old-alias',
+    });
+    assert.equal(prepared.input.cwd, worktree);
+    assert.equal(prepared.input.projectId, 'project-current');
+    assert.equal(prepared.input.permissionMode, 'ask');
+    const different = await fixture.coordinator.prepareWorkHubCreate(input, {
+      cwd: preferredPath,
+      projectId: 'old-alias',
+    });
+    assert.notEqual(different.requestFingerprint, prepared.requestFingerprint);
+    available = false;
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubCreate(input, { cwd: worktree, projectId: 'old-alias' }),
+      /unavailable/,
+    );
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubCreate(input, {
+        cwd: join(root, 'missing-source'),
+        projectId: null,
+      }),
+      /exist|directory|resolve/i,
+    );
+    assert.equal(fixture.drainRequests(), 0, 'failed preparation does not start or migrate work');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('creation reports a Project path lost before usage recording without draining', async () => {
   const fixture = createFixture({
     projectCatalog: {

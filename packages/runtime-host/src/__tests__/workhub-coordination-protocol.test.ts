@@ -82,6 +82,36 @@ test('work continuation selects an exact objective and source, never caller exec
   });
 });
 
+test('fresh work continuation selects a container, not a caller workspace or execution authority', () => {
+  const input = {
+    turnId: 'active',
+    actionId: 'fresh-follow-up',
+    proposal: {
+      disposition: 'continue_work',
+      workId: 'original',
+      sourceActionId: 'source',
+      container: 'fresh',
+    },
+    newWorkDefaults: {
+      model: { llmConnectionId: 'new-route', llmConnectionSlug: 'new', model: 'new-model' },
+      permissionMode: 'ask',
+    },
+  };
+  assert.deepEqual(decodeWorkHubCoordinationActFromTurnInput(input), input);
+  for (const extra of [
+    { create: { workspace: { kind: 'host_path', path: '/caller' } } },
+    { candidateSetId: `sha256:${'a'.repeat(64)}` },
+    { proposal: { ...input.proposal, container: 'invented' } },
+    { proposal: { ...input.proposal, container: 'reuse' } },
+    { proposal: { ...input.proposal, targetSessionId: 'caller-target' } },
+    { generationId: 'caller-generation' },
+  ])
+    assert.throws(
+      () => decodeWorkHubCoordinationActFromTurnInput({ ...input, ...extra }),
+      RuntimeHostProtocolError,
+    );
+});
+
 test('WorkHub Coordination resolve has a closed empty input and bounded identity result', () => {
   assert.deepEqual(decodeWorkHubCoordinationResolveInput({}), {});
   assert.deepEqual(decodeWorkHubCoordinationResolveResult({ sessionId: 'coordination' }), {

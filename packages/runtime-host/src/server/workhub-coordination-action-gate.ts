@@ -67,7 +67,11 @@ export interface WorkHubAdmittedAction
   >;
   readonly sourceMessageId?: string;
   /** Host-resolved work selection; never a second semantic target selection. */
-  readonly continuation?: { readonly workId: string; readonly sourceActionId: string };
+  readonly continuation?: {
+    readonly workId: string;
+    readonly sourceActionId: string;
+    readonly container?: 'fresh';
+  };
   /** Only the native task-input command supplies this accepted user input identity. */
   readonly taskInput?: WorkHubTaskInputRequest;
   readonly create?: { readonly workspace: WorkspaceTarget };
@@ -216,6 +220,11 @@ export interface WorkHubDelegationAssignmentInput {
   readonly work?: WorkHubWorkBinding;
   /** Rechecked under the target admission lease, only before a fresh assignment. */
   readonly validateFreshTarget?: () => Promise<void>;
+  /** Internal source proof/lane, never a caller-selected new execution identity. */
+  readonly freshSource?: {
+    readonly assignment: WorkHubDelegationAssignedMessage;
+    readonly workspace: WorkspaceProjection;
+  };
   readonly targetExecutionPreparation?: WorkHubTargetExecutionPreparationInput;
   readonly coordinationTurnId?: string;
   readonly actionId: string;
@@ -536,6 +545,42 @@ export class WorkHubCoordinationActionGate {
         );
       }
       const sessionId = workHubCreatedSessionId(input.actionId);
+      if (input.continuation?.container === 'fresh') {
+        const selected = input.selectedTarget;
+        if (!selected)
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'Fresh continuation requires its fixed source',
+          );
+        const validate = async () => {
+          const source = await this.#continuedSource(input, selected.sessionId);
+          const candidate = await this.nativeTaskCandidate(selected.sessionId);
+          if (!source || !candidate || digest(candidate.workspace) !== selected.workspaceDigest)
+            throw new WorkHubActionGateFailure(
+              'candidate_set_stale',
+              'The source workspace changed before fresh continuation',
+            );
+          return { assignment: source, workspace: candidate.workspace };
+        };
+        const freshSource = await validate();
+        const source = freshSource.assignment;
+        return this.#assign(
+          {
+            ...delegationAssignment(input, fingerprint, sessionId, proposal.title),
+            work: {
+              id: source.work?.id ?? source.actionId,
+              generationId: input.actionId,
+              continuesActionId: source.actionId,
+              ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+            },
+            freshSource,
+            validateFreshTarget: async () => {
+              await validate();
+            },
+          },
+          context,
+        );
+      }
       return this.#assign(
         delegationAssignment(input, fingerprint, sessionId, proposal.title),
         context,
@@ -631,33 +676,7 @@ export class WorkHubCoordinationActionGate {
     }
     this.#assertTarget(target);
     const validateSource = async () => {
-      const ref = input.selectedTarget?.sourceTask;
-      if (!ref) return;
-      const source = await this.#effects.readAssignment(ref.actionId);
-      const latest = source
-        ? await this.#effects.readLatestWorkAssignment(source.work?.id ?? source.actionId)
-        : undefined;
-      if (
-        !source ||
-        !latest ||
-        (latest.work?.generationId ?? latest.actionId) !==
-          (source.work?.generationId ?? source.actionId) ||
-        (input.continuation &&
-          (input.continuation.sourceActionId !== source.actionId ||
-            input.continuation.workId !== (source.work?.id ?? source.actionId))) ||
-        source.delegationId !== ref.delegationId ||
-        source.targetSessionId !== target.sessionId ||
-        !(await this.#effects.listActiveAssignments(target.sessionId)).some(
-          (link) => link.actionId === ref.actionId && link.delegationId === ref.delegationId,
-        ) ||
-        (await this.#effects.readReplacement(source.delegationId)) ||
-        ((await this.#effects.readStopRequest(source.delegationId)) &&
-          (await this.#effects.readStopResolution(source.delegationId))?.outcome !== 'not_owned')
-      )
-        throw new WorkHubActionGateFailure(
-          'action_conflict',
-          'The selected task was retired or changed before continuation',
-        );
+      await this.#continuedSource(input, target.sessionId);
     };
     await validateSource();
     const sourceRef = input.selectedTarget?.sourceTask;
@@ -706,6 +725,37 @@ export class WorkHubCoordinationActionGate {
       },
       context,
     );
+  }
+
+  async #continuedSource(input: AdmittedWorkHubAction, targetSessionId: string) {
+    const ref = input.selectedTarget?.sourceTask;
+    if (!ref) return undefined;
+    const source = await this.#effects.readAssignment(ref.actionId);
+    const latest = source
+      ? await this.#effects.readLatestWorkAssignment(source.work?.id ?? source.actionId)
+      : undefined;
+    if (
+      !source ||
+      !latest ||
+      (latest.work?.generationId ?? latest.actionId) !==
+        (source.work?.generationId ?? source.actionId) ||
+      (input.continuation &&
+        (input.continuation.sourceActionId !== source.actionId ||
+          input.continuation.workId !== (source.work?.id ?? source.actionId))) ||
+      source.delegationId !== ref.delegationId ||
+      source.targetSessionId !== targetSessionId ||
+      !(await this.#effects.listActiveAssignments(targetSessionId)).some(
+        (link) => link.actionId === ref.actionId && link.delegationId === ref.delegationId,
+      ) ||
+      (await this.#effects.readReplacement(source.delegationId)) ||
+      ((await this.#effects.readStopRequest(source.delegationId)) &&
+        (await this.#effects.readStopResolution(source.delegationId))?.outcome !== 'not_owned')
+    )
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        'The selected task was retired or changed before continuation',
+      );
+    return source;
   }
 
   /**

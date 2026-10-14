@@ -64,6 +64,170 @@ const PREFIX_PROOF_TEST_BUDGET = {
 };
 
 describe('SqliteRuntimeStore', () => {
+  it('observes the latest inline request anchor without cumulative usage or auxiliary model contexts', async () => {
+    await withStore(async (store) => {
+      const root = invocationOpeningEvent(1);
+      await store.appendRuntimeEvent(root.sessionId, root.runId, root);
+      const usage: RuntimeEvent = {
+        ...root,
+        id: 'request-usage',
+        ts: 11,
+        content: undefined,
+        actions: {
+          tokenUsage: {
+            input: 50000,
+            output: 1000,
+            lastRequestAnchor: { inputTokens: 600, outputTokens: 20 },
+          },
+        },
+      };
+      await store.appendRuntimeEvent(root.sessionId, root.runId, usage);
+      const child = invocationOpeningEvent(2);
+      assert.equal(child.content?.kind, 'invocation_opened');
+      if (child.content?.kind !== 'invocation_opened') return;
+      child.content = { ...child.content, lineage: { parentRunId: root.runId, agentId: 'child' } };
+      await store.appendRuntimeEvent(child.sessionId, child.runId, child);
+      await store.appendRuntimeEvent(child.sessionId, child.runId, {
+        ...child,
+        id: 'child-usage',
+        ts: 21,
+        content: undefined,
+        actions: {
+          tokenUsage: { input: 999999, output: 1, lastRequestAnchor: { inputTokens: 999999 } },
+        },
+      });
+      await store.appendRuntimeEvent(root.sessionId, root.runId, {
+        ...usage,
+        id: 'synthetic-compact-usage',
+        ts: 22,
+        actions: { tokenUsage: { input: 1, output: 0 } },
+      });
+      assert.deepEqual(await store.readLatestSessionRequestObservation(root.sessionId), {
+        status: 'observed',
+        eventId: usage.id,
+        runId: root.runId,
+        observedAt: 11,
+        modelId: 'fake-model',
+        connectionId: 'fake-connection',
+        connectionSlug: 'fake',
+        inputTokens: 600,
+        outputTokens: 20,
+      });
+      // Session ordinal, not timestamp sorting, owns recency.
+      await store.appendRuntimeEvent(root.sessionId, root.runId, {
+        ...usage,
+        id: 'newer-ordinal',
+        ts: 1,
+        actions: {
+          tokenUsage: {
+            input: 50000,
+            output: 0,
+            lastRequestAnchor: {
+              inputTokens: 700,
+              modelId: 'fake-model',
+              connectionId: 'fake-connection',
+            },
+          },
+        },
+      });
+      const latest = await store.readLatestSessionRequestObservation(root.sessionId);
+      assert.ok(latest.status === 'observed');
+      assert.equal(latest.eventId, 'newer-ordinal');
+      assert.equal(latest.observedAt, 1);
+      assert.equal(latest.inputTokens, 700);
+    });
+  });
+
+  it('does not fall back to an older route when the newest anchor has unknown or conflicting provenance', async () => {
+    for (const unknownRoute of [true, false])
+      await withStore(async (store) => {
+        const first = invocationOpeningEvent(1);
+        await store.appendRuntimeEvent(first.sessionId, first.runId, first);
+        await store.appendRuntimeEvent(first.sessionId, first.runId, {
+          ...first,
+          id: 'old-good-usage',
+          content: undefined,
+          actions: {
+            tokenUsage: { input: 700, output: 0, lastRequestAnchor: { inputTokens: 700 } },
+          },
+        });
+        const newest = invocationOpeningEvent(2);
+        assert.equal(newest.content?.kind, 'invocation_opened');
+        if (newest.content?.kind !== 'invocation_opened') return;
+        if (unknownRoute)
+          newest.content = {
+            ...newest.content,
+            route: {
+              provenance: 'unknown',
+              backendKind: 'fake',
+              llmConnectionSlug: 'fake',
+              modelId: 'fake-model',
+            },
+          };
+        await store.appendRuntimeEvent(newest.sessionId, newest.runId, newest);
+        await store.appendRuntimeEvent(newest.sessionId, newest.runId, {
+          ...newest,
+          id: 'new-usage',
+          content: undefined,
+          actions: {
+            tokenUsage: {
+              input: 800,
+              output: 0,
+              lastRequestAnchor: {
+                inputTokens: 800,
+                modelId: unknownRoute ? 'fake-model' : 'conflicting-model',
+              },
+            },
+          },
+        });
+        assert.deepEqual(await store.readLatestSessionRequestObservation(first.sessionId), {
+          status: 'unknown',
+          reason: unknownRoute ? 'unknown_route' : 'invalid_observation',
+        });
+      });
+  });
+
+  it('bounds request observation by record bytes and recent Session ordinals, without decoding cold history', async (t) => {
+    await withStore(async (store) => {
+      assert.deepEqual(await store.readLatestSessionRequestObservation('session-1'), {
+        status: 'unknown',
+        reason: 'not_observed',
+      });
+      const opening = invocationOpeningEvent(1);
+      await store.appendRuntimeEvent(opening.sessionId, opening.runId, opening);
+      await store.appendRuntimeEvent(opening.sessionId, opening.runId, {
+        ...opening,
+        id: 'old-usage',
+        content: undefined,
+        actions: { tokenUsage: { input: 100, output: 0, lastRequestAnchor: { inputTokens: 100 } } },
+      });
+      for (let index = 0; index < 65; index++)
+        await store.appendRuntimeEvent(opening.sessionId, opening.runId, {
+          ...opening,
+          id: `recent-text-${index}`,
+          content: { kind: 'text', text: 'No request usage here.' },
+          actions: undefined,
+        });
+      t.mock.method(store, 'readSessionRuntimeEvents', () => {
+        throw new Error('must not decode the transcript');
+      });
+      assert.deepEqual(await store.readLatestSessionRequestObservation(opening.sessionId), {
+        status: 'unknown',
+        reason: 'scan_limit',
+      });
+      await store.appendRuntimeEvent(opening.sessionId, opening.runId, {
+        ...opening,
+        id: 'oversized-cold-event',
+        content: { kind: 'text', text: 'x'.repeat(8 * 1024 * 1024) },
+        actions: undefined,
+      });
+      assert.deepEqual(await store.readLatestSessionRequestObservation(opening.sessionId), {
+        status: 'unknown',
+        reason: 'record_limit',
+      });
+    });
+  });
+
   it('reads a complete Session from one snapshot while another connection commits its terminal', async (t) => {
     await withStore(async (store, dbPath) => {
       const opening = invocationOpeningEvent(1);

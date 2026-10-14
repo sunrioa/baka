@@ -145,6 +145,110 @@ test('persists exact work relationships atomically and pages assignments without
   }
 });
 
+test('atomically creates a fresh container for the same work and retires only its previous generation', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-fresh-container-'));
+  let store = createSessionStore(root);
+  try {
+    await createCoordinationSession(store, root);
+    const target = await store.create({
+      cwd: root,
+      name: 'Original',
+      llmConnectionSlug: 'old',
+      model: 'old-model',
+      permissionMode: 'explore',
+    });
+    const original = assignmentRequest('original-work', target.id, target.name, 'original-turn');
+    original.assignment.schemaVersion = 4;
+    original.assignment.work = { id: 'original-work', generationId: 'original-work' };
+    await store.assignWorkHubMessage(original);
+    const unrelated = assignmentRequest('independent-b', target.id, target.name, 'b-turn');
+    unrelated.assignment.schemaVersion = 4;
+    unrelated.assignment.work = { id: 'independent-b', generationId: 'independent-b' };
+    await store.assignWorkHubMessage(unrelated);
+    const fresh = (actionId: string) => {
+      const request = assignmentRequest(
+        actionId,
+        `target-${actionId}`,
+        'Fresh',
+        `turn-${actionId}`,
+      );
+      request.assignment.schemaVersion = 4;
+      request.assignment.disposition = 'create_new';
+      request.assignment.create = { title: 'Fresh', workspace: { kind: 'host_path', path: root } };
+      request.assignment.work = {
+        id: 'original-work',
+        generationId: actionId,
+        continuesActionId: original.assignment.actionId,
+      };
+      return {
+        ...request,
+        create: {
+          sessionId: request.assignment.targetSessionId,
+          requestFingerprint: `sha256:${'b'.repeat(64)}` as const,
+          input: {
+            cwd: root,
+            name: 'Fresh',
+            llmConnectionSlug: 'new',
+            model: 'new-model',
+            permissionMode: 'ask' as const,
+          },
+        },
+      };
+    };
+    const request = fresh('fresh-generation');
+    const result = await store.assignWorkHubMessage(request);
+    assert.equal(result.targetCreated, true);
+    assert.deepEqual(result.assignment.work, request.assignment.work);
+    assert.deepEqual(
+      (await store.readActiveWorkHubAssignmentsByTarget([target.id])).map((a) => a.actionId),
+      ['independent-b'],
+    );
+    assert.equal(
+      (await store.readLatestWorkHubAssignment('original-work'))?.actionId,
+      'fresh-generation',
+    );
+    assert.equal((await store.readHeaderSnapshot(target.id)).model, 'old-model');
+    assert.equal((await store.readHeaderSnapshot(target.id)).permissionMode, 'explore');
+    assert.equal(
+      (await store.readHeaderSnapshot(request.assignment.targetSessionId)).model,
+      'new-model',
+    );
+    const stale = fresh('stale-generation');
+    await assert.rejects(store.assignWorkHubMessage(stale), /WorkHub continuation source/);
+    await assert.rejects(
+      store.readHeaderSnapshot(stale.assignment.targetSessionId),
+      isSessionNotFoundError,
+    );
+    assert.equal(
+      await store.readMessageAdmission(stale.assignment.targetSessionId, stale.admission.messageId),
+      undefined,
+    );
+    await store.close?.();
+    store = createSessionStore(root);
+    assert.equal((await store.assignWorkHubMessage(request)).kind, 'existing');
+    assert.deepEqual(
+      (await store.readWorkHubAssignment(original.assignment.actionId))?.work,
+      original.assignment.work,
+    );
+    const retired = assignmentRequest(
+      'old-follow-up',
+      target.id,
+      target.name,
+      'old-follow-up-turn',
+    );
+    retired.assignment.schemaVersion = 4;
+    retired.assignment.work = {
+      id: 'original-work',
+      generationId: 'original-work',
+      continuesActionId: 'original-work',
+    };
+    await assert.rejects(store.assignWorkHubMessage(retired), /WorkHub continuation source/);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('atomically commits one WorkHub assignment and target admission', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-workhub-assignment-'));
   const store = createSessionStore(root);

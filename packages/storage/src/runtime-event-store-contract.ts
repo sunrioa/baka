@@ -19,6 +19,29 @@
 
 import type { RuntimeEvent, ToolRecoveryMode } from '@maka/core/runtime-event';
 
+/** A bounded historical observation, never the next request's remaining capacity. */
+export type SessionRequestObservation =
+  | {
+      readonly status: 'unknown';
+      readonly reason:
+        | 'not_observed'
+        | 'scan_limit'
+        | 'record_limit'
+        | 'unknown_route'
+        | 'invalid_observation';
+    }
+  | {
+      readonly status: 'observed';
+      readonly eventId: string;
+      readonly runId: string;
+      readonly observedAt: number;
+      readonly modelId: string;
+      readonly connectionId: string;
+      readonly connectionSlug: string;
+      readonly inputTokens: number;
+      readonly outputTokens?: number;
+    };
+
 export interface ImmutableRuntimePrefixProofReadBudget {
   readonly maxEvents: number;
   readonly maxBytes: number;

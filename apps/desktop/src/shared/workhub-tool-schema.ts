@@ -171,9 +171,10 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
     operation: z.literal('continue_work'),
     workId: z.string().min(1).max(128),
     sourceActionId: z.string().min(1).max(128),
+    container: z.enum(['reuse', 'fresh']).optional(),
     text: z.string().min(1).max(48000),
   }).strict().describe(
-    'Continue one objective using its exact workId and sourceActionId returned by works or a prior assignment. The Host binds the original execution target without title/path rediscovery and persists this follow-up relationship. Busy Sessions keep next-Turn FIFO. This does not steer or stop active work, change Session permissions/model/cwd, or authorize a replacement. If the source is unavailable or retired, refresh works and clarify rather than substituting a historical same-topic Session.',
+    'Continue one objective using its exact workId and sourceActionId from works. Default/reuse appends to the original Session with its existing model/permissions/cwd and next-Turn FIFO. Choose container fresh to continue settled work in a new Session using visible WorkHub creation defaults and the original workspace; only short handoff references are added, not cold history. It preserves workId but starts a new generation. Use context observations when available; unknown or old observations are not current capacity, and there is no fixed age/token threshold. Neither choice stops/steers unrelated work or inherits expired grants. A busy/unsettled source cannot be silently retired. Refresh works after a source conflict instead of substituting a historical same-topic Session.',
   ),
   z.object({
     operation: z.literal("projects"),

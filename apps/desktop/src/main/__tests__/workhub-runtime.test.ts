@@ -20,10 +20,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
 import type { ProjectCatalogProjectDetails } from '@maka/runtime-host/protocol';
 import { decodeWorkHubCoordinationActFromTurnInput, decodeWorkHubCoordinationSelectAndDelegateInput } from '@maka/runtime-host/protocol';
 import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { createWorkHubRuntime } from '../workhub-runtime.js';
+import { readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
 
 const scope = { hostId: 'host', targetEpoch: 'epoch' };
 function fixture() {
@@ -49,6 +51,43 @@ function fixture() {
   } as unknown as ReturnType<typeof deps.client>;
   return { deps, client, requests, stops, changes, retire: () => { current = false; }, runtime: createWorkHubRuntime(deps) };
 }
+
+test('empty new-work preferences dispatch the visible coordination model, not a changed global default', async () => {
+  const f = fixture();
+  const visible = { llmConnectionId: 'visible-connection', llmConnectionSlug: 'visible', model: 'visible-model' };
+  const globalDefault = { llmConnectionId: 'global-connection', llmConnectionSlug: 'global', model: 'different-global-model' };
+  const creationClient = {
+    hostId: 'empty-preferences-host',
+    queryRuntimePolicy: async () => ({ revision: 1, policy: createDefaultRuntimePolicy() }),
+    getWorkHubSession: async () => ({ id: WORKHUB_COORDINATION_SESSION_ID, ...visible, permissionMode: 'bypass', cwd: '/internal-coordination' }),
+  };
+  writeWorkHubNewWorkDefaults(creationClient.hostId, {});
+  f.deps.createDefaults = () => readWorkHubCreationDefaults(creationClient);
+  await f.runtime.actTasks(scope, 'turn', 'fresh-without-explicit-selection', workHubTasksSchema.parse({ operation: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh', text: 'Continue settled work.' }));
+  const sent = decodeWorkHubCoordinationActFromTurnInput(f.requests[0]);
+  assert.deepEqual(sent.newWorkDefaults?.model, visible);
+  assert.notDeepEqual(sent.newWorkDefaults?.model, globalDefault);
+  assert.equal(sent.newWorkDefaults?.permissionMode, 'ask', 'never inherit the coordination Session bypass');
+  assert.equal('cwd' in (sent.newWorkDefaults ?? {}), false);
+  await f.runtime.actTasks(scope, 'turn', 'new-without-explicit-selection', workHubTasksSchema.parse({ operation: 'create_new', title: 'Independent', text: 'An independent task.' }));
+  assert.deepEqual(decodeWorkHubCoordinationActFromTurnInput(f.requests[1]).newWorkDefaults?.model, visible);
+});
+
+test('explicit creation defaults stay Host-scoped and an unavailable displayed fallback never becomes another model', async () => {
+  const hostId = 'explicit-creation-defaults-host';
+  const client = { hostId, queryRuntimePolicy: async () => ({ revision: 1, policy: createDefaultRuntimePolicy() }),
+    getWorkHubSession: async (): Promise<null> => { throw new Error('must not query coordination for an explicit preference'); } };
+  for (const saved of [{ model: { llmConnectionId: 'selected', llmConnectionSlug: 'selected', model: 'selected-model' }, thinkingLevel: 'high' as const },
+    { executorId: 'selected-executor', executorModel: 'executor-model' }]) {
+    writeWorkHubNewWorkDefaults(hostId, saved);
+    assert.deepEqual(await readWorkHubCreationDefaults(client), { permissionMode: 'ask', ...saved });
+  }
+  writeWorkHubNewWorkDefaults(hostId, {});
+  for (const session of [null, { id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: null, llmConnectionSlug: 'unbound', model: 'unknown' },
+    { id: 'foreign-session', llmConnectionId: 'foreign', llmConnectionSlug: 'foreign', model: 'foreign-model' }])
+    await assert.rejects(readWorkHubCreationDefaults({ ...client, getWorkHubSession: async () => session }), /Select an available model/);
+  await assert.rejects(readWorkHubCreationDefaults(client), /must not query/);
+});
 
 test('work discovery and continuation preserve exact objective references without target rediscovery', async () => {
   const f = fixture();
@@ -77,6 +116,24 @@ test('work discovery and continuation preserve exact objective references withou
   assert.deepEqual(f.changes, [[scope, 'status-change', 'session-a']]);
   assert.throws(() => workHubTasksSchema.parse({ operation: 'continue_work', workId: 'current-a',
     sourceActionId: 'assignment-a', text: 'Continue', permissionMode: 'bypass' }));
+});
+
+test('fresh work continuation uses visible creation defaults without a caller workspace or target rediscovery', async () => {
+  const f = fixture();
+  const defaults = { permissionMode: 'ask' as const, model: { llmConnectionId: 'new-connection', llmConnectionSlug: 'new', model: 'new-model' } };
+  f.deps.createDefaults = async () => defaults;
+  f.client.listProjects = async () => { throw new Error('The Host owns the source workspace'); };
+  f.client.listWorkHubCoordinationCandidates = async () => { throw new Error('The work source is already selected'); };
+  f.client.actWorkHubCoordinationFromTurn = async (input) => {
+    f.requests.push(decodeWorkHubCoordinationActFromTurnInput(input));
+    return { disposition: 'create_new', workId: 'original', targetSessionId: 'fresh', targetMessageId: 'fresh-message' };
+  };
+  const input = { operation: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh', text: 'Continue the objective' };
+  await f.runtime.actTasks(scope, 'turn', 'fresh-action', workHubTasksSchema.parse(input));
+  assert.deepEqual(f.requests, [{ turnId: 'turn', actionId: 'fresh-action', proposal: { disposition: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh' }, delegationText: input.text, newWorkDefaults: defaults }]);
+  assert.deepEqual(f.changes, [[scope, 'created', 'fresh']]);
+  for (const extra of [{ permissionMode: 'bypass' }, { newWorkDefaults: defaults }, { targetSessionId: 'other' }, { projectRef: 'other' }])
+    assert.equal(workHubTasksSchema.safeParse({ ...input, ...extra }).success, false);
 });
 
 test('work discovery does not return data from a Host retired during the query', async () => {

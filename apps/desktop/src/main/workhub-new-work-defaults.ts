@@ -17,7 +17,8 @@
  * under the License.
  */
 
-import type { WorkHubCreateDefaults } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
+import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
 import { isChatDefaultPermissionMode, isWorkHubMaxConcurrentSessions, WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS, type ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
@@ -42,6 +43,25 @@ export function writeWorkHubNewWorkDefaults(
 }
 
 type WorkHubPermissionClient = Pick<DesktopRuntimeHostClient, 'queryRuntimePolicy' | 'updateRuntimePolicy'>;
+
+export async function readWorkHubCreationDefaults(client: Pick<DesktopRuntimeHostClient, 'hostId' | 'queryRuntimePolicy'> & {
+  getWorkHubSession(): Promise<Pick<SessionCatalogProjection, 'id' | 'llmConnectionId' | 'llmConnectionSlug' | 'model'> | null>;
+}): Promise<WorkHubCreateDefaults> {
+  const permissionMode = await readWorkHubNewWorkPermissionMode(client);
+  const saved = readWorkHubNewWorkDefaults(client.hostId);
+  if (saved.model || saved.executorId) return { permissionMode, ...saved };
+  // The selector displays this exact fallback while no explicit preference is
+  // saved. Pin its route instead of silently executing the global default.
+  const coordination = await client.getWorkHubSession();
+  if (coordination?.id !== WORKHUB_COORDINATION_SESSION_ID || !coordination.llmConnectionId ||
+      !coordination.llmConnectionSlug || !coordination.model)
+    throw new Error('Select an available model for newly created WorkHub tasks');
+  return { permissionMode, ...saved, model: {
+    llmConnectionId: coordination.llmConnectionId,
+    llmConnectionSlug: coordination.llmConnectionSlug,
+    model: coordination.model,
+  } };
+}
 
 // Permission defaults belong to the selected Host's durable policy, not the
 // coordination Session's internal bypass boundary or the ordinary chat default.

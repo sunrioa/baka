@@ -1971,6 +1971,8 @@ export class SqliteSessionMetadataStore {
             `wha_${createHash('sha256').update(sourceActionId).digest('hex').slice(0, 48)}`,
           );
           const latest = this.readLatestWorkHubAssignmentSync(assignment.work.id);
+          const fresh =
+            !!assignment.work.continuesActionId && assignment.disposition === 'create_new';
           if (
             source?.type !== 'workhub_coordination' ||
             source.kind !== 'delegation_assigned' ||
@@ -1979,11 +1981,15 @@ export class SqliteSessionMetadataStore {
             (latest.work?.generationId ?? latest.actionId) !==
               (source.work?.generationId ?? source.actionId) ||
             assignment.work.generationId !==
-              (assignment.work.continuesActionId
+              (assignment.work.continuesActionId && !fresh
                 ? (source.work?.generationId ?? source.actionId)
                 : assignment.actionId) ||
             (assignment.work.continuesActionId &&
-              source.targetSessionId !== assignment.targetSessionId)
+              (fresh
+                ? source.targetSessionId === assignment.targetSessionId ||
+                  !create ||
+                  this.readRecordSync(assignment.targetSessionId) !== undefined
+                : source.targetSessionId !== assignment.targetSessionId))
           )
             throw new SessionMetadataConflictError(
               'WorkHub continuation source does not own this work',
@@ -2548,6 +2554,49 @@ export class SqliteSessionMetadataStore {
     return this.readMessageScanPage(sessionId, request, { peerActionId: actionId, now });
   }
 
+  async hasUnsettledWorkHubPeerCommunication(input: {
+    readonly sessionId: string;
+    readonly workId: string;
+    readonly generationId: string;
+    readonly now: number;
+  }): Promise<boolean> {
+    this.assertOpen();
+    for (const id of [input.sessionId, input.workId, input.generationId]) assertSafeSessionId(id);
+    if (!Number.isSafeInteger(input.now) || input.now < 0)
+      throw new Error('Invalid peer observation time');
+    return this.readTransaction(() => {
+      if (!this.readRecordSync(input.sessionId)) throw new SessionNotFoundError(input.sessionId);
+      return (
+        this.db
+          .prepare(`
+        SELECT 1 FROM session_messages message
+        WHERE message.session_id = :sessionId AND (
+          (message.message_type = 'workhub_peer_question'
+            AND json_extract(message.record_json, '$.sender.workId') = :workId
+            AND json_extract(message.record_json, '$.sender.generationId') = :generationId
+            AND json_extract(message.record_json, '$.expiresAt') > :now
+            AND NOT EXISTS (SELECT 1 FROM session_messages settled
+              WHERE settled.session_id = json_extract(message.record_json, '$.recipient.sessionId')
+                AND settled.message_id = 'whps_' || substr(message.message_id, 6)))
+          OR (message.message_type = 'workhub_peer_inbox'
+            AND json_extract(message.record_json, '$.target.workId') = :workId
+            AND json_extract(message.record_json, '$.target.generationId') = :generationId
+            AND json_extract(message.record_json, '$.expiresAt') > :now
+            AND NOT EXISTS (SELECT 1 FROM session_messages settled
+              WHERE settled.session_id = message.session_id
+                AND settled.message_id = 'whps_' || substr(message.message_id, 6)))
+        ) LIMIT 1
+      `)
+          .get({
+            sessionId: input.sessionId,
+            workId: input.workId,
+            generationId: input.generationId,
+            now: input.now,
+          }) !== undefined
+      );
+    });
+  }
+
   async readMessageAdmission(
     sessionId: string,
     messageId: string,
@@ -2803,6 +2852,7 @@ export class SqliteSessionMetadataStore {
         ) as Iterable<Row>;
       const assignments: WorkHubDelegationAssignedMessage[] = [];
       const acceptedPerTarget = new Map<string, number>();
+      const generations = new Map<string, string | undefined>();
       for (const row of rows) {
         if (typeof row.message_id !== 'string' || typeof row.session_id !== 'string') {
           throw new SessionMetadataConflictError('Invalid WorkHub target Message identity');
@@ -2861,6 +2911,13 @@ export class SqliteSessionMetadataStore {
         ) {
           continue;
         }
+        const workId = assignment.work?.id ?? assignment.actionId;
+        if (!generations.has(workId)) {
+          const latest = this.readLatestWorkHubAssignmentSync(workId);
+          generations.set(workId, latest?.work?.generationId ?? latest?.actionId);
+        }
+        if (generations.get(workId) !== (assignment.work?.generationId ?? assignment.actionId))
+          continue;
         assignments.push(assignment);
         acceptedPerTarget.set(targetSessionId, (acceptedPerTarget.get(targetSessionId) ?? 0) + 1);
       }

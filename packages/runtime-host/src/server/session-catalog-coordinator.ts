@@ -420,40 +420,64 @@ export class HostSessionCatalogCoordinator {
   }
 
   /** Prepare external facts before WorkHub commits create + assignment atomically. */
-  async prepareWorkHubCreate(input: SessionCreateInput): Promise<CreateStableSessionRequest> {
-    const prepared = await prepareCreate(input);
-    return this.#workspaceResolver.runWithUsageRecorded(input.workspace, async (workspace) => {
-      const [model, policy] = await Promise.all([
-        this.#resolveCreateExecution(input, workspace.cwd),
-        this.#readRuntimePolicy(),
-      ]);
-      return {
-        sessionId: input.sessionId,
-        requestFingerprint: createRequestFingerprint(input, prepared),
-        input: {
-          cwd: workspace.cwd,
-          ...(workspace.projectId === null ? {} : { projectId: workspace.projectId }),
-          name: prepared.name,
-          labels: [...prepared.labels],
-          ...(model.executorId
-            ? {
-                executorId: model.executorId,
-                ...(model.executorConfig ? { executorConfig: model.executorConfig } : {}),
-              }
-            : {}),
-          ...(model.connectionId ? { llmConnectionId: model.connectionId } : {}),
-          llmConnectionSlug: model.connectionSlug,
-          model: model.model,
-          ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
-          ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
-          permissionMode:
-            prepared.permissionMode ?? policy.policy.chatDefaults.workHubPermissionMode ?? 'ask',
-          toolMode: policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct',
-          collaborationMode: input.collaborationMode ?? 'agent',
-          orchestrationMode: input.orchestrationMode ?? 'default',
-        },
-      };
-    });
+  async prepareWorkHubCreate(
+    input: SessionCreateInput,
+    sourceWorkspace?: Pick<SessionHeader, 'cwd' | 'projectId'>,
+  ): Promise<CreateStableSessionRequest> {
+    // Only the internal fresh-work path supplies an authenticated source workspace.
+    // Validate its Project without substituting a moved root for a live worktree.
+    const sourceProjectId = sourceWorkspace?.projectId
+      ? await this.#workspaceResolver.runWithUsageRecorded(
+          { kind: 'project', projectId: sourceWorkspace.projectId },
+          async (workspace) => workspace.projectId,
+        )
+      : undefined;
+    const executionInput: SessionCreateInput = sourceWorkspace
+      ? { ...input, workspace: { kind: 'host_path', path: sourceWorkspace.cwd } }
+      : input;
+    const prepared = await prepareCreate(executionInput);
+    return this.#workspaceResolver.runWithUsageRecorded(
+      executionInput.workspace,
+      async (workspace) => {
+        const [model, policy] = await Promise.all([
+          this.#resolveCreateExecution(executionInput, workspace.cwd),
+          this.#readRuntimePolicy(),
+        ]);
+        const fingerprint = createRequestFingerprint(executionInput, prepared);
+        const projectId = sourceProjectId ?? workspace.projectId;
+        return {
+          sessionId: input.sessionId,
+          requestFingerprint:
+            sourceProjectId === undefined
+              ? fingerprint
+              : `sha256:${createHash('sha256')
+                  .update(JSON.stringify([fingerprint, sourceProjectId]))
+                  .digest('hex')}`,
+          input: {
+            cwd: workspace.cwd,
+            ...(projectId === null ? {} : { projectId }),
+            name: prepared.name,
+            labels: [...prepared.labels],
+            ...(model.executorId
+              ? {
+                  executorId: model.executorId,
+                  ...(model.executorConfig ? { executorConfig: model.executorConfig } : {}),
+                }
+              : {}),
+            ...(model.connectionId ? { llmConnectionId: model.connectionId } : {}),
+            llmConnectionSlug: model.connectionSlug,
+            model: model.model,
+            ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
+            ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
+            permissionMode:
+              prepared.permissionMode ?? policy.policy.chatDefaults.workHubPermissionMode ?? 'ask',
+            toolMode: policy.policy.chatDefaults.codeModeEnabled ? 'code_mode' : 'direct',
+            collaborationMode: input.collaborationMode ?? 'agent',
+            orchestrationMode: input.orchestrationMode ?? 'default',
+          },
+        };
+      },
+    );
   }
 
   async #query(

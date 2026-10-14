@@ -2004,6 +2004,89 @@ for (const backend of ['Local', 'Memory'] as const) {
     },
   );
   test(
+    backend +
+      ': fresh work generation CAS admits one racing container, retains unrelated work and replays its receipt',
+    async () => {
+      await withProvider(make(), async ({ sessionStore: s }, root) => {
+        await createCoordinationSession(s, root);
+        const source = await s.create({ ...sessionInput(root), permissionMode: 'bypass' });
+        const original = assignmentRequest('original-work', source.id, source.name, 'old-turn');
+        original.assignment.schemaVersion = 4;
+        original.assignment.work = { id: 'original-work', generationId: 'original-work' };
+        await s.assignWorkHubMessage(original);
+        const unrelated = assignmentRequest('unrelated-b', source.id, source.name, 'b-turn');
+        await s.assignWorkHubMessage(unrelated);
+        const requests = ['fresh-one', 'fresh-two'].map((actionId) => {
+          const request = assignmentRequest(
+            actionId,
+            `session-${actionId}`,
+            'Fresh',
+            `turn-${actionId}`,
+          );
+          request.assignment.schemaVersion = 4;
+          request.assignment.disposition = 'create_new';
+          request.assignment.create = {
+            title: 'Fresh',
+            workspace: { kind: 'host_path', path: root },
+          };
+          request.assignment.work = {
+            id: 'original-work',
+            generationId: actionId,
+            continuesActionId: 'original-work',
+          };
+          return {
+            ...request,
+            create: {
+              sessionId: request.assignment.targetSessionId,
+              requestFingerprint: `sha256:${'b'.repeat(64)}` as const,
+              input: { ...sessionInput(root), name: 'Fresh', permissionMode: 'ask' as const },
+            },
+          };
+        });
+        const outcomes = await Promise.allSettled(
+          requests.map((request) => s.assignWorkHubMessage(request)),
+        );
+        assert.equal(
+          outcomes.filter((outcome) => outcome.status === 'fulfilled').length,
+          1,
+          JSON.stringify(
+            outcomes.map((outcome) =>
+              outcome.status === 'rejected' ? String(outcome.reason) : outcome.status,
+            ),
+          ),
+        );
+        const winnerIndex = outcomes.findIndex((outcome) => outcome.status === 'fulfilled');
+        const winner = requests[winnerIndex]!,
+          loser = requests[1 - winnerIndex]!;
+        const failed = outcomes[1 - winnerIndex]!;
+        assert.ok(failed.status === 'rejected');
+        assert.match(String(failed.reason), /WorkHub continuation source/);
+        assert.equal(
+          (await s.readLatestWorkHubAssignment('original-work'))?.actionId,
+          winner.assignment.actionId,
+        );
+        assert.equal((await s.assignWorkHubMessage(winner)).kind, 'existing');
+        await assert.rejects(
+          s.readHeaderSnapshot(loser.assignment.targetSessionId),
+          SessionNotFoundError,
+        );
+        assert.equal(
+          await s.readMessageAdmission(loser.assignment.targetSessionId, loser.admission.messageId),
+          undefined,
+        );
+        assert.deepEqual(
+          (await s.readActiveWorkHubAssignmentsByTarget([source.id])).map((item) => item.actionId),
+          ['unrelated-b'],
+        );
+        assert.equal((await s.readHeaderSnapshot(source.id)).permissionMode, 'bypass');
+        assert.equal(
+          (await s.readHeaderSnapshot(winner.assignment.targetSessionId)).permissionMode,
+          'ask',
+        );
+      });
+    },
+  );
+  test(
     backend + ': operational purge removes tool and Goal facts without deleting the Session',
     async () => {
       await withProvider(make(), async (stores, root) => {

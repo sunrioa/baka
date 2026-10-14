@@ -74,6 +74,7 @@ import type {
   ToolOperationRecord,
   UnsettledToolOperationRecord,
   ImmutableRuntimePrefixProofReadBudget,
+  SessionRequestObservation,
 } from './runtime-event-store-contract.js';
 
 import { localExecutionPersistenceProvider } from './local-execution-persistence.js';
@@ -167,6 +168,7 @@ export type ExecutionAgentRunWriter = DurableAgentRunStore;
 export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
   RuntimeTranscriptQueries &
   RuntimeContinuationAuthorityStore & {
+    readLatestSessionRequestObservation?(sessionId: string): Promise<SessionRequestObservation>;
     readImmutableRuntimePrefixProof(
       input: { sessionId: string; runId: string; upToEventSeq?: number },
       budget: ImmutableRuntimePrefixProofReadBudget,
@@ -260,6 +262,7 @@ export interface ExecutionAgentRunReader {
 }
 
 export interface ExecutionRuntimeEventReader {
+  readLatestSessionRequestObservation?(sessionId: string): Promise<SessionRequestObservation>;
   readSessionRuntimeSnapshot?(sessionId: string): Promise<RuntimeSessionEventSnapshot>;
   /**
    * A Session's run inventory, read from its canonical events. This is the
@@ -573,6 +576,8 @@ async function createExecutionStoresForWrite(
         run(() => sessionStore.commitWorkHubPeerSettlement(settlement)),
       readWorkHubPeerInboxPage: (sessionId, actionId, now, request) =>
         run(() => sessionStore.readWorkHubPeerInboxPage(sessionId, actionId, now, request)),
+      hasUnsettledWorkHubPeerCommunication: (input) =>
+        run(() => sessionStore.hasUnsettledWorkHubPeerCommunication(input)),
       readWorkHubTaskInput: (inputId) => run(() => sessionStore.readWorkHubTaskInput(inputId)),
       readWorkHubTaskInputByMessage: (messageId) =>
         run(() => sessionStore.readWorkHubTaskInputByMessage(messageId)),
@@ -803,6 +808,12 @@ async function createExecutionStoresForWrite(
         run(() => runtimeEventStore.listInvocationRecoveryInventory(sessionIds)),
       readRunInvocation: (sessionId, runId) =>
         run(() => runtimeEventStore.readRunInvocation(sessionId, runId)),
+      ...(runtimeEventStore.readLatestSessionRequestObservation
+        ? {
+            readLatestSessionRequestObservation: (sessionId: string) =>
+              run(() => runtimeEventStore.readLatestSessionRequestObservation!(sessionId)),
+          }
+        : {}),
       listSessionInvocationsBounded: (sessionId, limit) =>
         run(() => runtimeEventStore.listSessionInvocationsBounded(sessionId, limit)),
       listSessionInvocationsPage: (sessionId, input) =>
@@ -966,6 +977,12 @@ async function openExecutionStoresForRead<K extends StorageRootKind, E extends o
         run(() => runtimeEventStore.listInvocationRecoveryInventory(sessionIds)),
       readRunInvocation: (sessionId, runId) =>
         run(() => runtimeEventStore.readRunInvocation(sessionId, runId)),
+      ...(runtimeEventStore.readLatestSessionRequestObservation
+        ? {
+            readLatestSessionRequestObservation: (sessionId: string) =>
+              run(() => runtimeEventStore.readLatestSessionRequestObservation!(sessionId)),
+          }
+        : {}),
       listSessionInvocationsBounded: (sessionId, limit) =>
         run(() => runtimeEventStore.listSessionInvocationsBounded(sessionId, limit)),
       listSessionInvocationsPage: (sessionId, input) =>

@@ -1175,6 +1175,39 @@ export function createMemorySessionStore(
         append(s, q.recipient.sessionId, [value]);
         return value;
       }),
+    hasUnsettledWorkHubPeerCommunication: async (input) =>
+      read((s) => {
+        for (const id of [input.sessionId, input.workId, input.generationId])
+          assertSafeSessionId(id);
+        requireHeader(s, input.sessionId);
+        if (!Number.isSafeInteger(input.now) || input.now < 0)
+          return conflict('Invalid peer observation time');
+        return messages(s)
+          .get(input.sessionId)!
+          .some((message) => {
+            if (message.type !== 'workhub_peer_question' && message.type !== 'workhub_peer_inbox')
+              return false;
+            const ref = message.type === 'workhub_peer_question' ? message.sender : message.target;
+            const recipient =
+              message.type === 'workhub_peer_question'
+                ? message.recipient.sessionId
+                : input.sessionId;
+            return (
+              ref.workId === input.workId &&
+              ref.generationId === input.generationId &&
+              message.expiresAt > input.now &&
+              !messages(s)
+                .get(recipient)
+                ?.some(
+                  (settled) =>
+                    settled.id ===
+                    workHubPeerSettlementId(
+                      message.type === 'workhub_peer_question' ? message.id : message.questionId,
+                    ),
+                )
+            );
+          });
+      }),
     readWorkHubPeerInboxPage: async (id, actionId, now, request) =>
       read((s) => {
         assertSafeSessionId(actionId);
@@ -1381,6 +1414,13 @@ export function createMemorySessionStore(
                 !memoryRootSourceReceipt(s, m.targetSessionId, m.targetMessageId))
             )
               return false;
+            const latest = latestWorkAssignment(s, m.work?.id ?? m.actionId);
+            if (
+              !latest ||
+              (latest.work?.generationId ?? latest.actionId) !==
+                (m.work?.generationId ?? m.actionId)
+            )
+              return false;
             const resolution =
               hubMessage(s, 'whzt_' + suffix(m.delegationId)) ??
               hubMessage(s, 'whz_' + suffix(m.delegationId));
@@ -1473,6 +1513,7 @@ export function createMemorySessionStore(
           if (sourceActionId) {
             const source = hubMessage(s, 'wha_' + suffix(sourceActionId));
             const latest = latestWorkAssignment(s, v.work.id);
+            const fresh = !!v.work.continuesActionId && v.disposition === 'create_new';
             if (
               source?.type !== 'workhub_coordination' ||
               source.kind !== 'delegation_assigned' ||
@@ -1481,10 +1522,15 @@ export function createMemorySessionStore(
               (latest.work?.generationId ?? latest.actionId) !==
                 (source.work?.generationId ?? source.actionId) ||
               v.work.generationId !==
-                (v.work.continuesActionId
+                (v.work.continuesActionId && !fresh
                   ? (source.work?.generationId ?? source.actionId)
                   : v.actionId) ||
-              (v.work.continuesActionId && source.targetSessionId !== v.targetSessionId)
+              (v.work.continuesActionId &&
+                (fresh
+                  ? source.targetSessionId === v.targetSessionId ||
+                    !request.create ||
+                    headers(s).has(v.targetSessionId)
+                  : source.targetSessionId !== v.targetSessionId))
             )
               conflict('WorkHub continuation source does not own this work');
           } else if (v.work.id !== v.actionId || v.work.generationId !== v.actionId)
