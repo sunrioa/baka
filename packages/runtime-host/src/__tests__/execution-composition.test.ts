@@ -2775,9 +2775,20 @@ test('production WorkHub continues cold work in a fresh model route without repl
       for await (const chunk of request) body += chunk.toString();
       const input = JSON.parse(body) as {
         model: string;
-        tools?: { function: { name: string } }[];
+        tools?: {
+          function: {
+            name: string;
+            parameters: { type?: string; oneOf?: unknown; anyOf?: unknown };
+          };
+        }[];
         messages: { role: string; content: unknown }[];
       };
+      for (const tool of input.tools ?? []) {
+        if (tool.function.name !== 'WorkHubEvidence') continue;
+        assert.equal(tool.function.parameters.type, 'object');
+        assert.equal(tool.function.parameters.oneOf, undefined);
+        assert.equal(tool.function.parameters.anyOf, undefined);
+      }
       const coordinator =
         input.tools?.some((tool) => tool.function.name === 'WorkHubResult') === true;
       requests.push({ model: input.model, url: request.url ?? '', body, coordinator });
