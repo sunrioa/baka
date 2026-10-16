@@ -96,18 +96,18 @@ export function createSessionTranscriptReader(input: {
   };
 }
 
-/** Reads only the delegated Turn's projected assistant output. The indexed
+/** Reads only the delegated Turn's projected output (or latest user input). The indexed
  * Turn extent avoids materializing every earlier message in its Session.
  */
 export function createTurnResultReader(input: {
   stores: ExecutionStoresWriter<'interactive'>;
   canonicalPermissionOutcomes: CanonicalPermissionOutcomeReader;
   ensureTranscriptLedger?: (sessionId: string) => Promise<void>;
-}): (sessionId: string, turnId: string) => Promise<string> {
+}): (sessionId: string, turnId: string, role?: 'assistant' | 'user') => Promise<string> {
   const ledger = createDurableLedgerTranscriptReader(input);
-  return async (sessionId, turnId) => {
+  return async (sessionId, turnId, role = 'assistant') => {
     await input.ensureTranscriptLedger?.(sessionId);
-    return ledger.readLatestAssistantForTurn(sessionId, turnId);
+    return ledger.readLatestTextForTurn(sessionId, turnId, role);
   };
 }
 
@@ -316,7 +316,11 @@ function createDurableLedgerTranscriptReader(
 
     ...pagedTranscriptReads(source),
 
-    async readLatestAssistantForTurn(sessionId: string, turnId: string): Promise<string> {
+    async readLatestTextForTurn(
+      sessionId: string,
+      turnId: string,
+      role: 'assistant' | 'user',
+    ): Promise<string> {
       const extents = await store.readTranscriptTurns(sessionId, { turnId });
       let result = '';
       for (const extent of extents) {
@@ -329,7 +333,7 @@ function createDurableLedgerTranscriptReader(
           if (!run) break;
           if (run.invocation.turnId === turnId) {
             for (const { message } of await projectTurn(run)) {
-              if (message.type === 'assistant' && message.text.trim()) result = message.text;
+              if (message.type === role && message.text.trim()) result = message.text;
             }
           }
           ordinal = run.lastOrdinal + 1;

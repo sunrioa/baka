@@ -307,6 +307,7 @@ test('maximum source identities and escaped excerpts fit the complete encoded no
       runId: 'r'.repeat(128),
       status: 'waiting_for_dependency',
       result: '\\'.repeat(383),
+      latestUserInput: '\\中文😀'.repeat(10000),
       details: {
         requestId: 'q'.repeat(128),
         sourceActionId: 's'.repeat(128),
@@ -318,6 +319,7 @@ test('maximum source identities and escaped excerpts fit the complete encoded no
     },
   );
   assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 6144);
+  assert.ok(c.text.includes('"latestUserInputTruncated":true'));
   assert.ok(c.text.includes('"requestId":"' + 'q'.repeat(128) + '"'));
 });
 

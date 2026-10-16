@@ -644,6 +644,12 @@ test('pages the ledger without materializing Turns it takes no rows from', async
       '',
     );
     assert.equal(
+      await decoding('early Turn input', SMALL_TURN_BUDGET, () =>
+        readTurnResult(session.id, 'turn-0', 'user'),
+      ),
+      'prompt 0',
+    );
+    assert.equal(
       await decoding('large Turn result', ONE_BIG_TURN_BUDGET, () =>
         readTurnResult(session.id, 'turn-4'),
       ),

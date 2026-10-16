@@ -33,6 +33,8 @@
  *   - model-visible content kind: text / thinking / function_call /
  *     function_response (per runtimeEventHasModelVisibleContent)
  *   - role is user, model, or tool (system excluded unless opted in)
+ *   - committed Host coordination receipts in WorkHub replay as bounded
+ *     acknowledgements, including when hidden from ordinary model history
  *
  * Policy (why an event is DROPPED):
  *   - partial === true (streaming chunks superseded by a later final event)
@@ -79,10 +81,29 @@ import type { DurableToolResultProjection } from '@maka/core/durable-tool-result
 import { resolveRuntimeRecovery } from './recovery-resolver.js';
 import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { isWorkHubActionReceipt } from '@maka/core/workhub-action-result';
 
 export const PROVIDER_REPLAY_PROJECTION_VERSION = 2;
-export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 3;
-export type ProviderReplayProjectionVersion = 2 | 3;
+export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 4;
+export type ProviderReplayProjectionVersion = 2 | 3 | 4;
+
+/** Project the existing Host receipt, never infer handling from user prose. */
+export function workHubCoordinationReceiptText(event: RuntimeEvent): string | undefined {
+  if (
+    event.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+    event.role !== 'system' ||
+    event.author !== 'host' ||
+    isPartialRuntimeEvent(event) ||
+    !isWorkHubActionReceipt(event.actions?.coordination)
+  )
+    return undefined;
+  const receipt = event.actions.coordination;
+  if (receipt.actionId.length > 256) return undefined;
+  return (
+    'Host operation receipt: the operation for this user input was already handled. This is not a new request; do not dispatch it again. Admission is not proof of execution or completion.\n\n' +
+    JSON.stringify({ actionId: receipt.actionId, ...receipt.result })
+  );
+}
 
 export function providerReplayProjectionVersion(
   sessionId: string,
@@ -424,6 +445,8 @@ export function estimateEffectiveToolResultChars(
 }
 
 export function estimateRuntimeEventChars(event: RuntimeEvent): number {
+  const receipt = workHubCoordinationReceiptText(event);
+  if (receipt !== undefined) return receipt.length;
   let total = 0;
   const content = event.content;
   if (content?.kind === 'text' || content?.kind === 'thinking') {
@@ -476,7 +499,7 @@ export function estimateRuntimeEventsTokens(
   let chars = 0;
   let mediaTokens = 0;
   for (const event of events) {
-    if (event.modelVisibility === 'hidden') continue;
+    if (event.modelVisibility === 'hidden' && !workHubCoordinationReceiptText(event)) continue;
     chars += estimateRuntimeEventChars(event);
     mediaTokens += estimateRuntimeEventMediaTokens(event);
   }
@@ -894,6 +917,19 @@ export function buildRuntimeEventModelReplayPlan(
       diagnostics.push(
         diagnostic(event, 'partial_skipped', 'partial RuntimeEvent skipped for model replay'),
       );
+      continue;
+    }
+
+    const receipt = workHubCoordinationReceiptText(event);
+    if (receipt !== undefined) {
+      items.push({
+        kind: 'text',
+        invocationId: event.invocationId,
+        role: 'assistant',
+        content: receipt,
+        eventId: event.id,
+        ts: event.ts,
+      });
       continue;
     }
 

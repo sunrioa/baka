@@ -90,7 +90,7 @@ export interface ContinuationClaimV1 {
   claimId: string;
   boundaryDigest: RuntimeBoundaryDigest;
   boundary: RuntimeBoundaryCursor;
-  providerProjectionVersion: 1 | 2 | 3;
+  providerProjectionVersion: 1 | 2 | 3 | 4;
   providerReplayDigest: RuntimeBoundaryDigest;
   target: {
     sessionId: string;
@@ -299,7 +299,8 @@ export function decodeContinuationClaim(value: unknown): ContinuationClaimV1 {
     !isNonEmptyString(value.target.turnId) ||
     (value.providerProjectionVersion !== 1 &&
       value.providerProjectionVersion !== 2 &&
-      value.providerProjectionVersion !== 3) ||
+      value.providerProjectionVersion !== 3 &&
+      value.providerProjectionVersion !== 4) ||
     !Number.isSafeInteger(value.claimedAt) ||
     (value.claimedAt as number) < 0
   ) {
