@@ -93,6 +93,17 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   };
   if (question) session = { ...session, runningTurnIds: ['question-turn'] };
   if (question) messages = [{ type: 'user', id: 'question-user', turnId: 'question-turn', ts: 1, text: '帮我安排发布。' }, { type: 'turn_state', id: 'question-running', turnId: 'question-turn', ts: 2, status: 'running' }];
+  if (taskOverview) messages = [
+    { type: 'user', id: 'batch-user', turnId: 'batch-turn', ts: 1, text: '分别处理发布检查、研究证据和重复投递用例。' },
+    { type: 'assistant', id: 'batch-receipt', turnId: 'batch-turn', ts: 2, modelId: 'model-a', text: '批量派发完整回执：每个任务都有自己的 actionId、delegationId 和执行记录。' },
+    { type: 'turn_state', id: 'batch-done', turnId: 'batch-turn', ts: 3, status: 'completed' },
+    ...tasks.filter(task => ['overview-running', 'overview-evidence', 'overview-done'].includes(task.actionId)).map((task): StoredMessage => ({
+      type: 'workhub_coordination', kind: 'delegation_assigned', id: `batch-${task.actionId}`, turnId: 'batch-turn', coordinationTurnId: 'batch-turn', ts: 3,
+      schemaVersion: 1, actionId: task.actionId, actionFingerprint: `sha256:${'0'.repeat(64)}`, disposition: 'delegate_existing', userText: '分别处理发布检查、研究证据和重复投递用例。',
+      targetSessionId: task.targetSessionId, targetSessionName: task.targetSessionName, targetTurnId: task.execution!.turnId, targetMessageId: task.targetMessageId, delegationId: task.delegationId,
+    })),
+    ...messages,
+  ];
   const interactionListeners = new Set<Parameters<WorkHubServices['subscribeActiveInteractions']>[0]>();
   const interactionUpdate = (event: Parameters<Parameters<WorkHubServices['subscribeActiveInteractions']>[0]>[0]) => { for (const listener of interactionListeners) listener(event); };
   let updateTranscript: ((snapshot: WorkHubTranscriptSnapshot) => void) | undefined;
@@ -345,19 +356,77 @@ const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, b
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+async function openDispatchReceipts(canvasElement: HTMLElement) {
+  // Reading an earlier receipt releases tail-following, just as real wheel
+  // input does. A bare programmatic scroll does not carry reader intent.
+  const scroll = canvasElement.closest('[data-chat-scroll-container]') ?? canvasElement.querySelector('[data-chat-scroll-container]');
+  scroll?.dispatchEvent(new WheelEvent('wheel', { deltaY: -2, bubbles: true }));
+  for (const receipt of canvasElement.querySelectorAll<HTMLDetailsElement>('.maka-turn-response-details'))
+    if (!receipt.open) await userEvent.click(receipt.querySelector('summary')!);
+}
+
+// Real path: one WorkHub Turn delegates several works. Their Host-projected
+// statuses render together; row clicks select the production task execution pane.
+export const DispatchCards: Story = {
+  render: () => <Surface history="usage" taskOverview />,
+  play: async ({ canvasElement }) => {
+    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
+    await waitFor(() => expect(main.querySelector('[data-turn-id="batch-turn"]')).not.toBeNull());
+    const batch = main.querySelector<HTMLElement>('[data-turn-id="batch-turn"]')!;
+    const group = await within(batch).findByRole('region', { name: '已派发任务: 分别处理发布检查、研究证据和重复投递用例。' });
+    const rows = group.querySelectorAll<HTMLElement>('.workhub-dispatch-row');
+    expect(rows).toHaveLength(3);
+    await waitFor(() => expect(rows[0]).toHaveAttribute('data-status', 'running'));
+    expect(rows[1]).toHaveAttribute('data-status', 'waiting_for_dependency');
+    expect(rows[2]).toHaveAttribute('data-status', 'pending_acceptance');
+    expect(rows[2]).toHaveTextContent('执行结束');
+    const receipt = batch.querySelector<HTMLDetailsElement>('.maka-turn-response-details')!;
+    expect(receipt.open).toBe(false);
+    expect(within(receipt).getByText(/批量派发完整回执/)).not.toBeVisible();
+    await userEvent.click(receipt.querySelector('summary')!);
+    await waitFor(() => expect(within(receipt).getByText(/批量派发完整回执/)).toBeVisible());
+    await userEvent.click(receipt.querySelector('summary')!);
+    await userEvent.click(rows[0]!);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：发布检查清单'));
+    expect(rows[0]).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务侧栏' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskRail')).not.toBeVisible());
+    await userEvent.click(rows[0]!);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskRail')).toBeVisible());
+    await userEvent.click(rows[1]!);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：研究证据'));
+    expect(rows[0]).toHaveAttribute('aria-pressed', 'false');
+    expect(rows[1]).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(rows[0]!);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：发布检查清单'));
+    expect(writes.open).not.toHaveBeenCalled();
+    expect(writes.answer).not.toHaveBeenCalled();
+    expect(writes.taskInput).not.toHaveBeenCalled();
+    expect(writes.permissions).not.toHaveBeenCalled();
+    expect(writes.concurrency).not.toHaveBeenCalled();
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务侧栏' }));
+    for (const row of rows) expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+  },
+};
+
 export const FullConversationAndWorkIdentity: Story = {
   render: () => <Surface history />,
   play: async ({ canvasElement }) => {
     Object.values(writes).forEach((spy) => spy.mockClear());
     const canvas = within(canvasElement);
     await waitFor(() => expect(canvas.getByText(/END_OF_FULL_RESPONSE/)).toBeInTheDocument());
+    expect(canvasElement.querySelector('.maka-turn-response-details')).not.toHaveAttribute('open');
+    await openDispatchReceipts(canvasElement);
     const meta = canvasElement.querySelector<HTMLElement>('.maka-user-message .maka-message-meta')!;
     await waitFor(() => expect(getComputedStyle(meta).opacity).toBe('0'));
     meta.querySelector<HTMLButtonElement>('button[data-message-id]')!.focus();
     await waitFor(() => expect(getComputedStyle(meta).opacity).toBe('1'));
     (document.activeElement as HTMLElement).blur();
     await userEvent.click(canvasElement.querySelector('.workhub-turn-label') as HTMLElement);
-    await waitFor(() => expect(writes.open).toHaveBeenCalledWith(targetId));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeVisible());
+    expect(canvas.getByText(/END_OF_FULL_RESPONSE/)).toBeInTheDocument();
+    expect(canvasElement.querySelector('.workHubComposerContent')).toBeVisible();
+    expect(writes.open).not.toHaveBeenCalled();
     await userEvent.hover(canvasElement.querySelector('.maka-user-message .workhub-message-rail') as HTMLElement);
     await waitFor(() => expect(canvasElement.querySelector('.workhub-turn-label')).toHaveAttribute('data-work-highlighted', 'true'));
   },
@@ -365,7 +434,7 @@ export const FullConversationAndWorkIdentity: Story = {
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
 async function openTaskSidebar(canvasElement: HTMLElement) {
   const toggle = within(canvasElement).queryByRole('button', { name: '近期任务' });
-  if (toggle) await userEvent.click(toggle);
+  if (toggle?.getAttribute('aria-expanded') === 'false') await userEvent.click(toggle);
 }
 // Real path: WorkHub → task overview → View task execution. The production
 // WorkHubRoot selects a canonical work, then reads its full Session histories.
@@ -375,8 +444,7 @@ export const TaskExecutionView: Story = {
   render: () => <Surface history="usage" taskInbox taskOverview question selectTarget />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    // The fresh Host fixture has no pre-existing pending input for this work.
-    sessionStorage.removeItem(JSON.stringify(['workhub-task-input-v1', sessionId, 'overview-running']));
+    for (const workId of ['overview-running', 'overview-evidence']) sessionStorage.removeItem(JSON.stringify(['workhub-task-input-v1', sessionId, workId]));
     const questionHeading = await canvas.findByRole('heading', { name: '首批发布范围选哪个？' });
     const coordinatorQuestion = questionHeading.closest<HTMLElement>('.maka-user-question-prompt')!;
     await userEvent.click(within(coordinatorQuestion).getAllByRole('option')[1]!);
@@ -385,7 +453,18 @@ export const TaskExecutionView: Story = {
     await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     const view = await canvas.findByRole('region', { name: '任务实时执行' });
     await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
-    expect(within(view).getByText(/任务公开输出 initial-turn/)).toBeInTheDocument();
+    const taskScroll = view.closest<HTMLElement>('[data-chat-scroll-container]')!;
+    const taskSessions = view.querySelectorAll<HTMLElement>('[data-task-session-id]');
+    // Chromium virtualizes offscreen Turns. Read the previous/current Session
+    // sections through their actual scrollport rather than requiring all rows
+    // to be mounted at once in a short stacked viewport.
+    taskScroll.scrollTo({ top: taskScroll.scrollTop + taskSessions[1]!.getBoundingClientRect().top - taskScroll.getBoundingClientRect().top });
+    await waitFor(() => expect(within(view).getByText(/任务公开输出 initial-turn/)).toBeInTheDocument());
+    expect(within(view).getByText('同 Session 的其他任务也在这里。')).toBeInTheDocument();
+    taskScroll.scrollTo({ top: 0 });
+    await waitFor(() => expect(within(view).getByText(/任务公开输出 cold-turn/)).toBeInTheDocument());
+    taskScroll.scrollTo({ top: taskScroll.scrollHeight });
+    await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
     const header = view.querySelector('.workHubTaskViewHeader')!;
     expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
     expect(header.getBoundingClientRect().bottom).toBeLessThan(window.innerHeight);
@@ -394,8 +473,6 @@ export const TaskExecutionView: Story = {
     expect(view.querySelector('.workHubTaskInstructions')).not.toHaveAttribute('open');
     expect(view.querySelectorAll('[data-task-session-id]')).toHaveLength(2);
     expect(within(view).getByTitle(targetId)).toHaveTextContent('Session · payments');
-    expect(within(view).getByText('同 Session 的其他任务也在这里。')).toBeInTheDocument();
-    expect(within(view).getByText(/任务公开输出 cold-turn/)).toBeInTheDocument();
     expect(view.querySelector('.workHubTaskStatusBadge')).toHaveTextContent('执行中');
     const inboxToggle = canvasElement.querySelector('.workHubTaskViewInbox summary')!;
     expect(inboxToggle).toBeVisible();
@@ -406,58 +483,78 @@ export const TaskExecutionView: Story = {
     expect(within(view).queryByText(/已补充重复投递测试/)).toBeNull();
     const taskComposer = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!;
     expect(taskComposer).toBeVisible();
-    expect(coordinatorQuestion).not.toBeVisible();
+    expect(coordinatorQuestion).toBeVisible();
     expect(within(taskComposer).getByRole('button', { name: '停止' })).toBeVisible();
-    expect(taskComposer.querySelector('.workHubTaskInputHeader')).toBeNull();
+    expect(taskComposer.querySelector('.workHubTaskInputTarget')).toHaveTextContent('发布检查清单');
     expect(within(taskComposer).queryByRole('button', { name: '返回协调输入' })).toBeNull();
-    expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
-    const editor = taskComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
+    const chooseTask = async (name: string) => {
+      await userEvent.click(canvas.getByRole('combobox', { name: '选择任务' }));
+      await userEvent.click(within(canvasElement.ownerDocument.body).getByRole('option', { name }));
+    };
+    let editor = taskComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
     await userEvent.click(editor); expect(editor).toHaveFocus();
     await userEvent.type(editor, '只核对协议，不更改权限。');
-    expect(within(taskComposer).getByRole('button', { name: '发送' })).toBeVisible();
+    await chooseTask('研究证据');
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toHaveAttribute('data-work-id', 'overview-evidence'));
+    let otherEditor = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer [contenteditable="true"]')!;
+    expect(otherEditor).toHaveTextContent('');
+    await userEvent.click(otherEditor); await userEvent.type(otherEditor, 'B 的独立草稿');
+    await chooseTask('发布检查清单');
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toHaveAttribute('data-work-id', 'overview-running'));
+    const currentComposer = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!;
+    editor = currentComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
+    await waitFor(() => expect(editor).toHaveTextContent('只核对协议，不更改权限。'));
+    await userEvent.click(editor);
+    expect(within(currentComposer).getByRole('button', { name: '发送' })).toBeVisible();
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(writes.taskInput).toHaveBeenCalledWith(sessionId, expect.objectContaining({
       workId: 'overview-running', generationId: 'overview-running', sourceActionId: 'overview-running', sourceDelegationId: 'overview-running-delegation', text: '只核对协议，不更改权限。',
     })));
-    await waitFor(() => expect(taskComposer.querySelector('[data-input-delivery="queued"]')).toBeVisible());
+    await waitFor(() => expect(currentComposer.querySelector('[data-input-delivery="queued"]')).toBeVisible());
     expect(editor).toHaveFocus(); expect(editor).toHaveTextContent('');
-    expect(taskComposer.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
-    expect(Math.abs(taskComposer.getBoundingClientRect().left - header.getBoundingClientRect().left)).toBeLessThan(2);
-    expect(view.scrollWidth).toBeLessThanOrEqual(view.clientWidth);
+    expect(currentComposer.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
+    const currentView = canvasElement.querySelector<HTMLElement>('.workHubTaskView')!;
+    expect(currentView.scrollWidth).toBeLessThanOrEqual(currentView.clientWidth);
+    const rail = canvasElement.querySelector<HTMLElement>('.workHubTaskRail')!;
+    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
+    if (window.innerWidth > 820) expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
+    else expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(rail.getBoundingClientRect().top);
     expect(writes.answer).not.toHaveBeenCalled();
     expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
     expect(writes.defaults).not.toHaveBeenCalled();
     expect(writes.question).not.toHaveBeenCalled(); expect(writes.form).not.toHaveBeenCalled();
-    await userEvent.click(within(view).getByRole('button', { name: '返回 WorkHub' }));
-    await waitFor(() => expect(coordinatorQuestion).toBeVisible());
     expect(canvasElement.querySelector('.maka-user-question-prompt')).toBe(coordinatorQuestion);
     expect(within(coordinatorQuestion).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
     await userEvent.click(within(coordinatorQuestion).getByRole('button', { name: '提交答案' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubComposerContent')).toBeVisible());
     const coordinatorEditor = canvasElement.querySelector<HTMLElement>('.workHubComposerContent [contenteditable="true"]')!;
-    await userEvent.click(coordinatorEditor); await userEvent.type(coordinatorEditor, '选择后续工作'); await userEvent.keyboard('{Enter}');
+    await userEvent.click(coordinatorEditor); await userEvent.type(coordinatorEditor, '选择后续工作');
+    await chooseTask('研究证据');
+    otherEditor = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer [contenteditable="true"]')!;
+    await waitFor(() => expect(otherEditor).toHaveTextContent('B 的独立草稿'));
+    expect(coordinatorEditor).toHaveTextContent('选择后续工作');
+    await chooseTask('发布检查清单');
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer [data-input-delivery="queued"]')).toBeVisible());
+    await userEvent.click(coordinatorEditor); await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBeVisible());
     const coordinatorForm = canvasElement.querySelector<HTMLElement>('.maka-form-interaction-prompt')!;
-    await openTaskSidebar(canvasElement);
-    const reopened = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
-    await userEvent.click(within(reopened.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer [data-input-delivery="queued"]')).toBeVisible());
-    expect(coordinatorForm).not.toBeVisible();
+    expect(coordinatorForm).toBeVisible();
     expect(within(canvasElement.querySelector<HTMLElement>('.workHubTaskComposer')!).getByRole('button', { name: '停止' })).toBeVisible();
     const restoredEditor = canvasElement.querySelector<HTMLElement>('.workHubTaskComposer [contenteditable="true"]')!;
     await userEvent.click(restoredEditor); expect(restoredEditor).toHaveFocus(); expect(restoredEditor).toHaveTextContent('');
     expect(writes.taskInput).toHaveBeenCalledTimes(1);
     expect(writes.answer).toHaveBeenCalledTimes(1); expect(writes.question).toHaveBeenCalledTimes(1); expect(writes.form).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
+    await userEvent.click(canvas.getByRole('button', { name: '收起任务侧栏' }));
     await waitFor(() => expect(coordinatorForm).toBeVisible());
     expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBe(coordinatorForm);
     await openTaskSidebar(canvasElement);
-    const finalHeading = canvas.getByRole('button', { name: '发布检查清单 执行中' });
-    await userEvent.click(within(finalHeading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toBeVisible());
   },
 };
+// Real path: the same task panel and coordination form stack in a narrow dock.
+export const TaskExecutionViewNarrow: Story = { ...TaskExecutionView };
 // Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
 // continuation retains unsent drafts across same-Host re-resolution and keeps
 // its exact submission after a lost receipt and reconnect.
@@ -466,8 +563,8 @@ export const TaskOverviewAndContinuation: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await openTaskSidebar(canvasElement);
-    await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
-    let overview = canvas.getByLabelText('近期任务');
+    await waitFor(() => expect(canvas.getByRole('region', { name: '近期任务' })).toHaveAttribute('aria-busy', 'false'));
+    let overview = canvas.getByRole('region', { name: '近期任务' });
     const inbox = await canvas.findByRole('region', { name: '待你处理' });
     expect(overview).toHaveAttribute('data-maka-assistant-exclude');
     expect(within(overview).getByText('执行结束不代表目标或产物已验证完成。')).toBeVisible();
@@ -480,10 +577,15 @@ export const TaskOverviewAndContinuation: Story = {
     const rail = overview.closest<HTMLElement>('.workHubTaskRail')!;
     expect(rail).toBeVisible();
     expect(rail.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
-    expect(rail.getBoundingClientRect().top).toBe(0);
-    expect(rail.getBoundingClientRect().height).toBe(window.innerHeight);
     expect(canvasElement.querySelector('.workHubTaskPanels')).not.toContainElement(overview);
-    if (window.innerWidth >= 1000) expect(canvasElement.querySelector('.mainColumn')!.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
+    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
+    if (window.innerWidth > 820) {
+      expect(rail.getBoundingClientRect().top).toBe(0);
+      expect(rail.getBoundingClientRect().height).toBe(window.innerHeight);
+      expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
+    } else expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(rail.getBoundingClientRect().top);
+    const float = canvas.getByRole('button', { name: '浮出工作台' }).getBoundingClientRect();
+    expect(canvas.getByRole('button', { name: '浮出工作台' }).contains(document.elementFromPoint(float.x + float.width / 2, float.y + float.height / 2))).toBe(true);
     const panels = canvasElement.querySelector('.workHubTaskPanels')!;
     expect(panels.getBoundingClientRect().bottom).toBeLessThanOrEqual(editor.getBoundingClientRect().top);
     expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
@@ -504,8 +606,8 @@ export const TaskOverviewAndContinuation: Story = {
     await waitFor(() => expect(overview.isConnected).toBe(false));
     expect(writes.taskContinue).not.toHaveBeenCalled();
     for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'ready' });
-    await waitFor(() => expect(canvas.getByLabelText('近期任务')).toHaveAttribute('aria-busy', 'false'));
-    overview = canvas.getByLabelText('近期任务');
+    await waitFor(() => expect(canvas.getByRole('region', { name: '近期任务' })).toHaveAttribute('aria-busy', 'false'));
+    overview = canvas.getByRole('region', { name: '近期任务' });
     done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
     await userEvent.click(done);
     card = done.closest('article')!;
@@ -608,6 +710,7 @@ export const UsageInspector: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await canvas.findByText(/接下来会核对并发回调的处理结果/);
+    await openDispatchReceipts(canvasElement);
     const conversation = canvasElement.querySelector('[data-chat-scroll-container]')!;
     const editor = canvasElement.querySelector('[contenteditable="true"]')!;
     await userEvent.click(editor);
@@ -813,6 +916,10 @@ async function expectPromptRailClearance(canvasElement: HTMLElement) {
 export const ColoredWorkHistory: Story = {
   render: () => <Surface history colors />,
   play: async ({ canvasElement }) => {
+    await waitFor(() => expect(canvasElement.querySelector('.maka-turn-response-details')).not.toBeNull());
+    await openDispatchReceipts(canvasElement);
+    const scroll = canvasElement.querySelector<HTMLElement>('[data-chat-scroll-container]')!;
+    scroll.scrollTo({ top: scroll.scrollHeight });
     await expectPromptRailClearance(canvasElement);
     await waitFor(() => expect(canvasElement.querySelectorAll('[data-turn-accent="true"]')).toHaveLength(3));
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-user-message .workhub-message-rail')).toHaveLength(3));
@@ -854,12 +961,16 @@ export const ColoredWorkHistory: Story = {
     const metadataRights = [...canvasElement.querySelectorAll('.maka-user-message .maka-message-meta')].map((element) => element.getBoundingClientRect().right);
     expect(metadataRights).toHaveLength(4);
     expect(Math.max(...metadataRights) - Math.min(...metadataRights)).toBeLessThan(1);
-    const label = turns[0]!.querySelector<HTMLElement>('.workhub-turn-label')!;
+    scroll.scrollTo({ top: 0 });
+    const firstLabel = () => canvasElement.querySelector<HTMLElement>('[data-transcript-turn-id="turn-1"] .workhub-turn-label')!;
+    await waitFor(() => expect(firstLabel()).toBeVisible());
+    const label = firstLabel();
     await userEvent.hover(label);
-    await waitFor(() => expect(turns[2]!.querySelector('.workhub-turn-label')).toHaveAttribute('data-work-highlighted', 'true'));
-    await waitFor(() => expect(turns[2]!.querySelector('.maka-user-message .workhub-message-rail')).toHaveAttribute('data-work-highlighted', 'true'));
-    await userEvent.click(label);
-    expect(writes.open).toHaveBeenCalledWith(targetId);
+    await waitFor(() => expect(canvasElement.querySelector('[data-transcript-turn-id="turn-3"] .workhub-turn-label')).toHaveAttribute('data-work-highlighted', 'true'));
+    await waitFor(() => expect(canvasElement.querySelector('[data-transcript-turn-id="turn-3"] .maka-user-message .workhub-message-rail')).toHaveAttribute('data-work-highlighted', 'true'));
+    await userEvent.click(firstLabel());
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeVisible());
+    expect(writes.open).not.toHaveBeenCalled();
     await userEvent.unhover(label);
   },
 };
@@ -971,8 +1082,8 @@ export const QuestionStopped: Story = {
   },
 };
 
-// Real path: WorkHub's canonical assignment rail opens the real task view;
-// returning restores the coordinator history without opening another window.
+// Real path: WorkHub's assignment rail opens the task beside the unchanged
+// coordinator conversation, without opening another native window.
 export const FilterWorkConversations: Story = {
   render: () => <Surface history colors />,
   play: async ({ canvasElement }) => {
@@ -982,18 +1093,25 @@ export const FilterWorkConversations: Story = {
     writes.open.mockClear();
     await userEvent.click(canvasElement.querySelector('.maka-user-message .workhub-message-rail') as HTMLElement);
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
-    expect(canvas.queryByText('请检查发布检查清单。')).toBeNull();
-    expect(canvas.queryByText('先讨论一下整体计划。')).toBeNull();
+    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
+    const mainScroll = main.querySelector<HTMLElement>('[data-chat-scroll-container]')!;
+    mainScroll.scrollTo({ top: 0 });
+    await waitFor(() => expect(within(main).getByText('请检查发布检查清单。')).toBeInTheDocument());
+    mainScroll.scrollTo({ top: mainScroll.scrollHeight });
+    await waitFor(() => expect(within(main).getByText('先讨论一下整体计划。')).toBeInTheDocument());
     await waitFor(() => expect(canvas.getByText(/任务公开输出/)).toBeInTheDocument());
     expect(writes.open).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
-    await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
-    const answerRail = canvasElement.querySelector('.maka-assistant-answer .workhub-message-rail') as HTMLElement;
+    expect(main.querySelectorAll('[data-prompt-turn-id]')).toHaveLength(4);
+    mainScroll.scrollTo({ top: 0 });
+    const firstTurn = () => main.querySelector<HTMLElement>('[data-turn-id="turn-1"]')!;
+    await waitFor(() => expect(firstTurn()).not.toBeNull());
+    await openDispatchReceipts(firstTurn());
+    await waitFor(() => expect(firstTurn()?.querySelector('.maka-assistant-answer .workhub-message-rail')).toBeVisible());
+    const answerRail = firstTurn().querySelector('.maka-assistant-answer .workhub-message-rail') as HTMLElement;
     answerRail.focus();
     expect(answerRail).toHaveFocus();
     await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
-    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeNull());
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     expect(writes.open).not.toHaveBeenCalled();
   },
@@ -1025,10 +1143,9 @@ export const FilterWorkHistoryPages: Story = {
     expect(canvas.queryByText('请检查支付回调幂等性。')).toBeNull();
     await userEvent.click(canvas.getByRole('button', { name: '载入更早的记录' }));
     await waitFor(() => expect(canvas.getByText('请检查支付回调幂等性。')).toBeInTheDocument());
-    expect(canvas.queryByText('先讨论一下整体计划。')).toBeNull();
+    expect(canvas.getByText('先讨论一下整体计划。')).toBeInTheDocument();
     expect(canvas.queryByRole('button', { name: '载入更早的记录' })).toBeNull();
-    await userEvent.click(canvas.getByRole('button', { name: '显示全部对话' }));
-    await waitFor(() => expect(canvas.getByText('先讨论一下整体计划。')).toBeInTheDocument());
+    expect(canvas.queryByRole('button', { name: '显示全部对话' })).toBeNull();
   },
 };
 export const FilterWorkConversationsNarrow: Story = { ...FilterWorkConversations, parameters: { viewport: { defaultViewport: 'tablet' } } };
@@ -1055,7 +1172,8 @@ export const WorkFilterHoverAndToggle: Story = {
     await waitFor(() => expect(color()).toBe(original));
     await userEvent.click(stripe());
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
-    await userEvent.click(within(canvasElement).getByRole('button', { name: '返回 WorkHub' }));
+    await userEvent.click(stripe());
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeNull());
     await waitFor(() => expect(canvasElement.querySelectorAll('.maka-turn[data-turn-id]')).toHaveLength(4));
     expect(writes.open).not.toHaveBeenCalled();
   },
@@ -1068,13 +1186,14 @@ export const SendWhileWorkFiltered: Story = {
     await waitFor(() => expect(canvasElement.querySelector('.workhub-message-rail')).not.toBeNull());
     await userEvent.click(canvasElement.querySelector('.workhub-message-rail') as HTMLElement);
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeInTheDocument());
-    expect(canvasElement.querySelector('.workHubComposerContent')).not.toBeVisible();
-    await userEvent.click(canvas.getByRole('button', { name: '返回 WorkHub' }));
-    const editor = canvasElement.querySelector('[contenteditable="true"]') as HTMLElement;
+    expect(canvasElement.querySelector('.workHubComposerContent')).toBeVisible();
+    const task = canvasElement.querySelector('.workHubTaskView');
+    const editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
     await userEvent.click(editor);
     await userEvent.keyboard('FILTERED_SEND_PROBE{Enter}');
     await waitFor(() => expect(canvas.getByText('FILTERED_SEND_PROBE')).toBeInTheDocument());
     await waitFor(() => expect(canvas.getByText('已收到。')).toBeInTheDocument());
+    expect(canvasElement.querySelector('.workHubTaskView')).toBe(task);
     expect(canvas.queryByRole('button', { name: '显示全部对话' })).toBeNull();
   },
 };
@@ -1090,7 +1209,7 @@ export const RetryWhileWorkFiltered: Story = {
     await userEvent.keyboard('FILTERED_RETRY_PROBE{Enter}');
     await waitFor(() => expect(canvas.getByRole('alert')).toHaveTextContent('Temporary Host failure'));
     await userEvent.click(canvasElement.querySelector('.workhub-message-rail') as HTMLElement);
-    await waitFor(() => expect(canvas.getByRole('button', { name: '返回 WorkHub' })).toBeInTheDocument());
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskView')).toBeVisible());
     await userEvent.click(canvas.getByRole('button', { name: /^重试$/ }));
     await waitFor(() => expect(writes.answer).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(canvas.getByText('已收到。')).toBeInTheDocument());

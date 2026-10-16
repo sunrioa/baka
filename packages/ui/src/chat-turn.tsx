@@ -400,6 +400,10 @@ export const TurnView = memo(function TurnView(props: {
   messageHeader?: ReactNode;
   /** Optional accessible action on each message edge. */
   messageRail?: ReactNode;
+  /** Optional disclosure for a settled successful response; never hides live work or failures. */
+  assistantDetailsLabel?: string;
+  /** Host-owned facts shown without replacing the original response. */
+  assistantSummary?: ReactNode;
   /** Host-owned status of the root prompt, displayed before its timestamp. */
   transientMessages?: readonly TransientUserMessageProjection[];
   userLabel?: string;
@@ -667,6 +671,7 @@ export const TurnView = memo(function TurnView(props: {
           ) : note.text}
         </ChatSystemMessage>
       ))}
+      {props.assistantSummary}
       {conversationSegments.map((segment, segmentIndex) => {
         if (segment.kind === 'user') {
           const message = segment.item.message;
@@ -729,8 +734,7 @@ export const TurnView = memo(function TurnView(props: {
           segment.repliesTo === undefined
             ? 'assistant-opening'
             : `assistant-after-${segment.repliesTo}`;
-        return (
-          <Fragment key={assistantKey}>
+        const answer = (
             <LocalizedChatMessage
               accessibleLabel={`${copy.assistantAriaLabel} · ${answerContext}`}
               sender="assistant"
@@ -858,6 +862,15 @@ export const TurnView = memo(function TurnView(props: {
               />
             )}
             </LocalizedChatMessage>
+        );
+        return (
+          <Fragment key={assistantKey}>
+            {props.assistantDetailsLabel && turn.status === 'completed' && !props.liveStreaming
+              ? <details className="maka-turn-response-details" open={props.searchHighlighted || undefined}>
+                  <summary>{props.assistantDetailsLabel}</summary>
+                  {answer}
+                </details>
+              : answer}
           </Fragment>
         );
       })}

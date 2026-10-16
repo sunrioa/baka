@@ -26,6 +26,8 @@ interface TaskViewCopy {
   chooseExecution: string; executionNumber: string; superseded: string; lineagePending: string;
   noAssignments: string; livePending: string; noPublicOutput: string;
   coordinatorInput: string; pendingInteractions: string; open: string;
+  panel: string; chooseTask: string; coordinationHint: string; coordinationFeed: string;
+  dispatchedTasks: string; dispatchSummary: string; dispatchDetails: string; taskStatePending: string; executionEnded: string;
   source: string; feed: string; historical: string; historyLimit: string;
   state: Record<WorkHubTaskAssignment['state'], string>;
   status: Record<TurnSnapshot['status'], string>;
@@ -38,6 +40,8 @@ export const workHubTaskViewCopy = {
     chooseExecution: 'Choose execution', executionNumber: 'Execution {number}', superseded: 'Superseded', lineagePending: 'Reading execution lineage; the latest attempt is not confirmed yet.',
     noAssignments: 'No readable assignments for this work.', livePending: 'Live observation is not ready; previously read records are retained.', noPublicOutput: 'This execution has no public output yet.',
     coordinatorInput: 'Return to coordinator input',
+    panel: 'Task execution panel', chooseTask: 'Choose task', coordinationHint: 'Tell me what to do. Keep coordinating while tasks run.', coordinationFeed: 'WorkHub conversation',
+    dispatchedTasks: 'Delegated tasks', dispatchSummary: 'Tasks delegated. You can keep arranging other work while they execute.', dispatchDetails: 'Dispatch explanation and full receipt', taskStatePending: 'Status awaiting refresh', executionEnded: 'Execution ended',
     pendingInteractions: 'WorkHub questions and permissions', open: 'View task execution',
     source: 'Task instructions', feed: 'Execution record', historical: 'Historical execution · Read only',
     historyLimit: 'Showing the latest {count} executions. Select an earlier assignment or execution above to read older records.',
@@ -51,6 +55,8 @@ export const workHubTaskViewCopy = {
     chooseExecution: '选择执行尝试', executionNumber: '执行 {number}', superseded: '已替换', lineagePending: '正在读取执行沿革，尚不能确定最新尝试。',
     noAssignments: '此工作没有可读取的派发记录。', livePending: '实时连接暂未就绪；保留已读取的记录。', noPublicOutput: '该执行尚无公开输出。',
     coordinatorInput: '返回协调输入',
+    panel: '任务执行面板', chooseTask: '选择任务', coordinationHint: '告诉我你要做什么，任务执行时仍可继续安排。', coordinationFeed: 'WorkHub 总对话',
+    dispatchedTasks: '已派发任务', dispatchSummary: '已派发以下任务，执行期间可以继续安排其他事。', dispatchDetails: '派发说明与完整回执', taskStatePending: '状态待刷新', executionEnded: '执行结束',
     pendingInteractions: 'WorkHub 待处理事项', open: '查看任务执行',
     source: '任务要求', feed: '执行记录', historical: '历史执行 · 只读',
     historyLimit: '当前展示最近 {count} 次执行；更早记录可在上方的派发与执行记录中选择查看。',
@@ -64,6 +70,8 @@ export const workHubTaskViewCopy = {
     chooseExecution: '選擇執行嘗試', executionNumber: '執行 {number}', superseded: '已取代', lineagePending: '正在讀取執行沿革，尚無法確認最新嘗試。',
     noAssignments: '此工作沒有可讀取的派發記錄。', livePending: '即時連線尚未就緒；保留已讀取的記錄。', noPublicOutput: '此執行尚無公開輸出。',
     coordinatorInput: '返回協調輸入',
+    panel: '任務執行面板', chooseTask: '選擇任務', coordinationHint: '告訴我要做什麼，任務執行時仍可繼續安排。', coordinationFeed: 'WorkHub 總對話',
+    dispatchedTasks: '已派發任務', dispatchSummary: '已派發以下任務，執行期間可以繼續安排其他事。', dispatchDetails: '派發說明與完整回執', taskStatePending: '狀態待更新', executionEnded: '執行結束',
     pendingInteractions: 'WorkHub 待處理事項', open: '檢視任務執行',
     source: '任務要求', feed: '執行記錄', historical: '歷史執行 · 唯讀',
     historyLimit: '目前顯示最近 {count} 次執行；更早記錄可在上方的派發與執行記錄中選擇查看。',

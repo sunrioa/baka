@@ -93,6 +93,7 @@ export {
   ChevronLeft,
   ChevronRight,
   ChevronRightIcon,
+  Circle,
   CircleCheckBig,
   CircleGauge,
   Clipboard,

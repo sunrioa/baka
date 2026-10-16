@@ -19,15 +19,15 @@
 
 import { useMemo } from 'react';
 import { Button, ChatView, useUiLocale } from '@maka/ui';
-import { ArrowLeft, ChevronDown, FileText, RefreshCw } from 'lucide-react';
+import { ChevronDown, FileText, RefreshCw } from 'lucide-react';
 import type { WorkHubServices } from '../ports.js';
 import { useWorkHubSessionView, type useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useAppShellTurnPresentation } from '../../../application/contracts/turn-presentation.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 
-export function WorkHubTaskView({ services, workId, name, view, onClose }: {
-  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; onClose(): void;
+export function WorkHubTaskView({ services, workId, name, view }: {
+  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>;
 }) {
   const copy = workHubTaskViewCopy[useUiLocale()];
   const sessions = useMemo(() => {
@@ -46,11 +46,11 @@ export function WorkHubTaskView({ services, workId, name, view, onClose }: {
   return <section className="workHubTaskView" aria-label={copy.title} data-work-id={workId}>
     <header className="workHubTaskViewHeader">
       <div className="workHubTaskHeadingRow">
-        <Button size="sm" variant="ghost" icon={<ArrowLeft size={14} />} label={copy.back} onClick={onClose} />
+        <p className="workHubTaskEyebrow">{copy.title}</p>
         <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} label={copy.refresh} onClick={() => { void view.refresh(); }} />
       </div>
       <div className="workHubTaskTitleRow">
-        <div><p className="workHubTaskEyebrow">{copy.title}</p><h2>{name}</h2></div>
+        <div><h2>{name}</h2></div>
         <span className="workHubTaskStatusBadge" data-status={status} role="status">
           {execution ? copy.status[execution.status] : view.assignment ? copy.state[view.assignment.state] : copy.loading}
         </span>
@@ -78,11 +78,13 @@ function WorkHubSessionTranscript({ services, sessionId, name, scrollOwner }: { 
   return <section className="workHubExecutionTranscript" data-task-session-id={sessionId} aria-label={name}>
     <div className="workHubTaskSessionLabel"><span>{name}</span><code title={sessionId}>Session · {parseDesktopSessionKey(sessionId).sessionId.slice(-8)}</code></div>
     {view.error && <p role="alert">{view.error}</p>}
-    {!view.ready && <p role="status">{copy.livePending}</p>}
-    <ChatView activeSession={view.session} messages={[...view.transcript.messages]} liveTurns={view.liveTurns} activeTurn={view.activeTurn}
+    {(!view.ready || !view.transcript.ready) && <p role="status">{copy.livePending}</p>}
+    {/* Settle the first scroll position from real history, not an empty reader
+        whose already-visible list would jump when the initial batch arrives. */}
+    {view.transcript.ready && <ChatView activeSession={view.session} messages={[...view.transcript.messages]} liveTurns={view.liveTurns} activeTurn={view.activeTurn}
       scrollOwner={scrollOwner} messageLoading={!view.transcript.ready} hasEarlierHistory={view.transcript.hasOlder}
       onLoadEarlierHistory={() => { void view.loadEarlier(); }} onStreamingSettled={view.streamingSettled}
       onReadAttachmentBytes={services.readAttachmentBytes} deriveTurnPresentation={deriveTurnPresentation}
-      onNew={() => {}} scrollBehavior="auto" emptyOverride={<p>{copy.noPublicOutput}</p>} />
+      onNew={() => {}} scrollBehavior="auto" emptyOverride={<p>{copy.noPublicOutput}</p>} />}
   </section>;
 }

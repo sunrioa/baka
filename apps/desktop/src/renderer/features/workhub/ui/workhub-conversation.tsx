@@ -20,19 +20,23 @@ import type { CSSProperties } from 'react';
 
 import { useContext, useMemo, type ComponentProps } from 'react';
 import { ChatView, useUiLocale } from '@maka/ui';
-import { Button, Link, Text } from '@astryxdesign/core';
+import { Button, Link } from '@astryxdesign/core';
 import { WorkHubHighlightContext, useWorkHubIdentityHue } from './workhub-work-identity.js';
 import type { WorkHubLinkedWork } from '../model/linked-work.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { useAppShellTurnPresentation } from '../../../application/contracts/turn-presentation.js';
+import type { WorkHubTask } from '@maka/runtime-host/protocol';
+import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
+import { WorkHubDispatchCard } from './workhub-dispatch-card.js';
 
-export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { workLinks: readonly WorkHubLinkedWork[]; onOpenWork(sessionId: string): void }) {
-  const { onOpenWork, workLinks: assignments, ...chat } = props;
+export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { workLinks: readonly WorkHubLinkedWork[]; taskFacts?: { tasks: readonly WorkHubTask[]; ready: boolean }; onOpenWork(sessionId: string): void }) {
+  const { onOpenWork, workLinks: assignments, taskFacts, ...chat } = props;
   const highlight = useContext(WorkHubHighlightContext);
   const workHubIdentityHue = useWorkHubIdentityHue(assignments.map((work) => work.targetSessionId));
   const locale = useUiLocale();
   const deriveTurnPresentation = useAppShellTurnPresentation({ uiLocale: locale, allowBranch: false });
   const copy = workHubLiveCopy[locale];
+  const taskCopy = workHubTaskViewCopy[locale];
   // A coordination turn can delegate to several Works. Keep every label and
   // divide its rail evenly, keeping every segment linked to its own Session.
   const worksByTurn = useMemo(() => {
@@ -56,6 +60,10 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
   })), [worksByTurn, highlight.sessionId, workHubIdentityHue]);
   const promptTextByTurn = new Map(chat.messages?.flatMap((message) => message.type === 'user' ? [[message.turnId, message.text.slice(0, 80)] as const] : []));
   const turnDecorations = new Map<string, NonNullable<ComponentProps<typeof ChatView>['turnDecorations']> extends ReadonlyMap<string, infer V> ? V : never>([...worksByTurn].map(([turnId, works]) => [turnId, {
+    assistantDetailsLabel: works.some(work => work.workId) ? taskCopy.dispatchDetails : undefined,
+    assistantSummary: works.some(work => work.workId)
+      ? <WorkHubDispatchCard works={works.filter(work => work.workId)} tasks={taskFacts?.tasks ?? []} ready={taskFacts?.ready ?? false} promptText={promptTextByTurn.get(turnId) ?? turnId} />
+      : undefined,
     accentColor: promptRailDecorations.get(turnId)?.accentColor ?? 'transparent',
     messageRail: <>{works.map((work, index) => <Button key={work.workId ?? work.targetSessionId}
       variant="ghost" isIconOnly icon={<span aria-hidden="true" />} className="workhub-message-rail"
@@ -63,7 +71,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
         '--maka-turn-accent': `oklch(var(--workhub-${highlight.sessionId === work.targetSessionId ? 'highlight' : 'tone'}) ${workHubIdentityHue(work.targetSessionId)})`,
       } as CSSProperties}
       data-work-session-id={work.targetSessionId}
-      label={`${copy.filterConversation}: ${work.targetSessionName} · ${promptTextByTurn.get(turnId) ?? turnId}`}
+      label={`${copy.filterConversation}: ${work.targetSessionName} · ${promptTextByTurn.get(turnId) ?? turnId}${works.length > 1 ? ` · ${index + 1}/${works.length}` : ''}`}
       tooltip={`${copy.filterConversation}: ${work.targetSessionName}`}
       aria-pressed={Boolean(highlight.selectedWork) && (highlight.selectedWork?.workId ?? highlight.selectedWork?.sessionId) === (work.workId ?? work.targetSessionId)}
       data-work-highlighted={highlight.sessionId === work.targetSessionId}
@@ -85,30 +93,17 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
         onMouseLeave={() => highlight.highlight(undefined)}
         onFocus={() => highlight.highlight(work.targetSessionId)}
         onBlur={() => highlight.highlight(undefined)}
-        onClick={() => onOpenWork(work.targetSessionId)}
+        onClick={() => work.workId
+          ? highlight.selectWork({ sessionId: work.targetSessionId, name: work.targetSessionName, workId: work.workId })
+          : onOpenWork(work.targetSessionId)}
       >{work.workspaceName ? `${work.workspaceName} / ${work.targetSessionName}` : work.targetSessionName}</Link>)}
     </div>,
   }]));
-  const selected = highlight.selectedWork;
-  const matchingTurns = new Set([...worksByTurn].filter(([, works]) => works.some((work) => work.targetSessionId === selected?.sessionId)).map(([turnId]) => turnId));
-  const messages = selected ? chat.messages.filter((message) => message.turnId !== undefined && matchingTurns.has(message.turnId)) : chat.messages;
-  const liveTurns = selected ? chat.liveTurns?.filter((turn) => matchingTurns.has(turn.turnId)) : chat.liveTurns;
-  const activeTurn = selected && chat.activeTurn && !matchingTurns.has(chat.activeTurn.turnId) ? undefined : chat.activeTurn;
-  return <>
-    {selected && <div className="workhub-conversation-filter" role="region" aria-label={copy.filterConversation}>
-      <Text type="supporting">{selected.name}</Text>
-      <Button variant="ghost" label={copy.clearConversationFilter} onClick={() => highlight.selectWork(undefined)} />
-    </div>}
-    <ChatView {...chat}
-    messages={messages}
-    liveTurns={liveTurns}
-    transientMessages={selected ? chat.transientMessages?.filter((message) => message.hostTurnId && matchingTurns.has(message.hostTurnId)) : chat.transientMessages}
-    activeTurn={activeTurn}
+  return <ChatView {...chat}
     deriveTurnPresentation={deriveTurnPresentation}
-    emptyOverride={selected ? <p>{copy.noWorkConversation}</p> : chat.emptyOverride}
     turnDecorations={turnDecorations}
     promptRailDecorations={promptRailDecorations}
     onPromptRailHighlight={(turnId) => highlight.highlight(turnId ? workByTurn.get(turnId) : undefined)}
 
-  /></>;
+  />;
 }

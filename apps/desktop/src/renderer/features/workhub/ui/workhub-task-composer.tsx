@@ -19,15 +19,15 @@
 
 import { useEffect, useRef, type RefObject } from 'react';
 import { Composer, Button, useUiLocale, type ComposerHandle } from '@maka/ui';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, CornerDownRight } from 'lucide-react';
 import type { WorkHubServices } from '../ports.js';
 import type { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useWorkHubTaskInput } from '../controller/use-workhub-task-input.js';
 import { workHubTaskInputCopy } from '../locales/workhub-task-input-copy.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
-export function WorkHubTaskComposer({ services, owner, workId, view, composerRef }: {
-  services: WorkHubServices; owner: string; workId: string; view: ReturnType<typeof useWorkHubTaskView>; composerRef?: RefObject<ComposerHandle | null>;
+export function WorkHubTaskComposer({ services, owner, workId, name, view, composerRef }: {
+  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; composerRef?: RefObject<ComposerHandle | null>;
 }) {
   const locale = useUiLocale(), t = workHubTaskInputCopy[locale];
   const input = useWorkHubTaskInput(services, owner, workId, view);
@@ -44,6 +44,7 @@ export function WorkHubTaskComposer({ services, owner, workId, view, composerRef
   const error = state.error ? t.error[state.error] : state.rejected?.message;
   const blocked = !view.ready ? t.unavailable : !input.source ? t.history : input.session?.backend === 'plugin-executor' ? t.unsupported : !input.ready ? t.sessionUnavailable : undefined;
   return <section className="workHubTaskComposer" data-work-input={workId} aria-label={t.title}>
+    <p className="workHubTaskInputTarget"><CornerDownRight size={14} aria-hidden="true" />{t.address.replace('{name}', name)}</p>
     {blocked && <p role="status">{blocked}{!input.source && view.ready && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].follow} onClick={view.followLatest} />}</p>}
     {error && <p role="alert">{error}</p>}
     {state.recoveryUnsafe && state.error !== 'storage' && <p role="alert">{t.error.storage}</p>}
