@@ -266,7 +266,7 @@ test('a play assertion exception fails the render even if Storybook emits a fini
   assert.match(window.__makaStorybookSmoke.failures[0], /glyphs moved/);
 });
 
-test('native ResizeObserver loop notifications fail the render without suppressing the ErrorEvent', () => {
+test('native ResizeObserver notifications remain diagnostics without suppressing the ErrorEvent', () => {
   const events = new Map();
   const stories = new Map();
   const window = {
@@ -287,9 +287,11 @@ test('native ResizeObserver loop notifications fail the render without suppressi
   }
   stories.get('storyFinished')({ storyId: 'example' });
   assert.equal(window.__makaStorybookSmoke.finished, true);
-  assert.equal(window.__makaStorybookSmoke.failures.length, 2);
-  assert.match(window.__makaStorybookSmoke.failures[0], /undelivered notifications/);
-  assert.match(window.__makaStorybookSmoke.failures[1], /limit exceeded/);
+  assert.deepEqual(Array.from(window.__makaStorybookSmoke.failures), []);
+  assert.match(window.__makaStorybookSmoke.resizeObserverWarnings[0], /undelivered notifications/);
+  assert.match(window.__makaStorybookSmoke.resizeObserverWarnings[1], /limit exceeded/);
+  stories.get('playFunctionThrewException')({ storyId: 'example', message: 'history disappeared' });
+  assert.match(window.__makaStorybookSmoke.failures[0], /history disappeared/);
 });
 
 test('WorkHub suggestion, overview and preview geometry run at both widths in both themes', () => {

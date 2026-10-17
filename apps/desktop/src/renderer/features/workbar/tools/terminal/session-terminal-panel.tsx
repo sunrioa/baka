@@ -95,7 +95,6 @@ export function SessionTerminalPanel(props: {
     let hydrationPending = false;
     let resyncRequested = false;
     let cancelHydrationFrame: (() => void) | null = null;
-    let cancelResizeFrame: (() => void) | null = null;
     const hydration = new SessionTerminalHydration();
     const terminal = new Terminal({
       allowTransparency: true,
@@ -230,14 +229,7 @@ export function SessionTerminalPanel(props: {
         })
         .catch(() => {});
     };
-    // Fitting xterm can resize its host (for example when an error banner
-    // appears). Keep that DOM work out of the native observer delivery cycle.
-    const observer = new ResizeObserver(() => {
-      cancelResizeFrame ??= scheduleTerminalFrame(() => {
-        cancelResizeFrame = null;
-        resize();
-      });
-    });
+    const observer = new ResizeObserver(resize);
     observer.observe(host);
 
     // Live-apply font-size changes from Appearance settings. Changing the size
@@ -276,8 +268,6 @@ export function SessionTerminalPanel(props: {
       renderQueue.close();
       cancelHydrationFrame?.();
       cancelHydrationFrame = null;
-      cancelResizeFrame?.();
-      cancelResizeFrame = null;
       observer.disconnect();
       unsubscribeFontSize();
       unsubscribe();

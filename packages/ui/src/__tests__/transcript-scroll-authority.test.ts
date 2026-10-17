@@ -96,13 +96,9 @@ function fakeRoot(options?: { scrollHeight?: number; clientHeight?: number }): F
  * is every box changing at once, which is the only distinction the authority
  * draws between them: none.
  *
- * Resize delivery advances its measurement frame; other frames are explicit.
- * Raw delivery is also exposed for observer-cycle and cancellation assertions.
+ * End-of-operation frame callbacks are advanced explicitly.
  */
-function withObservers<T>(run: (resize: () => void, frame: () => void, native: {
-  notifyResize: () => void;
-  pendingFrames: () => number;
-}) => T): T {
+function withObservers<T>(run: (resize: () => void, frame: () => void) => T): T {
   const observers = new Set<() => void>();
   const frames = new Map<number, FrameRequestCallback>();
   let nextFrame = 0;
@@ -117,9 +113,8 @@ function withObservers<T>(run: (resize: () => void, frame: () => void, native: {
   const originalFrame = globals.requestAnimationFrame;
   const originalCancelFrame = globals.cancelAnimationFrame;
   globals.requestAnimationFrame = (callback: FrameRequestCallback) => {
-    const id = nextFrame++;
-    frames.set(id, callback);
-    return id;
+    frames.set(++nextFrame, callback);
+    return nextFrame;
   };
   globals.cancelAnimationFrame = (id: number) => { frames.delete(id); };
   globals.ResizeObserver = class {
@@ -138,19 +133,14 @@ function withObservers<T>(run: (resize: () => void, frame: () => void, native: {
     observe(): void {}
     disconnect(): void {}
   };
-  const notifyResize = (): void => {
-    for (const observer of [...observers]) observer();
-  };
-  const frame = (): void => {
-    const pending = [...frames.values()];
-    frames.clear();
-    for (const callback of pending) callback(0);
-  };
   try {
     return run(() => {
-      notifyResize();
-      frame();
-    }, frame, { notifyResize, pendingFrames: () => frames.size });
+      for (const observer of [...observers]) observer();
+    }, () => {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const callback of pending) callback(0);
+    });
   } finally {
     globals.ResizeObserver = originalResize;
     globals.MutationObserver = originalMutation;
@@ -159,62 +149,24 @@ function withObservers<T>(run: (resize: () => void, frame: () => void, native: {
   }
 }
 
-test('resize publication coalesces outside the observer cycle and measures the latest boxes', () => {
-  withObservers((_resize, frame, native) => {
+test('resize updates the reading snapshot and keeps a pinned reader at the tail', () => {
+  withObservers((resize) => {
     const root = fakeRoot();
     const authority = createTranscriptScrollAuthority();
     const detach = authority.attach(root as unknown as HTMLElement, {
       turnAt: () => String(root.scrollHeight), offsetOf: () => 0,
       reveal: () => {}, measured: () => true,
     });
-    root.grow(100);
-    native.notifyResize();
-    root.grow(200);
-    native.notifyResize();
-    assert.equal(root.scrollTop, 2_700, 'the pinned tail stays in place in the same paint');
-    assert.equal(authority.getSnapshot().readingTurnId, '3000', 'native delivery must not publish a new virtual reading row');
-    assert.equal(native.pendingFrames(), 1);
-    frame();
+    root.grow(300);
+    resize();
     assert.equal(root.scrollTop, 2_700);
     assert.equal(authority.getSnapshot().readingTurnId, '3300');
     assert.equal(authority.getSnapshot().pinned, true);
     detach();
-  });
-});
-
-test('reader input before a deferred resize still releases following', () => {
-  withObservers((_resize, frame, native) => {
-    const root = fakeRoot();
-    const authority = createTranscriptScrollAuthority();
-    const detach = authority.attach(root as unknown as HTMLElement);
-    root.grow(300);
-    native.notifyResize();
-    root.input(-100);
-    root.scrollTop = 2_300;
-    frame();
-    assert.equal(root.scrollTop, 2_300);
-    assert.equal(authority.getSnapshot().pinned, false);
-    detach();
-  });
-});
-
-test('detach cancels a pending resize frame, including frame id zero', () => {
-  withObservers((_resize, frame, native) => {
-    const root = fakeRoot();
-    const authority = createTranscriptScrollAuthority();
-    const detach = authority.attach(root as unknown as HTMLElement);
-    root.grow(300);
-    native.notifyResize();
-    assert.equal(native.pendingFrames(), 1);
-    detach();
-    assert.equal(native.pendingFrames(), 0);
-    const nextRoot = fakeRoot();
-    const detachNext = authority.attach(nextRoot as unknown as HTMLElement);
-    nextRoot.scrollTop = 100;
-    frame();
-    assert.equal(root.scrollTop, 2_700);
-    assert.equal(nextRoot.scrollTop, 100, 'the old callback must not reposition a new attachment');
-    detachNext();
+    root.grow(100);
+    resize();
+    assert.equal(root.scrollTop, 2_700, 'a detached observer must not reposition its old reader');
+    assert.equal(authority.getSnapshot().readingTurnId, '3300');
   });
 });
 
