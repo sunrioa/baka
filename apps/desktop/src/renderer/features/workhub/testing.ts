@@ -21,6 +21,7 @@ export { useWorkHubController } from './controller/use-workhub-controller.js';
 
 export { WorkHubComposer } from './ui/workhub-composer.js';
 export { WorkHubConversation } from './ui/workhub-conversation.js';
+export { WorkHubDock } from './ui/workhub-dock.js';
 export { WorkHubTaskView } from './ui/workhub-task-view.js';
 
 export { WorkHubHighlightContext } from './ui/workhub-work-identity.js';

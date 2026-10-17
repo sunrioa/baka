@@ -96,11 +96,11 @@ export function WorkHubRoot() {
   else if (controller.sessionId) retainedTaskOwner.current.owner = controller.sessionId;
   const taskOwner = controller.sessionId ?? retainedTaskOwner.current.owner;
   const taskSelection = useWorkHubTaskSelection(services, taskOwner);
-  const highlight = { ...localHighlight, selectedWork: taskSelection.selected,
+  const highlight = { ...localHighlight, selectedWork: taskSelection.highlighted,
     selectWork: (work: typeof localHighlight.selectedWork) => taskSelection.select(work?.workId ? { ...work, workId: work.workId } : undefined),
-    toggleWork: (work: NonNullable<typeof localHighlight.selectedWork>) => taskSelection.select(work.workId && work.workId !== taskSelection.selected?.workId ? { ...work, workId: work.workId } : undefined),
+    toggleWork: (work: NonNullable<typeof localHighlight.selectedWork>) => taskSelection.select(work.workId && work.workId !== taskSelection.highlighted?.workId ? { ...work, workId: work.workId } : undefined),
   };
-  const selectedTask = highlight.selectedWork && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
+  const selectedTask = taskSelection.selected && sameWorkHubHost(taskOwner, taskSelection.selected.sessionId) ? taskSelection.selected : undefined;
   const focusComposer = () => composer.current?.focus();
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);

@@ -30,7 +30,7 @@ import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 /** The main window owns only this landing space; the live view keeps its React owner. */
 export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: {
   visible?: boolean;
-  workbar: { bottomOpen: boolean; rightCollapsed: boolean };
+  workbar: { bottomOpen: boolean; rightCollapsed: boolean; taskPanelVisible: boolean };
   workbarTogglePosition?: WorkbarTogglePosition;
 }) {
   const { presentation } = useWorkHubServices();
@@ -40,11 +40,13 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
   const workbarRef = useRef({
     placement: workbar.bottomOpen ? 'bottom' as const : 'right' as const,
     collapsed: workbar.bottomOpen ? false : workbar.rightCollapsed,
+    taskPanelVisible: workbar.taskPanelVisible,
     togglePosition: workbarTogglePosition,
   });
   workbarRef.current = {
     placement: workbar.bottomOpen ? 'bottom' : 'right',
     collapsed: workbar.bottomOpen ? false : workbar.rightCollapsed,
+    taskPanelVisible: workbar.taskPanelVisible,
     togglePosition: workbarTogglePosition,
   };
   const [snapshot, setSnapshot] = useState<WorkHubPresentationSnapshot>();
@@ -66,6 +68,7 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
     };
   }, [presentation]);
   const surface = useRef<NativeSurfaceWatch>(undefined);
+  const publishHost = useRef<() => void>(undefined);
   useLayoutEffect(() => {
     const node = element.current;
     if (!node) return;
@@ -95,10 +98,12 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
         }).catch(report);
       }
     };
+    publishHost.current = update;
     update();
     surface.current = visible && docked ? watchNativeSurface(node, update) : undefined;
     return () => {
       active = false;
+      publishHost.current = undefined;
       surface.current?.dispose();
       surface.current = undefined;
       void presentation
@@ -106,7 +111,10 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
         .catch(() => undefined);
     };
   }, [enabled, presentation, visible, snapshot?.placement]);
-  useEffect(() => surface.current?.refresh(), [workbar.bottomOpen, workbar.rightCollapsed, workbarTogglePosition]);
+  useEffect(() => {
+    if (surface.current) surface.current.refresh();
+    else publishHost.current?.(); // Floating mode has no native-surface observer.
+  }, [workbar.bottomOpen, workbar.rightCollapsed, workbar.taskPanelVisible, workbarTogglePosition]);
   return (
     <section ref={element} className="workHubDock" data-native-edge={snapshot?.placement === 'docked' && !needsRecovery || undefined} hidden={!visible} aria-label={t.title}>
       {backdrop && snapshot?.placement === 'docked' && <img className="workHubDockBackdrop" src={backdrop} alt="" aria-hidden draggable={false} />}
