@@ -18,7 +18,7 @@
  */
 
 import { BrowserWindow, View, WebContentsView, globalShortcut, ipcMain, screen, shell, systemPreferences } from 'electron';
-import type { WorkHubHost, WorkHubMainNavigation, WorkHubPresentationSnapshot } from '../shared/workhub-presentation.js';
+import type { WorkHubHost, WorkHubMainNavigation, WorkHubPresentationSnapshot, WorkHubTaskSelection } from '../shared/workhub-presentation.js';
 import { parseDesktopSessionKey } from '../shared/runtime-host-identity.js';
 import { loadMainRenderer, resolveMainRendererEntry } from './main-renderer-loader.js';
 import { isExternalUrl } from './external-link-guard.js';
@@ -72,6 +72,7 @@ export function createWorkHubPresentation(deps: WorkHubPresentationDeps) {
   let dismissedTurnId: string | undefined;
   let expandOnFocus = false;
   let placement: 'docked' | 'floating' = 'docked';
+  let taskSelection: WorkHubTaskSelection | undefined;
   let shortcutRegistered = false;
   let disposed = false;
   // The app is closing every window for an update install (#5783): the
@@ -112,7 +113,7 @@ export function createWorkHubPresentation(deps: WorkHubPresentationDeps) {
   }
 
   function getSnapshot(): WorkHubPresentationSnapshot {
-    return { placement, ...(host.workbar ? { workbar: host.workbar } : {}), floatingVisible: !!floating && !floating.isDestroyed() && floating.isVisible(), shortcutRegistered, rendererCrashed, ...(progressRequest !== undefined ? { progressRequest } : {}) };
+    return { placement, ...(host.workbar ? { workbar: host.workbar } : {}), ...(taskSelection ? { taskSelection } : {}), floatingVisible: !!floating && !floating.isDestroyed() && floating.isVisible(), shortcutRegistered, rendererCrashed, ...(progressRequest !== undefined ? { progressRequest } : {}) };
   }
 
   function send(channel: string, ...args: unknown[]): void {
@@ -705,6 +706,21 @@ export function createWorkHubPresentation(deps: WorkHubPresentationDeps) {
           }
           case 'dock': await dock(revision); return;
           case 'hide': hideFloating(); return;
+          case 'select-task': {
+            const value = payload as WorkHubTaskSelection | null;
+            if (!value || typeof value.ownerSessionId !== 'string' || value.ownerSessionId.length > 4096) throw new Error('Invalid WorkHub task selection');
+            const owner = parseDesktopSessionKey(value.ownerSessionId);
+            const work = value.work;
+            if (work !== undefined && (!work || typeof work.sessionId !== 'string' || work.sessionId.length > 4096 || typeof work.name !== 'string' || work.name.length > 4096 || typeof work.workId !== 'string' || !work.workId.trim() || work.workId.length > 4096)) throw new Error('Invalid WorkHub task selection');
+            if (work && parseDesktopSessionKey(work.sessionId).hostId !== owner.hostId) throw new Error('WorkHub task selection must stay on its Host');
+            taskSelection = { ownerSessionId: value.ownerSessionId, ...(work ? { work: { sessionId: work.sessionId, name: work.name, workId: work.workId } } : {}) };
+            send('workhub-presentation:changed', getSnapshot());
+            if (!isMain && work) await navigateMain({ kind: 'workhub', panelAction: 'tasks' }, revision);
+            return;
+          }
+          case 'tasks':
+            await navigateMain({ kind: 'workhub', panelAction: 'tasks' }, revision);
+            return;
           case 'toggle-workbar':
           case 'usage':
             await navigateMain({ kind: 'workhub', panelAction: command === 'usage' ? 'usage' : 'toggle' }, revision);

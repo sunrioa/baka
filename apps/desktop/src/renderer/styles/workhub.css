@@ -82,10 +82,7 @@
   .workHubWorkspace { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
   .workHubWorkspace > .mainColumn { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
   .workHubWorkspace > .mainColumn > .maka-chat-layout { flex: 1; min-height: 0; }
-  .workHubCoordinatorHeader { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px; border-bottom: 1px solid var(--border-subtle, var(--border)); }
-  .workHubCoordinatorHeader > div { min-width: 0; }
-  .workHubCoordinatorHeader h1 { font-size: 17px; line-height: 1.4; font-weight: 600; margin: 0; }
-  .workHubCoordinatorHeader p { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); margin: 4px 0 0; }
+  .workHubFloatingTaskToggle { display: flex; justify-content: flex-end; padding: 6px 12px; }
   .workHubLiveWelcome, .workHubDockPlaceholder { display: grid; justify-items: center; align-content: center; gap: var(--space-3); padding: var(--space-6); min-height: 220px; text-align: center; }
   .workHubDockPlaceholder { height: 100%; }
   .workHubDockBackdrop { display: block; width: 100%; height: 100%; object-fit: fill; }
@@ -333,7 +330,6 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
   .workHubWorkspace:has(.workHubTaskRail:not([hidden])) { flex-direction: column; }
   .workHubTaskRail:not([hidden]) { width: 100%; flex: 0 0 40%; border-inline-start: 0; border-top: 1px solid var(--border-subtle, var(--border)); }
   .workHubTaskRail[data-view='execution']:not([hidden]) { flex: 1; width: 100%; border-inline-start: 0; border-top: 1px solid var(--border-subtle, var(--border)); }
-  .workHubCoordinatorHeader { padding-block: 10px; }
   .workHubTaskRail .workHubTaskViewDescription { display: none; }
 }
 .workHubTaskRows h3, .workHubTaskDetails h4 { margin: 10px 0 6px; font-size: 12px; }
@@ -352,6 +348,12 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
 .workHubTaskDetails form { display: grid; gap: 6px; padding-top: 8px; }
 @media (max-width: 420px) { .workHubTaskHeadingContent { align-items: flex-start; flex-direction: column; gap: 2px; } .workHubTaskDetails dl { display: block; } .workHubTaskDetails dd { margin-bottom: 6px; } }
 .workHubTaskPanels { max-width: var(--maka-reading-measure); margin-inline: auto; max-height: min(52vh, 460px); overflow-y: auto; overscroll-behavior: contain; }
+.workHubTaskPanel { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; background: var(--background); }
+.workHubTaskPanel[data-view='overview'] { overflow-y: auto; overscroll-behavior: contain; }
+.workHubTaskPanel > .maka-chat-layout { flex: 1; min-height: 0; min-width: 0; }
+.workHubTaskPanel .workHubTaskViewHeader { gap: 8px; padding-block: 8px 12px; }
+.workHubTaskPanel .workHubTaskStatusBadge { padding: 3px 6px; font-size: 11px; border: 0; border-radius: 5px; }
+.workHubTaskPanel .workHubTaskSessionLabel { gap: 8px; margin-block: 0 12px; flex-wrap: wrap; }
 .workHubTaskPermission pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

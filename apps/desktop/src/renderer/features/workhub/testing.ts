@@ -31,3 +31,4 @@ export { createWorkHubTaskViewModel } from './model/task-view-model.js';
 export { useWorkHubSessionView, useWorkHubTaskView } from './controller/use-workhub-task-view.js';
 export { createWorkHubTaskInputModel, workHubTaskInputSource } from './model/task-input-model.js';
 export { useWorkHubTaskInput } from './controller/use-workhub-task-input.js';
+export { useWorkHubTaskSelection } from './controller/use-workhub-task-selection.js';

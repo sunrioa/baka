@@ -46,16 +46,11 @@ export function WorkHubTaskView({ services, workId, name, view }: {
   return <section className="workHubTaskView" aria-label={copy.title} data-work-id={workId}>
     <header className="workHubTaskViewHeader">
       <div className="workHubTaskHeadingRow">
-        <p className="workHubTaskEyebrow">{copy.title}</p>
-        <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} label={copy.refresh} onClick={() => { void view.refresh(); }} />
-      </div>
-      <div className="workHubTaskTitleRow">
-        <div><h2>{name}</h2></div>
         <span className="workHubTaskStatusBadge" data-status={status} role="status">
           {execution ? copy.status[execution.status] : view.assignment ? copy.state[view.assignment.state] : copy.loading}
         </span>
+        <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} label={copy.refresh} onClick={() => { void view.refresh(); }} />
       </div>
-      <p className="workHubTaskViewDescription">{copy.description}</p>
       {view.assignment && <details className="workHubTaskInstructions">
         <summary><FileText size={15} aria-hidden="true" /><span>{copy.source}</span><ChevronDown size={14} aria-hidden="true" /></summary>
         <p className="workHubTaskSource">{view.assignment.text}</p>

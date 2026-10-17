@@ -30,6 +30,7 @@ import {
 } from '../controller/use-workbar-controller.js';
 import type { WorkbarShellBridge } from '../controller/workbar-shell-bridge.js';
 import type { WorkbarHostModel } from './workbar-host.js';
+import { TaskExecutionPanelProvider } from '../../../application/contracts/task-execution-panel.js';
 
 const WorkbarHostModelContext = createContext<WorkbarHostModel | null>(null);
 
@@ -56,9 +57,11 @@ export function WorkbarProvider(props: {
   } as CSSProperties;
   return (
     <WorkbarHostModelContext.Provider value={controller.host}>
+      <TaskExecutionPanelProvider onOpen={() => controller.commands.openTool('workhub-tasks')}>
       <div className="maka-workbar-shell-vars" style={style}>
         {props.children}
       </div>
+      </TaskExecutionPanelProvider>
     </WorkbarHostModelContext.Provider>
   );
 }

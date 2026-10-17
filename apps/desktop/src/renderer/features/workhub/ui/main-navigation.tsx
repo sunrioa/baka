@@ -17,15 +17,19 @@
  * under the License.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSettingsNavigation } from '../../../application/contracts/settings-presentation/settings-navigation.js';
 import { useWorkHubServices } from '../services.js';
 import { useWorkHubEnablement } from '../../../application/contracts/workhub-workspace/workhub-enablement.js';
+import { useTaskExecutionPanel } from '../../../application/contracts/task-execution-panel.js';
+import { WorkHubTaskPanel } from './workhub-task-panel.js';
 export function WorkHubMainNavigation(props: { workbarReady: boolean; onOpenUsage(): void; onToggleWorkbar(): void; onOpenWorkHub(): void; onOpenSession(sessionId: string): void }) {
-  const [pendingAction, setPendingAction] = useState<'usage' | 'toggle'>();
+  const [pendingAction, setPendingAction] = useState<'usage' | 'toggle' | 'tasks'>();
   const { presentation } = useWorkHubServices();
   const settingsNavigation = useSettingsNavigation();
   const enablement = useWorkHubEnablement();
+  const taskPanel = useTaskExecutionPanel();
+  useLayoutEffect(() => taskPanel.register(WorkHubTaskPanel), [taskPanel.register]);
   const current = useRef(props); current.current = props;
   useEffect(() => presentation.onOpenMain((navigation) => {
     if (navigation.kind === 'workhub') {
@@ -38,9 +42,10 @@ export function WorkHubMainNavigation(props: { workbarReady: boolean; onOpenUsag
   useEffect(() => {
     if (pendingAction && props.workbarReady) {
       if (pendingAction === 'usage') current.current.onOpenUsage();
+      else if (pendingAction === 'tasks') taskPanel.open();
       else current.current.onToggleWorkbar();
       setPendingAction(undefined);
     }
-  }, [pendingAction, props.workbarReady]);
+  }, [pendingAction, props.workbarReady, taskPanel.open]);
   return null;
 }

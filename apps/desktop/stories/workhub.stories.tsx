@@ -18,15 +18,21 @@
  */
 
 import { useMemo, useState } from 'react';
-import { ComposerPromptSuggestionProvider, ToastProvider, LocaleProvider, AstryxLocaleProvider, ChatSurfaceLayout } from '@maka/ui';
+import { ComposerPromptSuggestionProvider, ToastProvider, LocaleProvider, AstryxLocaleProvider, ChatSurfaceLayout, useToast } from '@maka/ui';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { StoredMessage, SessionSummary } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskInputResult } from '@maka/runtime-host/protocol';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import { expect, fn, userEvent, within, waitFor } from 'storybook/test';
-import { WorkHubRoot, WorkHubServicesProvider, type WorkHubServices, type WorkHubTranscriptSnapshot } from '../src/renderer/features/workhub/index.js';
+import { WorkHubRoot, WorkHubServicesProvider, WorkHubMainNavigation, type WorkHubServices, type WorkHubTranscriptSnapshot } from '../src/renderer/features/workhub/index.js';
+import { WorkbarServicesProvider, WorkbarShellRoot, WorkbarProvider, WorkbarHost, WorkbarTitlebarActions } from '../src/renderer/features/workbar/index.js';
+import { createFakeWorkbarServices } from '../src/renderer/features/workbar/testing.js';
+import { WorkHubEnablementProvider } from '../src/renderer/application/contracts/workhub-workspace/workhub-enablement.js';
+import { SettingsNavigationProvider } from '../src/renderer/application/contracts/settings-presentation/settings-navigation.js';
+import { appShellFrameStyle } from '../src/renderer/shell/frame-style.js';
 import { WorkHubConversation, WorkHubHighlightContext } from '../src/renderer/features/workhub/testing.js';
 import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
+import type { WorkHubPresentationSnapshot, WorkHubMainNavigation as MainNavigation } from '../src/shared/workhub-presentation.js';
 
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
@@ -130,6 +136,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
   let executionConcurrency = 3;
   const publishExecution = () => updateExecution?.({ type: 'host_execution', available: true, rootTurn: pendingForm ? { sessionId, turnId: pendingForm.turnId, runId: 'selection-run', status: 'waiting_for_user' } : questionPending ? { sessionId, turnId: 'question-turn', runId: 'question-run', status: 'waiting_for_user' } : null });
   const publish = () => { publishExecution(); updateTranscript?.({ messages, hasOlder: false, ready: true }); };
+  let presentation: WorkHubPresentationSnapshot = { placement: progress ? 'floating' : 'docked', floatingVisible: progress, progressRequest: progress ? 1 : undefined, shortcutRegistered: true, rendererCrashed: false, workbar: { collapsed: true, placement: 'right', togglePosition: 'titlebar' } };
+  const presentationListeners = new Set<(snapshot: WorkHubPresentationSnapshot) => void>();
+  const navigationListeners = new Set<(navigation: MainNavigation) => void>();
   return {
     inspector: {
       context: async () => ({ ok: true, data: { status: 'available', completedAt: 1, modelId: session.model, providerId: 'openai', inputTokens: 1000, contextWindow: 100_000 } }),
@@ -148,7 +157,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     enqueueMessage: async () => 'admitted',
     queryMessageExecutions: async () => ({ resolutions: [] }),
     surface: 'workhub', initialLocale: 'zh-CN', subscribeAppearance: () => () => {},
-    presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => ({ placement: progress ? 'floating' : 'docked', floatingVisible: progress, progressRequest: progress ? 1 : undefined, shortcutRegistered: true, rendererCrashed: false, workbar: { collapsed: true, placement: 'right', togglePosition: 'edge' } }), setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openSession: async (id) => { writes.open(id); }, openSettings: async () => {}, subscribe: () => () => {}, onViewportInset: () => () => {}, onFocusComposer: () => () => {}, onOpenMain: () => () => {} },
+    presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => presentation, setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openTasks: async () => { for (const notify of navigationListeners) notify({ kind: 'workhub', panelAction: 'tasks' }); },
+      selectTask: async selection => { presentation = { ...presentation, taskSelection: selection }; for (const notify of presentationListeners) notify(presentation); if (presentation.placement === 'docked' && selection.work) for (const notify of navigationListeners) notify({ kind: 'workhub', panelAction: 'tasks' }); },
+      openSession: async (id) => { writes.open(id); }, openSettings: async () => {}, subscribe: handler => { presentationListeners.add(handler); return () => { presentationListeners.delete(handler); }; }, onViewportInset: () => () => {}, onFocusComposer: () => () => {}, onOpenMain: handler => { navigationListeners.add(handler); return () => { navigationListeners.delete(handler); }; } },
     control: { getSnapshot: async () => ({ revision: 0, phase: 'idle', canUndo: false }), subscribe: () => () => {}, stop: async () => {}, undo: async () => {} },
     bindBrowserSession: () => {},
     resolve: async () => sessionId, subscribeHosts: listener => { if (taskOverview) overviewHostListeners.add(listener); return () => { overviewHostListeners.delete(listener); }; }, subscribeAvailability: listener => { availabilityListeners.add(listener); return () => { availabilityListeners.delete(listener); }; },
@@ -333,6 +344,27 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
 
   };
 }
+function DockedConsole({ services }: { services: WorkHubServices }) {
+  const toastApi = useToast();
+  const [workbarServices] = useState(() => createFakeWorkbarServices({ inspector: services.inspector }));
+  // The real provider owns topology, resizing, tab selection and collapse.
+  // Only the Electron native docking rectangle is absent in Storybook.
+  return <WorkHubEnablementProvider value={{ isEnabled: () => true, subscribe: () => () => {} }}><SettingsNavigationProvider navigation={{ openSettingsSection() {} }}><WorkbarServicesProvider services={workbarServices}><WorkbarShellRoot>{workbar => <WorkbarProvider bridge={workbar.bridge} input={{
+    workHub: { active: true }, available: true, layoutSessionId: sessionId, activeSession: undefined,
+    projectId: null, projectAliases: [], authoritativeSessionIds: undefined, shellObscured: false, modelChoices: choices, toastApi,
+  }}>
+    <div className="appFrame agents-layout-root" data-agents-page data-sidebar-state="collapsed" style={appShellFrameStyle({ sessionListCollapsed: true, sessionListWidth: 0 })}>
+    <div className="maka-detail-with-artifacts" style={{ height: '100dvh', '--maka-plate-titlebar-clearance': '40px' } as import('react').CSSProperties}>
+      <WorkbarTitlebarActions togglePosition="titlebar" />
+      <WorkHubMainNavigation workbarReady={workbar.selectors.ready} onOpenUsage={() => workbar.commands.toggleTool('inspector')}
+        onToggleWorkbar={workbar.commands.toggleRightPanel} onOpenWorkHub={() => {}} onOpenSession={id => { void services.presentation.openSession(id); }} />
+      {/* Replace only Electron's main-column WebContentsView rectangle. */}
+      <div className="mainColumn" style={{ position: 'relative' }}><WorkHubRoot /></div>
+      <WorkbarHost togglePosition="titlebar" />
+    </div>
+    </div>
+  </WorkbarProvider>}</WorkbarShellRoot></WorkbarServicesProvider></SettingsNavigationProvider></WorkHubEnablementProvider>;
+}
 function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false, taskOverview = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean; taskOverview?: boolean }) {
   const [progressHeight, setProgressHeight] = useState(112);
   const [services] = useState(() => {
@@ -347,7 +379,7 @@ function Surface({ failFirst = false, history = false, colors = false, selectTar
     enabled: suggestionsEnabled, setEnabled: setSuggestionsEnabled,
     generate: async () => '继续补充并发回调、重复投递和异常恢复的测试，确认所有边界条件都能正确处理，然后整理测试结果。',
   } : undefined, [suggestions, suggestionsEnabled]);
-  return <LocaleProvider locale="zh-CN"><AstryxLocaleProvider><ToastProvider><ComposerPromptSuggestionProvider service={prediction}><WorkHubServicesProvider services={services}><div style={{ height: progress ? progressHeight : '100dvh', width: progress ? 360 : undefined, maxWidth: '100%' }}><WorkHubRoot /></div></WorkHubServicesProvider></ComposerPromptSuggestionProvider></ToastProvider></AstryxLocaleProvider></LocaleProvider>;
+  return <LocaleProvider locale="zh-CN"><AstryxLocaleProvider><ToastProvider><ComposerPromptSuggestionProvider service={prediction}><WorkHubServicesProvider services={services}><div style={{ height: progress ? progressHeight : '100dvh', width: progress ? 360 : undefined, maxWidth: '100%' }}>{progress ? <WorkHubRoot /> : <DockedConsole services={services} />}</div></WorkHubServicesProvider></ComposerPromptSuggestionProvider></ToastProvider></AstryxLocaleProvider></LocaleProvider>;
 }
 const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, beforeEach: () => {
   Object.values(writes).forEach((spy) => spy.mockClear());
@@ -387,24 +419,24 @@ export const DispatchCards: Story = {
     await waitFor(() => expect(within(receipt).getByText(/批量派发完整回执/)).toBeVisible());
     await userEvent.click(receipt.querySelector('summary')!);
     await userEvent.click(rows[0]!);
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：发布检查清单'));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveAccessibleName('发送目标：发布检查清单'));
     expect(rows[0]).toHaveAttribute('aria-pressed', 'true');
-    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务侧栏' }));
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskRail')).not.toBeVisible());
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务工作栏' }));
+    await waitFor(() => expect(canvasElement.querySelector('.maka-session-workbar[data-placement="right"]')).not.toBeVisible());
     await userEvent.click(rows[0]!);
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskRail')).toBeVisible());
+    await waitFor(() => expect(canvasElement.querySelector('.maka-session-workbar[data-placement="right"]')).toBeVisible());
     await userEvent.click(rows[1]!);
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：研究证据'));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveAccessibleName('发送目标：研究证据'));
     expect(rows[0]).toHaveAttribute('aria-pressed', 'false');
     expect(rows[1]).toHaveAttribute('aria-pressed', 'true');
     await userEvent.click(rows[0]!);
-    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveTextContent('发送目标：发布检查清单'));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toHaveAccessibleName('发送目标：发布检查清单'));
     expect(writes.open).not.toHaveBeenCalled();
     expect(writes.answer).not.toHaveBeenCalled();
     expect(writes.taskInput).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
     expect(writes.concurrency).not.toHaveBeenCalled();
-    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务侧栏' }));
+    await userEvent.click(within(canvasElement).getByRole('button', { name: '收起任务工作栏' }));
     for (const row of rows) expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
   },
 };
@@ -433,8 +465,14 @@ export const FullConversationAndWorkIdentity: Story = {
 };
 export const FullConversationNarrow: Story = { ...FullConversationAndWorkIdentity, parameters: { viewport: { defaultViewport: 'tablet' } } };
 async function openTaskSidebar(canvasElement: HTMLElement) {
-  const toggle = within(canvasElement).queryByRole('button', { name: '近期任务' });
-  if (toggle?.getAttribute('aria-expanded') === 'false') await userEvent.click(toggle);
+  const canvas = within(canvasElement);
+  await waitFor(() => expect(canvasElement.querySelector('.maka-session-workbar-toolbar')).not.toBeNull());
+  const toggle = canvas.queryByRole('button', { name: '展开任务工作栏' });
+  if (toggle) await userEvent.click(toggle);
+  if (!canvasElement.querySelector('.workHubTaskPanel')) {
+    const workbar = canvasElement.querySelector<HTMLElement>('.maka-session-workbar[data-placement="right"]')!;
+    await userEvent.click(await within(workbar).findByText('任务执行', { exact: true }));
+  }
 }
 // Real path: WorkHub → task overview → View task execution. The production
 // WorkHubRoot selects a canonical work, then reads its full Session histories.
@@ -485,7 +523,11 @@ export const TaskExecutionView: Story = {
     expect(taskComposer).toBeVisible();
     expect(coordinatorQuestion).toBeVisible();
     expect(within(taskComposer).getByRole('button', { name: '停止' })).toBeVisible();
-    expect(taskComposer.querySelector('.workHubTaskInputTarget')).toHaveTextContent('发布检查清单');
+    expect(taskComposer).toHaveAccessibleName('发送目标：发布检查清单');
+    expect(taskComposer.querySelector('.workHubTaskInputTarget')).toBeNull();
+    expect(taskComposer.querySelector('.workHubTaskInputHint')).toBeNull();
+    expect(canvasElement.querySelector('.workHubCoordinatorHeader')).toBeNull();
+    expect(view.querySelector('.workHubTaskViewDescription')).toBeNull();
     expect(within(taskComposer).queryByRole('button', { name: '返回协调输入' })).toBeNull();
     const chooseTask = async (name: string) => {
       await userEvent.click(canvas.getByRole('combobox', { name: '选择任务' }));
@@ -515,10 +557,10 @@ export const TaskExecutionView: Story = {
     expect(currentComposer.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
     const currentView = canvasElement.querySelector<HTMLElement>('.workHubTaskView')!;
     expect(currentView.scrollWidth).toBeLessThanOrEqual(currentView.clientWidth);
-    const rail = canvasElement.querySelector<HTMLElement>('.workHubTaskRail')!;
-    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
-    if (window.innerWidth > 820) expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
-    else expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(rail.getBoundingClientRect().top);
+    const rail = canvasElement.querySelector<HTMLElement>('.maka-session-workbar[data-placement="right"]')!;
+    expect(currentView.closest('.maka-session-workbar-panel')).toHaveAttribute('data-placement', 'right');
+    expect(currentView.getBoundingClientRect().left).toBeGreaterThanOrEqual(rail.getBoundingClientRect().left);
+    expect(canvasElement.querySelector('.workHubTaskRail')).toBeNull();
     expect(writes.answer).not.toHaveBeenCalled();
     expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
@@ -546,7 +588,7 @@ export const TaskExecutionView: Story = {
     await userEvent.click(restoredEditor); expect(restoredEditor).toHaveFocus(); expect(restoredEditor).toHaveTextContent('');
     expect(writes.taskInput).toHaveBeenCalledTimes(1);
     expect(writes.answer).toHaveBeenCalledTimes(1); expect(writes.question).toHaveBeenCalledTimes(1); expect(writes.form).not.toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole('button', { name: '收起任务侧栏' }));
+    await userEvent.click(canvas.getByRole('button', { name: '收起任务工作栏' }));
     await waitFor(() => expect(coordinatorForm).toBeVisible());
     expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBe(coordinatorForm);
     await openTaskSidebar(canvasElement);
@@ -574,16 +616,13 @@ export const TaskOverviewAndContinuation: Story = {
     let editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
     await userEvent.click(editor);
     expect(editor).toHaveFocus();
-    const rail = overview.closest<HTMLElement>('.workHubTaskRail')!;
+    const rail = overview.closest<HTMLElement>('.workHubTaskPanel')!;
     expect(rail).toBeVisible();
     expect(rail.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
     expect(canvasElement.querySelector('.workHubTaskPanels')).not.toContainElement(overview);
     const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
-    if (window.innerWidth > 820) {
-      expect(rail.getBoundingClientRect().top).toBe(0);
-      expect(rail.getBoundingClientRect().height).toBe(window.innerHeight);
-      expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
-    } else expect(main.getBoundingClientRect().bottom).toBeLessThanOrEqual(rail.getBoundingClientRect().top);
+    expect(rail.closest('.maka-session-workbar-panel')).toHaveAttribute('data-placement', 'right');
+    expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
     const float = canvas.getByRole('button', { name: '浮出工作台' }).getBoundingClientRect();
     expect(canvas.getByRole('button', { name: '浮出工作台' }).contains(document.elementFromPoint(float.x + float.width / 2, float.y + float.height / 2))).toBe(true);
     const panels = canvasElement.querySelector('.workHubTaskPanels')!;
@@ -603,7 +642,7 @@ export const TaskOverviewAndContinuation: Story = {
     expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(overviewHostListeners.size).toBeGreaterThan(0);
     for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'unavailable' });
-    await waitFor(() => expect(overview.isConnected).toBe(false));
+    await waitFor(() => expect(overview).toHaveAttribute('aria-busy', 'true'));
     expect(writes.taskContinue).not.toHaveBeenCalled();
     for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'ready' });
     await waitFor(() => expect(canvas.getByRole('region', { name: '近期任务' })).toHaveAttribute('aria-busy', 'false'));
@@ -637,7 +676,7 @@ export const TaskOverviewAndContinuation: Story = {
     // Restore the reachable top-of-list view for the visual evidence.
     rail.scrollTo({ top: 0 });
     panels.scrollTo({ top: 0 });
-    await userEvent.click(within(overview).getByRole('button', { name: '收起任务侧栏' }));
+    await userEvent.click(canvas.getByRole('button', { name: '收起任务工作栏' }));
     expect(rail).not.toBeVisible();
     await openTaskSidebar(canvasElement);
     expect(rail).toBeVisible();
@@ -866,9 +905,8 @@ export const ComposerRetainsFailedAttachment: Story = {
   },
 };
 
-// Real path: Appearance → disable the titlebar Workbar toggle → dock WorkHub.
-// The docked renderer reserves distinct targets for prompt navigation and the
-// Workbar edge. Measure those targets rather than a platform scrollbar width.
+// Real path: docked WorkHub's prompt rail remains inside the coordinator's
+// scrollport when the unified shell workbar uses its titlebar control.
 async function expectPromptRailClearance(canvasElement: HTMLElement) {
   await waitFor(() => {
     const rail = canvasElement.querySelector<HTMLElement>('.maka-prompt-rail')!;
@@ -882,11 +920,10 @@ async function expectPromptRailClearance(canvasElement: HTMLElement) {
     } else {
       expect(rail).toBeVisible();
       const box = rail.getBoundingClientRect();
-      const edge = canvasElement.querySelector('.maka-workbar-edge')!.getBoundingClientRect();
       const scroller = canvasElement.querySelector('[data-chat-scroll-container]')!.getBoundingClientRect();
       const composer = canvasElement.querySelector('.maka-composer')!.getBoundingClientRect();
       expect(box.width).toBeGreaterThan(0);
-      expect(box.right).toBeLessThan(edge.left);
+      expect(box.right).toBeLessThanOrEqual(scroller.right);
       expect(box.top).toBeGreaterThanOrEqual(scroller.top);
       expect(box.bottom).toBeLessThanOrEqual(composer.top);
       for (const tick of ticks) {

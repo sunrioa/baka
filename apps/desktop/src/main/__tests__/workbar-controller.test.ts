@@ -780,6 +780,8 @@ describe('useWorkbarController', () => {
     assert.deepEqual(controller().host.panelsState.right.tabs, []);
     await act(async () => controller().commands.openTool('browser'));
     assert.deepEqual(controller().host.panelsState.right.tabs.map((tab) => tab.kind), ['browser']);
+    await act(async () => controller().commands.openTool('workhub-tasks'));
+    assert.equal(controller().host.panelsState.right.activeTabId, 'workbar:workhub-tasks');
     await act(async () => render(false));
     assert.equal(controller().host.activeId, 'ordinary');
     await act(async () => controller().commands.openTool('review'));
