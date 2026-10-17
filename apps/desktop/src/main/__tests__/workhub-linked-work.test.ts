@@ -132,6 +132,18 @@ test('durable task results restore Host-scoped work links without treating faile
   ], [], 'Work'), []);
 });
 
+test('reused tool call IDs cannot attach another Turn’s result or classify a different tool as delegation', () => {
+  const call = (turnId: string): ToolCallMessage => ({ type: 'tool_call', id: 'reused', turnId, ts: 1, toolName: 'mcp__desktop_workhub__tasks', args: { request: { operation: 'stop' } } });
+  const result = (turnId: string, targetSessionKey: string): ToolResultMessage => ({ type: 'tool_result', id: `result-${turnId}`, turnId, ts: 2, toolUseId: 'reused', isError: false, content: { kind: 'json', value: { targetSessionKey } } });
+  const targets = ['first', 'second'].map(sessionId => JSON.stringify(['host', sessionId]));
+  const stopped = workHubLinkedWork([call('one'), result('one', targets[0]!), call('two'), result('two', targets[1]!)], [], 'Work');
+  assert.deepEqual(stopped.map(link => [link.coordinationTurnId, link.targetSessionId]), [['one', targets[0]], ['two', targets[1]]]);
+  const unrelated = { ...call('two'), toolName: 'Read', args: {} };
+  const misleading = result('two', targets[1]!);
+  misleading.content = { kind: 'json', value: { disposition: 'create_new', targetSessionKey: targets[1] } };
+  assert.deepEqual(workHubLinkedWork([call('one'), unrelated, misleading], [], 'Work'), []);
+});
+
 test('a shared coordination turn divides its clickable identity rail equally between Works', async () => {
   const markup = await renderTranscriptMarkup(createElement(LocaleProvider, { locale: 'en', children: null },
     createElement(ChatSurfaceLayout, { composer: null, children: null }, createElement(WorkHubConversation, {
