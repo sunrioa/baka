@@ -39,6 +39,7 @@ const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_wor
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
 const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskContinue: fn(), taskInput: fn() };
 const overviewHostListeners = new Set<Parameters<WorkHubServices['subscribeHosts']>[0]>();
+const overviewReadRecovery = new Set<() => void>();
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -172,7 +173,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
     queryTaskInteractions: async () => ({ requests: taskRequests, grants: taskGrants, truncated: false }),
-    queryTasks: async () => { if (disconnectedRead) { disconnectedRead = false; throw new Error('Host disconnected'); } return { tasks, truncated: taskOverview }; },
+    queryTasks: async () => { if (disconnectedRead) throw new Error('Host disconnected'); return { tasks, truncated: taskOverview }; },
     taskHistory: async (_owner, input) => {
       const task = tasks.find(item => item.actionId === input.workId);
       const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.workId);
@@ -218,6 +219,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       if (!task) throw new Error('Original task unavailable');
       if (writes.taskContinue.mock.calls.length === 1) {
         disconnectedRead = true;
+        overviewReadRecovery.add(() => { disconnectedRead = false; });
         for (const listener of availabilityListeners) listener();
         throw new Error('Lost continuation receipt');
       }
@@ -384,6 +386,7 @@ function Surface({ failFirst = false, history = false, colors = false, selectTar
 const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, beforeEach: () => {
   Object.values(writes).forEach((spy) => spy.mockClear());
   overviewHostListeners.clear();
+  overviewReadRecovery.clear();
 } } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -661,6 +664,9 @@ export const TaskOverviewAndContinuation: Story = {
     expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
     expect(instruction).toHaveAttribute('readonly');
     expect(within(card).getByRole('button', { name: '重试原续办' })).toBeDisabled();
+    // The shell and coordinator are independent readers. Recover the mocked
+    // transport explicitly; one reader must not consume the other's failure.
+    for (const recover of overviewReadRecovery) recover();
     await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
     await waitFor(() => expect(within(card).getByRole('button', { name: '重试原续办' })).toBeEnabled());
     await userEvent.click(within(card).getByRole('button', { name: '重试原续办' }));
@@ -677,9 +683,9 @@ export const TaskOverviewAndContinuation: Story = {
     rail.scrollTo({ top: 0 });
     panels.scrollTo({ top: 0 });
     await userEvent.click(canvas.getByRole('button', { name: '收起任务工作栏' }));
-    expect(rail).not.toBeVisible();
+    await waitFor(() => expect(rail).not.toBeVisible());
     await openTaskSidebar(canvasElement);
-    expect(rail).toBeVisible();
+    await waitFor(() => expect(rail).toBeVisible());
   },
 };
 // Real path: delegated task roots wait on questions/forms/grants; WorkHub's
