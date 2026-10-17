@@ -77,6 +77,8 @@ import { LiveContextUsageProbe } from '../tools/inspector/live-context-usage-pro
 
 interface OpenToolOptions {
   initialPrompt?: string;
+  /** An explicit task card has already selected its exact work identity. */
+  preserveTaskSelection?: boolean;
 }
 
 export interface WorkbarControllerCommands {
@@ -197,7 +199,7 @@ export function useWorkbarController(
     viteEnv?.VITE_MAKA_WORK_BOARD_START_TASK === '1' &&
     Boolean(input.openNewTaskSurface && input.resolveWorkBoardTarget && input.prepareWorkBoardDraft);
   const terminalCopy = getDesktopConversationCopy(locale).terminalPanel;
-  const { browser, sideChat, terminal, workBoard } = useWorkbarServices();
+  const { browser, sideChat, terminal, workBoard, taskSelection } = useWorkbarServices();
   const compact = useMediaQuery(SHELL_WORKBAR_COMPACT_QUERY);
   const layout = useWorkbarLayoutState(input.layoutSessionId, input.authoritativeSessionIds, compact);
   const sideConversations = useSideConversationWorkspace();
@@ -568,8 +570,23 @@ export function useWorkbarController(
       const definition = workbarToolDefinition(kind);
       const targetPlacement = placement ?? definition.defaultPlacement;
       if (definition.singleton) {
-        layout.openWorkbarTab(definition.kind, targetPlacement);
-        revealPlacement(targetPlacement);
+        const open = () => {
+          layout.openWorkbarTab(definition.kind, targetPlacement);
+          revealPlacement(targetPlacement);
+        };
+        if (kind === 'workhub-tasks' && !options.preserveTaskSelection) {
+          const owner = activeSessionIdRef.current;
+          if (!owner) return;
+          // Clear through the shared presentation owner before revealing the
+          // panel, so reopening cannot briefly display the previous task.
+          void taskSelection.clear(owner).then(() => {
+            if (activeSessionIdRef.current === owner) open();
+          }).catch(error => {
+            if (activeSessionIdRef.current !== owner) return;
+            const label = getDesktopConversationCopy(locale).workbar.openTab;
+            input.toastApi.error(label, localizedShellErrorMessage(error, label, locale));
+          });
+        } else open();
         return;
       }
       switch (definition.kind) {
@@ -635,6 +652,8 @@ export function useWorkbarController(
       revealPlacement,
       terminal,
       terminalCopy.startFailed,
+      taskSelection,
+      workspace,
     ],
   );
 
@@ -797,6 +816,11 @@ export function useWorkbarController(
 
   const toggleRight = useCallback(() => {
     if (layout.workbarCollapsed) {
+      const activeTab = panelsStateRef.current.right.tabs.find(tab => tab.id === panelsStateRef.current.right.activeTabId);
+      if (workspace === 'workhub' && activeTab?.kind === 'workhub-tasks') {
+        openTool('workhub-tasks');
+        return;
+      }
       layout.setWorkbarCollapsed(false);
       const activeTabId = panelsStateRef.current.right.activeTabId;
       if (activeTabId) layout.activateWorkbarTab('right', activeTabId);
@@ -807,6 +831,8 @@ export function useWorkbarController(
     layout.activateWorkbarTab,
     layout.setWorkbarCollapsed,
     layout.workbarCollapsed,
+    openTool,
+    workspace,
   ]);
 
   /* The panel-facing toggle applies the same space decision as every other
@@ -1031,7 +1057,11 @@ export function useWorkbarController(
       rightWidth: layout.workbarWidth,
       bottomHeight: layout.bottomPanelHeight,
       panelsState: layout.workbarPanelsState,
-      onActivateTab: layout.activateWorkbarTab,
+      onActivateTab: (placement, id) => {
+        const tab = panelsStateRef.current[placement].tabs.find(tab => tab.id === id);
+        if (tab?.kind === 'workhub-tasks') openTool('workhub-tasks', placement);
+        else layout.activateWorkbarTab(placement, id);
+      },
       onCloseTab: closeTab,
       onOpenLauncher: (placement) => {
         layout.openWorkbarLauncher(placement);

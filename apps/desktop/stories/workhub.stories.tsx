@@ -158,7 +158,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     enqueueMessage: async () => 'admitted',
     queryMessageExecutions: async () => ({ resolutions: [] }),
     surface: 'workhub', initialLocale: 'zh-CN', subscribeAppearance: () => () => {},
-    presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => presentation, setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openTasks: async () => { for (const notify of navigationListeners) notify({ kind: 'workhub', panelAction: 'tasks' }); },
+    presentation: { ready: async () => {}, progressReady: async () => {}, resizeProgress: async () => {}, expandProgress: async () => {}, getSnapshot: async () => presentation, setHost: async () => {}, setConversationLayout: async () => {}, detach: async () => {}, dock: async () => {}, hide: async () => {}, openUsage: async () => { writes.panel('inspector'); }, toggleWorkbar: async () => { writes.panel('toggle'); }, openTasks: async () => { presentation = { ...presentation, taskSelection: undefined }; for (const notify of presentationListeners) notify(presentation); for (const notify of navigationListeners) notify({ kind: 'workhub', panelAction: 'tasks' }); },
       selectTask: async selection => { presentation = { ...presentation, taskSelection: selection }; for (const notify of presentationListeners) notify(presentation); if (presentation.placement === 'docked' && selection.work) for (const notify of navigationListeners) notify({ kind: 'workhub', panelAction: 'tasks' }); },
       openSession: async (id) => { writes.open(id); }, openSettings: async () => {}, subscribe: handler => { presentationListeners.add(handler); return () => { presentationListeners.delete(handler); }; }, onViewportInset: () => () => {}, onFocusComposer: () => () => {}, onOpenMain: handler => { navigationListeners.add(handler); return () => { navigationListeners.delete(handler); }; } },
     control: { getSnapshot: async () => ({ revision: 0, phase: 'idle', canUndo: false }), subscribe: () => () => {}, stop: async () => {}, undo: async () => {} },
@@ -348,7 +348,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
 }
 function DockedConsole({ services }: { services: WorkHubServices }) {
   const toastApi = useToast();
-  const [workbarServices] = useState(() => createFakeWorkbarServices({ inspector: services.inspector }));
+  const [workbarServices] = useState(() => createFakeWorkbarServices({ inspector: services.inspector,
+    taskSelection: { clear: ownerSessionId => services.presentation.selectTask({ ownerSessionId }) },
+  }));
   // The real provider owns topology, resizing, tab selection and collapse.
   // Only the Electron native docking rectangle is absent in Storybook.
   return <WorkHubEnablementProvider value={{ isEnabled: () => true, subscribe: () => () => {} }}><SettingsNavigationProvider navigation={{ openSettingsSection() {} }}><WorkbarServicesProvider services={workbarServices}><WorkbarShellRoot>{workbar => <WorkbarProvider bridge={workbar.bridge} input={{
@@ -596,6 +598,10 @@ export const TaskExecutionView: Story = {
     await waitFor(() => expect(coordinatorForm).toBeVisible());
     expect(canvasElement.querySelector('.maka-form-interaction-prompt')).toBe(coordinatorForm);
     await openTaskSidebar(canvasElement);
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskOverview')).toBeVisible());
+    expect(canvasElement.querySelector('.workHubTaskComposer')).toBeNull();
+    const reopenedTask = canvas.getByRole('button', { name: '发布检查清单 执行中' });
+    await userEvent.click(within(reopenedTask.closest('article')!).getByRole('button', { name: '查看任务执行' }));
     await waitFor(() => expect(canvasElement.querySelector('.workHubTaskComposer')).toBeVisible());
   },
 };

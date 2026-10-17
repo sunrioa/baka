@@ -77,11 +77,17 @@ function createBridgeRecorder(answerOverrides: Record<string, unknown> = {}): {
       inspector: domain('inspector'),
       attachments: domain('attachments'),
       transcripts: domain('transcripts'),
+      workHubPresentation: domain('workHubPresentation'),
     } as unknown as MakaBridge,
   };
 }
 
 describe('createDesktopWorkbarServices', () => {
+  it('clears only task presentation for the exact coordinator owner', async () => {
+    const { bridge, calls } = createBridgeRecorder();
+    await createDesktopWorkbarServices(bridge).taskSelection.clear('owner');
+    assert.deepEqual(calls, [{ name: 'workHubPresentation.selectTask', args: [{ ownerSessionId: 'owner' }] }]);
+  });
   it('recovers only live local desktop PTYs from the Host inventory and updates', async () => {
     const { bridge } = createBridgeRecorder();
     const manual = {

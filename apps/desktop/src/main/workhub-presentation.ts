@@ -719,6 +719,8 @@ export function createWorkHubPresentation(deps: WorkHubPresentationDeps) {
             return;
           }
           case 'tasks':
+            taskSelection = undefined;
+            send('workhub-presentation:changed', getSnapshot());
             await navigateMain({ kind: 'workhub', panelAction: 'tasks' }, revision);
             return;
           case 'toggle-workbar':

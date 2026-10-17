@@ -87,6 +87,7 @@ export function createFakeWorkbarServices(
       },
     },
     popupMenu: async () => null,
+    taskSelection: { clear: async () => {} },
     review: {
       read: async () => {
         throw new Error('Fake review.read is not configured');

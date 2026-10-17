@@ -1254,5 +1254,9 @@ test('task selections share exact identities between the native coordinator and 
   const navigationsBefore = h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main')).length;
   await h.command(view.webContents, 'select-task', { ownerSessionId, work });
   assert.equal(h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main')).length, navigationsBefore + 1, 'floating work opens the same shell-owned execution pane');
+  await h.command(view.webContents, 'tasks');
+  assert.equal((await snapshot()).taskSelection, undefined, 'the generic floating task button opens the list, not the last selected task');
+  await h.command(view.webContents, 'select-task', { ownerSessionId, work });
+  assert.equal((await snapshot()).taskSelection?.work?.workId, work.workId, 'an explicit task card still opens its exact task');
   h.controller.dispose();
 });

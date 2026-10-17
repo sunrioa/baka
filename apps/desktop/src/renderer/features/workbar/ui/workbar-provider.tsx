@@ -57,7 +57,7 @@ export function WorkbarProvider(props: {
   } as CSSProperties;
   return (
     <WorkbarHostModelContext.Provider value={controller.host}>
-      <TaskExecutionPanelProvider onOpen={() => controller.commands.openTool('workhub-tasks')}>
+      <TaskExecutionPanelProvider onOpen={() => controller.commands.openTool('workhub-tasks', undefined, { preserveTaskSelection: true })}>
       <div className="maka-workbar-shell-vars" style={style}>
         {props.children}
       </div>
