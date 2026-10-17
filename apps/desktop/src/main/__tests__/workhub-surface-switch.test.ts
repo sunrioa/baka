@@ -67,6 +67,46 @@ test('the coordinator and shell task reader share selection without accepting an
   assert.equal(subscribers.size, 0);
 });
 
+test('closing the workbar removes task highlights without clearing selection or changing the task input target', async () => {
+  const { root } = installReactRenderer();
+  const initial = deferred<WorkHubPresentationSnapshot>();
+  let notify!: (snapshot: WorkHubPresentationSnapshot) => void;
+  let selectionCalls = 0;
+  const owner = desktopSessionKey({ hostId: 'host', sessionId: 'coordination' });
+  const work = { sessionId: desktopSessionKey({ hostId: 'host', sessionId: 'shared-session' }), name: 'A', workId: 'a' };
+  const base: WorkHubPresentationSnapshot = { placement: 'docked', floatingVisible: false, rendererCrashed: false, shortcutRegistered: true, taskSelection: { ownerSessionId: owner, work } };
+  const services = { presentation: {
+    getSnapshot: () => initial.promise,
+    subscribe: (handler: typeof notify) => { notify = handler; return () => {}; },
+    selectTask: async () => { selectionCalls += 1; },
+  } } as unknown as WorkHubServices;
+  let selection!: ReturnType<typeof useWorkHubTaskSelection>;
+  function Reader({ currentOwner = owner }: { currentOwner?: string }) { selection = useWorkHubTaskSelection(services, currentOwner); return null; }
+  try {
+    await act(async () => root.render(createElement(Reader)));
+    assert.equal(selection.highlighted, undefined, 'unknown workbar visibility cannot imply an open preview');
+    await act(async () => notify({ ...base, workbar: { collapsed: false, placement: 'right' } }));
+    assert.deepEqual(selection.highlighted, work);
+    await act(async () => notify({ ...base, workbar: { collapsed: true, placement: 'right' } }));
+    assert.equal(selection.highlighted, undefined, 'the main card must lose its highlight on manual close');
+    assert.deepEqual(selection.selected, work, 'closing is presentation-only and must not redirect or discard the task reader');
+    await act(async () => initial.resolve({ ...base, workbar: { collapsed: false, placement: 'right' } }));
+    assert.equal(selection.highlighted, undefined, 'a delayed initial snapshot must not restore a closed highlight');
+    await act(async () => notify({ ...base, workbar: { collapsed: false, placement: 'bottom' } }));
+    assert.deepEqual(selection.highlighted, work, 'an expanded bottom workbar follows the same selection');
+    const second = { ...work, name: 'B', workId: 'b' };
+    await act(async () => notify({ ...base, taskSelection: { ownerSessionId: owner, work: second }, workbar: { collapsed: false, placement: 'right' } }));
+    assert.deepEqual(selection.highlighted, second, 'different tasks sharing a Session still highlight by work identity');
+    await act(async () => notify({ ...base, taskSelection: { ownerSessionId: owner }, workbar: { collapsed: false, placement: 'right' } }));
+    assert.equal(selection.highlighted, undefined, 'the task list has no selected task card');
+    await act(async () => notify({ ...base, workbar: { collapsed: false, placement: 'right' } }));
+    await act(async () => root.render(createElement(Reader, { currentOwner: desktopSessionKey({ hostId: 'other', sessionId: 'coordination' }) })));
+    assert.equal(selection.highlighted, undefined, 'another owner cannot inherit the visible highlight');
+    assert.equal(selection.selected, undefined);
+    assert.equal(selectionCalls, 0, 'visibility notifications never issue task selection or dispatch commands');
+  } finally { await act(async () => root.unmount()); }
+});
+
 test('the main surface does not mount WorkHub or start its lifecycle', async () => {
   const { root, container } = installReactRenderer();
   const services = { surface: 'main' } as WorkHubServices;

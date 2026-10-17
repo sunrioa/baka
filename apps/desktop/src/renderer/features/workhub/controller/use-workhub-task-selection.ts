@@ -19,19 +19,19 @@
 
 import { useEffect, useState } from 'react';
 import type { WorkHubServices } from '../ports.js';
-import type { WorkHubTaskSelection } from '../../../../shared/workhub-presentation.js';
+import type { WorkHubPresentationSnapshot, WorkHubTaskSelection } from '../../../../shared/workhub-presentation.js';
 
 /** The native coordinator and the shell workbar share one exact work selection. */
 export function useWorkHubTaskSelection(services: WorkHubServices, owner: string | undefined) {
-  const [state, setState] = useState<{ services: WorkHubServices; selection?: WorkHubTaskSelection; error?: string }>({ services });
+  const [state, setState] = useState<{ services: WorkHubServices; selection?: WorkHubTaskSelection; expanded?: boolean; error?: string }>({ services });
   useEffect(() => {
     let active = true;
     let notified = false;
-    const accept = (selection: WorkHubTaskSelection | undefined) => {
-      if (active) setState({ services, selection });
+    const accept = (snapshot: WorkHubPresentationSnapshot) => {
+      if (active) setState({ services, selection: snapshot.taskSelection, expanded: snapshot.workbar?.collapsed === false });
     };
-    const unsubscribe = services.presentation.subscribe(snapshot => { notified = true; accept(snapshot.taskSelection); });
-    void services.presentation.getSnapshot().then(snapshot => { if (!notified) accept(snapshot.taskSelection); }, reason => {
+    const unsubscribe = services.presentation.subscribe(snapshot => { notified = true; accept(snapshot); });
+    void services.presentation.getSnapshot().then(snapshot => { if (!notified) accept(snapshot); }, reason => {
       if (active && !notified) setState({ services, error: reason instanceof Error ? reason.message : String(reason) });
     });
     return () => { active = false; unsubscribe(); };
@@ -39,6 +39,8 @@ export function useWorkHubTaskSelection(services: WorkHubServices, owner: string
   const selected = state.services === services && state.selection?.ownerSessionId === owner ? state.selection?.work : undefined;
   return {
     selected,
+    // Remember the task for its reader, but only mark visible previews as selected.
+    highlighted: state.expanded ? selected : undefined,
     error: state.services === services ? state.error : undefined,
     select(work: WorkHubTaskSelection['work']) {
       if (!owner) return;
