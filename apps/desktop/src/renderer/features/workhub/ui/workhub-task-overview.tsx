@@ -19,7 +19,7 @@
 
 import { useEffect, useId, useState } from 'react';
 import { Button, IconButton, TextArea, useUiLocale } from '@maka/ui';
-import { PanelRightClose, RefreshCw } from '@maka/ui/icons';
+import { PanelRightClose, RefreshCcw } from '@maka/ui/icons';
 import type { WorkHubTask, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskOverview } from '../controller/use-workhub-task-overview.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
@@ -32,7 +32,7 @@ export function WorkHubTaskOverview({ overview, onOpen, onView, onClose }: { ove
   const groups = [{ label: t.progress, tasks: overview.tasks.filter(task => !ended(task)) }, { label: t.delivery, tasks: overview.tasks.filter(ended) }];
   return <section className="workHubTaskOverview" aria-label={t.title} aria-busy={!overview.ready} data-maka-assistant-exclude>
     <header className="workHubTaskRailHeader"><h2>{t.title}{overview.ready && <span> · {overview.tasks.length}</span>}</h2>
-      <IconButton size="sm" variant="ghost" icon={<RefreshCw size={14} />} label={t.refresh} onClick={() => { void overview.refresh(); }} />
+      <IconButton size="sm" variant="ghost" icon={<RefreshCcw size={14} />} label={t.refresh} onClick={() => { void overview.refresh(); }} />
       {onClose && <IconButton size="sm" variant="ghost" icon={<PanelRightClose size={16} />} label={t.close} onClick={onClose} />}
     </header>
     {!overview.ready && <p role={overview.error ? 'alert' : 'status'}>{overview.tasks.length ? t.stale : overview.error ? t.unavailable : t.loading}</p>}
