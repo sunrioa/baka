@@ -187,6 +187,7 @@ function mountHook(env: Env) {
   } = { highlighted: null, anchors: new Map() };
   const viewportNavigation = createTranscriptViewportNavigation();
   function Harness(props: {
+    enabled?: boolean;
     sessionId: string;
     target?: { turnId: string; nonce: number; preserveFocus?: boolean };
     restoreTarget?: { turnId: string; unavailable?: boolean };
@@ -195,6 +196,7 @@ function mountHook(env: Env) {
     const virtualizerRef = useRef<VirtualizerHandle | null>(env.handle);
     state.authority = useTranscriptScrollAuthority();
     const result = useChatScroll({
+      enabled: props.enabled,
       scrollRef,
       virtualizerRef,
       sessionId: props.sessionId,
@@ -226,6 +228,25 @@ function mountHook(env: Env) {
 
 const turns = (count: number, prefix = 'turn'): string[] =>
   Array.from({ length: count }, (_, index) => `${prefix}-${index}`);
+
+test('an earlier Session section renders without taking the shared scrollport or issuing commands', async () => {
+  const env = setup(turns(6));
+  const hook = mountHook(env);
+  env.scroller.scrollTop = 300;
+  await hook.render({ sessionId: 'earlier', enabled: false, target: { turnId: 'turn-2', nonce: 1 } });
+  assert.equal(hook.state.placed, true);
+  assert.equal(env.scroller.scrollTop, 300);
+  assert.deepEqual(env.calls, []);
+  await act(() => { hook.state.revealTurnAtStart?.('turn-1', Promise.resolve()); hook.viewportNavigation.followLatest('earlier'); });
+  env.transcript.turnIds = [...turns(2, 'older'), ...env.transcript.turnIds];
+  await hook.render({ sessionId: 'earlier', enabled: false });
+  env.resize(); await env.flushFrames(30);
+  assert.equal(env.scroller.scrollTop, 300);
+  assert.deepEqual(env.calls, []);
+  assert.equal(hook.state.anchors.size, 0);
+  await hook.render({ sessionId: 'latest', enabled: true });
+  assert.equal(env.scroller.scrollTop, 8 * TURN_HEIGHT - CLIENT_HEIGHT, 'only the tail Session owns follow-to-bottom');
+});
 
 test('the reading anchor is the Turn the virtualizer maps under the offset', async () => {
   const env = setup(turns(6));

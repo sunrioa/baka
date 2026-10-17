@@ -23,7 +23,7 @@ import { act, createElement, StrictMode } from 'react';
 import { LocaleProvider } from '@maka/ui';
 import { deferred, waitFor } from '@maka/core/test-only/async-primitives';
 import type { WorkHubTaskAssignment, WorkHubTaskExecutionsResult, TurnSnapshot } from '@maka/runtime-host/protocol';
-import { createWorkHubTaskViewModel, workHubTaskInputSource, useWorkHubExecutionView, useWorkHubTaskView, useWorkHubTaskInput } from '../../renderer/features/workhub/testing.js';
+import { createWorkHubTaskViewModel, workHubTaskInputSource, useWorkHubSessionView, useWorkHubTaskView, useWorkHubTaskInput } from '../../renderer/features/workhub/testing.js';
 import type { SessionSummary } from '@maka/core/session';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
@@ -31,47 +31,52 @@ import { installReactRenderer, cleanupFakeDom } from './fake-dom.js';
 
 afterEach(cleanupFakeDom);
 
-test('real task view hook closes old scope readers and ignores late events/history after switching tasks', async () => {
-  const subscriptions: Array<{ id: string; scope: Parameters<WorkHubServices['observe']>[5]; event: Parameters<WorkHubServices['observe']>[1]; closed: boolean }> = [];
-  const readers: Array<{ scope: Parameters<WorkHubServices['openTranscript']>[4]; accept: Parameters<WorkHubServices['openTranscript']>[1]; signal: AbortSignal; closed: boolean }> = [];
+test('full Session readers close and ignore late events/history after switching tasks', async () => {
+  const subscriptions: Array<{ id: string; event: Parameters<WorkHubServices['observe']>[1]; closed: boolean }> = [];
+  const readers: Array<{ id: string; accept: Parameters<WorkHubServices['openTranscript']>[1]; signal: AbortSignal; closed: boolean }> = [];
+  const sessionReads = { a: deferred<SessionSummary | null>(), b: deferred<SessionSummary | null>() };
   const services = {
-    getTaskSession: async () => null,
+    getTaskSession: async id => sessionReads[id as 'a' | 'b'].promise,
     observe(id, event, _error, phase, execution, scope) {
-      const subscription = { id, scope, event, closed: false }; subscriptions.push(subscription);
-      phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: { sessionId: id, ...scope!, status: 'running' } });
+      assert.equal(scope, undefined);
+      const subscription = { id, event, closed: false }; subscriptions.push(subscription);
+      phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: { sessionId: id, turnId: id, runId: `run-${id}`, status: 'running' } });
       return () => { subscription.closed = true; };
     },
-    async openTranscript(_id, accept, signal, _error, scope) {
-      const reader = { scope, accept, signal, closed: false }; readers.push(reader);
-      accept({ messages: [{ type: 'user', id: `user-${scope!.turnId}`, turnId: scope!.turnId, ts: 1, text: scope!.turnId }], ready: true, hasOlder: false });
+    async openTranscript(id, accept, signal, _error, scope) {
+      assert.equal(scope, undefined);
+      const reader = { id, accept, signal, closed: false }; readers.push(reader);
+      accept({ messages: [{ type: 'user', id: `user-${id}`, turnId: id, ts: 1, text: id }], ready: true, hasOlder: false });
       return { observationChanged() {}, loadEarlier: async () => {}, close: async () => { reader.closed = true; } };
     },
   } satisfies Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>;
-  let view!: ReturnType<typeof useWorkHubExecutionView>;
-  function Probe({ id }: { id: string }) {
-    view = useWorkHubExecutionView(services, 'same-session', { turnId: id, runId: `run-${id}` });
-    return null;
-  }
+  let view!: ReturnType<typeof useWorkHubSessionView>;
+  function Probe({ id }: { id: string }) { view = useWorkHubSessionView(services, id); return null; }
   const { root } = installReactRenderer();
   const render = (id: string) => createElement(StrictMode, {}, createElement(LocaleProvider, { locale: 'en', children: null }, createElement(Probe, { key: id, id })));
   await act(async () => { root.render(render('a')); });
   assert.equal(view.transcript.messages[0]!.turnId, 'a');
+  assert.equal(view.sessionReady, false, 'transcript arrival does not invent a Session identity');
   await act(async () => { root.render(render('b')); });
   assert.equal(view.transcript.messages[0]!.turnId, 'b');
   assert.equal(view.activeTurn?.turnId, 'b');
+  assert.equal(view.sessionReady, false);
   await act(async () => {
-    for (const reader of readers.filter(item => item.scope?.turnId === 'a')) {
+    for (const reader of readers.filter(item => item.id === 'a')) {
       assert.ok(reader.signal.aborted && reader.closed);
       reader.accept({ messages: [{ type: 'user', id: 'late-a', turnId: 'a', ts: 2, text: 'Late old task' }], ready: true, hasOlder: false });
     }
-    for (const subscription of subscriptions.filter(item => item.scope?.turnId === 'a')) {
+    for (const subscription of subscriptions.filter(item => item.id === 'a')) {
       assert.equal(subscription.closed, true);
       subscription.event({ type: 'error', id: 'late-error', turnId: 'a', ts: 3, message: 'Old task failed', recoverable: false });
     }
   });
   assert.equal(view.transcript.messages[0]!.turnId, 'b');
   assert.equal(view.error, undefined);
-  assert.ok(subscriptions.every(item => item.scope && item.scope.runId === `run-${item.scope.turnId}`));
+  await act(async () => { sessionReads.a.resolve(null); });
+  assert.equal(view.sessionReady, false, 'late old metadata must not place the new Session');
+  await act(async () => { sessionReads.b.resolve(null); });
+  assert.equal(view.sessionReady, true);
 });
 
 const assignment = (actionId: string, patch: Partial<WorkHubTaskAssignment> = {}): WorkHubTaskAssignment => ({
@@ -80,6 +85,70 @@ const assignment = (actionId: string, patch: Partial<WorkHubTaskAssignment> = {}
   state: 'owned', superseded: false, execution: { turnId: `turn-${actionId}`, runId: `run-${actionId}` }, ...patch,
 });
 const turn = (id: string, sessionId = 'same-session'): TurnSnapshot => ({ sessionId, turnId: id, runId: `run-${id}`, status: 'completed', terminalEventId: `terminal-${id}` });
+
+test('a queued follow-up stays current independently of the displayed Session histories', async () => {
+  const original = assignment('original');
+  const followup = assignment('followup', { state: 'queued', execution: undefined });
+  const rows = [followup, original, assignment('shared', { state: 'shared', execution: undefined }),
+    assignment('retired', { generationId: 'retired', superseded: true }), assignment('elsewhere', { targetSessionId: 'other-session' })];
+  const reads: string[] = [];
+  const model = createWorkHubTaskViewModel({
+    taskHistory: async () => ({ workId: 'work', assignments: rows, nextCursor: null }),
+    taskExecutions: async (_owner, input) => {
+      reads.push(input.actionId);
+      const row = rows.find(item => item.actionId === input.actionId)!;
+      return { actionId: row.actionId, delegationId: row.delegationId, targetSessionId: row.targetSessionId,
+        executions: [{ ...turn(row.execution!.turnId), runId: row.execution!.runId }], nextCursor: null };
+    },
+  }, 'host-a-coordinator', 'work');
+  await model.refresh();
+  assert.equal(model.snapshot().assignment?.actionId, 'followup');
+  assert.equal(model.snapshot().execution, undefined);
+  assert.deepEqual(reads, [], 'display history never changes the canonical send source');
+  assert.equal(workHubTaskInputSource(model.snapshot())?.actionId, 'followup', 'history does not replace the latest queued send source');
+  rows[0] = assignment('followup');
+  await model.refresh();
+  assert.equal(model.snapshot().execution?.turnId, 'turn-followup');
+  assert.deepEqual(reads, ['followup']);
+  model.selectAssignment('original');
+  await waitFor(() => model.snapshot().executionsReady);
+  assert.equal(workHubTaskInputSource(model.snapshot()), undefined, 'historical inspection stays read-only');
+  model.close();
+});
+
+test('full Session history includes intervening tasks and remains visible while a follow-up is queued', async () => {
+  let accept!: Parameters<WorkHubServices['openTranscript']>[1];
+  let loaded = false, closed = false;
+  const services = {
+    getTaskSession: async () => null,
+    observe(_id, _event, _error, phase, execution, scope) {
+      assert.equal(scope, undefined, 'viewing full history does not grant execution ownership');
+      execution?.({ type: 'host_execution', available: true, rootTurn: { sessionId: 'same-session', turnId: 'followup', runId: 'followup-run', status: 'admitted' } });
+      phase('ready'); return () => { closed = true; };
+    },
+    async openTranscript(_id, handler, _signal, _error, scope) {
+      assert.equal(scope, undefined); accept = handler;
+      accept({ ready: true, hasOlder: true, messages: [
+        { type: 'user', id: 'original', turnId: 'original', ts: 1, text: 'Original task' },
+        { type: 'user', id: 'other', turnId: 'other', ts: 2, text: 'Intervening other task' },
+      ] });
+      return { observationChanged() {}, loadEarlier: async () => { loaded = true; }, close: async () => {} };
+    },
+  } satisfies Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>;
+  let view!: ReturnType<typeof useWorkHubSessionView>;
+  function Probe() { view = useWorkHubSessionView(services, 'same-session'); return null; }
+  const { root } = installReactRenderer();
+  await act(async () => { root.render(createElement(LocaleProvider, { locale: 'en', children: createElement(Probe) })); });
+  assert.equal(view.activeTurn?.queued, true);
+  assert.deepEqual(view.transcript.messages.map(item => item.id), ['original', 'other']);
+  await view.loadEarlier(); assert.equal(loaded, true);
+  await act(async () => accept({ ready: true, hasOlder: false, messages: [
+    ...view.transcript.messages, { type: 'assistant', id: 'followup-answer', turnId: 'followup', ts: 3, text: 'Follow-up output', modelId: 'model' },
+  ] }));
+  assert.deepEqual(view.transcript.messages.map(item => item.id), ['original', 'other', 'followup-answer']);
+  await act(async () => root.unmount());
+  assert.equal(closed, true);
+});
 
 for (const revisit of ['refresh', 'loadEarlier'] as const) test(`a selected old queued assignment becomes readable after ${revisit}`, async () => {
   let owned = false;

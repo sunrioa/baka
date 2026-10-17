@@ -2955,6 +2955,12 @@ export async function createExecutionRuntimeHostComposition(
           `[runtime-host] WorkHub evidence reconciliation failed: ${boundedFailureDiagnostic(error)}`,
         ),
     });
+    const readTurnText = createTurnResultReader({
+      stores,
+      canonicalPermissionOutcomes,
+      ensureTranscriptLedger: (sessionId) =>
+        requireSessionManager(manager).ensureTranscriptLedgerForRead(sessionId),
+    });
     workHubResults = createWorkHubResultRuntime({
       stores,
       evidence: workHubEvidence,
@@ -2963,12 +2969,8 @@ export async function createExecutionRuntimeHostComposition(
       messages,
       interactions,
       admission: sessionAdmission,
-      readTurnResult: createTurnResultReader({
-        stores,
-        canonicalPermissionOutcomes,
-        ensureTranscriptLedger: (sessionId) =>
-          requireSessionManager(manager).ensureTranscriptLedgerForRead(sessionId),
-      }),
+      readTurnResult: readTurnText,
+      readTurnInput: (sessionId, turnId) => readTurnText(sessionId, turnId, 'user'),
       acquireResidency: () => context.acquireResidency('hosted-execution'),
       onError: (error) =>
         console.error(

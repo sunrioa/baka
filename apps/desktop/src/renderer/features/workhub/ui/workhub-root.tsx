@@ -21,7 +21,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChatSurfaceLayout, UserQuestionPrompt, MakaWordmark, PermissionModeSelect, getPermissionModeMeta, useToast, useUiLocale, type ComposerHandle } from '@maka/ui';
 import { Button, IconButton, Selector } from '@astryxdesign/core';
 import { WORKHUB_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
-import { ChevronDown, PictureInPicture2, Undo2, Workflow, X } from '@maka/ui/icons';
+import { ChevronDown, PanelRightOpen, PictureInPicture2, Undo2, Workflow, X } from '@maka/ui/icons';
 import { useLiveContextUsage } from '../../../application/contracts/session-inspector/use-live-context-usage.js';
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
@@ -34,16 +34,14 @@ import { WorkbarEdgeToggle } from '../../../application/contracts/workbar-edge-t
 import { useWorkHubHighlightState, WorkHubHighlightContext, WorkHubHueProvider } from './workhub-work-identity.js';
 import { useWorkHubController } from '../controller/use-workhub-controller.js';
 import { WorkHubTaskInbox } from './workhub-task-inbox.js';
-import { WorkHubTaskOverview } from './workhub-task-overview.js';
 import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.js';
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { workHubLinkedWork } from '../model/linked-work.js';
-import { WorkHubTaskView } from './workhub-task-view.js';
-import { WorkHubTaskComposer } from './workhub-task-composer.js';
-import { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
+import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
+import { useWorkHubTaskSelection } from '../controller/use-workhub-task-selection.js';
 
 function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
   if (!owner || !target) return false;
@@ -83,12 +81,13 @@ function revealWordmark(element: HTMLDivElement | null, content: HTMLDivElement 
 }
 
 export function WorkHubRoot() {
-  const highlight = useWorkHubHighlightState();
+  const localHighlight = useWorkHubHighlightState();
+  const [presentation, setPresentation] = useState<WorkHubPresentationSnapshot>();
+  const floating = presentation?.placement === 'floating';
   const composer = useRef<ComposerHandle>(null);
-  const taskComposer = useRef<ComposerHandle>(null);
   const draftRestore = useRef<((sessionId: string, draft: RestoredDraftContent) => void) | undefined>(undefined);
   const controller = useWorkHubController(
-    () => highlight.selectWork(undefined),
+    undefined,
     (sessionId, draft) => draftRestore.current?.(sessionId, draft),
   );
   const { services, session, transcript, busy } = controller;
@@ -96,10 +95,13 @@ export function WorkHubRoot() {
   if (retainedTaskOwner.current.services !== services) retainedTaskOwner.current = { services, owner: controller.sessionId };
   else if (controller.sessionId) retainedTaskOwner.current.owner = controller.sessionId;
   const taskOwner = controller.sessionId ?? retainedTaskOwner.current.owner;
-  const selectedTask = highlight.selectedWork?.workId && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
-  const taskView = useWorkHubTaskView(services, selectedTask ? taskOwner : undefined, selectedTask?.workId, controller.sessionId === taskOwner && !!controller.sessionId);
-  const selectedTaskRef = useRef(selectedTask); selectedTaskRef.current = selectedTask;
-  const focusComposer = () => (selectedTaskRef.current ? taskComposer : composer).current?.focus();
+  const taskSelection = useWorkHubTaskSelection(services, taskOwner);
+  const highlight = { ...localHighlight, selectedWork: taskSelection.selected,
+    selectWork: (work: typeof localHighlight.selectedWork) => taskSelection.select(work?.workId ? { ...work, workId: work.workId } : undefined),
+    toggleWork: (work: NonNullable<typeof localHighlight.selectedWork>) => taskSelection.select(work.workId && work.workId !== taskSelection.selected?.workId ? { ...work, workId: work.workId } : undefined),
+  };
+  const selectedTask = highlight.selectedWork && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
+  const focusComposer = () => composer.current?.focus();
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
     return () => services.bindBrowserSession(null);
@@ -148,10 +150,8 @@ export function WorkHubRoot() {
   hasConversationRef.current = hasConversation;
   const [expandedLayoutHeight, setExpandedLayoutHeight] = useState(720);
   const [control, setControl] = useState<WorkHubControlSnapshot>();
-  const [presentation, setPresentation] = useState<WorkHubPresentationSnapshot>();
   const progress = presentation?.progressRequest !== undefined;
   const editingProgress = progress && editingProgressRequest === presentation.progressRequest;
-  const floating = presentation?.placement === 'floating';
   useEffect(() => {
     if (controller.activeQuestion || controller.activeForm) {
       setConversationExpanded(true);
@@ -256,7 +256,7 @@ export function WorkHubRoot() {
     void services.control.getSnapshot().then(acceptControl).catch(controller.report);
     const focus = services.presentation.onFocusComposer((expand) => {
       if (expand) setConversationExpanded(true);
-      const choice = selectedTaskRef.current ? undefined : surface.current?.querySelector<HTMLElement>('.maka-choice-panel');
+      const choice = composerSurface.current?.querySelector<HTMLElement>('.maka-choice-panel');
       if (choice) {
         if (!choice.contains(document.activeElement)) choice.focus();
       } else focusComposer();
@@ -297,33 +297,33 @@ export function WorkHubRoot() {
       {!progress && floating && conversationExpanded && <div className="workHubWindowControls">
         <IconButton className="workHubCloseButton" type="button" size="sm" variant="ghost" icon={<X size={12} />} label={t.hide} onClick={() => call(services.presentation.hide())} />
         <div className="workHubWindowActions">
+          <IconButton type="button" size="sm" variant="ghost" icon={<PanelRightOpen size={17} />}
+            label={workHubTaskCopy[locale].title} onClick={() => call(services.presentation.openTasks())} />
           <IconButton type="button" size="sm" variant="ghost" icon={<PictureInPicture2 size={14}><path d="m8 11-4-4m0 4V7h4" /></PictureInPicture2>} label={t.dock} onClick={() => call(services.presentation.dock())} />
           <IconButton type="button" size="sm" variant="ghost" icon={<ChevronDown size={14} style={{ rotate: conversationExpanded ? '0deg' : '180deg' }} />} label={conversationExpanded ? t.collapseConversation : t.expandConversation} aria-expanded={conversationExpanded} onClick={toggleConversation} />
         </div>
       </div>}
       <div className="workHubRevealMark" ref={revealMark} aria-hidden="true"><MakaWordmark width={192} /></div>
-      <div className="workHubWorkspace"><div className="mainColumn">
+      <div className="workHubWorkspace"><div className="mainColumn" role="region" aria-label={taskCopy.coordinationFeed}>
       <ChatSurfaceLayout
         scrollButton={showConversation ? undefined : null}
         style={!showConversation ? { height: expandedLayoutHeight, flex: 'none', position: 'absolute', bottom: 0, width: '100%' } : undefined}
         composer={
           <div className="workHubComposerSurface" ref={composerSurface} onFocusCapture={editProgress} onPointerUpCapture={editProgress}>
-            {(controller.error || control?.error) && (
+            {(controller.error || control?.error || taskSelection.error) && (
               <div className="workHubLiveError" role="alert">
-                {controller.error ?? t.controlFailed}
+                {controller.error ?? taskSelection.error ?? t.controlFailed}
                 {controller.canRetry && (
                   <Button label={t.retry} variant="ghost" onClick={controller.retry} />
                 )}
               </div>
             )}
             <div className="workHubTaskPanels">
-              {selectedTask ? <details className="workHubTaskViewInbox"><summary>{taskCopy.pendingInteractions}</summary>
+              {selectedTask ? (!!controller.taskInbox.requests.length || !!controller.taskInbox.grants?.length || !!controller.taskInbox.error) && <details className="workHubTaskViewInbox"><summary>{taskCopy.pendingInteractions}<span>{controller.taskInbox.requests.length}</span></summary>
                 <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
               </details> : <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />}
-              {!progress && !selectedTask && <WorkHubTaskOverview key={'tasks:' + controller.sessionId} overview={controller.taskOverview} onOpen={id => call(services.presentation.openSession(id))}
-                onView={task => highlight.selectWork({ sessionId: task.targetSessionId, name: task.targetSessionName, workId: task.workId ?? task.actionId })} />}
             </div>
-            {(controller.activeForm || controller.activeQuestion) && <div hidden={Boolean(selectedTask)}>
+            {(controller.activeForm || controller.activeQuestion) && <div>
             {controller.activeForm && (
               <FormInteractionPrompt
                 request={controller.activeForm}
@@ -337,11 +337,7 @@ export function WorkHubRoot() {
               request={controller.activeQuestion} onRespond={controller.respondToUserQuestion}
               onStop={controller.stop} stopPending={controller.stopPending} />}
             </div>}
-            {selectedTask && taskOwner && <WorkHubTaskComposer
-              key={JSON.stringify([taskOwner, selectedTask.workId])}
-              services={services} owner={taskOwner} workId={selectedTask.workId!} name={selectedTask.name} view={taskView}
-              composerRef={taskComposer} onBack={() => highlight.selectWork(undefined)} />}
-            <div className="workHubComposerContent" hidden={Boolean(selectedTask || controller.activeQuestion || controller.activeForm)}>
+            <div className="workHubComposerContent" hidden={Boolean(controller.activeQuestion || controller.activeForm)}>
             <WorkHubComposer
               pendingMessages={controller.transientMessages}
               queuedMessages={controller.messageQueue.entries}
@@ -444,8 +440,9 @@ export function WorkHubRoot() {
                     variant="ghost"
                     size="sm"
                     width={80}
+                    placement="above"
                     value={controller.executionConcurrency?.toString()}
-                    options={Array.from({ length: WORKHUB_MAX_CONCURRENT_SESSIONS }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))}
+                    options={Array.from({ length: WORKHUB_MAX_CONCURRENT_SESSIONS }, (_, index) => ({ value: String(index + 1), label: `${t.executionConcurrency} ${index + 1}` }))}
                     renderValue={(option) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }} title={`${t.executionConcurrency}: ${option.value} — ${t.executionConcurrencyHint}`}><Workflow size={14} aria-hidden="true" />{option.value}</span>}
                     isDisabled={controller.executionConcurrency === undefined || controller.savingConcurrency}
                     onChange={(value) => controller.changeExecutionConcurrency(Number(value))}
@@ -463,11 +460,9 @@ export function WorkHubRoot() {
         }
       >
         <div ref={history} className="workHubHistory" aria-hidden={!showConversation} inert={!showConversation}>
-        {selectedTask && taskOwner ? <WorkHubTaskView key={JSON.stringify([taskOwner, selectedTask.workId])}
-          services={services} owner={taskOwner} workId={selectedTask.workId!} name={selectedTask.name}
-          view={taskView}
-          onClose={() => highlight.selectWork(undefined)} /> : <WorkHubConversation
+        <WorkHubConversation
           workLinks={links}
+          taskFacts={controller.taskOverview}
           onReadAttachmentBytes={services.readAttachmentBytes}
           onOpenWork={(id) => call(services.presentation.openSession(id))}
           scrollBehavior="auto"
@@ -488,10 +483,11 @@ export function WorkHubRoot() {
               <p>{t.hint}</p>
             </div>
           }
-        />}
+        />
         </div>
       </ChatSurfaceLayout>
-      </div></div>
+      </div>
+      </div>
     </section>
     </WorkHubHueProvider>
     </WorkHubHighlightContext.Provider>

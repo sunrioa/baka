@@ -18,23 +18,27 @@
  */
 
 import { useEffect, useId, useState } from 'react';
-import { Button, TextArea, useUiLocale } from '@maka/ui';
+import { Button, IconButton, TextArea, useUiLocale } from '@maka/ui';
+import { PanelRightClose, RefreshCcw } from '@maka/ui/icons';
 import type { WorkHubTask, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskOverview } from '../controller/use-workhub-task-overview.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
 type Overview = ReturnType<typeof useWorkHubTaskOverview>;
-export function WorkHubTaskOverview({ overview, onOpen, onView }: { overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void }) {
+export function WorkHubTaskOverview({ overview, onOpen, onView, onClose }: { overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void; onClose?(): void }) {
   const t = workHubTaskCopy[useUiLocale()];
-  if (overview.ready && !overview.tasks.length && !overview.truncated) return null;
   const ended = (task: WorkHubTask) => ['pending_acceptance', 'failed', 'cancelled', 'stopped', 'unavailable'].includes(task.status);
   const groups = [{ label: t.progress, tasks: overview.tasks.filter(task => !ended(task)) }, { label: t.delivery, tasks: overview.tasks.filter(ended) }];
-  return <details className="workHubTaskOverview" open aria-label={t.title} aria-busy={!overview.ready} data-maka-assistant-exclude>
-    <summary>{t.title}{overview.ready && <span> · {overview.tasks.length}</span>}</summary>
+  return <section className="workHubTaskOverview" aria-label={t.title} aria-busy={!overview.ready} data-maka-assistant-exclude>
+    <header className="workHubTaskRailHeader"><h2>{t.title}{overview.ready && <span> · {overview.tasks.length}</span>}</h2>
+      <IconButton size="sm" variant="ghost" icon={<RefreshCcw size={14} />} label={t.refresh} onClick={() => { void overview.refresh(); }} />
+      {onClose && <IconButton size="sm" variant="ghost" icon={<PanelRightClose size={16} />} label={t.close} onClick={onClose} />}
+    </header>
     {!overview.ready && <p role={overview.error ? 'alert' : 'status'}>{overview.tasks.length ? t.stale : overview.error ? t.unavailable : t.loading}</p>}
     <>
       <p className="workHubTaskHint">{t.hint}</p>
+      {overview.ready && !overview.tasks.length && <p>{t.empty}</p>}
       <div className="workHubTaskRows">
         {groups.flatMap(group => group.tasks.map((task, index) => <div key={JSON.stringify([task.actionId, task.delegationId])}>
           {index === 0 && <h3>{group.label}</h3>}
@@ -43,8 +47,7 @@ export function WorkHubTaskOverview({ overview, onOpen, onView }: { overview: Ov
       </div>
       {overview.truncated && <p role="status">{t.truncated}</p>}
     </>
-    <Button size="sm" variant="ghost" label={t.refresh} onClick={() => { void overview.refresh(); }} />
-  </details>;
+  </section>;
 }
 function TaskCard({ task, overview, onOpen, onView }: { task: WorkHubTask; overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void }) {
   const locale = useUiLocale();
@@ -71,7 +74,7 @@ function TaskCard({ task, overview, onOpen, onView }: { task: WorkHubTask; overv
     <Button variant="ghost" size="sm" width="100%" className="workHubTaskHeading" label={`${shown.targetSessionName} ${t.status[shown.status]}`} aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>
       <span className="workHubTaskHeadingContent"><span className="workHubTaskName">{shown.targetSessionName}</span><span className="workHubTaskStatus">{t.status[shown.status]}</span></span>
     </Button>
-    <p className="workHubTaskText">{shown.text}</p>
+    <p className="workHubTaskText" data-expanded={expanded}>{shown.text}</p>
     {shown.waitReason && <p className="workHubTaskHint">{t[shown.waitReason]}</p>}
     {shown.dependency && <p className="workHubTaskHint">{t.dependency}: {shown.dependency.question}</p>}
     {shown.failure && <p className="workHubTaskFailure">{shown.failure}</p>}

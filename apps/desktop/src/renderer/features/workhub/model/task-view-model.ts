@@ -60,21 +60,18 @@ export function createWorkHubTaskViewModel(
       manualTurn = undefined;
       publish({ assignment, executions: [], execution: undefined });
     } else publish({ assignment });
-    if (!assignment?.execution || assignment.state !== 'owned') {
-      publish({ executions: [], execution: undefined, executionsReady: true });
-      return;
-    }
     publish({ executionsReady: false });
-    const executions: TurnSnapshot[] = [];
-    const cursors = new Set<string>();
-    let cursor: string | undefined;
-    try {
+    const read = async (source: WorkHubTaskAssignment): Promise<TurnSnapshot[]> => {
+      if (!source.execution || source.state !== 'owned') return [];
+      const executions: TurnSnapshot[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
       do {
-        const page = await services.taskExecutions(owner, { actionId: assignment.actionId, delegationId: assignment.delegationId, ...(cursor ? { cursor } : {}) });
-        if (closed || generation !== executionVersion) return;
-        if (page.actionId !== assignment.actionId || page.delegationId !== assignment.delegationId || page.targetSessionId !== assignment.targetSessionId ||
-            (!cursor && (page.executions[0]?.turnId !== assignment.execution.turnId || page.executions[0]?.runId !== assignment.execution.runId)) ||
-            page.executions.some(item => item.sessionId !== assignment.targetSessionId || executions.some(previous => previous.turnId === item.turnId))) {
+        const page = await services.taskExecutions(owner, { actionId: source.actionId, delegationId: source.delegationId, ...(cursor ? { cursor } : {}) });
+        if (closed || generation !== executionVersion) return [];
+        if (page.actionId !== source.actionId || page.delegationId !== source.delegationId || page.targetSessionId !== source.targetSessionId ||
+            (!cursor && (page.executions[0]?.turnId !== source.execution.turnId || page.executions[0]?.runId !== source.execution.runId)) ||
+            page.executions.some(item => item.sessionId !== source.targetSessionId || executions.some(previous => previous.turnId === item.turnId))) {
           throw new Error('Task execution history changed identity');
         }
         executions.push(...page.executions);
@@ -83,10 +80,15 @@ export function createWorkHubTaskViewModel(
         if (cursor) cursors.add(cursor);
         // These are small status records, never transcript payloads. Do not
         // label an intermediate page as the latest execution.
-        publish({ executions: [...executions] });
+        if (source.actionId === assignment?.actionId) publish({ executions: [...executions] });
       } while (cursor);
+      return executions;
+    };
+    try {
+      const executions = assignment ? await read(assignment) : [];
+      if (closed || generation !== executionVersion) return;
       const selected = executions.find(item => item.turnId === manualTurn) ?? executions.at(-1);
-      publish({ execution: selected ? { turnId: selected.turnId, runId: selected.runId } : undefined, executionsReady: true });
+      publish({ executions, execution: selected ? { turnId: selected.turnId, runId: selected.runId } : undefined, executionsReady: true });
     } catch (reason) {
       if (closed || generation !== executionVersion) return;
       publish({ executionsReady: false });
@@ -144,8 +146,7 @@ export function createWorkHubTaskViewModel(
             }
             assignments = assignments.map(item => item.actionId === selected ? row : item);
           }
-          const assignment = assignments.find(item => item.actionId === manualAction) ??
-            page.rows.find(item => item.generationId === page.rows[0]?.generationId && !item.superseded && item.state === 'owned') ?? page.rows[0];
+          const assignment = assignments.find(item => item.actionId === manualAction) ?? page.rows[0];
           publish({ assignments, historyCursor: page.cursor, ready: true, loadingEarlier: false, error: undefined });
           await readExecutions(assignment);
         } catch (reason) { if (!closed && generation === version) { publish({ ready: false }); fail(reason); } }

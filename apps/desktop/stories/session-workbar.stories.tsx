@@ -887,6 +887,8 @@ function bridge(options: {
   popupMenu?: WorkbarServices['popupMenu'];
   /** Make `browser.navigate` reject, so a valid address surfaces the navigation-failed toast. */
   browserNavigateFails?: boolean;
+  /** Make `browser.reload` reject, so the toolbar shows the action-failed toast. */
+  browserReloadFails?: boolean;
   /** The git-review read result the 变更 panel receives (empty / source error / truncated / edge diffs). */
   review?: GitReviewReadResult;
   /** Make `review.read` reject, so the panel shows its load-error banner. */
@@ -982,7 +984,9 @@ function bridge(options: {
       },
       back: async () => undefined,
       forward: async () => undefined,
-      reload: async () => undefined,
+      reload: async () => {
+        if (options.browserReloadFails) throw new Error('reload failed');
+      },
       stop: async () => undefined,
       close: async () => undefined,
       getState: async () => browserState,
@@ -1669,7 +1673,7 @@ export const WorkHubTools: Story = {
     workHubMenu.mockClear();
     workHubMenu.mockResolvedValueOnce('inspector');
     await userEvent.click(canvas.getByRole('button', { name: '添加面板' }));
-    expect(workHubMenu.mock.lastCall?.[0].items.map((item) => item.label)).toEqual(['浏览器', '工作看板', '追踪']);
+    expect(workHubMenu.mock.lastCall?.[0].items.map((item) => item.label)).toEqual(['任务执行', '浏览器', '工作看板', '追踪']);
     await waitFor(() => expect(canvas.getByRole('tab', { name: '追踪' })).toHaveAttribute('aria-selected', 'true'));
     workHubMenu.mockResolvedValueOnce('browser');
     await userEvent.click(canvas.getByRole('button', { name: '添加面板' }));
@@ -1770,6 +1774,18 @@ export const BrowserNavigationFailed: Story = {
     await userEvent.clear(address);
     await userEvent.type(address, 'https://example.com/status{Enter}');
     await within(document.body).findByText('浏览器导航失败');
+  },
+};
+
+// Real path: session → Browser → reload; a rejected Desktop action leaves the
+// page visible and reports a localized failure through the existing toast.
+export const BrowserToolbarActionFailed: Story = {
+  decorators: [bridge({ browserState: LOADED_BROWSER_STATE, browserReloadFails: true })],
+  render: () => <Workbar tab="browser" />,
+  play: async ({ canvasElement }) => {
+    const reload = await within(canvasElement).findByRole('button', { name: '刷新页面' });
+    await userEvent.click(reload);
+    await within(document.body).findByText('浏览器操作失败');
   },
 };
 

@@ -108,6 +108,13 @@ export function installStorybookRenderProbe({ storyId }) {
       `unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
     );
   });
+  // Native ResizeObserver loop notifications are ErrorEvents, not always a
+  // Playwright pageerror. Observe from before mount without suppressing them.
+  window.addEventListener('error', (event) => {
+    if (event.message?.startsWith('ResizeObserver loop')) {
+      smoke.failures.push(`resize observer: ${event.message}`);
+    }
+  });
 
   const eventStoryId = (payload) => (typeof payload === 'string' ? payload : payload?.storyId);
   const belongsToStory = (payload) => {
@@ -194,6 +201,7 @@ export function catalogJobs(
       }
       if (
         entry.id === 'product-workhub--next-prompt-suggestion' ||
+        entry.id === 'product-workhub--task-preview-switch-is-atomic' ||
         entry.id === 'product-workhub--task-overview-and-continuation'
       ) {
         return COLOR_SCHEMES.flatMap((colorScheme) =>
@@ -552,10 +560,12 @@ async function runCli() {
     );
   }
   const { chromium } = await import('@playwright/test');
-  // Headless Chromium paints no platform scrollbar, so anything a scrollbar
-  // can occlude is inert here and on CI. `SMOKE_HEADED=1` is how you check
-  // those by hand, on the platform whose scrollbar overlays the content.
-  const browser = await chromium.launch({ headless: process.env.SMOKE_HEADED !== '1' });
+  // Keep native scrollbar geometry in headless layout checks. Playwright hides
+  // scrollbars by default, masking the space classic scrollbars consume.
+  const browser = await chromium.launch({
+    headless: process.env.SMOKE_HEADED !== '1',
+    ignoreDefaultArgs: ['--hide-scrollbars'],
+  });
   const server = await startStaticServer(staticDir);
   let problems;
   try {

@@ -41,8 +41,11 @@ export function workHubLinkedWork(
 ): WorkHubLinkedWork[] {
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const workspaceName = (id: string) => workspaceNameFromCwd(sessionById.get(id)?.cwd);
+  // Backport #6096 without adopting the upstream topic/dispatch redesign:
+  // providers may reuse a call ID in another Turn, never another call's link.
+  const callKey = (turnId: string, id: string) => JSON.stringify([turnId, id]);
   const taskCalls = new Set(messages.flatMap((message) =>
-    message.type === 'tool_call' && message.toolName === 'mcp__desktop_workhub__tasks' ? [message.id] : [],
+    message.type === 'tool_call' && message.toolName === 'mcp__desktop_workhub__tasks' ? [callKey(message.turnId, message.id)] : [],
   ));
   const readResult = (message: StoredMessage | undefined): Record<string, unknown> | undefined => {
     if (message?.type !== 'tool_result') return undefined;
@@ -54,14 +57,14 @@ export function workHubLinkedWork(
     if (value && typeof value === 'object' && 'structuredContent' in value) value = value.structuredContent;
     return value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
   };
-  const results = new Map(messages.flatMap((message) => message.type === 'tool_result' ? [[message.toolUseId, message] as const] : []));
+  const results = new Map(messages.flatMap((message) => message.type === 'tool_result' ? [[callKey(message.turnId, message.toolUseId), message] as const] : []));
   return messages.flatMap((message): WorkHubLinkedWork[] => {
-    if (message.type === 'tool_call' && taskCalls.has(message.id)) {
+    if (message.type === 'tool_call' && taskCalls.has(callKey(message.turnId, message.id))) {
       const args = message.args;
       const request = args && typeof args === 'object' && 'request' in args ? args.request : undefined;
       if (!request || typeof request !== 'object' || !('operation' in request) ||
         (request.operation !== 'stop' && request.operation !== 'resume')) return [];
-      const resultMessage = results.get(message.id);
+      const resultMessage = results.get(callKey(message.turnId, message.id));
       const result = readResult(resultMessage);
       let target = typeof result?.targetSessionKey === 'string' && !resultMessage?.isError ? result.targetSessionKey : undefined;
       if (!target && coordinationSessionKey && 'targetSessionId' in request && typeof request.targetSessionId === 'string') {
@@ -84,7 +87,7 @@ export function workHubLinkedWork(
       targetSessionName: sessionById.get(message.targetSessionId)?.name ?? message.targetSessionName,
       workspaceName: workspaceName(message.targetSessionId),
     }];
-    if (message.type !== 'tool_result' || message.isError || !taskCalls.has(message.toolUseId)) return [];
+    if (message.type !== 'tool_result' || message.isError || !taskCalls.has(callKey(message.turnId, message.toolUseId))) return [];
     let result: unknown;
     if (message.content.kind === 'json') result = message.content.value;
     else if (message.content.kind === 'text') {

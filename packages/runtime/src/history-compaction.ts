@@ -21,7 +21,11 @@ import type { RuntimeInvocationRecord } from '@maka/core/runtime-invocation';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
 import { finitePositive } from './context-budget-helpers.js';
-import { estimateRuntimeEventChars, estimateRuntimeEventsTokens } from './model-history.js';
+import {
+  estimateRuntimeEventChars,
+  estimateRuntimeEventsTokens,
+  workHubCoordinationReceiptText,
+} from './model-history.js';
 import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
 import {
   HistoryCompactSummarizerError,
@@ -546,5 +550,8 @@ export function applyRuntimeEventHistoryCompact(
 
 /** True when the event carries model-visible content the compact projection counts. */
 export function isHistoryCompactContentEvent(event: RuntimeEvent): boolean {
-  return event.modelVisibility !== 'hidden' && estimateRuntimeEventChars(event) > 0;
+  return (
+    (event.modelVisibility !== 'hidden' || workHubCoordinationReceiptText(event) !== undefined) &&
+    estimateRuntimeEventChars(event) > 0
+  );
 }

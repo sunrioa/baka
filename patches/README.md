@@ -298,3 +298,18 @@ throttle fail without it.
 
 Delete when upstream applies the correction absolutely after a clamp
 (inokawa/virtua#983).
+
+The React ESM/CJS observers measure DOM commits in a microtask before the
+browser delivers resize notifications, preserving same-paint row positions.
+Deferring every measurement by a frame made sent prompts reverse direction.
+Native resize-only changes remain coalesced on a frame; a newer DOM commit
+cancels that pending delivery and measures current content boxes, subtracting
+border/padding for border-box sizing. Synchronous layout during native resize
+delivery otherwise produces loop warnings on long history/task pane changes.
+There is no public observer scheduling option. Unobserve drops queued targets;
+disconnect clears targets, stops mutation observation and cancels the frame,
+including ID zero. No global observer or error handler is replaced, and task
+execution is unaffected. Both entry points are covered by
+`packages/ui/src/__tests__/virtua-resize-observer.test.tsx`; Chromium transcript
+geometry and WorkHub stories protect the scrolling behavior. Remove this hunk
+when upstream offers equivalent observer-cycle-safe measurement delivery.

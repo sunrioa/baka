@@ -183,8 +183,10 @@ export function ChatView(props: {
    * Host-owned execution identity. Buffered content and the session catalog
    * never decide which Turn owns the activity footer.
    */
-  activeTurn?: { readonly turnId: string; readonly awaitingInput?: boolean; readonly compacting?: boolean };
+  activeTurn?: { readonly turnId: string; readonly awaitingInput?: boolean; readonly compacting?: boolean; readonly queued?: boolean };
   activeSession?: SessionSummary;
+  /** False for earlier Session sections in a continuous multi-Session view. */
+  scrollOwner?: boolean;
   /** Personalized user label shown on user messages. Falls back to "你". */
   userLabel?: string;
   /**
@@ -205,7 +207,7 @@ export function ChatView(props: {
    */
   emptyOverride?: ReactNode;
   /** Optional host-owned identity beside a turn; absent for ordinary transcripts. */
-  turnDecorations?: ReadonlyMap<string, { header: ReactNode; accentColor?: string; messageRail?: ReactNode }>;
+  turnDecorations?: ReadonlyMap<string, { header: ReactNode; accentColor?: string; messageRail?: ReactNode; assistantSummary?: ReactNode; assistantDetailsLabel?: string }>;
   /** Session-owned records anchored after a durable conversation turn. */
   conversationItems?: ReadonlyArray<{
     id: string;
@@ -268,6 +270,8 @@ export function ChatView(props: {
   restoreTargetTurn?: { turnId: string; unavailable?: boolean };
   viewportNavigation?: TranscriptViewportNavigation;
   onReadingAnchorChange?(turnId?: string): void;
+  /** The initial virtual rows have reached their reading position. */
+  onInitialPositioned?(): void;
   scrollBehavior: ScrollBehavior;
   /** Turns older than the first one in `messages` exist and can be loaded. */
   hasEarlierHistory?: boolean;
@@ -543,13 +547,15 @@ export function ChatView(props: {
           turnId={pendingTurnId}
           startedAt={activeContent?.startedAt}
           running={runningStatus}
+          queued={props.activeTurn?.queued}
           providerRetry={activeContent?.providerRetry}
         />
       )}
     </VStack>
   ) : null;
-  const { startMargin, listRef, measureStartMargin } = useTranscriptStartMargin(scrollRef);
+  const { startMargin, listRef, measureStartMargin } = useTranscriptStartMargin(scrollRef, props.scrollOwner !== false);
   const { highlightedTurnId, placed, commandTurnId, revealTurnAtStart, measurement } = useChatScroll({
+    enabled: props.scrollOwner,
     scrollRef,
     measureStartMargin,
     virtualizerRef,
@@ -561,6 +567,9 @@ export function ChatView(props: {
     onReadingAnchorChange: props.onReadingAnchorChange,
     behavior: props.scrollBehavior,
   });
+  useEffect(() => {
+    if (placed) props.onInitialPositioned?.();
+  }, [placed, props.activeSession?.id, props.onInitialPositioned]);
   const onLoadTranscriptTurnRef = useRef(props.onLoadTranscriptTurn);
   onLoadTranscriptTurnRef.current = props.onLoadTranscriptTurn;
   const navigatePromptRail = useCallback(
@@ -927,12 +936,12 @@ export function ChatView(props: {
       />
       <div className="maka-chat-shell">
         {/* ChatSurfaceLayout hosts the rail outside bounded transcript columns. */}
-        <PromptAnchorRail
+        {props.scrollOwner !== false && <PromptAnchorRail
           turns={promptRailTurns}
           onHighlightTurn={props.onPromptRailHighlight ? (turn) => props.onPromptRailHighlight?.(turn?.turnId) : undefined}
           scrollRef={scrollRef}
           onNavigateTurn={navigatePromptRail}
-        />
+        />}
         <ChatMessageList
           className="maka-chat-message-list maka-chatContent"
           data-turn-source-count={turns.length}
@@ -991,6 +1000,8 @@ export function ChatView(props: {
                           activityObserved={turn.turnId === props.activeTurn?.turnId}
                           messageHeader={decoration?.header}
                           messageRail={decoration?.messageRail}
+                          assistantDetailsLabel={decoration?.assistantDetailsLabel}
+                          assistantSummary={decoration?.assistantSummary}
                           transientMessages={inlineTransientMessagesByTurn.get(turn.turnId)}
                           userLabel={props.userLabel}
                           footerActions={turnPresentation?.footerActionsByTurn[turn.turnId]}

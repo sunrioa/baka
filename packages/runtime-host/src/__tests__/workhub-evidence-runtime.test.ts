@@ -19,6 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { z } from 'zod';
 import type {
   StoredMessage,
   WorkHubDelegationAssignedMessage,
@@ -404,6 +405,61 @@ function fixture() {
     },
   };
 }
+
+test('WorkHubEvidence advertises an object schema without losing any operation fields', () => {
+  const f = fixture();
+  const parameters = f.runtime.tool.parameters as z.ZodType;
+  const schema = z.toJSONSchema(parameters, { io: 'input', target: 'draft-7' });
+  assert.equal(schema.type, 'object');
+  assert.equal(schema.oneOf, undefined);
+  assert.equal(schema.anyOf, undefined);
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.required, ['operation']);
+  const source = { workId: 'a', generationId: 'a', actionId: 'a', delegationId: 'delegation-a' };
+  const correlation = { requesterSessionId: 'a', questionId: `whpq_${'a'.repeat(48)}` };
+  const calls = [
+    { operation: 'list', query: 'checksum', limit: 16, cursor: 'cursor' },
+    { operation: 'read', sourceActionId: 'a', source, cursor: 'cursor' },
+    { operation: 'ask', source, question: 'Which checksum?' },
+    { operation: 'inbox', limit: 8, cursor: 'cursor' },
+    { operation: 'result', ...correlation },
+    { operation: 'reply', ...correlation, answer: 'abc123' },
+    { operation: 'cancel', ...correlation },
+    { operation: 'wait', ...correlation },
+    { operation: 'request', question: 'Which checksum?', sourceActionId: 'a' },
+    { operation: 'resolve', requesterActionId: 'a', requestId: 'request-a', sourceActionId: null },
+  ];
+  const operation = schema.properties?.operation;
+  assert.ok(operation && typeof operation === 'object');
+  assert.deepEqual(new Set(operation.enum), new Set(calls.map((call) => call.operation)));
+  for (const call of calls) {
+    assert.ok(parameters.safeParse(call).success, JSON.stringify(call));
+    for (const field of Object.keys(call)) {
+      assert.ok(Object.hasOwn(schema.properties ?? {}, field), `${call.operation}.${field}`);
+    }
+  }
+});
+
+test('WorkHubEvidence keeps operation-specific argument validation at the tool boundary', () => {
+  const parameters = fixture().runtime.tool.parameters as z.ZodType;
+  for (const call of [
+    { operation: 'list', answer: 'not a list argument' },
+    { operation: 'read', sourceActionId: null },
+    { operation: 'inbox', limit: 9 },
+    { operation: 'request' },
+    { operation: 'resolve', requesterActionId: 'a', requestId: 'request-a' },
+    { operation: 'reply', requesterSessionId: 'a', questionId: 'invalid', answer: 'abc123' },
+    {
+      operation: 'reply',
+      requesterSessionId: 'a',
+      questionId: `whpq_${'a'.repeat(48)}`,
+      answer: '',
+    },
+    { operation: 'list', unrelated: true },
+  ]) {
+    assert.equal(parameters.safeParse(call).success, false, JSON.stringify(call));
+  }
+});
 
 test('fresh container admission waits for every owned assignment and checks resources without reading history', async () => {
   const f = fixture();

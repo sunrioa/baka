@@ -20,7 +20,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { applyLiveTurnBufferEvent, reconcileLiveTurnBuffer, settleLiveTurnBufferStep, useUiLocale, type LiveTurnBuffer } from '@maka/ui';
 import type { SessionSummary } from '@maka/core/session';
-import type { SessionExecutionScope } from '@maka/runtime-host/protocol';
 import { chatTurnActivity, type SessionExecutionProjection } from '../../../application/contracts/session-execution.js';
 import { createWorkHubTaskViewModel, type WorkHubTaskViewSnapshot } from '../model/task-view-model.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
@@ -63,11 +62,12 @@ export function useWorkHubTaskView(services: TaskViewServices, owner: string | u
     followLatest: () => currentModel()?.followLatest() };
 }
 
-/** One immutable owned execution. Its parent keys it by Host, Session, Turn and Run. */
-export function useWorkHubExecutionView(services: Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>, sessionId: string, scope: SessionExecutionScope) {
+/** User-facing full Session history; it is not coordinator context or execution authority. */
+export function useWorkHubSessionView(services: Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>, sessionId: string) {
   const locale = useUiLocale();
   const localeRef = useRef(locale); localeRef.current = locale;
   const [session, setSession] = useState<SessionSummary>();
+  const [sessionReady, setSessionReady] = useState(false);
   const [transcript, setTranscript] = useState(emptyTranscript);
   const transcriptRef = useRef(emptyTranscript);
   const settled = useRef(new Set<string>());
@@ -75,15 +75,19 @@ export function useWorkHubExecutionView(services: Pick<WorkHubServices, 'getTask
   const [execution, setExecution] = useState<SessionExecutionProjection>();
   const [error, setError] = useState<string>();
   const [ready, setReady] = useState(false);
-  const range = useRef<WorkHubTranscript>(undefined);
+  const range = useRef<WorkHubTranscript | undefined>(undefined);
   useEffect(() => {
     const abort = new AbortController();
     let handle: WorkHubTranscript | undefined;
     let phase: 'pending' | 'ready' = 'pending';
+    transcriptRef.current = emptyTranscript; settled.current.clear();
+    setSession(undefined); setSessionReady(false); setTranscript(emptyTranscript); setLiveTurns(undefined); setExecution(undefined); setReady(false); setError(undefined);
     const report = (reason: unknown) => { if (!abort.signal.aborted) { setReady(false); setError(reason instanceof Error ? reason.message : String(reason)); } };
-    void services.getTaskSession(sessionId).then(value => { if (!abort.signal.aborted) setSession(value ?? undefined); }).catch(report);
+    void services.getTaskSession(sessionId).then(value => {
+      if (!abort.signal.aborted) { setSession(value ?? undefined); setSessionReady(true); }
+    }).catch(report);
     const unsubscribe = services.observe(sessionId, event => {
-      if (abort.signal.aborted || event.turnId !== scope.turnId) return;
+      if (abort.signal.aborted) return;
       setLiveTurns(previous => {
         const next = applyLiveTurnBufferEvent(previous, event, localeRef.current);
         return next ? reconcileLiveTurnBuffer(next, transcriptRef.current.messages) : next;
@@ -92,10 +96,9 @@ export function useWorkHubExecutionView(services: Pick<WorkHubServices, 'getTask
       if (abort.signal.aborted) return;
       phase = next; handle?.observationChanged(next); setReady(next === 'ready');
       if (next === 'ready') setError(undefined);
-    }, projection => { if (!abort.signal.aborted) setExecution(projection); }, scope);
+    }, projection => { if (!abort.signal.aborted) setExecution(projection); });
     void services.openTranscript(sessionId, snapshot => {
       if (abort.signal.aborted) return;
-      if (snapshot.messages.some(message => message.turnId !== scope.turnId)) { report(new Error('Task transcript changed execution')); return; }
       transcriptRef.current = snapshot; setTranscript(snapshot);
       setLiveTurns(previous => {
         let next = previous;
@@ -104,19 +107,17 @@ export function useWorkHubExecutionView(services: Pick<WorkHubServices, 'getTask
         }
         return next ? reconcileLiveTurnBuffer(next, snapshot.messages) : next;
       });
-    }, abort.signal, report, scope).then(value => {
+    }, abort.signal, report).then(value => {
       if (abort.signal.aborted) { void value.close(); return; }
       handle = value; range.current = value; value.observationChanged(phase);
     }).catch(report);
     return () => { abort.abort(); unsubscribe(); range.current = undefined; void handle?.close(); };
-  }, [services, sessionId, scope.turnId, scope.runId]);
-  return { session, transcript, liveTurns, activeTurn: chatTurnActivity(execution), ready, error,
+  }, [services, sessionId]);
+  return { session, sessionReady, transcript, liveTurns, activeTurn: chatTurnActivity(execution), ready, error,
     loadEarlier: async () => {
       const handle = range.current;
       try { await handle?.loadEarlier(); }
-      catch (reason) {
-        if (handle && range.current === handle) setError(reason instanceof Error ? reason.message : String(reason));
-      }
+      catch (reason) { if (handle && range.current === handle) setError(reason instanceof Error ? reason.message : String(reason)); }
     },
     streamingSettled: (stepId: string) => {
       if (!transcriptRef.current.messages.some(message => message.type === 'assistant' && message.id === stepId)) settled.current.add(stepId);

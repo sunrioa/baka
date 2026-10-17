@@ -46,6 +46,14 @@ type WorkbarToolDefinitionsByKind = {
 };
 
 const WORKBAR_TOOL_DEFINITION_BY_KIND = {
+  'workhub-tasks': {
+    kind: 'workhub-tasks',
+    labelKey: 'workhub-tasks',
+    icon: 'list-todo',
+    persisted: true,
+    singleton: true,
+    defaultPlacement: 'right',
+  },
   'side-chat': {
     kind: 'side-chat',
     labelKey: 'side-chat',
@@ -137,6 +145,6 @@ export function isPersistedWorkbarTool(
 /** WorkHub coordinates work; task-specific resources belong to ordinary sessions. */
 export function workbarToolsForWorkspace(workspace: 'session' | 'workhub' = 'session'): readonly WorkbarToolDefinition[] {
   return workspace === 'workhub'
-    ? WORKBAR_TOOL_DEFINITIONS.filter(({ kind }) => kind === 'browser' || kind === 'work-board' || kind === 'inspector')
-    : WORKBAR_TOOL_DEFINITIONS;
+    ? WORKBAR_TOOL_DEFINITIONS.filter(({ kind }) => kind === 'workhub-tasks' || kind === 'browser' || kind === 'work-board' || kind === 'inspector')
+    : WORKBAR_TOOL_DEFINITIONS.filter(({ kind }) => kind !== 'workhub-tasks');
 }

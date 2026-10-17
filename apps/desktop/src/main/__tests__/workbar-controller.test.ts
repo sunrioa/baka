@@ -757,7 +757,11 @@ describe('useWorkbarController', () => {
 
   it('blocks task-specific tools and side-chat commands in WorkHub', async () => {
     const { root } = installReactRenderer();
-    const services = createFakeWorkbarServices();
+    const resets: string[] = [];
+    let pendingReset: Promise<void> | undefined;
+    const services = createFakeWorkbarServices({ taskSelection: { clear: async owner => {
+      resets.push(owner); await pendingReset;
+    } } });
     const coordinationId = desktopSessionKey({ hostId: 'local', sessionId: 'maka_workhub_coordination' });
     const coordination: WorkHubWorkspaceServices = {
       resolve: async () => coordinationId,
@@ -780,8 +784,49 @@ describe('useWorkbarController', () => {
     assert.deepEqual(controller().host.panelsState.right.tabs, []);
     await act(async () => controller().commands.openTool('browser'));
     assert.deepEqual(controller().host.panelsState.right.tabs.map((tab) => tab.kind), ['browser']);
+    await act(async () => controller().commands.openTool('workhub-tasks'));
+    assert.equal(controller().host.panelsState.right.activeTabId, 'workbar:workhub-tasks');
+    assert.deepEqual(resets, [coordinationId]);
+    // Task-card navigation must retain the exact selection it just published.
+    await act(async () => controller().commands.openTool('workhub-tasks', undefined, { preserveTaskSelection: true }));
+    assert.equal(resets.length, 1);
+    await act(async () => controller().host.onRequestOpenTab('right', 'workhub-tasks'));
+    assert.equal(resets.length, 2, 'the tool menu always opens the list');
+    await act(async () => controller().host.onActivateTab('right', 'workbar:workhub-tasks'));
+    assert.equal(resets.length, 3, 'the task tool tab opens the list too');
+    await act(async () => controller().host.onDismissPanel('right'));
+    const reset = deferred<void>(); pendingReset = reset.promise;
+    await act(async () => controller().commands.toggleRightPanel());
+    assert.equal(resets.length, 4);
+    assert.equal(controller().selectors.rightCollapsed, true, 'do not flash the previous task before the shared selection clears');
+    await act(async () => reset.resolve()); pendingReset = undefined;
+    assert.equal(controller().selectors.rightCollapsed, false);
+    for (const navigate of [
+      () => controller().commands.openTool('browser'),
+      () => controller().host.onActivateTab('right', 'workbar:browser'),
+      () => controller().host.onOpenLauncher('right'),
+      () => controller().host.onDismissPanel('right'),
+    ]) {
+      await act(async () => controller().commands.openTool('workhub-tasks', undefined, { preserveTaskSelection: true }));
+      const delayed = deferred<void>(); pendingReset = delayed.promise;
+      await act(async () => controller().host.onRequestOpenTab('right', 'workhub-tasks'));
+      await act(async () => navigate());
+      const latestPanels = JSON.stringify(controller().host.panelsState);
+      const latestCollapsed = controller().selectors.rightCollapsed;
+      await act(async () => delayed.resolve()); pendingReset = undefined;
+      assert.equal(JSON.stringify(controller().host.panelsState), latestPanels, 'the newest panel navigation must win over a delayed task-list request');
+      assert.equal(controller().selectors.rightCollapsed, latestCollapsed);
+    }
+    await act(async () => controller().host.onDismissPanel('right'));
+    const obsoleteReset = deferred<void>(); pendingReset = obsoleteReset.promise;
+    await act(async () => controller().commands.toggleRightPanel());
     await act(async () => render(false));
+    const otherOwnerPanels = JSON.stringify(controller().host.panelsState);
+    const otherOwnerCollapsed = controller().selectors.rightCollapsed;
+    await act(async () => obsoleteReset.resolve()); pendingReset = undefined;
     assert.equal(controller().host.activeId, 'ordinary');
+    assert.equal(JSON.stringify(controller().host.panelsState), otherOwnerPanels, 'late WorkHub navigation cannot change another owner\u2019s panel topology');
+    assert.equal(controller().selectors.rightCollapsed, otherOwnerCollapsed);
     await act(async () => controller().commands.openTool('review'));
     assert.ok(controller().host.panelsState.right.tabs.some((tab) => tab.kind === 'review'));
     await act(async () => render(true));

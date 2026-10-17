@@ -31,8 +31,41 @@ import {
   type WorkHubServices,
 } from '../../renderer/features/workhub/index.js';
 import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
+import { useWorkHubTaskSelection } from '../../renderer/features/workhub/testing.js';
+import type { WorkHubPresentationSnapshot } from '../../shared/workhub-presentation.js';
 
 afterEach(cleanupFakeDom);
+
+test('the coordinator and shell task reader share selection without accepting an older snapshot or another owner', async () => {
+  const { root } = installReactRenderer();
+  const initial = deferred<WorkHubPresentationSnapshot>();
+  const subscribers = new Set<(snapshot: WorkHubPresentationSnapshot) => void>();
+  const owner = desktopSessionKey({ hostId: 'host', sessionId: 'coordination' });
+  const work = { sessionId: desktopSessionKey({ hostId: 'host', sessionId: 'shared-session' }), name: 'A', workId: 'a' };
+  const base: WorkHubPresentationSnapshot = { placement: 'docked', floatingVisible: false, rendererCrashed: false, shortcutRegistered: true };
+  const services = { presentation: {
+    getSnapshot: () => initial.promise,
+    subscribe: (notify: (snapshot: WorkHubPresentationSnapshot) => void) => { subscribers.add(notify); return () => { subscribers.delete(notify); }; },
+    selectTask: async (selection: NonNullable<WorkHubPresentationSnapshot['taskSelection']>) => { for (const notify of subscribers) notify({ ...base, taskSelection: selection }); },
+  } } as WorkHubServices;
+  const readers: Array<ReturnType<typeof useWorkHubTaskSelection>> = [];
+  function Reader({ index, owner }: { index: number; owner: string }) { readers[index] = useWorkHubTaskSelection(services, owner); return null; }
+  const render = (secondOwner: string) => root.render(createElement('div', null, createElement(Reader, { index: 0, owner }), createElement(Reader, { index: 1, owner: secondOwner })));
+  try {
+    await act(async () => render(owner));
+    await act(async () => readers[0]!.select(work));
+    assert.equal(readers[1]!.selected?.workId, 'a');
+    await act(async () => initial.resolve(base));
+    assert.equal(readers[0]!.selected?.workId, 'a', 'an initial IPC read cannot overwrite a newer selection notification');
+    await act(async () => readers[1]!.select({ ...work, name: 'B', workId: 'b' }));
+    assert.equal(readers[0]!.selected?.workId, 'b', 'two works sharing a Session remain distinct');
+    await act(async () => render(desktopSessionKey({ hostId: 'other-host', sessionId: 'coordination' })));
+    assert.equal(readers[1]!.selected, undefined, 'switching Host hides the old owner before any new effect runs');
+    await act(async () => readers[0]!.select(undefined));
+    assert.equal(readers[0]!.selected, undefined);
+  } finally { await act(async () => root.unmount()); }
+  assert.equal(subscribers.size, 0);
+});
 
 test('the main surface does not mount WorkHub or start its lifecycle', async () => {
   const { root, container } = installReactRenderer();

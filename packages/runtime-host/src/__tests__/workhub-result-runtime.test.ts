@@ -140,6 +140,31 @@ test('task overview includes only a linked child question belonging to the exact
   assert.equal(f.resultReads(), 0);
 });
 
+test('result notifications include the latest delivered user correction from the exact owned Turn, never a shared Turn', async () => {
+  const f = fixture();
+  f.setOriginalAnswered();
+  f.setTip({ sessionId: 'target', turnId: 'continued-turn', runId: 'continued-run' });
+  f.setLatestInput('Use the corrected output. Do not repeat the command.');
+  await f.handlers['workhub.tasks.query']({}, {} as never);
+  assert.equal(f.inputReads(), 0, 'overview does not read target history');
+  await f.reconcile();
+  const data = JSON.parse(f.notifications[0]!.split('\n\n').at(-1)!);
+  assert.equal(data.targetTurnId, 'continued-turn');
+  assert.equal(data.latestUserInput, 'Use the corrected output. Do not repeat the command.');
+  assert.equal(data.latestUserInputTruncated, false);
+
+  const shared = fixture();
+  shared.setOriginalAnswered();
+  shared.setDisposition('shared_turn');
+  shared.setLatestInput('Unrelated manual work');
+  await shared.reconcile();
+  assert.equal(shared.inputReads(), 0);
+  assert.equal(
+    JSON.parse(shared.notifications[0]!.split('\n\n').at(-1)!).latestUserInput,
+    undefined,
+  );
+});
+
 function fixture(childRequest = false) {
   let active = true,
     stopped = false;
@@ -167,6 +192,9 @@ function fixture(childRequest = false) {
     targetMessageId: 'message',
     returnResults: true,
   };
+  let latestInput = assignment.userText;
+  let inputReads = 0;
+  const notifications: string[] = [];
   const questions = [
     {
       question: 'When should the release go out?',
@@ -187,7 +215,8 @@ function fixture(childRequest = false) {
     _origin,
     prepare,
   ) => {
-    await prepare({} as SessionAdmissionLease);
+    const content = await prepare({} as SessionAdmissionLease);
+    if (content) notifications.push(content.text);
     return 'delivered';
   };
   const runtime = createWorkHubResultRuntime({
@@ -273,6 +302,12 @@ function fixture(childRequest = false) {
       resultReads++;
       return '😀'.repeat(16001);
     },
+    readTurnInput: async (sessionId, turnId) => {
+      assert.equal(sessionId, 'target');
+      assert.equal(turnId, tip.turnId);
+      inputReads++;
+      return latestInput;
+    },
     admission,
     acquireResidency: () => ({ release() {} }),
     onError: (error) => {
@@ -310,6 +345,11 @@ function fixture(childRequest = false) {
     forwarded,
     closedRelays,
     resultReads: () => resultReads,
+    inputReads: () => inputReads,
+    notifications,
+    setLatestInput: (text: string) => {
+      latestInput = text;
+    },
     notify: runtime.notify,
     reconcile: () => runtime.coordinator.reconcile(),
     setRelayReject: (reject: (reason: Error) => void) => {

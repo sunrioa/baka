@@ -47,6 +47,22 @@ function outputPanelCount(markup: string): number {
 }
 
 describe('tool activity presentation', () => {
+  it('uses the shell resource status for both the icon and the outcome word after reattaching', () => {
+    for (const status of ['running', 'completed', 'cancelled'] as const) {
+      const item: ToolActivityItem = {
+        toolUseId: 'reattached-bash', toolName: 'Bash', status: 'interrupted', args: { command: 'sleep 60' },
+        result: {
+          kind: 'shell_run', ref: 'maka://runtime/background-tasks/reattached', mode: 'pipes', status,
+          cwd: '/repo', cmd: 'sleep 60', startedAt: 1, updatedAt: 2, revision: 1,
+          output: { mode: 'pipes', stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false, redacted: false },
+        },
+      };
+      const markup = renderToStaticMarkup(createElement(ToolTrow, { items: [item], activityObserved: true }));
+      if (status === 'cancelled') assert.match(markup, /已中断/);
+      else assert.doesNotMatch(markup, /已中断/);
+    }
+  });
+
   it('localizes client capability boundary failures and offers recovery', () => {
     const item: ToolActivityItem = {
       toolUseId: 'client-capability-boundary',

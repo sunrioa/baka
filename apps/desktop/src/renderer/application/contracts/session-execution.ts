@@ -33,6 +33,7 @@ export function chatTurnActivity(projection: SessionExecutionProjection | undefi
   const turn = activeHostTurn(projection);
   return turn ? {
     turnId: turn.turnId,
+    ...(turn.status === 'admitted' || turn.status === 'created' ? { queued: true } : {}),
     awaitingInput: turn.status === 'waiting_for_user',
     compacting: turn.rootExecutionKind === 'context_compact',
   } : undefined;

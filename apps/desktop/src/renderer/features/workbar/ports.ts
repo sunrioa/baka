@@ -286,6 +286,8 @@ export interface SideChatSessionPort {
 
 export interface WorkbarServices {
   popupMenu(input: import('../../../shared/native-menu.js').NativeMenuRequest): Promise<string | null>;
+  /** Presentation only: generic task-tool entry starts from the overview. */
+  readonly taskSelection: { clear(ownerSessionId: string): Promise<void> };
   readonly review: WorkbarReviewService;
   /**
    * Explicit qualified refs persist per Session across panel/app restarts.

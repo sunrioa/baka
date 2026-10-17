@@ -73,6 +73,7 @@ import type {
   QuoteCompanionPanelState,
 } from '../tools/side-chat/quote-companion-panel-state';
 import type { CompanionForkVisibilityEvent } from '../tools/side-chat/quote-companion-visibility';
+import { TaskExecutionPanel } from '../../../application/contracts/task-execution-panel.js';
 
 const ArtifactPane = lazy(() =>
   import('../tools/artifacts/artifact-pane').then((module) => ({ default: module.ArtifactPane })),
@@ -166,6 +167,8 @@ function faceLabel(kind: SessionWorkbarTabKind, copy: WorkbarCopy): string {
       return copy.terminal;
     case 'work-board':
       return copy.workBoard;
+    case 'workhub-tasks':
+      return copy.workhubTasks;
     case 'browser':
       return copy.browser;
     case 'files':
@@ -380,6 +383,8 @@ function launcherCopyKey(
     ? 'sideChat'
     : kind === 'work-board'
       ? 'workBoard'
+      : kind === 'workhub-tasks'
+        ? 'workhubTasks'
       : kind;
 }
 
@@ -427,6 +432,10 @@ export function WorkbarSurface(props: {
   const locale = useUiLocale();
   const copy = getDesktopConversationCopy(locale).workbar;
   const tools = workbarToolsForWorkspace(props.workspace);
+  // Keep the task tool mounted across a transient Coordination lookup gap.
+  // Its feature disables authority while retaining drafts and pending receipts.
+  const retainedTaskOwner = useRef<string | undefined>(undefined);
+  if (props.workspace === 'workhub' && props.sessionId) retainedTaskOwner.current = props.sessionId;
   // Inactive Side Chats remain mounted across main-Session navigation. Retain
   // the last authoritative source summary for each one so its subscription and
   // eventual explicit-close cleanup never lose the source identity merely
@@ -524,7 +533,7 @@ export function WorkbarSurface(props: {
         const selected = !showingLauncher && activeTab?.id === tab.id;
         const active = panelVisible && selected;
         let content: ReactNode = null;
-        if (tab.kind !== 'terminal' && !props.sessionId) return null;
+        if (tab.kind !== 'terminal' && tab.kind !== 'workhub-tasks' && !props.sessionId) return null;
         if (tab.kind === 'review') {
           content = (
             <Suspense fallback={<WorkbarPanelLoading label={copy.review} />}>
@@ -546,6 +555,8 @@ export function WorkbarSurface(props: {
               />
             </Suspense>
           );
+        } else if (tab.kind === 'workhub-tasks') {
+          if (retainedTaskOwner.current) content = <TaskExecutionPanel owner={retainedTaskOwner.current} available={!!props.sessionId} />;
         } else if (tab.kind === 'work-board') {
           content = (
             <WorkBoardPanel

@@ -61,6 +61,8 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     GLOBAL_KEYS.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
   );
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
+  const frames = new Map<number, FrameRequestCallback>();
+  let nextFrame = 0;
   const scrollTops = new WeakMap<HTMLElement, number>();
   Object.defineProperties(window.HTMLElement.prototype, {
     offsetParent: { configurable: true, get(this: HTMLElement) { return this.parentElement; } },
@@ -142,11 +144,14 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     MutationObserver: InertObserver,
     Node: window.Node,
     ResizeObserver: MeasuringResizeObserver,
-    cancelAnimationFrame: () => undefined,
+    cancelAnimationFrame: (id: number) => { frames.delete(id); },
     document,
     getComputedStyle: () => ({ overflowY: 'visible' }),
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-    requestAnimationFrame: () => 0,
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    },
     window,
   });
   const container = document.querySelector<HTMLElement>('#root')!;
@@ -157,9 +162,13 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     container,
     async render(element) {
       await act(async () => { root.render(element); });
-      // Viewport measurement mounts the Turns; their own measurement settles them.
-      await act(async () => {});
-      await act(async () => {});
+      // Resize delivery is frame-coalesced. Advance the viewport and mounted
+      // row measurements explicitly; fake DOM geometry is not browser layout.
+      for (let frame = 0; frame < 4 && frames.size; frame++) {
+        const callbacks = [...frames.values()];
+        frames.clear();
+        await act(async () => { for (const callback of callbacks) callback(performance.now()); });
+      }
     },
     async cleanup() {
       await act(async () => { root.unmount(); });

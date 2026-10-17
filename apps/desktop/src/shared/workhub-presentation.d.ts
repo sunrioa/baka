@@ -44,10 +44,17 @@ export interface WorkHubPresentationSnapshot {
   readonly rendererCrashed: boolean;
   readonly progressRequest?: number;
   readonly workbar?: WorkHubWorkbarState;
+  readonly taskSelection?: WorkHubTaskSelection;
+}
+
+/** Presentation only. Task input authority still comes from the Host ledger. */
+export interface WorkHubTaskSelection {
+  readonly ownerSessionId: string;
+  readonly work?: { readonly sessionId: string; readonly name: string; readonly workId: string };
 }
 
 export type WorkHubMainNavigation =
-  | { readonly kind: 'workhub'; readonly panelAction?: 'usage' | 'toggle' }
+  | { readonly kind: 'workhub'; readonly panelAction?: 'usage' | 'toggle' | 'tasks' }
   | { readonly kind: 'session'; readonly sessionKey: string }
   | { readonly kind: 'settings'; readonly section: 'models' };
 
@@ -64,6 +71,8 @@ export interface WorkHubPresentationBridge {
   hide(): Promise<void>;
   openUsage(): Promise<void>;
   toggleWorkbar(): Promise<void>;
+  openTasks(): Promise<void>;
+  selectTask(selection: WorkHubTaskSelection): Promise<void>;
   openSession(sessionKey: string): Promise<void>;
   openSettings(section: 'models'): Promise<void>;
   subscribe(handler: (snapshot: WorkHubPresentationSnapshot) => void): () => void;

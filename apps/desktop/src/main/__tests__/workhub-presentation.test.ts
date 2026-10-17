@@ -1229,3 +1229,34 @@ test('mirrors panel state to WorkHub and routes edge toggles back to Main', asyn
   await assert.rejects(h.command(view.webContents, 'host', host), /Only the main window/);
   h.controller.dispose();
 });
+
+test('task selections share exact identities between the native coordinator and the unified workbar', async () => {
+  const h = await harness();
+  await h.command(h.main.webContents, 'host', { visible: true, rect: { x: 200, y: 40, width: 800, height: 760 } });
+  await h.command(h.main.webContents, 'ready');
+  const view = h.views[0]!;
+  const ownerSessionId = JSON.stringify(['host', 'coordinator']);
+  const work = { sessionId: JSON.stringify(['host', 'task-a']), name: 'A', workId: 'work-a' };
+  const snapshot = () => h.command(h.main.webContents, 'snapshot') as Promise<import('../../shared/workhub-presentation.js').WorkHubPresentationSnapshot>;
+  await h.command(view.webContents, 'select-task', { ownerSessionId, work });
+  assert.deepEqual(JSON.parse(JSON.stringify((await snapshot()).taskSelection)), { ownerSessionId, work });
+  const navigation = h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main'));
+  assert.equal(JSON.stringify(navigation.at(-1)?.[1]), JSON.stringify({ kind: 'workhub', panelAction: 'tasks' }));
+  await h.command(h.main.webContents, 'select-task', { ownerSessionId, work: { ...work, workId: 'work-b', name: 'B' } });
+  assert.equal((await snapshot()).taskSelection?.work?.workId, 'work-b', 'work identity, not a shared Session, selects the task');
+  assert.equal(h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main')).length, navigation.length, 'switching a workbar selector cannot toggle or reopen the bar');
+  await h.command(h.main.webContents, 'select-task', { ownerSessionId });
+  assert.equal((await snapshot()).taskSelection?.work, undefined);
+  await assert.rejects(h.command(view.webContents, 'select-task', { ownerSessionId, work: { ...work, workId: '' } }), /Invalid WorkHub task selection/);
+  await assert.rejects(h.command(view.webContents, 'select-task', { ownerSessionId, work: { ...work, sessionId: JSON.stringify(['other-host', 'task']) } }), /must stay on its Host/);
+  assert.equal((await snapshot()).taskSelection?.work, undefined, 'invalid selection cannot change the current work');
+  await h.controller.toggle();
+  const navigationsBefore = h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main')).length;
+  await h.command(view.webContents, 'select-task', { ownerSessionId, work });
+  assert.equal(h.main.webContents.sent.filter(([channel]) => channel.endsWith('open-main')).length, navigationsBefore + 1, 'floating work opens the same shell-owned execution pane');
+  await h.command(view.webContents, 'tasks');
+  assert.equal((await snapshot()).taskSelection, undefined, 'the generic floating task button opens the list, not the last selected task');
+  await h.command(view.webContents, 'select-task', { ownerSessionId, work });
+  assert.equal((await snapshot()).taskSelection?.work?.workId, work.workId, 'an explicit task card still opens its exact task');
+  h.controller.dispose();
+});

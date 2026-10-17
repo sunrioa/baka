@@ -849,8 +849,9 @@ function RequiresBypassBanner(props: {
  */
 function outcomeWord(item: ToolActivityItem, locale: UiLocale): string | undefined {
   const copy = getToolActivityCopy(locale).status;
-  if (item.status === 'interrupted') return copy.interrupted;
-  if (item.status === 'errored' && isSandboxDeniedTool(item)) return copy.sandboxBlocked;
+  const status = toolActivityPresentationStatus(item);
+  if (status === 'interrupted') return copy.interrupted;
+  if (status === 'errored' && isSandboxDeniedTool(item)) return copy.sandboxBlocked;
   return undefined;
 }
 

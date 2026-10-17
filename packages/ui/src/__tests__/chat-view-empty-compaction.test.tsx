@@ -100,6 +100,10 @@ test('shows one waiting indicator before a named live Turn reaches the transcrip
   });
   assert.equal((committed.match(/class="maka-turn-processing"/g) ?? []).length, 1);
   assert.match(committed, /data-transcript-turn-id="pending-turn"/);
+  const queued = await renderChat(undefined, { activeTurn: { turnId: 'queued-turn', queued: true } });
+  assert.match(queued, /Accepted, waiting to start/);
+  assert.match(queued, /data-turn-status="queued"/);
+  assert.doesNotMatch(queued, /Pondering|maka-turn-processing|maka-turn-elapsed/);
 });
 
 test('a new Host Turn owns its waiting footer while the previous answer remains buffered', async () => {
@@ -203,6 +207,35 @@ test('turn identity stays on its exact durable anchor and is absent from ordinar
   assert.match(one.textContent!, /Workspace \/ Work/);
   assert.equal(document.querySelector('[data-transcript-turn-id="two"]')!.getAttribute('data-turn-accent'), null);
   assert.doesNotMatch(await renderChat(undefined, { messages }), /data-turn-accent|Workspace \/ Work/);
+});
+
+test('host response disclosures preserve original content and never collapse failed or live responses', async () => {
+  const decoration = { header: null, assistantSummary: <p>Host task facts</p>, assistantDetailsLabel: 'Full receipt' };
+  for (const status of ['completed', 'failed', 'aborted'] as const) {
+    const { document } = parseHTML(await renderChat(undefined, {
+      messages: [
+        { type: 'user', id: 'ask', turnId: 'turn', ts: 1, text: 'Original request' },
+        { type: 'assistant', id: 'answer', turnId: 'turn', ts: 2, modelId: 'test', text: 'Original assistant content' },
+        { type: 'turn_state', id: 'end', turnId: 'turn', ts: 3, status },
+      ],
+      turnDecorations: new Map([['turn', decoration]]),
+    }));
+    const details = document.querySelector('.maka-turn-response-details');
+    assert.equal(!!details, status === 'completed');
+    for (const text of ['Original request', 'Host task facts', 'Original assistant content'])
+      assert.ok(document.querySelector('.maka-transcript-turn')!.textContent!.includes(text));
+    if (details) {
+      assert.equal(details.hasAttribute('open'), false);
+      assert.match(details.textContent!, /Original assistant content/);
+      assert.doesNotMatch(details.textContent!, /Original request|Host task facts/);
+    }
+  }
+  const live = await renderChat({ turnId: 'turn', steps: [] }, {
+    messages: [{ type: 'user', id: 'ask', turnId: 'turn', ts: 1, text: 'Original request' }],
+    activeTurn: { turnId: 'turn' }, turnDecorations: new Map([['turn', decoration]]),
+  });
+  assert.doesNotMatch(live, /maka-turn-response-details/);
+  assert.match(live, /Host task facts/);
 });
 
 test('shared turn presentation only exposes lineage when the surface supports navigation', async () => {

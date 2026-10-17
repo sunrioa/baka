@@ -63,6 +63,7 @@ export function createWorkHubResultRuntime(options: {
     Partial<Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'readEvidenceContinuation'>>;
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
+  readTurnInput(sessionId: string, turnId: string): Promise<string>;
   acquireResidency(): { release(): void };
   onError(error: unknown): void;
 }) {
@@ -178,12 +179,20 @@ export function createWorkHubResultRuntime(options: {
       const answer = includeResult
         ? await readTurnResult(assignment.targetSessionId, identity.turnId)
         : '';
+      const latestUserInput =
+        includeResult && !sharedTurn
+          ? await options.readTurnInput(assignment.targetSessionId, identity.turnId)
+          : undefined;
       return {
         turnId: identity.turnId,
         runId: identity.runId,
         eventKey: snapshot.terminalEventId,
         status: snapshot.status,
         result: answer,
+        ...(latestUserInput &&
+        latestUserInput !== (assignment.delegationText ?? assignment.userText)
+          ? { latestUserInput }
+          : {}),
         details:
           snapshot.status === 'failed'
             ? {

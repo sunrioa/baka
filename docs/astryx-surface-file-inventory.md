@@ -6,7 +6,7 @@ Generated against `@astryxdesign/core@0.6.3` (195 component exports).
 
 Wiki bar: Design Conventions · API Use-the-System · Theming · Container Padding.
 
-**Totals:** 332 files — blocker 0, reimplementation 0, polish 4, aligned 328.
+**Totals:** 335 files — blocker 0, reimplementation 0, polish 4, aligned 331.
 
 ## Exclusions (explicit)
 
@@ -41,6 +41,7 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-navigation.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-route-header.tsx` | other | HStack, Heading, IconButton, Text, Toolbar, VStack | aligned — uses Astryx (HStack, Heading, IconButton, Text, Toolbar, VStack) | aligned |
 | `apps/desktop/src/renderer/application/contracts/settings-presentation/settings-section.tsx` | other | Divider, HStack, Heading, Item, Text, VStack | aligned — uses Astryx (Divider, HStack, Heading, Item, Text, VStack) | aligned |
+| `apps/desktop/src/renderer/application/contracts/task-execution-panel.tsx` | shell-chrome-or-panel | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/application/contracts/workbar-edge-toggle.tsx` | shell-chrome-or-panel | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/cascade-layers.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |
 | `apps/desktop/src/renderer/chat-composer-region.tsx` | shell-chrome-or-panel | Banner, Button | aligned — uses Astryx (Banner, Button) | aligned |
@@ -154,14 +155,16 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/features/workhub/ui/cursor.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/main-navigation.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-composer.tsx` | shell-chrome-or-panel | none | aligned — no raw controls; no Astryx JSX usage | aligned |
-| `apps/desktop/src/renderer/features/workhub/ui/workhub-conversation.tsx` | other | Button, Link, Text | aligned — uses Astryx (Button, Link, Text) | aligned |
+| `apps/desktop/src/renderer/features/workhub/ui/workhub-conversation.tsx` | other | Button, Link | aligned — uses Astryx (Button, Link) | aligned |
+| `apps/desktop/src/renderer/features/workhub/ui/workhub-dispatch-card.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-dock.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-progress-card.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-root.tsx` | other | Button, IconButton, Selector | aligned — uses Astryx (Button, IconButton, Selector) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-surface-switch.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-composer.tsx` | shell-chrome-or-panel | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-inbox.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
-| `apps/desktop/src/renderer/features/workhub/ui/workhub-task-overview.tsx` | other | Button, TextArea | aligned — uses Astryx (Button, TextArea) | aligned |
+| `apps/desktop/src/renderer/features/workhub/ui/workhub-task-overview.tsx` | other | Button, IconButton, TextArea | aligned — uses Astryx (Button, IconButton, TextArea) | aligned |
+| `apps/desktop/src/renderer/features/workhub/ui/workhub-task-panel.tsx` | shell-chrome-or-panel | Selector | aligned — uses Astryx (Selector) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-view.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-work-identity.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/maka-tokens.css` | styles | n/a (css) | aligned — no off-rhythm control heights flagged | aligned |

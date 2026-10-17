@@ -22,7 +22,9 @@ import { test } from 'node:test';
 import {
   buildRuntimeEventModelReplayPlan,
   buildRuntimeEventReplayTimeline,
+  estimateRuntimeEventsTokens,
 } from '../model-history.js';
+import { isHistoryCompactContentEvent } from '../history-compaction.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
@@ -45,6 +47,7 @@ test('model history compacts only source-bound Host result notifications without
       targetTurnId: origin.targetTurnId,
       targetRunId: 'source-run',
       originalRequest: 'Original objective',
+      latestUserInput: 'Use the corrected output, not the original output.',
       status: 'completed',
       sharedTurn: false,
       result: '中文😀\\\n"'.repeat(10000) + 'FULL_RESULT_TAIL',
@@ -79,12 +82,61 @@ test('model history compacts only source-bound Host result notifications without
   assert.ok(Buffer.byteLength(JSON.stringify(compact.content), 'utf8') <= 7500);
   assert.ok(compact.content.includes('"actionId":"source-action"'));
   assert.ok(compact.content.includes('"resultTruncated":true'));
+  assert.ok(compact.content.includes('Use the corrected output, not the original output.'));
   assert.ok(!compact.content.includes('FULL_RESULT_TAIL'));
   assert.equal(unchanged.content, text, 'human text is never identified by a string prefix');
   const copy = buildRuntimeEventModelReplayPlan([{ ...notification, sessionId: 'ordinary-copy' }])
     .items[0];
   assert.ok(copy?.kind === 'text');
   assert.equal(copy.content, text, 'ordinary copied conversations retain their source text');
+});
+
+test('committed native WorkHub receipts remain visible after their user input and survive compaction sizing', () => {
+  const user = {
+    ...event({
+      id: 'native-user',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Correct A' },
+    }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  };
+  const receipt: RuntimeEvent = {
+    ...event({ id: 'native-receipt', role: 'system', author: 'host' }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    modelVisibility: 'hidden',
+    actions: {
+      coordination: {
+        actionId: 'accepted-action',
+        userText: 'Correct A',
+        result: {
+          disposition: 'delegate_existing',
+          workId: 'work-a',
+          targetSessionId: 'session-a',
+          targetMessageId: 'message-a',
+        },
+      },
+    },
+  };
+  const raw = JSON.stringify(receipt);
+  const plan = buildRuntimeEventModelReplayPlan([user, receipt]);
+  const acknowledgment = plan.items[1];
+  assert.ok(acknowledgment?.kind === 'text');
+  assert.equal(acknowledgment.role, 'assistant');
+  assert.ok(acknowledgment.content.includes('accepted-action'));
+  assert.ok(acknowledgment.content.includes('message-a'));
+  assert.ok(acknowledgment.content.includes('not a new request'));
+  assert.ok(isHistoryCompactContentEvent(receipt));
+  assert.ok(estimateRuntimeEventsTokens([receipt]) > 0);
+  assert.equal(JSON.stringify(receipt), raw, 'receipt projection never edits durable facts');
+  for (const rejected of [
+    { ...receipt, sessionId: 'ordinary-session' },
+    { ...receipt, partial: true },
+    { ...receipt, author: 'agent' as const },
+    { ...receipt, actions: { coordination: { ...receipt.actions!.coordination!, actionId: '' } } },
+  ]) {
+    assert.equal(buildRuntimeEventModelReplayPlan([rejected]).items.length, 0);
+  }
 });
 
 test('malformed or mismatched Host result data cannot substitute another source in replay', () => {

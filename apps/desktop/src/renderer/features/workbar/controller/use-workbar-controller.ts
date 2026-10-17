@@ -77,6 +77,8 @@ import { LiveContextUsageProbe } from '../tools/inspector/live-context-usage-pro
 
 interface OpenToolOptions {
   initialPrompt?: string;
+  /** An explicit task card has already selected its exact work identity. */
+  preserveTaskSelection?: boolean;
 }
 
 export interface WorkbarControllerCommands {
@@ -197,7 +199,7 @@ export function useWorkbarController(
     viteEnv?.VITE_MAKA_WORK_BOARD_START_TASK === '1' &&
     Boolean(input.openNewTaskSurface && input.resolveWorkBoardTarget && input.prepareWorkBoardDraft);
   const terminalCopy = getDesktopConversationCopy(locale).terminalPanel;
-  const { browser, sideChat, terminal, workBoard } = useWorkbarServices();
+  const { browser, sideChat, terminal, workBoard, taskSelection } = useWorkbarServices();
   const compact = useMediaQuery(SHELL_WORKBAR_COMPACT_QUERY);
   const layout = useWorkbarLayoutState(input.layoutSessionId, input.authoritativeSessionIds, compact);
   const sideConversations = useSideConversationWorkspace();
@@ -228,7 +230,9 @@ export function useWorkbarController(
     sessionId?: string;
   } | undefined>(undefined);
   const resourceGenerationRef = useRef(0);
+  const panelNavigationRef = useRef(0);
   useLayoutEffect(() => {
+    panelNavigationRef.current += 1;
     activeSessionIdRef.current = activeSessionId;
     return () => {
       activeSessionIdRef.current = undefined;
@@ -565,11 +569,27 @@ export function useWorkbarController(
   const openTool = useCallback<WorkbarControllerCommands['openTool']>(
     (kind, placement, options = {}) => {
       if (!workbarToolsForWorkspace(workspace).some((tool) => tool.kind === kind)) return;
+      const navigation = ++panelNavigationRef.current;
       const definition = workbarToolDefinition(kind);
       const targetPlacement = placement ?? definition.defaultPlacement;
       if (definition.singleton) {
-        layout.openWorkbarTab(definition.kind, targetPlacement);
-        revealPlacement(targetPlacement);
+        const open = () => {
+          layout.openWorkbarTab(definition.kind, targetPlacement);
+          revealPlacement(targetPlacement);
+        };
+        if (kind === 'workhub-tasks' && !options.preserveTaskSelection) {
+          const owner = activeSessionIdRef.current;
+          if (!owner) return;
+          // Clear through the shared presentation owner before revealing the
+          // panel, so reopening cannot briefly display the previous task.
+          void taskSelection.clear(owner).then(() => {
+            if (activeSessionIdRef.current === owner && panelNavigationRef.current === navigation) open();
+          }).catch(error => {
+            if (activeSessionIdRef.current !== owner || panelNavigationRef.current !== navigation) return;
+            const label = getDesktopConversationCopy(locale).workbar.openTab;
+            input.toastApi.error(label, localizedShellErrorMessage(error, label, locale));
+          });
+        } else open();
         return;
       }
       switch (definition.kind) {
@@ -635,6 +655,8 @@ export function useWorkbarController(
       revealPlacement,
       terminal,
       terminalCopy.startFailed,
+      taskSelection,
+      workspace,
     ],
   );
 
@@ -796,7 +818,13 @@ export function useWorkbarController(
   );
 
   const toggleRight = useCallback(() => {
+    panelNavigationRef.current += 1;
     if (layout.workbarCollapsed) {
+      const activeTab = panelsStateRef.current.right.tabs.find(tab => tab.id === panelsStateRef.current.right.activeTabId);
+      if (workspace === 'workhub' && activeTab?.kind === 'workhub-tasks') {
+        openTool('workhub-tasks');
+        return;
+      }
       layout.setWorkbarCollapsed(false);
       const activeTabId = panelsStateRef.current.right.activeTabId;
       if (activeTabId) layout.activateWorkbarTab('right', activeTabId);
@@ -807,6 +835,8 @@ export function useWorkbarController(
     layout.activateWorkbarTab,
     layout.setWorkbarCollapsed,
     layout.workbarCollapsed,
+    openTool,
+    workspace,
   ]);
 
   /* The panel-facing toggle applies the same space decision as every other
@@ -901,6 +931,7 @@ export function useWorkbarController(
 
   const toggleTool = useCallback((kind: SessionWorkbarTabKind) => {
     if (!workbarToolsForWorkspace(workspace).some((tool) => tool.kind === kind)) return;
+    panelNavigationRef.current += 1;
     const activeSideChatTabIds = kind === 'side-chat'
       ? new Set(
         sideConversations.panels
@@ -997,7 +1028,7 @@ export function useWorkbarController(
       respondToUserForm: sideChat.respondToUserForm,
       toggleRight,
       toggleRightPanel,
-      setWorkbarCollapsed: layout.setWorkbarCollapsed,
+      setWorkbarCollapsed: (collapsed) => { panelNavigationRef.current += 1; layout.setWorkbarCollapsed(collapsed); },
       bindNewTaskSessionResolver,
     }),
     [
@@ -1031,15 +1062,22 @@ export function useWorkbarController(
       rightWidth: layout.workbarWidth,
       bottomHeight: layout.bottomPanelHeight,
       panelsState: layout.workbarPanelsState,
-      onActivateTab: layout.activateWorkbarTab,
-      onCloseTab: closeTab,
+      onActivateTab: (placement, id) => {
+        panelNavigationRef.current += 1;
+        const tab = panelsStateRef.current[placement].tabs.find(tab => tab.id === id);
+        if (tab?.kind === 'workhub-tasks') openTool('workhub-tasks', placement);
+        else layout.activateWorkbarTab(placement, id);
+      },
+      onCloseTab: (placement, tab) => { panelNavigationRef.current += 1; closeTab(placement, tab); },
       onOpenLauncher: (placement) => {
+        panelNavigationRef.current += 1;
         layout.openWorkbarLauncher(placement);
         revealPlacement(placement);
       },
       onRequestOpenTab: (placement, kind) => openTool(kind, placement),
       onToggleRightPanel: toggleRightPanel,
       onDismissPanel: (placement) => {
+        panelNavigationRef.current += 1;
         if (placement === 'right') layout.setWorkbarCollapsed(true);
         else layout.setBottomPanelOpen(false);
       },

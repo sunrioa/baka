@@ -41,6 +41,7 @@ export type DesktopWorkbarBridge = Pick<
   | 'sessions'
   | 'shellRuns'
   | 'transcripts'
+  | 'workHubPresentation'
 > &
   Partial<Pick<MakaBridge, 'workBoard'>>;
 
@@ -113,6 +114,7 @@ export function createDesktopWorkbarServices(
   return {
     reviewBaseBranchPreference: createReviewBaseBranchPreferences(),
     popupMenu: (input) => bridge.appWindow.popupMenu(input),
+    taskSelection: { clear: (ownerSessionId) => bridge.workHubPresentation.selectTask({ ownerSessionId }) },
     review: {
       read: (input) => bridge.gitReview.read(input),
       subscribeSessionEvents: (sessionId, handler) =>

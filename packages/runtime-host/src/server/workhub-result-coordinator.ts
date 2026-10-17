@@ -38,6 +38,7 @@ export interface WorkHubResultObservation {
     | 'waiting_for_user'
     | 'waiting_for_dependency';
   readonly result: string;
+  readonly latestUserInput?: string;
   readonly details?: unknown;
   readonly sharedTurn: boolean;
   /** A correlated peer wait is observable to users but needs no coordinator-model wake. */
@@ -87,6 +88,7 @@ export function workHubResultContent(
     targetRunId: observation.runId,
     originalRequest: assignment.userText,
     delegatedRequest: assignment.delegationText ?? assignment.userText,
+    latestUserInput: observation.latestUserInput,
     status: observation.status,
     sharedTurn: observation.sharedTurn,
     result: observation.result,

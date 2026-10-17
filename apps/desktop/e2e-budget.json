@@ -7,7 +7,7 @@
   "specs": {
     "workhub-evidence.spec.ts": {
       "tests": 1,
-      "electron": "native Desktop task capabilities admit two independent workers; evidence starts a fresh worker Turn whose exact question is answered through the contextBridge task inbox after renderer replacement, then its owned delivery and native continuation cross the task preload/main IPC, detecting stale native offers, old-Run response routing or lost task identity"
+      "electron": "native Desktop task capabilities admit two independent workers; sidebar navigation leaves the persistent WorkHub WebContentsView and exposes a running worker in the main renderer before its provider finishes; evidence starts a fresh worker Turn whose exact question is answered through the contextBridge task inbox after renderer replacement, then its owned delivery and native continuation cross the task preload/main IPC, detecting stale native offers, old-Run response routing or lost task identity"
     },
     "composer-directory-reference.spec.ts": {
       "tests": 1,
@@ -51,7 +51,7 @@
     },
     "session-workbar.spec.ts": {
       "tests": 5,
-      "electron": "Git changes re-read on native window focus; native PTY ownership survives Session navigation and renderer replacement, while Stop/exit cross preload/main into the terminal view; Side Chat owns a Host fork lifecycle; first send reaches the Host; the composer usage entry opens a workbar whose per-Session visibility survives renderer reload."
+      "electron": "Git changes re-read on native window focus; native PTY ownership survives Session navigation and renderer replacement, while Stop/exit cross preload/main into the terminal view; Side Chat owns a Host fork lifecycle; first send reaches the Host; the Trace launcher opens a workbar whose per-Session visibility survives renderer reload."
     },
     "settings.spec.ts": {
       "tests": 2,

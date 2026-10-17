@@ -1,8 +1,60 @@
 diff --git a/node_modules/virtua/lib/index.cjs b/node_modules/virtua/lib/index.cjs
-index 0153fca..7481c9e 100644
+index 0153fca..8592d46 100644
 --- a/node_modules/virtua/lib/index.cjs
 +++ b/node_modules/virtua/lib/index.cjs
-@@ -361,8 +361,8 @@ n), S = e => l(e.t(), e.o()), _ = ({l: e, i: t, u: o, h: n, $: r, p: c, t: a, m:
+@@ -311,16 +311,47 @@ n), S = e => l(e.t(), e.o()), _ = ({l: e, i: t, u: o, h: n, $: r, p: c, t: a, m:
+     };
+     return null != o && (s.position = "sticky", s[n] = o + "px", s.zIndex = r), s;
+ }, W = e => {
+-    let t;
++    let t, frame, owner, mutation, queued = !1;
++    const pending = new Map, targets = new Set;
++    const flush = () => {
++        frame = void 0;
++        const entries = Array.from(pending.values());
++        pending.clear(), entries.length && e(entries);
++    }, measure = () => {
++        queued = !1;
++        if (!targets.size || !owner.getComputedStyle) return;
++        frame !== void 0 && owner.cancelAnimationFrame(frame);
++        for (const target of targets) {
++            const style = owner.getComputedStyle(target), border = style.boxSizing === "border-box";
++            const size = (axis, sides) => Math.max(0, parseFloat(style[axis]) - (border ? sides.reduce((sum, side) => sum + (parseFloat(style["padding" + side]) || 0) + (parseFloat(style["border" + side + "Width"]) || 0), 0) : 0));
++            const visible = !target.getClientRects || target.getClientRects().length;
++            const width = visible ? size("width", ["Left", "Right"]) : 0, height = visible ? size("height", ["Top", "Bottom"]) : 0;
++            Number.isFinite(width) && Number.isFinite(height) && pending.set(target, { target, contentRect: { width, height } });
++        }
++        flush();
++    }, schedule = () => {
++        queued || (queued = !0, queueMicrotask(measure));
++    };
+     return {
+         Y(o) {
+-            (t || (t = new (w(p(o)).ResizeObserver)(e))).observe(o);
++            targets.add(o);
++            (t || (owner = w(p(o)), t = new owner.ResizeObserver(entries => {
++                for (const entry of entries) pending.set(entry.target, entry);
++                if (frame === void 0) frame = owner.requestAnimationFrame(flush);
++            }))).observe(o);
++            if (!mutation && owner.MutationObserver) {
++                mutation = new owner.MutationObserver(schedule);
++                mutation.observe(o, { subtree: !0, childList: !0, characterData: !0, attributes: !0, attributeFilter: ["style", "class", "open"] });
++            }
++            schedule();
+         },
+         j(e) {
+-            t.unobserve(e);
++            targets.delete(e), pending.delete(e), t.unobserve(e);
+         },
+         J() {
+-            t && t.disconnect();
++            t && t.disconnect(), pending.clear(), targets.clear();
++            mutation && mutation.disconnect(), mutation = void 0;
++            frame !== void 0 && owner.cancelAnimationFrame(frame), frame = void 0;
+         }
+     };
+ }, H = (e, t, o, n, r, s, l) => {
+@@ -361,8 +392,8 @@ n), S = e => l(e.t(), e.o()), _ = ({l: e, i: t, u: o, h: n, $: r, p: c, t: a, m:
              const [t, n] = e.L();
              if (!t) return;
              p && s && s(), p = !1;
@@ -14,10 +66,62 @@ index 0153fca..7481c9e 100644
                  behavior: "instant"
              }), n && (i && i(), e.o() > e.t() && e.A(1, z()));
 diff --git a/node_modules/virtua/lib/index.js b/node_modules/virtua/lib/index.js
-index eac48a4..935ccfa 100644
+index eac48a4..225f148 100644
 --- a/node_modules/virtua/lib/index.js
 +++ b/node_modules/virtua/lib/index.js
-@@ -361,8 +361,8 @@ f), b = e => h(e.t(), e.o()), k = ({l: e, i: t, u: o, h: n, $: r, p: s, t: l, m:
+@@ -311,16 +311,47 @@ f), b = e => h(e.t(), e.o()), k = ({l: e, i: t, u: o, h: n, $: r, p: s, t: l, m:
+     };
+     return null != o && (s.position = "sticky", s[n] = o + "px", s.zIndex = r), s;
+ }, Y = e => {
+-    let t;
++    let t, frame, owner, mutation, queued = !1;
++    const pending = new Map, targets = new Set;
++    const flush = () => {
++        frame = void 0;
++        const entries = Array.from(pending.values());
++        pending.clear(), entries.length && e(entries);
++    }, measure = () => {
++        queued = !1;
++        if (!targets.size || !owner.getComputedStyle) return;
++        frame !== void 0 && owner.cancelAnimationFrame(frame);
++        for (const target of targets) {
++            const style = owner.getComputedStyle(target), border = style.boxSizing === "border-box";
++            const size = (axis, sides) => Math.max(0, parseFloat(style[axis]) - (border ? sides.reduce((sum, side) => sum + (parseFloat(style["padding" + side]) || 0) + (parseFloat(style["border" + side + "Width"]) || 0), 0) : 0));
++            const visible = !target.getClientRects || target.getClientRects().length;
++            const width = visible ? size("width", ["Left", "Right"]) : 0, height = visible ? size("height", ["Top", "Bottom"]) : 0;
++            Number.isFinite(width) && Number.isFinite(height) && pending.set(target, { target, contentRect: { width, height } });
++        }
++        flush();
++    }, schedule = () => {
++        queued || (queued = !0, queueMicrotask(measure));
++    };
+     return {
+         Y(o) {
+-            (t || (t = new (x(y(o)).ResizeObserver)(e))).observe(o);
++            targets.add(o);
++            (t || (owner = x(y(o)), t = new owner.ResizeObserver(entries => {
++                for (const entry of entries) pending.set(entry.target, entry);
++                if (frame === void 0) frame = owner.requestAnimationFrame(flush);
++            }))).observe(o);
++            if (!mutation && owner.MutationObserver) {
++                mutation = new owner.MutationObserver(schedule);
++                mutation.observe(o, { subtree: !0, childList: !0, characterData: !0, attributes: !0, attributeFilter: ["style", "class", "open"] });
++            }
++            schedule();
+         },
+         J(e) {
+-            t.unobserve(e);
++            targets.delete(e), pending.delete(e), t.unobserve(e);
+         },
+         j() {
+-            t && t.disconnect();
++            t && t.disconnect(), pending.clear(), targets.clear();
++            mutation && mutation.disconnect(), mutation = void 0;
++            frame !== void 0 && owner.cancelAnimationFrame(frame), frame = void 0;
+         }
+     };
+ }, J = (e, t, o, n, r, s, l) => {
+@@ -361,8 +392,8 @@ f), b = e => h(e.t(), e.o()), k = ({l: e, i: t, u: o, h: n, $: r, p: s, t: l, m:
              const [t, n] = e.L();
              if (!t) return;
              h && s && s(), h = !1;
