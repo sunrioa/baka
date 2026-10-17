@@ -30,7 +30,7 @@ import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 /** The main window owns only this landing space; the live view keeps its React owner. */
 export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: {
   visible?: boolean;
-  workbar: { bottomOpen: boolean; rightCollapsed: boolean };
+  workbar: { bottomOpen: boolean; rightCollapsed: boolean; taskPanelVisible: boolean };
   workbarTogglePosition?: WorkbarTogglePosition;
 }) {
   const { presentation } = useWorkHubServices();
@@ -40,11 +40,13 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
   const workbarRef = useRef({
     placement: workbar.bottomOpen ? 'bottom' as const : 'right' as const,
     collapsed: workbar.bottomOpen ? false : workbar.rightCollapsed,
+    taskPanelVisible: workbar.taskPanelVisible,
     togglePosition: workbarTogglePosition,
   });
   workbarRef.current = {
     placement: workbar.bottomOpen ? 'bottom' : 'right',
     collapsed: workbar.bottomOpen ? false : workbar.rightCollapsed,
+    taskPanelVisible: workbar.taskPanelVisible,
     togglePosition: workbarTogglePosition,
   };
   const [snapshot, setSnapshot] = useState<WorkHubPresentationSnapshot>();
@@ -106,7 +108,7 @@ export function WorkHubDock({ visible = true, workbar, workbarTogglePosition }: 
         .catch(() => undefined);
     };
   }, [enabled, presentation, visible, snapshot?.placement]);
-  useEffect(() => surface.current?.refresh(), [workbar.bottomOpen, workbar.rightCollapsed, workbarTogglePosition]);
+  useEffect(() => surface.current?.refresh(), [workbar.bottomOpen, workbar.rightCollapsed, workbar.taskPanelVisible, workbarTogglePosition]);
   return (
     <section ref={element} className="workHubDock" data-native-edge={snapshot?.placement === 'docked' && !needsRecovery || undefined} hidden={!visible} aria-label={t.title}>
       {backdrop && snapshot?.placement === 'docked' && <img className="workHubDockBackdrop" src={backdrop} alt="" aria-hidden draggable={false} />}

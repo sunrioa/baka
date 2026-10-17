@@ -29,6 +29,8 @@ export interface WorkbarShellState {
   readonly hiddenSessionIds: ReadonlySet<string>;
   readonly rightCollapsed: boolean;
   readonly bottomOpen: boolean;
+  /** Whether a task tool, not merely either workbar, is actually visible. */
+  readonly taskPanelVisible: boolean;
   /** Whether the Workbar is available with a Session to show; WorkHub's
    * navigation waits for it before opening a tool. */
   readonly ready: boolean;
@@ -38,6 +40,7 @@ const EMPTY_STATE: WorkbarShellState = {
   hiddenSessionIds: new Set(),
   rightCollapsed: true,
   bottomOpen: false,
+  taskPanelVisible: false,
   ready: false,
 };
 
@@ -55,6 +58,7 @@ function readonlyStringSetEqual(
 function shellStateEqual(left: WorkbarShellState, right: WorkbarShellState): boolean {
   return left.rightCollapsed === right.rightCollapsed &&
     left.bottomOpen === right.bottomOpen &&
+    left.taskPanelVisible === right.taskPanelVisible &&
     left.ready === right.ready &&
     readonlyStringSetEqual(left.hiddenSessionIds, right.hiddenSessionIds);
 }
@@ -65,8 +69,8 @@ const ignoreResolvedSession = (): void => undefined;
  * Per-shell command port and read store; the provider alone owns the
  * controller. Commands are stable delegates, so publishing a new controller
  * never re-renders the shell. The shell's read is the small state above, and
- * it is replaced only when one of its values actually changes: tab switches,
- * resize drags and panel topology stay inside the provider.
+ * it is replaced only when one of its values actually changes. Only task-tool
+ * visibility crosses for WorkHub; other tab switches and resize stay local.
  */
 export function createWorkbarShellBridge() {
   let controller: WorkbarController | undefined;
@@ -106,6 +110,11 @@ export function createWorkbarShellBridge() {
         hiddenSessionIds: next.selectors.hiddenSessionIds,
         rightCollapsed: next.selectors.rightCollapsed,
         bottomOpen: next.host.bottomOpen,
+        taskPanelVisible: next.host.workspace === 'workhub' && !next.host.hidden && Boolean(next.host.activeId) && (['right', 'bottom'] as const).some(placement => {
+          const panel = next.host.panelsState[placement];
+          const open = placement === 'right' ? !next.host.rightCollapsed : next.host.bottomOpen;
+          return open && !panel.launcherOpen && panel.tabs.some(tab => tab.id === panel.activeTabId && tab.kind === 'workhub-tasks');
+        }),
         ready: Boolean(next.host.activeId),
       });
     },

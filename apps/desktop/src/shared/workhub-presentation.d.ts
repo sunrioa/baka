@@ -25,6 +25,8 @@ export interface WorkHubHostRect {
 }
 
 export interface WorkHubWorkbarState {
+  /** Presentation only: an active task tool is visible in either workbar. */
+  readonly taskPanelVisible?: boolean;
   readonly togglePosition?: import('@maka/core/settings').WorkbarTogglePosition;
   readonly collapsed: boolean;
   readonly placement: 'right' | 'bottom';

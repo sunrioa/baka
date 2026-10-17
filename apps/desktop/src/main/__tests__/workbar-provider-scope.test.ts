@@ -191,4 +191,38 @@ describe('WorkbarProvider render scope', () => {
     bridge.disconnect();
     assert.equal(notified, 0);
   });
+
+  it('publishes exact task-tool visibility with both workbars open and unrelated tabs or launchers active', () => {
+    const bridge = createWorkbarShellBridge();
+    let notified = 0;
+    bridge.subscribe(() => { notified += 1; });
+    const task = { id: 'task', kind: 'workhub-tasks' as const };
+    const browser = { id: 'browser', kind: 'browser' as const };
+    const panel = (activeTabId: string, launcherOpen = false) => ({ tabs: [task, browser], activeTabId, launcherOpen, activationHistory: [] });
+    const host = { workspace: 'workhub', activeId: 'owner', hidden: false, rightCollapsed: false, bottomOpen: true,
+      panelsState: { right: panel(task.id), bottom: panel(browser.id), focusedPanel: 'right' } };
+    const publish = (patch: Partial<typeof host> = {}) => bridge.publish({ host: { ...host, ...patch }, selectors: { rightCollapsed: patch.rightCollapsed ?? host.rightCollapsed, hiddenSessionIds: new Set() }, commands: {} } as unknown as Parameters<typeof bridge.publish>[0]);
+    publish();
+    assert.equal(bridge.getState().taskPanelVisible, true);
+    publish({ rightCollapsed: true });
+    assert.equal(bridge.getState().bottomOpen, true);
+    assert.equal(bridge.getState().taskPanelVisible, false, 'an open bottom browser must not keep the closed right task highlighted');
+    publish();
+    const beforeSwitch = notified;
+    publish({ panelsState: { ...host.panelsState, right: panel(browser.id) } });
+    assert.equal(bridge.getState().taskPanelVisible, false);
+    assert.equal(notified, beforeSwitch + 1, 'tab-only task visibility changes must cross the shell bridge');
+    publish({ panelsState: { ...host.panelsState, right: panel(task.id, true) } });
+    assert.equal(bridge.getState().taskPanelVisible, false, 'a launcher covers its remembered task tab');
+    publish({ rightCollapsed: true, panelsState: { ...host.panelsState, bottom: panel(task.id) } });
+    assert.equal(bridge.getState().taskPanelVisible, true, 'a task moved to an open bottom workbar remains visible');
+    publish({ hidden: true });
+    assert.equal(bridge.getState().taskPanelVisible, false);
+    publish({ workspace: 'session' });
+    assert.equal(bridge.getState().taskPanelVisible, false);
+    publish({ activeId: '' });
+    assert.equal(bridge.getState().taskPanelVisible, false);
+    bridge.disconnect();
+    assert.equal(bridge.getState().taskPanelVisible, false);
+  });
 });

@@ -1225,6 +1225,14 @@ test('mirrors panel state to WorkHub and routes edge toggles back to Main', asyn
   const changes = view.webContents.sent.filter(([channel]) => channel.endsWith('changed'));
   assert.equal(changes.length, changesBefore + 1);
   assert.equal((changes.at(-1)![1] as import('../../shared/workhub-presentation.js').WorkHubPresentationSnapshot).workbar?.togglePosition, 'edge');
+  const beforeVisibility = changes.length;
+  for (const taskPanelVisible of [true, false]) {
+    await h.command(h.main.webContents, 'host', { ...host, workbar: { collapsed: false, placement: 'bottom', togglePosition: 'edge', taskPanelVisible } });
+    const updates = view.webContents.sent.filter(([channel]) => channel.endsWith('changed'));
+    assert.equal(updates.length, beforeVisibility + (taskPanelVisible ? 1 : 2), 'task visibility alone must notify even with an unrelated bottom panel still open');
+    assert.equal((updates.at(-1)![1] as import('../../shared/workhub-presentation.js').WorkHubPresentationSnapshot).workbar?.taskPanelVisible, taskPanelVisible);
+  }
+  await assert.rejects(h.command(h.main.webContents, 'host', { ...host, workbar: { ...host.workbar, taskPanelVisible: 'true' } }), /Invalid WorkHub workbar/);
   await assert.rejects(h.command(h.main.webContents, 'host', { ...host, workbar: { ...host.workbar, togglePosition: 'invalid' } }), /Invalid WorkHub workbar/);
   await assert.rejects(h.command(view.webContents, 'host', host), /Only the main window/);
   h.controller.dispose();
