@@ -263,9 +263,11 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
           .toEqual({ finished: 1, errors: [] });
         expect(seen.filter((value) => value === 'resumed')).toHaveLength(1);
         await expect(inbox).toBeHidden();
-        const showTasks = hub.getByRole('button', { name: 'Recent tasks', exact: true });
-        if (await showTasks.isVisible()) await showTasks.click();
-        const consumer = hub.locator('.workHubTaskCard').filter({ hasText: 'EVIDENCE_CONSUMER' });
+        // The task list belongs to the main shell workbar, not the persistent
+        // native coordination renderer that was replaced above.
+        await page.getByRole('button', { name: 'Expand task workbar', exact: true }).click();
+        await page.getByRole('button', { name: /^Task execution/ }).click();
+        const consumer = page.locator('.workHubTaskCard').filter({ hasText: 'EVIDENCE_CONSUMER' });
         await expect(consumer).toHaveAttribute('data-status', 'pending_acceptance');
         await consumer.locator('.workHubTaskHeading').click();
         await expect(consumer.locator('pre')).toContainText('Consumer finished using abc123');
