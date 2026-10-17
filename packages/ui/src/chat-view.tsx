@@ -371,6 +371,7 @@ export function ChatView(props: {
     sessionId: props.activeSession?.id,
     locale,
     messages: visibleMessages,
+    activeTurnId: props.activeTurn?.queued ? undefined : props.activeTurn?.turnId,
     liveTurns: props.liveTurns,
     shellRunUpdates: props.shellRunUpdates,
   });

@@ -64,6 +64,8 @@ export interface TranscriptProjectionInput {
   sessionId?: string;
   locale: UiLocale;
   messages: readonly StoredMessage[];
+  /** Host-observed executing Turn, not a queued admission or buffered output. */
+  activeTurnId?: string;
   liveTurns?: readonly LiveTurnProjection[];
   shellRunUpdates?: readonly ShellRunUpdate[];
 }
@@ -84,6 +86,7 @@ export function createTranscriptProjection(): TranscriptProjection {
   let lastMessages: readonly StoredMessage[] | undefined;
   let lastLocale: UiLocale | undefined;
   let lastLiveTurn: readonly LiveTurnProjection[] | undefined;
+  let lastActiveTurnId: string | undefined;
   let lastUpdates: readonly ShellRunUpdate[] | undefined;
 
   // Stage outputs.
@@ -105,6 +108,7 @@ export function createTranscriptProjection(): TranscriptProjection {
     lastMessages = undefined;
     lastLocale = undefined;
     lastLiveTurn = undefined;
+    lastActiveTurnId = undefined;
     lastUpdates = undefined;
     settledTurns = NO_TURNS;
     liveTurns = NO_TURNS;
@@ -136,6 +140,7 @@ export function createTranscriptProjection(): TranscriptProjection {
       hasProjected
       && input.messages === lastMessages
       && input.locale === lastLocale
+      && input.activeTurnId === lastActiveTurnId
       && !buffersMoved
       && !updatesMoved
     ) {
@@ -153,11 +158,14 @@ export function createTranscriptProjection(): TranscriptProjection {
     if (
       liveTurnsFrom !== settledTurns ||
       buffersMoved ||
+      input.activeTurnId !== lastActiveTurnId ||
       input.locale !== lastOverlayLocale
     ) {
-      liveTurns = (input.liveTurns ?? []).reduce<readonly TurnViewModel[]>((turns, live) => overlayLiveTurn(turns, live, input.locale), settledTurns);
+      const observedTurns = observeActiveTurn(settledTurns, input.activeTurnId);
+      liveTurns = (input.liveTurns ?? []).reduce<readonly TurnViewModel[]>((turns, live) => overlayLiveTurn(turns, live, input.locale), observedTurns);
       liveTurnsFrom = settledTurns;
       lastLiveTurn = input.liveTurns;
+      lastActiveTurnId = input.activeTurnId;
       lastOverlayLocale = input.locale;
     }
     if (updatesMoved) {
@@ -204,6 +212,19 @@ export function createTranscriptProjection(): TranscriptProjection {
   }
 
   return { project };
+}
+
+/** A late reader may miss tool_start; Host activity outranks legacy inference, not terminal facts. */
+function observeActiveTurn(turns: readonly TurnViewModel[], activeTurnId: string | undefined): readonly TurnViewModel[] {
+  if (!activeTurnId) return turns;
+  return turns.map(turn => {
+    if (turn.turnId !== activeTurnId || turn.statusSource === 'recorded' || turn.status === 'aborted') return turn;
+    const tools = turn.tools.map(tool => tool.status === 'interrupted' && tool.result === undefined
+      ? { ...tool, status: 'running' as const }
+      : tool);
+    const projected = projectTurnTools([turn], tools)[0]!;
+    return projected.status === 'running' ? projected : { ...projected, status: 'running' };
+  });
 }
 
 /**
