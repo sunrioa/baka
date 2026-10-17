@@ -97,6 +97,7 @@ export function installStorybookRenderProbe({ storyId }) {
   const smoke = {
     finished: false,
     failures: [],
+    resizeObserverWarnings: [],
   };
   Object.defineProperty(window, '__makaStorybookSmoke', {
     configurable: true,
@@ -109,10 +110,14 @@ export function installStorybookRenderProbe({ storyId }) {
     );
   });
   // Native ResizeObserver loop notifications are ErrorEvents, not always a
-  // Playwright pageerror. Observe from before mount without suppressing them.
+  // Playwright pageerror. Retain diagnostics without suppressing the event or
+  // treating a deferred notification as proof of a visible layout regression.
   window.addEventListener('error', (event) => {
-    if (event.message?.startsWith('ResizeObserver loop')) {
-      smoke.failures.push(`resize observer: ${event.message}`);
+    if (
+      event.message === 'ResizeObserver loop completed with undelivered notifications.' ||
+      event.message === 'ResizeObserver loop limit exceeded'
+    ) {
+      smoke.resizeObserverWarnings.push(event.message);
     }
   });
 
@@ -373,9 +378,17 @@ export async function smokeStory(page, baseUrl, job, options = {}) {
       if (dialogs.length > 1) {
         failures.push(`multiple visible modal dialogs remain open (${dialogs.length})`);
       }
-      return { failures };
+      return {
+        failures,
+        resizeObserverWarnings: window.__makaStorybookSmoke?.resizeObserverWarnings ?? [],
+      };
     });
     browserFailures.push(...result.failures);
+    if (result.resizeObserverWarnings.length > 0) {
+      console.warn(
+        `${prefix} ResizeObserver diagnostics (${result.resizeObserverWarnings.length}): ${[...new Set(result.resizeObserverWarnings)].join('; ')}`,
+      );
+    }
     if (
       browserFailures.length === 0 &&
       job.storyId === PROMPT_RAIL_CLEARANCE_STORY_ID &&

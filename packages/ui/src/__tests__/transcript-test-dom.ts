@@ -61,8 +61,6 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     GLOBAL_KEYS.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
   );
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
-  const frames = new Map<number, FrameRequestCallback>();
-  let nextFrame = 0;
   const scrollTops = new WeakMap<HTMLElement, number>();
   Object.defineProperties(window.HTMLElement.prototype, {
     offsetParent: { configurable: true, get(this: HTMLElement) { return this.parentElement; } },
@@ -144,14 +142,11 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     MutationObserver: InertObserver,
     Node: window.Node,
     ResizeObserver: MeasuringResizeObserver,
-    cancelAnimationFrame: (id: number) => { frames.delete(id); },
+    cancelAnimationFrame: () => undefined,
     document,
     getComputedStyle: () => ({ overflowY: 'visible' }),
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      frames.set(++nextFrame, callback);
-      return nextFrame;
-    },
+    requestAnimationFrame: () => 0,
     window,
   });
   const container = document.querySelector<HTMLElement>('#root')!;
@@ -162,13 +157,9 @@ export function installTranscriptDom(options: { viewportHeight?: number; boxHeig
     container,
     async render(element) {
       await act(async () => { root.render(element); });
-      // Resize delivery is frame-coalesced. Advance the viewport and mounted
-      // row measurements explicitly; fake DOM geometry is not browser layout.
-      for (let frame = 0; frame < 4 && frames.size; frame++) {
-        const callbacks = [...frames.values()];
-        frames.clear();
-        await act(async () => { for (const callback of callbacks) callback(performance.now()); });
-      }
+      // Viewport measurement mounts the Turns; their own measurement settles them.
+      await act(async () => {});
+      await act(async () => {});
     },
     async cleanup() {
       await act(async () => { root.unmount(); });

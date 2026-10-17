@@ -53,8 +53,6 @@ export async function renderTranscriptMarkup(element: ReactElement): Promise<str
     GLOBAL_KEYS.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
   );
   const { document, window } = parseHTML('<html><body><div id="root"></div></body></html>');
-  const frames = new Map<number, FrameRequestCallback>();
-  let nextFrame = 0;
   const prototype = window.HTMLElement.prototype;
   const prototypeOriginals = new Map<PropertyKey, PropertyDescriptor | undefined>(
     GEOMETRY_KEYS.map((key) => [key, Object.getOwnPropertyDescriptor(prototype, key)]),
@@ -100,27 +98,20 @@ export async function renderTranscriptMarkup(element: ReactElement): Promise<str
     MutationObserver: InertObserver,
     Node: window.Node,
     ResizeObserver: MeasuringResizeObserver,
-    cancelAnimationFrame: (id: number) => { frames.delete(id); },
+    cancelAnimationFrame: () => undefined,
     document,
     getComputedStyle: () => ({ overflowY: 'visible' }),
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-    requestAnimationFrame: (callback: FrameRequestCallback) => {
-      frames.set(++nextFrame, callback);
-      return nextFrame;
-    },
+    requestAnimationFrame: () => 0,
     window,
   });
   const container = document.querySelector<HTMLElement>('#root')!;
   const root = createRoot(container);
   try {
     await act(async () => { root.render(element); });
-    // Advance frame-coalesced viewport and row measurements before inspecting
-    // markup. The fake DOM does not establish actual browser geometry.
-    for (let frame = 0; frame < 4 && frames.size; frame++) {
-      const callbacks = [...frames.values()];
-      frames.clear();
-      await act(async () => { for (const callback of callbacks) callback(performance.now()); });
-    }
+    // Viewport measurement mounts the Turns; their own measurement settles them.
+    await act(async () => {});
+    await act(async () => {});
     return container.innerHTML;
   } finally {
     await act(async () => { root.unmount(); });
