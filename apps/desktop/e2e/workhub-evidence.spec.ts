@@ -226,10 +226,11 @@ test('evidence continuation retains a live Desktop question binding after WorkHu
           await hub.locator(COMPOSER_INPUT).press('Enter');
         };
         await send('Start two independent tasks: EVIDENCE_CONSUMER and EVIDENCE_PRODUCER.');
+        // Routing and the producer's model request are independent admissions;
+        // a routing receipt does not prove the producer's HTTP request arrived.
         await expect
-          .poll(() => ({ routed: seen.includes('routed'), errors }))
-          .toEqual({ routed: true, errors: [] });
-        expect(seen).toContain('producer');
+          .poll(() => ({ routed: seen.includes('routed'), producer: seen.includes('producer'), errors }))
+          .toEqual({ routed: true, producer: true, errors: [] });
         // Leaving the persistent native WorkHub view must expose the main
         // renderer's live transcript before the worker's provider is released.
         const expandSidebar = page.getByRole('button', { name: 'Expand sidebar', exact: true });
