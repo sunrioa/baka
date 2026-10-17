@@ -801,6 +801,22 @@ describe('useWorkbarController', () => {
     assert.equal(controller().selectors.rightCollapsed, true, 'do not flash the previous task before the shared selection clears');
     await act(async () => reset.resolve()); pendingReset = undefined;
     assert.equal(controller().selectors.rightCollapsed, false);
+    for (const navigate of [
+      () => controller().commands.openTool('browser'),
+      () => controller().host.onActivateTab('right', 'workbar:browser'),
+      () => controller().host.onOpenLauncher('right'),
+      () => controller().host.onDismissPanel('right'),
+    ]) {
+      await act(async () => controller().commands.openTool('workhub-tasks', undefined, { preserveTaskSelection: true }));
+      const delayed = deferred<void>(); pendingReset = delayed.promise;
+      await act(async () => controller().host.onRequestOpenTab('right', 'workhub-tasks'));
+      await act(async () => navigate());
+      const latestPanels = JSON.stringify(controller().host.panelsState);
+      const latestCollapsed = controller().selectors.rightCollapsed;
+      await act(async () => delayed.resolve()); pendingReset = undefined;
+      assert.equal(JSON.stringify(controller().host.panelsState), latestPanels, 'the newest panel navigation must win over a delayed task-list request');
+      assert.equal(controller().selectors.rightCollapsed, latestCollapsed);
+    }
     await act(async () => controller().host.onDismissPanel('right'));
     const obsoleteReset = deferred<void>(); pendingReset = obsoleteReset.promise;
     await act(async () => controller().commands.toggleRightPanel());

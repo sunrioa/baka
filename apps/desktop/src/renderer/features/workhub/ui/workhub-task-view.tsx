@@ -67,16 +67,20 @@ function WorkHubSessionTranscript({ services, sessionId, name, scrollOwner, onRe
   const deriveTurnPresentation = useAppShellTurnPresentation({ uiLocale: locale, allowBranch: false });
   const positioned = useCallback(() => onReady(sessionId), [onReady, sessionId]);
   const ready = view.ready && view.sessionReady && view.transcript.ready;
+  const [initialized, setInitialized] = useState(false);
+  useEffect(() => { if (ready) setInitialized(true); }, [ready]);
   useEffect(() => { if (view.error || (ready && !view.session)) positioned(); }, [view.error, ready, view.session, positioned]);
   return <section className="workHubExecutionTranscript" data-task-session-id={sessionId} aria-label={name}>
     <div className="workHubTaskSessionLabel"><span>{name}</span><code title={sessionId}>Session · {parseDesktopSessionKey(sessionId).sessionId.slice(-8)}</code></div>
     {view.error && <p role="alert">{view.error}</p>}
-    {!ready && <p role="status">{copy.livePending}</p>}
+    {!ready && !initialized && <p role="status">{copy.livePending}</p>}
     {/* Settle the first scroll position from real history, not an empty reader
         whose already-visible list would jump when the initial batch arrives. */}
-    {ready && view.session && <ChatView activeSession={view.session} messages={[...view.transcript.messages]} liveTurns={view.liveTurns} activeTurn={view.activeTurn}
+    {/* Reconnection changes live readiness, not the identity/reading position
+        of history that is already mounted. Send authority remains Host-owned. */}
+    {(ready || initialized) && view.session && <ChatView activeSession={view.session} messages={[...view.transcript.messages]} liveTurns={view.liveTurns} activeTurn={view.activeTurn}
       onInitialPositioned={positioned}
-      scrollOwner={scrollOwner} messageLoading={!view.transcript.ready} hasEarlierHistory={view.transcript.hasOlder}
+      scrollOwner={scrollOwner} messageLoading={!view.transcript.ready && !initialized} hasEarlierHistory={view.transcript.hasOlder}
       onLoadEarlierHistory={() => { void view.loadEarlier(); }} onStreamingSettled={view.streamingSettled}
       onReadAttachmentBytes={services.readAttachmentBytes} deriveTurnPresentation={deriveTurnPresentation}
       onNew={() => {}} scrollBehavior="auto" emptyOverride={<p>{copy.noPublicOutput}</p>} />}

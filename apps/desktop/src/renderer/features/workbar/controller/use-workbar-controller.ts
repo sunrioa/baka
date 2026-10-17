@@ -230,7 +230,9 @@ export function useWorkbarController(
     sessionId?: string;
   } | undefined>(undefined);
   const resourceGenerationRef = useRef(0);
+  const panelNavigationRef = useRef(0);
   useLayoutEffect(() => {
+    panelNavigationRef.current += 1;
     activeSessionIdRef.current = activeSessionId;
     return () => {
       activeSessionIdRef.current = undefined;
@@ -567,6 +569,7 @@ export function useWorkbarController(
   const openTool = useCallback<WorkbarControllerCommands['openTool']>(
     (kind, placement, options = {}) => {
       if (!workbarToolsForWorkspace(workspace).some((tool) => tool.kind === kind)) return;
+      const navigation = ++panelNavigationRef.current;
       const definition = workbarToolDefinition(kind);
       const targetPlacement = placement ?? definition.defaultPlacement;
       if (definition.singleton) {
@@ -580,9 +583,9 @@ export function useWorkbarController(
           // Clear through the shared presentation owner before revealing the
           // panel, so reopening cannot briefly display the previous task.
           void taskSelection.clear(owner).then(() => {
-            if (activeSessionIdRef.current === owner) open();
+            if (activeSessionIdRef.current === owner && panelNavigationRef.current === navigation) open();
           }).catch(error => {
-            if (activeSessionIdRef.current !== owner) return;
+            if (activeSessionIdRef.current !== owner || panelNavigationRef.current !== navigation) return;
             const label = getDesktopConversationCopy(locale).workbar.openTab;
             input.toastApi.error(label, localizedShellErrorMessage(error, label, locale));
           });
@@ -815,6 +818,7 @@ export function useWorkbarController(
   );
 
   const toggleRight = useCallback(() => {
+    panelNavigationRef.current += 1;
     if (layout.workbarCollapsed) {
       const activeTab = panelsStateRef.current.right.tabs.find(tab => tab.id === panelsStateRef.current.right.activeTabId);
       if (workspace === 'workhub' && activeTab?.kind === 'workhub-tasks') {
@@ -927,6 +931,7 @@ export function useWorkbarController(
 
   const toggleTool = useCallback((kind: SessionWorkbarTabKind) => {
     if (!workbarToolsForWorkspace(workspace).some((tool) => tool.kind === kind)) return;
+    panelNavigationRef.current += 1;
     const activeSideChatTabIds = kind === 'side-chat'
       ? new Set(
         sideConversations.panels
@@ -1023,7 +1028,7 @@ export function useWorkbarController(
       respondToUserForm: sideChat.respondToUserForm,
       toggleRight,
       toggleRightPanel,
-      setWorkbarCollapsed: layout.setWorkbarCollapsed,
+      setWorkbarCollapsed: (collapsed) => { panelNavigationRef.current += 1; layout.setWorkbarCollapsed(collapsed); },
       bindNewTaskSessionResolver,
     }),
     [
@@ -1058,18 +1063,21 @@ export function useWorkbarController(
       bottomHeight: layout.bottomPanelHeight,
       panelsState: layout.workbarPanelsState,
       onActivateTab: (placement, id) => {
+        panelNavigationRef.current += 1;
         const tab = panelsStateRef.current[placement].tabs.find(tab => tab.id === id);
         if (tab?.kind === 'workhub-tasks') openTool('workhub-tasks', placement);
         else layout.activateWorkbarTab(placement, id);
       },
-      onCloseTab: closeTab,
+      onCloseTab: (placement, tab) => { panelNavigationRef.current += 1; closeTab(placement, tab); },
       onOpenLauncher: (placement) => {
+        panelNavigationRef.current += 1;
         layout.openWorkbarLauncher(placement);
         revealPlacement(placement);
       },
       onRequestOpenTab: (placement, kind) => openTool(kind, placement),
       onToggleRightPanel: toggleRightPanel,
       onDismissPanel: (placement) => {
+        panelNavigationRef.current += 1;
         if (placement === 'right') layout.setWorkbarCollapsed(true);
         else layout.setBottomPanelOpen(false);
       },

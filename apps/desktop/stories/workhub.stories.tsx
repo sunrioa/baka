@@ -609,15 +609,25 @@ export const TaskExecutionView: Story = {
 export const TaskExecutionViewNarrow: Story = { ...TaskExecutionView };
 
 let pendingPreviewRead: Promise<void> | undefined;
+const previewObservationPhases = new Map<string, Parameters<WorkHubServices['observe']>[3]>();
 // Real preview shell, virtual rows and task-bound input; only Host read latency
 // is controlled. Every paint must retain a positioned reader during a switch.
 export const TaskPreviewSwitchIsAtomic: Story = {
   render: () => <Surface history="usage" taskOverview configureServices={services => {
     pendingPreviewRead = undefined;
+    previewObservationPhases.clear();
+    const observe = services.observe;
+    services.observe = (id, event, error, phase, ...rest) => {
+      const unsubscribe = observe(id, event, error, phase, ...rest);
+      if (id !== sessionId) previewObservationPhases.set(id, phase);
+      return () => { if (previewObservationPhases.get(id) === phase) previewObservationPhases.delete(id); unsubscribe(); };
+    };
     const read = services.openTranscript;
-    services.openTranscript = async (...args) => {
-      if (args[0] === targetId && pendingPreviewRead) await pendingPreviewRead;
-      return read(...args);
+    services.openTranscript = async (id, accept, ...rest) => {
+      if (id === targetId && pendingPreviewRead) await pendingPreviewRead;
+      return read(id, snapshot => accept({ ...snapshot, messages: snapshot.messages.map(message =>
+        id !== sessionId && id !== targetId && message.type === 'assistant'
+          ? { ...message, text: `${message.text}\n\n${'历史证据用于核对调用顺序和任务结果。'.repeat(24)}` } : message) }), ...rest);
     };
   }} />,
   play: async ({ canvasElement }) => {
@@ -629,6 +639,20 @@ export const TaskPreviewSwitchIsAtomic: Story = {
     await waitFor(() => expect(active()?.querySelector('.maka-chat-session-swap[data-placed] [data-transcript-turn-id]') ?? null).not.toBeNull());
     const original = active()!;
     const deck = original.parentElement!;
+    const scroller = original.querySelector<HTMLElement>('[data-chat-scroll-container]')!;
+    await waitFor(() => expect(scroller.scrollHeight - scroller.clientHeight).toBeGreaterThan(200));
+    scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -800, bubbles: true }));
+    scroller.scrollTo({ top: scroller.scrollHeight / 3, behavior: 'instant' });
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const readers = [...original.querySelectorAll('.agents-chat-view-root')];
+    const readingTop = scroller.scrollTop;
+    for (const phase of previewObservationPhases.values()) phase('pending');
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const [index, reader] of readers.entries()) expect(original.querySelectorAll('.agents-chat-view-root')[index]).toBe(reader);
+    for (const phase of previewObservationPhases.values()) phase('ready');
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    for (const [index, reader] of readers.entries()) expect(original.querySelectorAll('.agents-chat-view-root')[index]).toBe(reader);
+    expect(Math.abs(scroller.scrollTop - readingTop)).toBeLessThan(2);
     const paints: boolean[] = [];
     let sampling = true, frame = 0;
     const sample = () => {
