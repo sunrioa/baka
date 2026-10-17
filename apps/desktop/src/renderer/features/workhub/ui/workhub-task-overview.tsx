@@ -19,7 +19,7 @@
 
 import { useEffect, useId, useState } from 'react';
 import { Button, IconButton, TextArea, useUiLocale } from '@maka/ui';
-import { PanelRightClose, RefreshCw } from 'lucide-react';
+import { PanelRightClose, RefreshCw } from '@maka/ui/icons';
 import type { WorkHubTask, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskOverview } from '../controller/use-workhub-task-overview.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';

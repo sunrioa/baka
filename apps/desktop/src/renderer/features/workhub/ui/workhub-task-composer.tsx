@@ -19,7 +19,7 @@
 
 import { useEffect, useRef, type RefObject } from 'react';
 import { Composer, Button, useUiLocale, type ComposerHandle } from '@maka/ui';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown } from '@maka/ui/icons';
 import type { WorkHubServices } from '../ports.js';
 import type { useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useWorkHubTaskInput } from '../controller/use-workhub-task-input.js';
