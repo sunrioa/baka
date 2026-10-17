@@ -23,7 +23,7 @@ import { deferred } from '@maka/core/test-only/async-primitives';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import { afterEach, test } from 'node:test';
 import { act, createElement, useEffect } from 'react';
-import { useToast, useUiLocale } from '@maka/ui';
+import { LocaleProvider, useToast, useUiLocale } from '@maka/ui';
 import type { UiLocale } from '@maka/core/ui-locale';
 import {
   WorkHubServicesProvider,
@@ -31,7 +31,8 @@ import {
   type WorkHubServices,
 } from '../../renderer/features/workhub/index.js';
 import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
-import { useWorkHubTaskSelection } from '../../renderer/features/workhub/testing.js';
+import { useWorkHubTaskSelection, WorkHubDock } from '../../renderer/features/workhub/testing.js';
+import { WorkHubEnablementProvider } from '../../renderer/application/contracts/workhub-workspace/workhub-enablement.js';
 import type { WorkHubPresentationSnapshot } from '../../shared/workhub-presentation.js';
 
 afterEach(cleanupFakeDom);
@@ -110,6 +111,51 @@ test('closing the workbar removes task highlights without clearing selection or 
     assert.equal(selection.selected, undefined);
     assert.equal(selectionCalls, 0, 'visibility notifications never issue task selection or dispatch commands');
   } finally { await act(async () => root.unmount()); }
+});
+
+test('a floating WorkHub still receives task visibility updates without a docked native surface observer', async () => {
+  const { root } = installReactRenderer();
+  const prototype = HTMLElement.prototype;
+  const original = Object.getOwnPropertyDescriptor(prototype, 'getBoundingClientRect');
+  Object.defineProperty(prototype, 'getBoundingClientRect', { configurable: true, value: () => ({ x: 0, y: 0, width: 800, height: 600 }) });
+  const owner = desktopSessionKey({ hostId: 'host', sessionId: 'coordination' });
+  const work = { sessionId: desktopSessionKey({ hostId: 'host', sessionId: 'task' }), name: 'A', workId: 'a' };
+  let snapshot: WorkHubPresentationSnapshot = { placement: 'floating', floatingVisible: true, rendererCrashed: false, shortcutRegistered: true, taskSelection: { ownerSessionId: owner, work } };
+  const subscribers = new Set<(snapshot: WorkHubPresentationSnapshot) => void>();
+  const services = { presentation: {
+    getSnapshot: async () => snapshot,
+    subscribe: (notify: (snapshot: WorkHubPresentationSnapshot) => void) => { subscribers.add(notify); return () => { subscribers.delete(notify); }; },
+    setHost: async (host: import('../../shared/workhub-presentation.js').WorkHubHost) => {
+      if (host.workbar) {
+        snapshot = { ...snapshot, workbar: host.workbar };
+        for (const notify of subscribers) notify(snapshot);
+      }
+    },
+  } } as unknown as WorkHubServices;
+  const enablement = { isEnabled: () => true, subscribe: () => () => {} };
+  let selection!: ReturnType<typeof useWorkHubTaskSelection>;
+  function Reader() { selection = useWorkHubTaskSelection(services, owner); return null; }
+  const render = (taskPanelVisible: boolean, rightCollapsed: boolean) => root.render(createElement(LocaleProvider, { locale: 'en', children: null }, createElement(WorkHubServicesProvider, { services },
+    createElement(WorkHubEnablementProvider, { value: enablement }, createElement('div', null,
+      createElement(Reader), createElement(WorkHubDock, { workbar: { bottomOpen: true, rightCollapsed, taskPanelVisible } }))))));
+  try {
+    await act(async () => render(true, false));
+    assert.deepEqual(selection.highlighted, work);
+    await act(async () => render(false, true));
+    assert.equal(snapshot.workbar?.taskPanelVisible, false, 'closing the right task must publish even with the bottom browser open');
+    assert.equal(selection.highlighted, undefined);
+    assert.deepEqual(selection.selected, work);
+    await act(async () => render(true, false));
+    assert.deepEqual(selection.highlighted, work, 'reopening still selects the same task');
+    await act(async () => render(false, false));
+    assert.equal(snapshot.workbar?.taskPanelVisible, false, 'tab-only visibility changes cannot depend on native bounds or collapse changes');
+    assert.equal(selection.highlighted, undefined);
+  } finally {
+    await act(async () => root.unmount());
+    if (original) Object.defineProperty(prototype, 'getBoundingClientRect', original);
+    else Reflect.deleteProperty(prototype, 'getBoundingClientRect');
+  }
+  assert.equal(subscribers.size, 0);
 });
 
 test('the main surface does not mount WorkHub or start its lifecycle', async () => {
