@@ -1673,7 +1673,7 @@ export const WorkHubTools: Story = {
     workHubMenu.mockClear();
     workHubMenu.mockResolvedValueOnce('inspector');
     await userEvent.click(canvas.getByRole('button', { name: '添加面板' }));
-    expect(workHubMenu.mock.lastCall?.[0].items.map((item) => item.label)).toEqual(['浏览器', '工作看板', '追踪']);
+    expect(workHubMenu.mock.lastCall?.[0].items.map((item) => item.label)).toEqual(['任务执行', '浏览器', '工作看板', '追踪']);
     await waitFor(() => expect(canvas.getByRole('tab', { name: '追踪' })).toHaveAttribute('aria-selected', 'true'));
     workHubMenu.mockResolvedValueOnce('browser');
     await userEvent.click(canvas.getByRole('button', { name: '添加面板' }));

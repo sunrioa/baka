@@ -367,10 +367,11 @@ function DockedConsole({ services }: { services: WorkHubServices }) {
     </div>
   </WorkbarProvider>}</WorkbarShellRoot></WorkbarServicesProvider></SettingsNavigationProvider></WorkHubEnablementProvider>;
 }
-function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false, taskOverview = false }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean; taskOverview?: boolean }) {
+function Surface({ failFirst = false, history = false, colors = false, selectTarget = false, question = false, progress = false, repairModel = false, suggestions = false, taskInbox = false, taskOverview = false, configureServices }: { failFirst?: boolean; history?: boolean | 'usage'; colors?: boolean; selectTarget?: boolean; question?: boolean; progress?: boolean; repairModel?: boolean; suggestions?: boolean; taskInbox?: boolean; taskOverview?: boolean; configureServices?(services: WorkHubServices): void }) {
   const [progressHeight, setProgressHeight] = useState(112);
   const [services] = useState(() => {
     const services = makeServices(failFirst, history, colors, selectTarget, question, progress, repairModel, suggestions, taskInbox, taskOverview);
+    configureServices?.(services);
     // Storybook has no BrowserWindow: honor the production renderer's native
     // height request and use the native progress card's 360px width.
     if (progress) services.presentation.resizeProgress = async (_request, height) => { setProgressHeight(height); };
@@ -506,15 +507,14 @@ export const TaskExecutionView: Story = {
     await waitFor(() => expect(within(view).getByText(/任务公开输出 cold-turn/)).toBeInTheDocument());
     taskScroll.scrollTo({ top: taskScroll.scrollHeight });
     await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
-    const header = view.querySelector('.workHubTaskViewHeader')!;
-    expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
-    expect(header.getBoundingClientRect().bottom).toBeLessThan(window.innerHeight);
+    expect(view.querySelector('.workHubTaskViewHeader')).toBeNull();
     expect(view.querySelector('.workHubTaskAttempts')).toBeNull();
     expect(view.querySelector('.workHubTaskExecutionChoices')).toBeNull();
-    expect(view.querySelector('.workHubTaskInstructions')).not.toHaveAttribute('open');
+    expect(view.querySelector('.workHubTaskInstructions')).toBeNull();
+    expect(within(view).queryByRole('button', { name: '刷新' })).toBeNull();
     expect(view.querySelectorAll('[data-task-session-id]')).toHaveLength(2);
     expect(within(view).getByTitle(targetId)).toHaveTextContent('Session · payments');
-    expect(view.querySelector('.workHubTaskStatusBadge')).toHaveTextContent('执行中');
+    expect(view.querySelector('[role="status"][data-status]')).toHaveTextContent('执行中');
     const inboxToggle = canvasElement.querySelector('.workHubTaskViewInbox summary')!;
     expect(inboxToggle).toBeVisible();
     await userEvent.click(inboxToggle);
@@ -535,6 +535,7 @@ export const TaskExecutionView: Story = {
     const chooseTask = async (name: string) => {
       await userEvent.click(canvas.getByRole('combobox', { name: '选择任务' }));
       await userEvent.click(within(canvasElement.ownerDocument.body).getByRole('option', { name }));
+      await waitFor(() => expect(canvasElement.querySelector('.workHubTaskScreen:not([data-staged]) .workHubTaskComposer')).toHaveAccessibleName(`发送目标：${name}`));
     };
     let editor = taskComposer.querySelector<HTMLElement>('[contenteditable="true"]')!;
     await userEvent.click(editor); expect(editor).toHaveFocus();
@@ -600,6 +601,75 @@ export const TaskExecutionView: Story = {
 };
 // Real path: the same task panel and coordination form stack in a narrow dock.
 export const TaskExecutionViewNarrow: Story = { ...TaskExecutionView };
+
+let pendingPreviewRead: Promise<void> | undefined;
+// Real preview shell, virtual rows and task-bound input; only Host read latency
+// is controlled. Every paint must retain a positioned reader during a switch.
+export const TaskPreviewSwitchIsAtomic: Story = {
+  render: () => <Surface history="usage" taskOverview configureServices={services => {
+    pendingPreviewRead = undefined;
+    const read = services.openTranscript;
+    services.openTranscript = async (...args) => {
+      if (args[0] === targetId && pendingPreviewRead) await pendingPreviewRead;
+      return read(...args);
+    };
+  }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await openTaskSidebar(canvasElement);
+    const heading = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
+    await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
+    const active = () => canvasElement.querySelector<HTMLElement>('.workHubTaskScreen:not([data-staged])');
+    await waitFor(() => expect(active()?.querySelector('.maka-chat-session-swap[data-placed] [data-transcript-turn-id]') ?? null).not.toBeNull());
+    const original = active()!;
+    const deck = original.parentElement!;
+    const paints: boolean[] = [];
+    let sampling = true, frame = 0;
+    const sample = () => {
+      paints.push(!!active()?.querySelector('.maka-chat-session-swap[data-placed] [data-transcript-turn-id]'));
+      if (sampling) frame = requestAnimationFrame(sample);
+    };
+    frame = requestAnimationFrame(sample);
+    const choose = async (name: string) => {
+      await userEvent.click(canvas.getByRole('combobox', { name: '选择任务' }));
+      await userEvent.click(within(canvasElement.ownerDocument.body).getByRole('option', { name }));
+    };
+    let release = () => {};
+    try {
+      pendingPreviewRead = new Promise(resolve => { release = resolve; });
+      await choose('研究证据');
+      await waitFor(() => expect(deck).toHaveAttribute('aria-busy', 'true'));
+      expect(active()).toBe(original);
+      expect(original).toHaveAttribute('inert');
+      expect(canvasElement.querySelector('.workHubTaskScreen[data-staged]')).toHaveAttribute('inert');
+      expect(canvasElement.querySelectorAll('.workHubTaskScreen')).toHaveLength(2);
+      // A rapid reversal cancels the staged view. Late Host data must not
+      // replace the current preview or re-enable the cancelled input target.
+      await choose('发布检查清单');
+      await waitFor(() => expect(deck).toHaveAttribute('aria-busy', 'false'));
+      release(); pendingPreviewRead = undefined;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      expect(active()).toBe(original);
+      await choose('研究证据');
+      await waitFor(() => expect(active()?.querySelector('.workHubTaskView')).toHaveAttribute('data-work-id', 'overview-evidence'));
+      expect(deck).toHaveAttribute('aria-busy', 'false');
+      expect(canvasElement.querySelectorAll('.workHubTaskScreen')).toHaveLength(1);
+      const composer = active()!.querySelector<HTMLElement>('.workHubTaskComposer')!;
+      expect(composer).toHaveAccessibleName('发送目标：研究证据');
+      const editor = composer.querySelector<HTMLElement>('[contenteditable="true"]')!;
+      await userEvent.click(editor); await userEvent.type(editor, '只说明证据来源，不改权限。');
+      await userEvent.keyboard('{Enter}');
+      await waitFor(() => expect(writes.taskInput).toHaveBeenCalledWith(sessionId, expect.objectContaining({ workId: 'overview-evidence', text: '只说明证据来源，不改权限。' })));
+      expect(paints.length).toBeGreaterThan(0);
+      expect(paints.every(Boolean)).toBe(true);
+      expect(writes.answer).not.toHaveBeenCalled();
+      expect(writes.permissions).not.toHaveBeenCalled();
+      expect(writes.concurrency).not.toHaveBeenCalled();
+    } finally {
+      sampling = false; cancelAnimationFrame(frame); release(); pendingPreviewRead = undefined;
+    }
+  },
+};
 // Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
 // continuation retains unsent drafts across same-Host re-resolution and keeps
 // its exact submission after a lost receipt and reconnect.
@@ -1004,7 +1074,8 @@ export const ColoredWorkHistory: Story = {
     const metadataRights = [...canvasElement.querySelectorAll('.maka-user-message .maka-message-meta')].map((element) => element.getBoundingClientRect().right);
     expect(metadataRights).toHaveLength(4);
     expect(Math.max(...metadataRights) - Math.min(...metadataRights)).toBeLessThan(1);
-    scroll.scrollTo({ top: 0 });
+    scroll.dispatchEvent(new WheelEvent('wheel', { deltaY: -scroll.scrollTop, bubbles: true }));
+    scroll.scrollTo({ top: 0, behavior: 'instant' });
     const firstLabel = () => canvasElement.querySelector<HTMLElement>('[data-transcript-turn-id="turn-1"] .workhub-turn-label')!;
     await waitFor(() => expect(firstLabel()).toBeVisible());
     const label = firstLabel();

@@ -351,6 +351,10 @@ body:has(.workHubLive[data-placement='floating'][data-progress='true'])::after {
 .workHubTaskPanel { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; background: var(--background); }
 .workHubTaskPanel[data-view='overview'] { overflow-y: auto; overscroll-behavior: contain; }
 .workHubTaskPanel > .maka-chat-layout { flex: 1; min-height: 0; min-width: 0; }
+.workHubTaskPreview { position: relative; display: flex; flex: 1; min-height: 0; min-width: 0; }
+.workHubTaskScreen { display: flex; width: 100%; height: 100%; min-height: 0; min-width: 0; }
+.workHubTaskScreen > .maka-chat-layout { flex: 1; min-height: 0; min-width: 0; }
+.workHubTaskScreen[data-staged] { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
 .workHubTaskPanel .workHubTaskViewHeader { gap: 8px; padding-block: 8px 12px; }
 .workHubTaskPanel .workHubTaskStatusBadge { padding: 3px 6px; font-size: 11px; border: 0; border-radius: 5px; }
 .workHubTaskPanel .workHubTaskSessionLabel { gap: 8px; margin-block: 0 12px; flex-wrap: wrap; }

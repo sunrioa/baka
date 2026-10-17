@@ -270,6 +270,8 @@ export function ChatView(props: {
   restoreTargetTurn?: { turnId: string; unavailable?: boolean };
   viewportNavigation?: TranscriptViewportNavigation;
   onReadingAnchorChange?(turnId?: string): void;
+  /** The initial virtual rows have reached their reading position. */
+  onInitialPositioned?(): void;
   scrollBehavior: ScrollBehavior;
   /** Turns older than the first one in `messages` exist and can be loaded. */
   hasEarlierHistory?: boolean;
@@ -565,6 +567,9 @@ export function ChatView(props: {
     onReadingAnchorChange: props.onReadingAnchorChange,
     behavior: props.scrollBehavior,
   });
+  useEffect(() => {
+    if (placed) props.onInitialPositioned?.();
+  }, [placed, props.activeSession?.id, props.onInitialPositioned]);
   const onLoadTranscriptTurnRef = useRef(props.onLoadTranscriptTurn);
   onLoadTranscriptTurnRef.current = props.onLoadTranscriptTurn;
   const navigatePromptRail = useCallback(

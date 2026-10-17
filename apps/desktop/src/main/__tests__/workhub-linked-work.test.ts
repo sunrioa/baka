@@ -28,12 +28,15 @@ import type { ToolCallMessage, ToolResultMessage } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
 
-test('task history waits for its first transcript before mounting scroll placement', async () => {
+test('task history waits for its first transcript and Session identity before mounting scroll placement', async () => {
   const sessionId = JSON.stringify(['host', 'task']);
   const assignment: WorkHubTaskAssignment = { workId: 'work', generationId: 'work', actionId: 'action', delegationId: 'delegation', targetSessionId: sessionId, targetSessionName: 'Task', targetMessageId: 'message', text: 'Do the task', createdAt: 1, state: 'owned', superseded: false };
-  for (const ready of [false, true]) {
+  for (const [ready, sessionReady] of [[false, true], [true, false], [true, true]]) {
     const services = {
-      getTaskSession: async () => ({ id: sessionId, name: 'Task', status: 'active', labels: [], isFlagged: false, isArchived: false, hasUnread: false, backend: 'ai-sdk', llmConnectionSlug: 'test', connectionLocked: false, model: 'test', permissionMode: 'ask' }),
+      getTaskSession: async () => {
+        if (!sessionReady) await new Promise(() => {});
+        return { id: sessionId, name: 'Task', status: 'active', labels: [], isFlagged: false, isArchived: false, hasUnread: false, backend: 'ai-sdk', llmConnectionSlug: 'test', connectionLocked: false, model: 'test', permissionMode: 'ask' };
+      },
       observe: (_id, _event, _error, phase) => { phase('ready'); return () => {}; },
       openTranscript: async (_id, accept) => {
         accept({ messages: ready ? [{ type: 'user', id: 'message', turnId: 'turn', ts: 1, text: 'Original task history' }] : [], ready, hasOlder: false });
@@ -48,8 +51,8 @@ test('task history waits for its first transcript before mounting scroll placeme
       })),
     ));
     const { document } = parseHTML(markup);
-    assert.equal(!!document.querySelector('.agents-chat-view-root'), ready, 'an empty pending reader must not settle the scroll position before history arrives');
-    if (ready) assert.match(document.querySelector('.workHubExecutionTranscript')!.textContent!, /Original task history/);
+    assert.equal(!!document.querySelector('.agents-chat-view-root'), ready && sessionReady, 'a pending reader must not settle the scroll position before history and Session identity arrive');
+    if (ready && sessionReady) assert.match(document.querySelector('.workHubExecutionTranscript')!.textContent!, /Original task history/);
     else assert.equal(document.querySelector('.workHubExecutionTranscript')!.textContent!.includes('No public'), false);
   }
 });

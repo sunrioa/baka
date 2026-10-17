@@ -67,6 +67,7 @@ export function useWorkHubSessionView(services: Pick<WorkHubServices, 'getTaskSe
   const locale = useUiLocale();
   const localeRef = useRef(locale); localeRef.current = locale;
   const [session, setSession] = useState<SessionSummary>();
+  const [sessionReady, setSessionReady] = useState(false);
   const [transcript, setTranscript] = useState(emptyTranscript);
   const transcriptRef = useRef(emptyTranscript);
   const settled = useRef(new Set<string>());
@@ -80,9 +81,11 @@ export function useWorkHubSessionView(services: Pick<WorkHubServices, 'getTaskSe
     let handle: WorkHubTranscript | undefined;
     let phase: 'pending' | 'ready' = 'pending';
     transcriptRef.current = emptyTranscript; settled.current.clear();
-    setSession(undefined); setTranscript(emptyTranscript); setLiveTurns(undefined); setExecution(undefined); setReady(false); setError(undefined);
+    setSession(undefined); setSessionReady(false); setTranscript(emptyTranscript); setLiveTurns(undefined); setExecution(undefined); setReady(false); setError(undefined);
     const report = (reason: unknown) => { if (!abort.signal.aborted) { setReady(false); setError(reason instanceof Error ? reason.message : String(reason)); } };
-    void services.getTaskSession(sessionId).then(value => { if (!abort.signal.aborted) setSession(value ?? undefined); }).catch(report);
+    void services.getTaskSession(sessionId).then(value => {
+      if (!abort.signal.aborted) { setSession(value ?? undefined); setSessionReady(true); }
+    }).catch(report);
     const unsubscribe = services.observe(sessionId, event => {
       if (abort.signal.aborted) return;
       setLiveTurns(previous => {
@@ -110,7 +113,7 @@ export function useWorkHubSessionView(services: Pick<WorkHubServices, 'getTaskSe
     }).catch(report);
     return () => { abort.abort(); unsubscribe(); range.current = undefined; void handle?.close(); };
   }, [services, sessionId]);
-  return { session, transcript, liveTurns, activeTurn: chatTurnActivity(execution), ready, error,
+  return { session, sessionReady, transcript, liveTurns, activeTurn: chatTurnActivity(execution), ready, error,
     loadEarlier: async () => {
       const handle = range.current;
       try { await handle?.loadEarlier(); }

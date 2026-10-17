@@ -34,8 +34,9 @@ afterEach(cleanupFakeDom);
 test('full Session readers close and ignore late events/history after switching tasks', async () => {
   const subscriptions: Array<{ id: string; event: Parameters<WorkHubServices['observe']>[1]; closed: boolean }> = [];
   const readers: Array<{ id: string; accept: Parameters<WorkHubServices['openTranscript']>[1]; signal: AbortSignal; closed: boolean }> = [];
+  const sessionReads = { a: deferred<SessionSummary | null>(), b: deferred<SessionSummary | null>() };
   const services = {
-    getTaskSession: async () => null,
+    getTaskSession: async id => sessionReads[id as 'a' | 'b'].promise,
     observe(id, event, _error, phase, execution, scope) {
       assert.equal(scope, undefined);
       const subscription = { id, event, closed: false }; subscriptions.push(subscription);
@@ -55,9 +56,11 @@ test('full Session readers close and ignore late events/history after switching 
   const render = (id: string) => createElement(StrictMode, {}, createElement(LocaleProvider, { locale: 'en', children: null }, createElement(Probe, { key: id, id })));
   await act(async () => { root.render(render('a')); });
   assert.equal(view.transcript.messages[0]!.turnId, 'a');
+  assert.equal(view.sessionReady, false, 'transcript arrival does not invent a Session identity');
   await act(async () => { root.render(render('b')); });
   assert.equal(view.transcript.messages[0]!.turnId, 'b');
   assert.equal(view.activeTurn?.turnId, 'b');
+  assert.equal(view.sessionReady, false);
   await act(async () => {
     for (const reader of readers.filter(item => item.id === 'a')) {
       assert.ok(reader.signal.aborted && reader.closed);
@@ -70,6 +73,10 @@ test('full Session readers close and ignore late events/history after switching 
   });
   assert.equal(view.transcript.messages[0]!.turnId, 'b');
   assert.equal(view.error, undefined);
+  await act(async () => { sessionReads.a.resolve(null); });
+  assert.equal(view.sessionReady, false, 'late old metadata must not place the new Session');
+  await act(async () => { sessionReads.b.resolve(null); });
+  assert.equal(view.sessionReady, true);
 });
 
 const assignment = (actionId: string, patch: Partial<WorkHubTaskAssignment> = {}): WorkHubTaskAssignment => ({
