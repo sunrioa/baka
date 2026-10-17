@@ -389,6 +389,9 @@ test('WorkHub uses its coordination model and shared attachment composer', async
       (button as HTMLButtonElement).click();
       requestAnimationFrame(sample);
     }));
+    await testInfo.attach(`floating-resize-motion-${expanded ? 'expand' : 'fold'}.json`, {
+      body: JSON.stringify(motion), contentType: 'application/json',
+    });
     expect(motion.every(({ bottom, left }) => bottom >= -0.5 && bottom <= 12.5 && left >= -0.5 && left <= 12.5)).toBe(true);
     expect(motion.some(({ bottom }) => bottom > 0.5 && bottom < 11.5)).toBe(true);
     expect(new Set(motion.map(({ height }) => height)).size).toBeLessThanOrEqual(2);

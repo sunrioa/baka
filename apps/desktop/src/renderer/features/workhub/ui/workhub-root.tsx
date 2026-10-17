@@ -297,16 +297,14 @@ export function WorkHubRoot() {
       {!progress && floating && conversationExpanded && <div className="workHubWindowControls">
         <IconButton className="workHubCloseButton" type="button" size="sm" variant="ghost" icon={<X size={12} />} label={t.hide} onClick={() => call(services.presentation.hide())} />
         <div className="workHubWindowActions">
+          <IconButton type="button" size="sm" variant="ghost" icon={<PanelRightOpen size={17} />}
+            label={workHubTaskCopy[locale].title} onClick={() => call(services.presentation.openTasks())} />
           <IconButton type="button" size="sm" variant="ghost" icon={<PictureInPicture2 size={14}><path d="m8 11-4-4m0 4V7h4" /></PictureInPicture2>} label={t.dock} onClick={() => call(services.presentation.dock())} />
           <IconButton type="button" size="sm" variant="ghost" icon={<ChevronDown size={14} style={{ rotate: conversationExpanded ? '0deg' : '180deg' }} />} label={conversationExpanded ? t.collapseConversation : t.expandConversation} aria-expanded={conversationExpanded} onClick={toggleConversation} />
         </div>
       </div>}
       <div className="workHubRevealMark" ref={revealMark} aria-hidden="true"><MakaWordmark width={192} /></div>
       <div className="workHubWorkspace"><div className="mainColumn" role="region" aria-label={taskCopy.coordinationFeed}>
-      {showConversation && floating && <div className="workHubFloatingTaskToggle">
-        <IconButton type="button" size="sm" variant="ghost" icon={<PanelRightOpen size={17} />}
-          label={workHubTaskCopy[locale].title} onClick={() => call(services.presentation.openTasks())} />
-      </div>}
       <ChatSurfaceLayout
         scrollButton={showConversation ? undefined : null}
         style={!showConversation ? { height: expandedLayoutHeight, flex: 'none', position: 'absolute', bottom: 0, width: '100%' } : undefined}
