@@ -108,6 +108,13 @@ export function installStorybookRenderProbe({ storyId }) {
       `unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`,
     );
   });
+  // Native ResizeObserver loop notifications are ErrorEvents, not always a
+  // Playwright pageerror. Observe from before mount without suppressing them.
+  window.addEventListener('error', (event) => {
+    if (event.message?.startsWith('ResizeObserver loop')) {
+      smoke.failures.push(`resize observer: ${event.message}`);
+    }
+  });
 
   const eventStoryId = (payload) => (typeof payload === 'string' ? payload : payload?.storyId);
   const belongsToStory = (payload) => {
@@ -194,6 +201,7 @@ export function catalogJobs(
       }
       if (
         entry.id === 'product-workhub--next-prompt-suggestion' ||
+        entry.id === 'product-workhub--task-preview-switch-is-atomic' ||
         entry.id === 'product-workhub--task-overview-and-continuation'
       ) {
         return COLOR_SCHEMES.flatMap((colorScheme) =>

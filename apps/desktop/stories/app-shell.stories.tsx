@@ -3301,6 +3301,9 @@ export const OversizedTurnHoldsAReadingAnchorOnColdScroll: Story = {
   play: async () => {
     const root = tailScroller();
     await document.fonts.ready;
+    // Resize delivery mounts the first virtual row on a frame. An empty
+    // scroller is trivially at its tail, but has no process to open yet.
+    await waitFor(() => expect(root.querySelector('.maka-processing-sequence')).not.toBeNull());
     await waitFor(() => expect(document.querySelector('.maka-markdown-pending')).toBeNull());
     // Real path: open the completed process, then start reading from its
     // bottom. Live processes already start open. No upward warm-up traversal.

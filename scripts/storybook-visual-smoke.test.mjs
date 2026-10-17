@@ -266,9 +266,36 @@ test('a play assertion exception fails the render even if Storybook emits a fini
   assert.match(window.__makaStorybookSmoke.failures[0], /glyphs moved/);
 });
 
-test('WorkHub suggestion and task overview geometry run at both widths in both themes', () => {
+test('native ResizeObserver loop notifications fail the render without suppressing the ErrorEvent', () => {
+  const events = new Map();
+  const stories = new Map();
+  const window = {
+    addEventListener: (event, handler) => events.set(event, handler),
+    __STORYBOOK_PREVIEW__: { channel: { on: (event, handler) => stories.set(event, handler) } },
+  };
+  runInNewContext(`(${installStorybookRenderProbe.toString()})({storyId: 'example'})`, { window });
+  for (const message of [
+    'ResizeObserver loop completed with undelivered notifications.',
+    'ResizeObserver loop limit exceeded',
+  ]) {
+    events.get('error')({
+      message,
+      preventDefault() {
+        assert.fail('the observer probe must not hide errors');
+      },
+    });
+  }
+  stories.get('storyFinished')({ storyId: 'example' });
+  assert.equal(window.__makaStorybookSmoke.finished, true);
+  assert.equal(window.__makaStorybookSmoke.failures.length, 2);
+  assert.match(window.__makaStorybookSmoke.failures[0], /undelivered notifications/);
+  assert.match(window.__makaStorybookSmoke.failures[1], /limit exceeded/);
+});
+
+test('WorkHub suggestion, overview and preview geometry run at both widths in both themes', () => {
   for (const storyId of [
     'product-workhub--next-prompt-suggestion',
+    'product-workhub--task-preview-switch-is-atomic',
     'product-workhub--task-overview-and-continuation',
   ]) {
     const jobs = catalogJobs(storyIndex(storyId));

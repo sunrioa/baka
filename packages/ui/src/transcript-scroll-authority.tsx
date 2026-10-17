@@ -382,12 +382,24 @@ export function createTranscriptScrollAuthority(): TranscriptScrollAuthority {
 
       // Observe the viewport and its direct content boxes, including content
       // outside Turns. Resize changes position only; it never changes intent.
-      const box = new ResizeObserver(() => {
+      const measureBox = (): void => {
         if (pinned && !gesture) writeToTail();
         else if (positioning) place();
         awayFromTail = distanceToTail() > BUTTON_THRESHOLD_PX;
         readingTurnId = readTurn();
         publish();
+      };
+      // Publishing can synchronously move virtual rows. Do not change their
+      // layout while the browser is still delivering resize notifications.
+      let resizeFrame: number | undefined;
+      const box = new ResizeObserver(() => {
+        // Keep a pinned tail in the same paint. This DOM-only correction does
+        // not publish React state or ask the virtualizer to mount another row.
+        if (pinned && !gesture) target.scrollTop = target.scrollHeight;
+        resizeFrame ??= requestAnimationFrame(() => {
+          resizeFrame = undefined;
+          measureBox();
+        });
       });
       const observeBox = (): void => {
         box.disconnect();
@@ -404,6 +416,7 @@ export function createTranscriptScrollAuthority(): TranscriptScrollAuthority {
       return () => {
         childList.disconnect();
         box.disconnect();
+        if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
         target.removeEventListener('wheel', onWheel);
         target.ownerDocument.removeEventListener('keydown', onKeyDown);
         target.removeEventListener('pointerdown', onPointerDown);
