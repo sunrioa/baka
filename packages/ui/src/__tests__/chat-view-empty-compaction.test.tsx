@@ -23,7 +23,7 @@ import { act, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { parseHTML } from 'linkedom';
-import type { SessionSummary } from '@maka/core/session';
+import type { SessionSummary, StoredMessage } from '@maka/core/session';
 import { ChatSurfaceLayout } from '../chat-surface-layout.js';
 import { ChatView } from '../chat-view.js';
 import type { LiveTurnProjection } from '../live-turn-projection.js';
@@ -82,6 +82,24 @@ test('retains tool and compaction evidence without activity after observation lo
     assert.equal(compactDocument.querySelectorAll('.maka-compaction-status .astryx-spinner').length, observed ? 1 : 0);
   }
   assert.equal(tool.steps[0]?.tools[0]?.status, 'running', 'availability never rewrites retained execution evidence');
+});
+
+test('a late-opened task renders its unfinished tool as running only for the observed executing Turn', async () => {
+  const messages: StoredMessage[] = [
+    { type: 'user', id: 'user', turnId: 'turn', ts: 1, text: 'Wait for the command' },
+    { type: 'tool_call', id: 'foreground', turnId: 'turn', ts: 2, toolName: 'Bash', args: { command: 'sleep 75' } },
+  ];
+  for (const activeTurn of [undefined, { turnId: 'other' }, { turnId: 'turn', queued: true }, { turnId: 'turn' }]) {
+    const markup = await renderChat(undefined, { messages, activeTurn });
+    const card = parseHTML(markup).document.querySelector('.maka-tool-activity-card');
+    assert.ok(card, 'the tool history must remain visible without a live event buffer');
+    assert.match(card.textContent ?? '', /sleep 75/);
+    if (activeTurn?.turnId === 'turn' && !activeTurn.queued) {
+      assert.doesNotMatch(card.textContent ?? '', /Interrupted|Failed/);
+    } else {
+      assert.match(card.textContent ?? '', /Interrupted/);
+    }
+  }
 });
 
 test('shows one waiting indicator before a named live Turn reaches the transcript', async () => {

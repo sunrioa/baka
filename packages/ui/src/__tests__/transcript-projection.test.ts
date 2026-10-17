@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import type { ShellRunSnapshotResult, ShellRunUpdate } from '@maka/core/events';
+import type { ShellRunSnapshotResult, ShellRunUpdate, ToolResultContent } from '@maka/core/events';
 import type { ShellRunToolResult } from '@maka/core/shell-run-result';
 import type { StoredMessage } from '@maka/core/session';
 import { createTranscriptProjection, valuesEqual } from '../transcript-projection.js';
@@ -67,6 +67,59 @@ function streamingTurn(text: string): LiveTurnProjection {
 }
 
 describe('incremental transcript projection', () => {
+  test('reattaching to the observed active Turn restores unfinished tools without replaying tool_start', () => {
+    const projection = createTranscriptProjection();
+    const messages = [...history(), toolCall('foreground', 'turn-3', 'Bash', { command: 'sleep 75' }, 7)];
+    const base = { locale: 'en' as const, sessionId: SESSION, messages };
+    const historical = projection.project(base);
+    assert.equal(historical[2]?.tools[0]?.status, 'interrupted');
+
+    const active = projection.project({ ...base, activeTurnId: 'turn-3' });
+    assert.equal(active[2]?.status, 'running');
+    assert.equal(active[2]?.tools[0]?.status, 'running');
+    assert.strictEqual(timelineTools(active[2]!.timeline)[0], active[2]?.tools[0]);
+    assert.strictEqual(active[0], historical[0]);
+    assert.strictEqual(active[1], historical[1]);
+    assert.equal(historical[2]?.tools[0]?.status, 'interrupted', 'observation must not mutate history');
+    assert.strictEqual(projection.project({ ...base, activeTurnId: 'turn-3' }), active);
+    assert.deepEqual(projection.project(base), historical, 'withdrawn observation must invalidate the projection');
+    assert.deepEqual(projection.project({ ...base, activeTurnId: 'different-turn' }), historical);
+
+    const completed = projection.project({ ...base, activeTurnId: 'turn-3', messages: [...messages,
+      toolResult('foreground', 'turn-3', { kind: 'text', text: 'done' }, 8),
+      { type: 'turn_state', id: 'ended', turnId: 'turn-3', ts: 9, status: 'completed' },
+    ] });
+    assert.equal(completed[2]?.status, 'completed', 'terminal facts outrank a lagging activity snapshot');
+    assert.equal(completed[2]?.tools[0]?.status, 'completed');
+    assert.strictEqual(completed[0], active[0]);
+  });
+
+  test('active observation never overrides terminal facts, settled tools or live interruption', () => {
+    for (const status of ['completed', 'failed', 'aborted'] as const) {
+      const messages: StoredMessage[] = [
+        toolCall('unfinished', 'turn', 'Bash', { command: 'sleep 75' }, 1),
+        { type: 'turn_state', id: 'ended', turnId: 'turn', ts: 2, status },
+      ];
+      const turns = createTranscriptProjection().project({ locale: 'en', messages, activeTurnId: 'turn' });
+      assert.equal(turns[0]?.status, status);
+      assert.equal(turns[0]?.tools[0]?.status, 'interrupted');
+    }
+    const messages: StoredMessage[] = [
+      toolCall('done', 'turn', 'Bash', { command: 'true' }, 1),
+      toolResult('done', 'turn', { kind: 'text', text: 'done' }, 2),
+      toolCall('failed', 'turn', 'Read', { path: '/missing' }, 3),
+      { type: 'tool_result', id: 'failure', turnId: 'turn', ts: 4, toolUseId: 'failed', isError: true,
+        content: { kind: 'text', text: 'missing' } },
+      toolCall('unfinished', 'turn', 'Bash', { command: 'sleep 75' }, 5),
+    ];
+    const turns = createTranscriptProjection().project({ locale: 'en', messages, activeTurnId: 'turn',
+      liveTurns: [{ turnId: 'turn', terminal: true, steps: [{ stepId: 'step', tools: [
+        { toolUseId: 'unfinished', toolName: 'Bash', args: undefined, status: 'interrupted' },
+      ] }] }],
+    });
+    assert.deepEqual(turns[0]?.tools.map(tool => tool.status), ['completed', 'errored', 'interrupted']);
+  });
+
   test('a durable append does not reread unchanged historical message contents', () => {
     let historicalReads = 0;
     const messages = history().map((message, index) => index < 4
@@ -744,7 +797,7 @@ function toolCall(
 function toolResult(
   toolUseId: string,
   turnId: string,
-  content: ShellRunToolResult,
+  content: ToolResultContent,
   ts: number,
 ): Extract<StoredMessage, { type: 'tool_result' }> {
   return { type: 'tool_result', id: `result-${toolUseId}`, turnId, ts, toolUseId, isError: false, content };
