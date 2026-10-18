@@ -145,6 +145,7 @@ function fixture() {
         readActiveWorkHubAssignmentsByTarget: async (ids: readonly string[]) =>
           assignments.filter((a) => ids.includes(a.targetSessionId) && active.has(a.actionId)),
         readWorkHubReplacement: async (id: string) => (replaced.has(id) ? {} : undefined),
+        readWorkHubSupersession: async () => undefined,
         readWorkHubStopRequest: async (id: string) => (stopped.has(id) ? {} : undefined),
         readWorkHubStopResolution: async () => undefined,
         readWorkHubAssignment: async (id: string) => assignments.find((a) => a.actionId === id),
@@ -255,7 +256,10 @@ function fixture() {
           records.set(sid + '/' + value.id, decodeCanonicalMessage(value));
         },
       },
-      agentRunStore: { readRootTurnAdmission: async (_sid: string, tid: string) => roots.get(tid) },
+      agentRunStore: {
+        readRootTurnAdmission: async (_sid: string, tid: string) => roots.get(tid),
+        readRootTurnContinuationAdmission: async () => undefined,
+      },
       runtimeEventStore: { readRunInvocation: async (_sid: string, rid: string) => runs.get(rid) },
     } as unknown as Options['stores'],
     executions: {
@@ -420,6 +424,12 @@ test('WorkHubEvidence advertises an object schema without losing any operation f
   const calls = [
     { operation: 'list', query: 'checksum', limit: 16, cursor: 'cursor' },
     { operation: 'read', sourceActionId: 'a', source, cursor: 'cursor' },
+    {
+      operation: 'read',
+      sourceActionId: 'a',
+      view: 'task_history',
+      kinds: ['user', 'tool_result'],
+    },
     { operation: 'ask', source, question: 'Which checksum?' },
     { operation: 'inbox', limit: 8, cursor: 'cursor' },
     { operation: 'result', ...correlation },
@@ -539,6 +549,89 @@ test('fresh container admission waits for every owned assignment and checks reso
   await assert.rejects(check(), /generation changed/);
   assert.deepEqual(f.transcriptReads, []);
   assert.deepEqual(f.deliveries, []);
+});
+
+test('task history extends only the current same-work native worker without broadening other-task evidence or coordinator access', async () => {
+  const f = fixture();
+  f.terminal('a');
+  f.assignments[2] = {
+    ...f.assignments[2]!,
+    actionId: 'fresh-a',
+    work: { id: 'a', generationId: 'fresh-a', continuesActionId: 'a' },
+  };
+  f.active.delete('a');
+  f.active.delete('c');
+  f.active.add('fresh-a');
+  f.outputs.set('a', [
+    {
+      type: 'user',
+      id: 'steer',
+      turnId: 'turn-a',
+      ts: 1,
+      text: 'Correction: use cookies',
+      steeringEventId: 'steer-event',
+    },
+    {
+      type: 'tool_call',
+      id: 'test-command',
+      turnId: 'turn-a',
+      ts: 2,
+      toolName: 'Bash',
+      args: { command: 'npm test' },
+    },
+    {
+      type: 'tool_result',
+      id: 'test-result',
+      turnId: 'turn-a',
+      ts: 3,
+      toolUseId: 'test-command',
+      isError: true,
+      content: { kind: 'text', text: 'Actual assertion failure' },
+    },
+    { type: 'assistant', id: 'reply', turnId: 'turn-a', ts: 4, text: 'Changed', modelId: 'test' },
+    {
+      type: 'user',
+      id: 'private',
+      turnId: 'unrelated-turn',
+      ts: 5,
+      text: 'UNRELATED PRIVATE INPUT',
+    },
+  ]);
+  const request = { operation: 'read', sourceActionId: 'a', view: 'task_history' } as const;
+  let cursor: string | undefined,
+    text = '';
+  do {
+    const result = (await f.runtime.tool.impl(
+      { ...request, ...(cursor ? { cursor } : {}) },
+      f.caller('c'),
+    )) as {
+      history: { records: unknown[]; nextCursor: string | null };
+    };
+    assert.ok(result.history, JSON.stringify(result));
+    text += JSON.stringify(result.history.records);
+    cursor = result.history.nextCursor ?? undefined;
+  } while (cursor);
+  for (const value of [
+    'Original user task a',
+    'Correction: use cookies',
+    'npm test',
+    'Actual assertion failure',
+  ])
+    assert.ok(text.includes(value), value);
+  assert.ok(!text.includes('UNRELATED PRIVATE INPUT'));
+  for (const sid of ['b', WORKHUB_COORDINATION_SESSION_ID])
+    assert.deepEqual(await f.runtime.tool.impl(request, f.caller(sid)), { status: 'unavailable' });
+  const ordinary = await f.runtime.tool.impl(
+    { operation: 'read', sourceActionId: 'a' },
+    f.caller('c'),
+  );
+  assert.match(JSON.stringify(ordinary), /Changed/);
+  assert.doesNotMatch(JSON.stringify(ordinary), /Correction: use cookies|Actual assertion failure/);
+  f.headerOverrides.set('c', { backend: 'plugin-executor' });
+  assert.deepEqual(await f.runtime.tool.impl(request, f.caller('c')), { status: 'unavailable' });
+  assert.deepEqual(f.deliveries, []);
+  assert.equal(f.runs.size, 4);
+  assert.equal(f.records.size, 0);
 });
 
 test('only the current same-work generation or coordinator can explicitly read retired-generation evidence', async () => {

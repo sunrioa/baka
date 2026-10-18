@@ -52,6 +52,12 @@ export const workHubEvidenceReadParameters = z
     sourceActionId: id.optional(),
     source: sourceSchema.optional(),
     cursor: token.optional(),
+    view: z.literal('task_history').optional(),
+    kinds: z
+      .array(z.enum(['user', 'assistant', 'tool_call', 'tool_result']))
+      .min(1)
+      .max(4)
+      .optional(),
   })
   .strict();
 const ordinal = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);

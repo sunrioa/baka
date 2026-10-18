@@ -227,6 +227,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
     actionId: string,
     delegationId: string,
     token?: string,
+    maxExecutions = WORKHUB_EXECUTION_PAGE_MAX_ITEMS,
   ): Promise<WorkHubTaskExecutionsResult> {
     const cursor = decode(token);
     if (
@@ -250,7 +251,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
         let evidenceRounds = cursor?.kind === 'executions' ? cursor.evidenceRounds : 0;
         const executions: TurnSnapshot[] = [],
           seen = new Set<string>();
-        while (current && executions.length < WORKHUB_EXECUTION_PAGE_MAX_ITEMS) {
+        while (current && executions.length < maxExecutions) {
           if (seen.has(current.turnId)) throw new Error('Task execution lineage contains a cycle');
           seen.add(current.turnId);
           const root = await stores.agentRunStore.readRootTurnAdmission(
@@ -328,6 +329,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
     }
   }
   return {
+    readExecutions,
     handlers: {
       'workhub.tasks.history': (input) =>
         query(() => readHistory(input.workId, input.cursor, input.actionId)),
