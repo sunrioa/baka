@@ -50,6 +50,7 @@ import {
 } from '@maka/core/runtime-invocation';
 import {
   type SessionHeader,
+  type WorkHubDelegationAssignedMessage,
   snapshotWorkHubTaskSettings,
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
@@ -243,7 +244,7 @@ import { resolveSandboxBoundaryRootSession } from './sandbox-boundary-graph-wake
 import { HostRuntimePolicyCoordinator } from './runtime-policy-coordinator.js';
 import { startHostModelMetadataRefresh } from './model-metadata-refresh.js';
 import { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
-import { SessionAdmissionGate } from './session-admission-gate.js';
+import { SessionAdmissionGate, type SessionAdmissionLease } from './session-admission-gate.js';
 import {
   HostSessionCatalogCoordinator,
   SessionOperationFailure,
@@ -275,6 +276,8 @@ import {
   WorkHubActionEffectFailure,
   WorkHubActionGateFailure,
   type WorkHubDelegationAssignmentInput,
+  type WorkHubDelegationRetirementClaim,
+  type WorkHubRetirementResult,
   workHubResumedTurnId,
 } from './workhub-coordination-action-gate.js';
 
@@ -2382,34 +2385,43 @@ export async function createExecutionRuntimeHostComposition(
       string,
       Awaited<ReturnType<typeof prepareWorkHubMessage>> & { release(): void }
     >();
-    workHubCoordination = new HostWorkHubCoordinationCoordinator({
-      readStopBinding: async (source, lease) => {
-        const disposition = lease
-          ? await messages.readMessageExecutionDispositionAdmitted(
-              source.targetSessionId,
-              source.targetMessageId,
-              lease,
-            )
-          : await messages.readMessageExecutionDisposition(
-              source.targetSessionId,
-              source.targetMessageId,
-            );
-        if (disposition.kind !== 'owned_root') return JSON.stringify(disposition);
-        const original = {
-          sessionId: source.targetSessionId,
-          turnId: disposition.turnId,
-          runId: disposition.runId,
-        };
-        const current = workHubEvidence
-          ? await workHubEvidence.taskExecution(source, original)
-          : await coordinator.readLatestRootTurnLineage(original);
-        return JSON.stringify([
+    const readStopTarget = async (
+      source: WorkHubDelegationAssignedMessage,
+      lease?: SessionAdmissionLease,
+    ): Promise<WorkHubStopTarget> => {
+      const disposition = lease
+        ? await messages.readMessageExecutionDispositionAdmitted(
+            source.targetSessionId,
+            source.targetMessageId,
+            lease,
+          )
+        : await messages.readMessageExecutionDisposition(
+            source.targetSessionId,
+            source.targetMessageId,
+          );
+      if (disposition.kind !== 'owned_root') return { binding: JSON.stringify(disposition) };
+      const original = {
+        sessionId: source.targetSessionId,
+        turnId: disposition.turnId,
+        runId: disposition.runId,
+      };
+      const current = workHubEvidence
+        ? await workHubEvidence.taskExecution(source, original)
+        : await coordinator.readLatestRootTurnLineage(original);
+      return {
+        binding: JSON.stringify([
           source.actionId,
           source.delegationId,
           source.targetMessageId,
-          current,
-        ]);
-      },
+          current.sessionId,
+          current.turnId,
+          current.runId,
+        ]),
+        execution: { sessionId: current.sessionId, turnId: current.turnId, runId: current.runId },
+      };
+    };
+    workHubCoordination = new HostWorkHubCoordinationCoordinator({
+      readStopBinding: async (source, lease) => (await readStopTarget(source, lease)).binding,
       readWorkContext: createWorkHubContextObserver({
         sessions: stores.sessionStore,
         runtime: stores.runtimeEventStore,
@@ -2612,40 +2624,12 @@ export async function createExecutionRuntimeHostComposition(
             targetTurnId: started.result.turn.turnId,
           };
         },
-        retireDelegation: async (assignment, retirement) => {
-          const disposition = await messages.cancelMessageIfPending(
-            assignment.targetSessionId,
-            assignment.targetMessageId,
-            retirement.cancellationClaimId,
-          );
-          if (disposition.kind === 'recovering') {
-            return { outcome: 'recovering' as const };
-          }
-          if (disposition.kind === 'cancelled') {
-            return { outcome: 'already_terminal' as const };
-          }
-          if (disposition.kind === 'cancelled_pending') {
-            return { outcome: 'cancelled_pending' as const };
-          }
-          if (disposition.kind === 'shared_turn') {
-            return { outcome: 'not_owned' as const, targetTurnId: disposition.turnId };
-          }
-          if (disposition.kind === 'owned_root') {
-            const original = {
-              sessionId: assignment.targetSessionId,
-              turnId: disposition.turnId,
-              runId: disposition.runId,
-            };
-            const identity = workHubEvidence
-              ? await workHubEvidence.taskExecution(assignment, original)
-              : await coordinator.readLatestRootTurnLineage(original);
-            return retirement.cause === 'direct_stop'
-              ? stopOwnedWorkHubRoot(coordinator, identity, retirement.cancellationClaimId)
-              : stopReplacedWorkHubRoot(coordinator, identity);
-          }
-          disposition satisfies never;
-          throw new Error('Unhandled WorkHub Message retirement disposition');
-        },
+        retireDelegation: (assignment, retirement) =>
+          retireWorkHubDelegation(assignment, retirement, {
+            messages,
+            coordinator,
+            readStopTarget,
+          }),
         assign: async (input) => {
           const durable = await stores.sessionStore.readWorkHubAssignment(input.actionId);
           if (durable) {
@@ -3663,6 +3647,76 @@ export async function createExecutionRuntimeHostComposition(
     if (errors.length === 1) throw error;
     throw new AggregateError(errors, 'Unable to clean up Runtime Host execution composition');
   }
+}
+
+interface WorkHubStopTarget {
+  readonly binding: string;
+  readonly execution?: {
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly runId: string;
+  };
+}
+
+class WorkHubStopTargetChangedError extends Error {}
+
+/** Replays the committed stop's exact execution, never the delegation's later continuation. */
+export async function retireWorkHubDelegation(
+  assignment: WorkHubDelegationAssignedMessage,
+  retirement: WorkHubDelegationRetirementClaim,
+  deps: {
+    readonly messages: Pick<HostMessageCoordinator, 'cancelMessageIfPending'>;
+    readonly coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>;
+    readonly readStopTarget: (
+      source: WorkHubDelegationAssignedMessage,
+      lease?: SessionAdmissionLease,
+    ) => Promise<WorkHubStopTarget>;
+  },
+): Promise<WorkHubRetirementResult> {
+  let authorized: WorkHubStopTarget['execution'];
+  let disposition: Awaited<ReturnType<HostMessageCoordinator['cancelMessageIfPending']>>;
+  try {
+    disposition = await deps.messages.cancelMessageIfPending(
+      assignment.targetSessionId,
+      assignment.targetMessageId,
+      retirement.cancellationClaimId,
+      retirement.executionBinding === undefined
+        ? undefined
+        : async (lease) => {
+            const target = await deps.readStopTarget(assignment, lease);
+            if (target.binding !== retirement.executionBinding)
+              throw new WorkHubStopTargetChangedError();
+            authorized = target.execution;
+          },
+    );
+  } catch (error) {
+    if (error instanceof WorkHubStopTargetChangedError) return { outcome: 'not_owned' };
+    throw error;
+  }
+  if (disposition.kind === 'recovering') return { outcome: 'recovering' };
+  if (disposition.kind === 'cancelled') return { outcome: 'already_terminal' };
+  if (disposition.kind === 'cancelled_pending') return { outcome: 'cancelled_pending' };
+  if (disposition.kind === 'shared_turn')
+    return { outcome: 'not_owned', targetTurnId: disposition.turnId };
+  const original = {
+    sessionId: assignment.targetSessionId,
+    turnId: disposition.turnId,
+    runId: disposition.runId,
+  };
+  if (retirement.cause === 'replacement') {
+    const current = (await deps.readStopTarget(assignment)).execution;
+    return stopReplacedWorkHubRoot(deps.coordinator, current ?? original);
+  }
+  // Old claims have no confirmed binding. They may cancel their original
+  // Message/root, but cannot acquire authority over a later resumed execution.
+  if (retirement.executionBinding === undefined) {
+    const current = (await deps.readStopTarget(assignment)).execution;
+    if (!current || current.turnId !== original.turnId || current.runId !== original.runId)
+      return { outcome: 'not_owned' };
+    authorized = original;
+  }
+  if (!authorized) return { outcome: 'not_owned' };
+  return stopOwnedWorkHubRoot(deps.coordinator, authorized, retirement.cancellationClaimId);
 }
 
 /**

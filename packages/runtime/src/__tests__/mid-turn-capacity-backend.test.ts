@@ -165,6 +165,8 @@ interface MidTurnFixtureOptions {
   finalStepUsage?: { input: number; output: number };
   /** Make the first provider request reject as a context overflow. */
   firstRequestContextOverflow?: boolean;
+  contextOverflowAtCall?: number;
+  withoutCacheBreakdown?: boolean;
   /** Prior-turn RuntimeEvents appended after the shaped priors (e.g. a persisted usage anchor). */
   extraPriorEvents?: readonly RuntimeEvent[];
   /** Run headers for the prior turns, so a persisted anchor can be identity-gated. */
@@ -217,7 +219,9 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
   let recordedAtThirdRequest = false;
   const fixture = { summarizerCalls: 0, ledgerReads: 0 };
   const usage = (input: number, output: number) => ({
-    inputTokens: { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
+    inputTokens: options.withoutCacheBreakdown
+      ? { total: input, noCache: undefined, cacheRead: undefined, cacheWrite: undefined }
+      : { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: output, text: output, reasoning: 0 },
   });
   const firstStepUsage = (): ReturnType<typeof usage> => {
@@ -308,7 +312,10 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
         throw Object.assign(new Error('aborted'), { name: 'AbortError' });
       }
       const call = model.doStreamCalls.length;
-      if (options.firstRequestContextOverflow && call === 1) {
+      if (
+        (options.firstRequestContextOverflow && call === 1) ||
+        options.contextOverflowAtCall === call
+      ) {
         throw Object.assign(new Error('prompt is too long: 213462 tokens > 200000 maximum'), {
           name: 'AI_APICallError',
           statusCode: 400,
@@ -1743,12 +1750,64 @@ describe('the shipped runtime default drives the proactive long-turn journey (is
     assert.equal(anchor?.outputTokens, 10);
     assert.equal(anchor?.cacheReadInputTokens, 0);
     assert.equal(anchor?.cacheWriteInputTokens, 0);
+    assert.equal(anchor?.cacheReadInputSource, 'reported');
+    assert.equal(anchor?.cacheWriteInputSource, 'reported');
+    assert.equal(anchor?.cacheMissInputSource, 'explicit');
+    assert.equal(anchor?.usageScope, 'last_completed_request');
     assert.equal(
       anchor?.cacheMissInputTokens,
       120,
       'last request, not send-level cumulative input',
     );
     assert.ok(Number.isSafeInteger(anchor?.requestedAt));
+    assert.equal(anchor?.latestRequestAt, anchor?.requestedAt);
+  });
+
+  test('does not pair an unmetered later overflow time with the completed request baseline', async () => {
+    const fixture = buildFixture({
+      contextWindow: 1_000_000,
+      withoutPriorTurns: true,
+      contextOverflowAtCall: 2,
+      summarize: () => undefined,
+    });
+    await runFixtureTurn(fixture);
+    assert.equal(fixture.model.doStreamCalls.length, 2);
+    assert.ok(fixture.events.some((event) => event.type === 'error'));
+    const usage = fixture.messages.find(
+      (message) => (message as { type?: string }).type === 'token_usage',
+    ) as
+      | { lastRequestAnchor?: import('@maka/core/usage-record-schema').LastRequestAnchor }
+      | undefined;
+    const anchor = usage?.lastRequestAnchor;
+    assert.equal(anchor?.inputTokens, 100);
+    assert.equal(anchor?.outputTokens, 20);
+    assert.equal(anchor?.usageScope, 'last_completed_request');
+    assert.ok(
+      anchor?.requestedAt !== undefined &&
+        anchor.latestRequestAt !== undefined &&
+        anchor.requestedAt < anchor.latestRequestAt,
+    );
+  });
+
+  test('keeps absent cache observations unknown instead of exporting normalized zeros', async () => {
+    const fixture = buildFixture({
+      contextWindow: 1_000_000,
+      finalAtSecondCall: true,
+      withoutCacheBreakdown: true,
+    });
+    await runFixtureTurn(fixture);
+    const usage = fixture.messages.find(
+      (message) => (message as { type?: string }).type === 'token_usage',
+    ) as
+      | { lastRequestAnchor?: import('@maka/core/usage-record-schema').LastRequestAnchor }
+      | undefined;
+    assert.equal(usage?.lastRequestAnchor?.inputTokens, 120);
+    for (const key of [
+      'cacheReadInputTokens',
+      'cacheWriteInputTokens',
+      'cacheMissInputTokens',
+    ] as const)
+      assert.equal(usage?.lastRequestAnchor?.[key], undefined, key);
   });
 
   test('an anchor is discarded unless its invocation proves it came from this model', async () => {

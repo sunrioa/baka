@@ -1018,6 +1018,7 @@ export class AiSdkTurn {
     let lastStepOutputTokens: number | undefined;
     let lastStepUsage: NormalizedUsage | undefined;
     let lastStepRequestedAt: number | undefined;
+    let latestRequestAt: number | undefined;
     let streamStatus: LlmCallRecord['status'] = 'success';
     let streamErrorClass: string | undefined;
     let runtimeSteps = 0;
@@ -1633,7 +1634,7 @@ export class AiSdkTurn {
             // rebuilt in place by overflow recovery, and the boundary it folded
             // under must travel with that rebuild, not with the step.
             const historyCompactBoundary = requestHistoryCompactBoundary();
-            lastStepRequestedAt = this.deps.now();
+            latestRequestAt = this.deps.now();
             result = await this.deps.modelAdapter.startStream({
               model,
               messages: dispatchMessages,
@@ -1948,6 +1949,7 @@ export class AiSdkTurn {
               lastStepInputTokens = stepUsage?.inputTokens;
               lastStepOutputTokens = stepUsage?.outputTokens;
               lastStepUsage = stepUsage;
+              lastStepRequestedAt = latestRequestAt;
               // A `finishReason: length` is deliberately not a trigger. The
               // reply may have been cut because the provider ran out of
               // window room, or because the provider's own output cap is
@@ -2420,14 +2422,30 @@ export class AiSdkTurn {
                 ? {
                     lastRequestAnchor: {
                       inputTokens: anchorInputTokens,
+                      usageScope: 'last_completed_request' as const,
+                      ...(latestRequestAt === undefined ? {} : { latestRequestAt }),
                       ...(lastStepRequestedAt === undefined
                         ? {}
                         : { requestedAt: lastStepRequestedAt }),
-                      ...(lastStepUsage
+                      ...(lastStepUsage?.cacheReadInputSource === 'reported'
                         ? {
                             cacheReadInputTokens: lastStepUsage.cacheHitInputTokens,
+                            cacheReadInputSource: 'reported' as const,
+                          }
+                        : {}),
+                      ...(lastStepUsage?.cacheWriteInputSource === 'reported'
+                        ? {
                             cacheWriteInputTokens: lastStepUsage.cacheWriteInputTokens,
+                            cacheWriteInputSource: 'reported' as const,
+                          }
+                        : {}),
+                      ...(lastStepUsage &&
+                      (lastStepUsage.cacheMissInputSource === 'explicit' ||
+                        (lastStepUsage.cacheReadInputSource === 'reported' &&
+                          lastStepUsage.cacheWriteInputSource === 'reported'))
+                        ? {
                             cacheMissInputTokens: lastStepUsage.cacheMissInputTokens,
+                            cacheMissInputSource: lastStepUsage.cacheMissInputSource,
                           }
                         : {}),
                       ...(anchorOutputTokens !== undefined

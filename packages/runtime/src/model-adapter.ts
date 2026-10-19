@@ -1677,6 +1677,12 @@ export function normalizeAiSdkUsage(
     cacheMissInputTokens,
     cacheMissInputSource,
     cacheWriteInputTokens,
+    ...(reportedCacheHitInputTokens === undefined
+      ? {}
+      : { cacheReadInputSource: 'reported' as const }),
+    ...(reportedCacheWriteInputTokens === undefined
+      ? {}
+      : { cacheWriteInputSource: 'reported' as const }),
     reasoningTokens,
     totalTokens,
     ...(rawFinishReason !== undefined ? { rawFinishReason } : {}),

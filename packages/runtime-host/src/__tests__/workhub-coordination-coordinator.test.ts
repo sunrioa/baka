@@ -2341,7 +2341,14 @@ describe('Host WorkHub Coordination coordinator', () => {
   });
 });
 
-for (const scenario of ['user-second', 'feedback', 'declined', 'stale', 'concurrent'] as const)
+for (const scenario of [
+  'user-second',
+  'feedback',
+  'declined',
+  'stale',
+  'concurrent',
+  'withdrawn-followup',
+] as const)
   test(`stop confirmation binds origin, distinct targets and exact execution (${scenario})`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-stop-confirmation-'));
     const store = createSessionStore(root);
@@ -2370,7 +2377,14 @@ for (const scenario of ['user-second', 'feedback', 'declined', 'stale', 'concurr
         undefined,
         {
           assign: persistTestAssignmentAction(store, (input) => `turn-${input.actionId}`),
-          retireDelegation: async (source) => {
+          readDelegationRetirement: async (source) =>
+            source.actionId === 'withdrawn-followup' ? 'retired' : 'not_retired',
+          retireDelegation: async (source, claim) => {
+            assert.equal(
+              claim.executionBinding,
+              'execution-before',
+              'durable binding reaches the effect',
+            );
             retired.push(source.actionId);
             return { outcome: 'stop_delivered', targetTurnId: source.targetTurnId };
           },
@@ -2431,6 +2445,31 @@ for (const scenario of ['user-second', 'feedback', 'declined', 'stale', 'concurr
         );
         assert.ok(result.ok, JSON.stringify(result));
       }
+      if (scenario === 'withdrawn-followup') {
+        await persistTestAssignment(
+          store,
+          {
+            actionId: 'withdrawn-followup',
+            actionFingerprint: `sha256:${'9'.repeat(64)}`,
+            targetSessionId: targets[0]!,
+            targetSessionName: 'a',
+            disposition: 'delegate_existing',
+            userText: 'Later input, withdrawn from queue',
+            work: { id: 'source-a', generationId: 'source-a', continuesActionId: 'source-a' },
+          },
+          'withdrawn-turn',
+        );
+        const withdrawn = (await store.readWorkHubAssignment('withdrawn-followup'))!;
+        await store.claimMessageAdmissionCancellation(
+          withdrawn.targetSessionId,
+          withdrawn.targetMessageId,
+          'withdraw-action',
+        );
+        assert.equal(
+          (await store.readLatestWorkHubAssignment('source-a'))?.actionId,
+          'withdrawn-followup',
+        );
+      }
       const stop = (actionId: string, targetSessionId: string) =>
         host.handlers['workhub.coordination.actFromTurn'](
           {
@@ -2459,7 +2498,7 @@ for (const scenario of ['user-second', 'feedback', 'declined', 'stale', 'concurr
         assert.deepEqual(replay, first);
         assert.equal(retired.length, 1);
         assert.equal(confirmations, scenario === 'feedback' ? 1 : 0);
-        if (scenario !== 'feedback') {
+        if (scenario !== 'feedback' && scenario !== 'withdrawn-followup') {
           host = makeHost(); // The distinct-target count is durable, not a process-local set.
           const second = await stop('stop-b', targets[1]!);
           assert.equal(confirmations, 1);

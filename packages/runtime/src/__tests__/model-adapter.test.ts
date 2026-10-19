@@ -1075,10 +1075,12 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 20,
         outputTokens: 5,
         cacheHitInputTokens: 7,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 10,
         cacheMissInputSource: 'derived',
         cachedInputTokens: 7,
         cacheWriteInputTokens: 3,
+        cacheWriteInputSource: 'reported',
         reasoningTokens: 2,
         totalTokens: 30,
       },
@@ -1101,6 +1103,22 @@ describe('ModelAdapter stream and error normalization', () => {
     });
   });
 
+  test('preserves the difference between missing and reported-zero cache fields', () => {
+    const missing = normalizeAiSdkUsage({ inputTokens: 100, outputTokens: 10 });
+    assert.equal(missing?.cacheHitInputTokens, 0, 'legacy aggregate normalization stays unchanged');
+    assert.equal(missing?.cacheReadInputSource, undefined);
+    assert.equal(missing?.cacheWriteInputSource, undefined);
+    const zero = normalizeAiSdkUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+    });
+    assert.equal(zero?.cacheReadInputSource, 'reported');
+    assert.equal(zero?.cacheWriteInputSource, 'reported');
+    assert.equal(zero?.cacheMissInputSource, 'derived');
+  });
+
   test('derives totals from detail-only AI SDK usage', () => {
     assert.deepEqual(
       normalizeAiSdkUsage({
@@ -1120,10 +1138,12 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 17,
         outputTokens: 7,
         cacheHitInputTokens: 5,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 10,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 5,
         cacheWriteInputTokens: 2,
+        cacheWriteInputSource: 'reported',
         reasoningTokens: 3,
         totalTokens: 24,
       },
@@ -1151,6 +1171,7 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 100,
         outputTokens: 20,
         cacheHitInputTokens: 40,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 60,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 40,
@@ -1191,6 +1212,7 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 1460,
         outputTokens: 2,
         cacheHitInputTokens: 1408,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 52,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 1408,

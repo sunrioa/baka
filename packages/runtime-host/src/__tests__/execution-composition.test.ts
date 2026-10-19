@@ -31,6 +31,7 @@ import {
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import type { WorkHubAdmittedAction } from '../server/workhub-coordination-action-gate.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
+import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import {
   buildInvocationOpenedEvent,
   runtimeInvocationOutcome,
@@ -107,6 +108,7 @@ import {
   runtimeHostFilesystemWorkerRuntime,
   stopOwnedWorkHubRoot,
   stopReplacedWorkHubRoot,
+  retireWorkHubDelegation,
   type ExecutionRuntimeHostCompositionDependencies,
   type ExecutionRuntimeHostComposition,
 } from '../server/execution-composition.js';
@@ -808,6 +810,82 @@ test('WorkHub recovers a delivered root Stop from its durable cancelled Turn', a
   });
   assert.equal(stopCalls, 0);
 });
+
+for (const scenario of [
+  'changed-after-claim',
+  'changed-after-validation',
+  'legacy-resumed',
+] as const)
+  test(`WorkHub stop cannot retarget a resumed execution (${scenario})`, async () => {
+    const assignment: Parameters<typeof retireWorkHubDelegation>[0] = {
+      type: 'workhub_coordination',
+      id: `wha_${'a'.repeat(48)}`,
+      turnId: 'coordination',
+      ts: 1,
+      schemaVersion: 1,
+      kind: 'delegation_assigned',
+      actionId: 'task-action',
+      actionFingerprint: `sha256:${'a'.repeat(64)}`,
+      coordinationTurnId: 'coordination',
+      targetSessionId: 'target',
+      targetSessionName: 'task',
+      targetTurnId: 'original',
+      targetMessageId: `whm_${'a'.repeat(48)}`,
+      delegationId: `whd_${'a'.repeat(48)}`,
+      disposition: 'delegate_existing',
+      userText: 'work',
+    };
+    const original = { sessionId: 'target', turnId: 'original', runId: 'original-run' };
+    const resumed = { sessionId: 'target', turnId: 'resumed', runId: 'resumed-run' };
+    let active = scenario === 'changed-after-validation' ? original : resumed;
+    let cancellations = 0,
+      stops = 0;
+    const admission = new SessionAdmissionGate();
+    const result = await retireWorkHubDelegation(
+      assignment,
+      {
+        cancellationClaimId: 'stop-action',
+        cause: 'direct_stop',
+        ...(scenario === 'legacy-resumed' ? {} : { executionBinding: 'confirmed-original' }),
+      },
+      {
+        messages: {
+          cancelMessageIfPending: async (sessionId, _messageId, _claim, validate) =>
+            admission.run(sessionId, async (lease) => {
+              await validate?.(lease);
+              cancellations++;
+              if (scenario === 'changed-after-validation') active = resumed;
+              return { kind: 'owned_root', turnId: original.turnId, runId: original.runId };
+            }),
+        },
+        readStopTarget: async (_source, lease) => {
+          if (lease) await admission.runAdmitted('target', lease, async () => undefined);
+          return {
+            binding: active === original ? 'confirmed-original' : 'different-resumed',
+            execution: active,
+          };
+        },
+        coordinator: {
+          readRootState: () => ({ kind: 'active', ...active }),
+          read: async (identity: typeof original) => ({
+            ...identity,
+            status: 'completed',
+            terminalEventId: 'old-terminal',
+          }),
+          stopRoot: async () => {
+            stops++;
+          },
+        } as unknown as Parameters<typeof retireWorkHubDelegation>[2]['coordinator'],
+      },
+    );
+    assert.equal(stops, 0, 'never sends Stop to the resumed execution');
+    assert.equal(cancellations, scenario === 'changed-after-claim' ? 0 : 1);
+    assert.equal(
+      result.outcome,
+      scenario === 'changed-after-validation' ? 'already_terminal' : 'not_owned',
+    );
+    assert.equal(active, resumed);
+  });
 
 test('WorkHub never reports a still-running root as already terminal', async () => {
   // The restart window: the execution is not registered in memory yet, so the

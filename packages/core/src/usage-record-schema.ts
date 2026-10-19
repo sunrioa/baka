@@ -290,10 +290,11 @@ export interface TokenUsageFields {
 }
 
 /**
- * The last provider request of a send, as the provider counted it: its real
+ * The last completed provider request of a send with usable usage: its real
  * input tokens and its real output tokens. Together they are the baseline the
  * next request is judged from — everything the model produced is re-sent as
- * input — with no local measure involved (#4559).
+ * input — with no local measure involved (#4559). A later unmetered attempt's
+ * timestamp is separate; it must not be paired with this completed baseline.
  *
  * `payloadChars` is a retired key from the 0.2.0 anchor, which paired the input
  * count with a locally measured payload size. It is still accepted on decode so
@@ -302,11 +303,17 @@ export interface TokenUsageFields {
 export interface LastRequestAnchor {
   inputTokens: number;
   outputTokens?: number;
-  /** Per-physical-request normalized provider fields, never the send aggregate. */
+  /** Counts without their source are legacy normalized fields, not evidence of reported zero. */
   cacheReadInputTokens?: number;
   cacheWriteInputTokens?: number;
   cacheMissInputTokens?: number;
+  cacheReadInputSource?: 'reported';
+  cacheWriteInputSource?: 'reported';
+  cacheMissInputSource?: 'explicit' | 'derived';
+  usageScope?: 'last_completed_request';
   requestedAt?: number;
+  /** Last attempted request may be later than the completed request whose usage anchors this record. */
+  latestRequestAt?: number;
   /**
    * The route that produced these counts.
    *
@@ -330,6 +337,11 @@ const LAST_REQUEST_ANCHOR_SHAPE = defineObjectShape<LastRequestAnchor>()(
     'cacheWriteInputTokens',
     'cacheMissInputTokens',
     'requestedAt',
+    'latestRequestAt',
+    'usageScope',
+    'cacheReadInputSource',
+    'cacheWriteInputSource',
+    'cacheMissInputSource',
   ],
   ['payloadChars'],
 );
@@ -342,11 +354,25 @@ export function isLastRequestAnchor(value: unknown): value is LastRequestAnchor 
     value.inputTokens > 0 &&
     (value.outputTokens === undefined ||
       (isFiniteNumber(value.outputTokens) && value.outputTokens >= 0)) &&
-    ['cacheReadInputTokens', 'cacheWriteInputTokens', 'cacheMissInputTokens', 'requestedAt'].every(
+    [
+      'cacheReadInputTokens',
+      'cacheWriteInputTokens',
+      'cacheMissInputTokens',
+      'requestedAt',
+      'latestRequestAt',
+    ].every(
       (key) =>
         value[key] === undefined ||
         (Number.isSafeInteger(value[key]) && (value[key] as number) >= 0),
     ) &&
+    (value.usageScope === undefined || value.usageScope === 'last_completed_request') &&
+    (value.cacheReadInputSource === undefined ||
+      (value.cacheReadInputSource === 'reported' && value.cacheReadInputTokens !== undefined)) &&
+    (value.cacheWriteInputSource === undefined ||
+      (value.cacheWriteInputSource === 'reported' && value.cacheWriteInputTokens !== undefined)) &&
+    (value.cacheMissInputSource === undefined ||
+      ((value.cacheMissInputSource === 'explicit' || value.cacheMissInputSource === 'derived') &&
+        value.cacheMissInputTokens !== undefined)) &&
     (value.payloadChars === undefined || isFiniteNumber(value.payloadChars))
   );
 }

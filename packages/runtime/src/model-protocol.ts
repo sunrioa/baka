@@ -296,6 +296,9 @@ export interface NormalizedUsage {
   cacheMissInputTokens: number;
   cacheMissInputSource: CacheMissInputSource;
   cacheWriteInputTokens: number;
+  /** Presence at the SDK/provider boundary, before missing values are normalized to zero. */
+  cacheReadInputSource?: 'reported';
+  cacheWriteInputSource?: 'reported';
   reasoningTokens: number;
   totalTokens: number;
   rawFinishReason?: string;

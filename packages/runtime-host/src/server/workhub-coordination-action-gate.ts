@@ -200,6 +200,7 @@ export interface WorkHubActionGateEffects {
 export interface WorkHubDelegationRetirementClaim {
   readonly cancellationClaimId: string;
   readonly cause: 'direct_stop' | 'replacement';
+  readonly executionBinding?: string;
 }
 
 export interface WorkHubDelegationResumeInput {
@@ -865,6 +866,7 @@ export class WorkHubCoordinationActionGate {
     const retirement = await this.#effects.retireDelegation(source, {
       cancellationClaimId: request.actionId,
       cause: 'direct_stop',
+      ...(request.executionBinding ? { executionBinding: request.executionBinding } : {}),
     });
     const outcome =
       retirement.outcome === 'recovering'

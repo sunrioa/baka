@@ -364,10 +364,20 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(requested), requested);
+    const bound = {
+      ...requested,
+      workId: 'original-action',
+      executionBinding: '["payments","turn-1","run-1"]',
+    };
+    assert.deepEqual(decodeCanonicalMessage(bound), bound);
     assert.deepEqual(decodeCanonicalMessage(resolved), resolved);
     for (const invalid of [
       { ...requested, candidateRef: 'injected' },
       { ...requested, schemaVersion: 2 },
+      { ...requested, executionBinding: '' },
+      { ...requested, executionBinding: 'x'.repeat(4097) },
+      { ...requested, executionBinding: 1 },
+      { ...requested, executionBinding: 'bad\0binding' },
       { ...resolved, outcome: 'stopped' },
       { ...resolved, runId: 'injected' },
       { ...resolved, targetTurnId: '' },

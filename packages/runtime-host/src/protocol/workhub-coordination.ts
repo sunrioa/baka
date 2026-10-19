@@ -209,10 +209,15 @@ export interface WorkHubContextObservation {
         readonly inputTokens: number;
         readonly outputTokens?: number;
         readonly requestedAt?: number;
-        /** Normalized fields for this physical request; absent on old/unsupported records. */
+        readonly latestRequestAt?: number;
+        readonly usageScope?: 'last_completed_request';
+        /** Missing cache fields remain unknown; sources distinguish reported and derived values. */
         readonly cacheReadInputTokens?: number;
         readonly cacheWriteInputTokens?: number;
         readonly cacheMissInputTokens?: number;
+        readonly cacheReadInputSource?: 'reported';
+        readonly cacheWriteInputSource?: 'reported';
+        readonly cacheMissInputSource?: 'explicit' | 'derived';
         /** null when the current connection identity cannot be resolved. */
         readonly matchesCurrentRoute: boolean | null;
       };
@@ -1015,9 +1020,14 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
       [
         'outputTokens',
         'requestedAt',
+        'latestRequestAt',
+        'usageScope',
         'cacheReadInputTokens',
         'cacheWriteInputTokens',
         'cacheMissInputTokens',
+        'cacheReadInputSource',
+        'cacheWriteInputSource',
+        'cacheMissInputSource',
       ],
     );
     if (
@@ -1027,6 +1037,19 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
       throw invalidProtocolFrame('Invalid WorkHub context state');
     const inputTokens = requireCount(observed.inputTokens, 'WorkHub request input tokens');
     if (inputTokens === 0) throw invalidProtocolFrame('Invalid WorkHub request input tokens');
+    if (
+      (observed.usageScope !== undefined && observed.usageScope !== 'last_completed_request') ||
+      (observed.cacheReadInputSource !== undefined &&
+        (observed.cacheReadInputSource !== 'reported' ||
+          observed.cacheReadInputTokens === undefined)) ||
+      (observed.cacheWriteInputSource !== undefined &&
+        (observed.cacheWriteInputSource !== 'reported' ||
+          observed.cacheWriteInputTokens === undefined)) ||
+      (observed.cacheMissInputSource !== undefined &&
+        (!['explicit', 'derived'].includes(observed.cacheMissInputSource as string) ||
+          observed.cacheMissInputTokens === undefined))
+    )
+      throw invalidProtocolFrame('Invalid WorkHub request observation source');
     lastRequest = {
       status: 'observed',
       eventId: requireEntityId(observed.eventId, 'WorkHub usage event'),
@@ -1041,10 +1064,29 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
       ),
       inputTokens,
       ...Object.fromEntries(
-        ['requestedAt', 'cacheReadInputTokens', 'cacheWriteInputTokens', 'cacheMissInputTokens']
+        [
+          'requestedAt',
+          'latestRequestAt',
+          'cacheReadInputTokens',
+          'cacheWriteInputTokens',
+          'cacheMissInputTokens',
+        ]
           .filter((key) => observed[key] !== undefined)
           .map((key) => [key, requireCount(observed[key], `WorkHub request ${key}`)]),
       ),
+      ...(observed.usageScope === 'last_completed_request'
+        ? { usageScope: observed.usageScope }
+        : {}),
+      ...(observed.cacheReadInputSource === 'reported'
+        ? { cacheReadInputSource: observed.cacheReadInputSource }
+        : {}),
+      ...(observed.cacheWriteInputSource === 'reported'
+        ? { cacheWriteInputSource: observed.cacheWriteInputSource }
+        : {}),
+      ...(observed.cacheMissInputSource === 'explicit' ||
+      observed.cacheMissInputSource === 'derived'
+        ? { cacheMissInputSource: observed.cacheMissInputSource }
+        : {}),
       ...(observed.outputTokens === undefined
         ? {}
         : { outputTokens: requireCount(observed.outputTokens, 'WorkHub request output tokens') }),

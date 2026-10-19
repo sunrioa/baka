@@ -394,7 +394,7 @@ export class HostWorkHubCoordinationCoordinator {
     let confirmed = false;
     let confirmedBinding: string | undefined;
     const commit = () =>
-      this.#commitCoordinationFact({
+      this.#commitCoordinationFact<WorkHubDelegationStopRequestedMessage>({
         // Only the two Sessions this stop can change: the one whose delegation
         // ends, and the Coordination Session that records it. Holding a lane for
         // every Session with an active delegation would serialize unrelated
@@ -411,25 +411,31 @@ export class HostWorkHubCoordinationCoordinator {
           );
           return this.#stores.readWorkHubStopRequest(input.stopsDelegationId, input.actionId);
         },
-        build: (existing) => ({
-          type: 'workhub_coordination',
-          id: `whq_${suffix}`,
-          turnId: existing?.turnId ?? input.coordinationTurnId ?? input.actionId,
-          ts: existing?.ts ?? Date.now(),
-          schemaVersion: WORKHUB_COORDINATION_STOP_SCHEMA_VERSION,
-          kind: 'delegation_stop_requested',
-          actionId: input.actionId,
-          actionFingerprint: input.actionFingerprint,
-          coordinationTurnId:
-            existing?.coordinationTurnId ?? input.coordinationTurnId ?? input.actionId,
-          stopsActionId: input.stopsActionId,
-          stopsDelegationId: input.stopsDelegationId,
-          targetSessionId: input.targetSessionId,
-          targetMessageId: input.targetMessageId,
-          targetSessionName: input.targetSessionName,
-          userText: input.userText,
-          workId,
-        }),
+        build: async (existing, lease) => {
+          const executionBinding = existing
+            ? existing.executionBinding
+            : await this.#readStopBinding?.(source, lease);
+          return {
+            type: 'workhub_coordination',
+            id: `whq_${suffix}`,
+            turnId: existing?.turnId ?? input.coordinationTurnId ?? input.actionId,
+            ts: existing?.ts ?? Date.now(),
+            schemaVersion: WORKHUB_COORDINATION_STOP_SCHEMA_VERSION,
+            kind: 'delegation_stop_requested',
+            actionId: input.actionId,
+            actionFingerprint: input.actionFingerprint,
+            coordinationTurnId:
+              existing?.coordinationTurnId ?? input.coordinationTurnId ?? input.actionId,
+            stopsActionId: input.stopsActionId,
+            stopsDelegationId: input.stopsDelegationId,
+            targetSessionId: input.targetSessionId,
+            targetMessageId: input.targetMessageId,
+            targetSessionName: input.targetSessionName,
+            userText: input.userText,
+            ...(existing && existing.workId === undefined ? {} : { workId }),
+            ...(executionBinding === undefined ? {} : { executionBinding }),
+          };
+        },
         conflictMessage: 'WorkHub delegation already has a different stop claim',
         beforeAppend: async (lease) => {
           if (
@@ -442,10 +448,14 @@ export class HostWorkHubCoordinationCoordinator {
               'Stop confirmation belongs to a different target execution',
             );
           const head = await this.#stores.readLatestWorkHubAssignment(workId);
-          if (head?.actionId !== source.actionId)
+          if (
+            !head ||
+            (head.work?.generationId ?? head.actionId) !==
+              (source.work?.generationId ?? source.actionId)
+          )
             throw new WorkHubActionGateFailure(
               'action_conflict',
-              'WorkHub stop source is no longer the current task input',
+              'WorkHub stop source is no longer the current task generation',
             );
           // This count and the claim are in one admitted lane. Splitting stop
           // into concurrent tool calls cannot turn every target into the first one.
@@ -655,7 +665,7 @@ export class HostWorkHubCoordinationCoordinator {
   #commitCoordinationFact<T extends StoredMessage>(options: {
     readonly admissionSessionIds?: readonly string[];
     readonly read: () => Promise<T | undefined>;
-    readonly build: (existing: T | undefined) => T;
+    readonly build: (existing: T | undefined, lease: SessionAdmissionLease) => T | Promise<T>;
     readonly additionalMessages?: (requested: T) => Promise<StoredMessage[]>;
     readonly conflictMessage: string;
     readonly beforeAppend: (lease: SessionAdmissionLease) => Promise<void>;
@@ -665,7 +675,7 @@ export class HostWorkHubCoordinationCoordinator {
       options.admissionSessionIds ?? [WORKHUB_COORDINATION_SESSION_ID],
       async (lease) => {
         const existing = await options.read();
-        const requested = options.build(existing);
+        const requested = await options.build(existing, lease);
         if (existing) {
           if (!isDeepStrictEqual(existing, requested)) {
             throw new WorkHubActionGateFailure('action_conflict', options.conflictMessage);

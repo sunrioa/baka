@@ -755,16 +755,31 @@ export class SqliteRuntimeStore
           connectionId: route.llmConnectionId,
           connectionSlug: route.llmConnectionSlug,
           inputTokens: anchor.inputTokens,
-          ...(anchor.requestedAt === undefined ? {} : { requestedAt: anchor.requestedAt }),
-          ...(anchor.cacheReadInputTokens === undefined
+          ...(anchor.usageScope === undefined ? {} : { usageScope: anchor.usageScope }),
+          ...(anchor.usageScope !== 'last_completed_request' || anchor.requestedAt === undefined
             ? {}
-            : { cacheReadInputTokens: anchor.cacheReadInputTokens }),
-          ...(anchor.cacheWriteInputTokens === undefined
+            : { requestedAt: anchor.requestedAt }),
+          ...(anchor.latestRequestAt === undefined
             ? {}
-            : { cacheWriteInputTokens: anchor.cacheWriteInputTokens }),
-          ...(anchor.cacheMissInputTokens === undefined
+            : { latestRequestAt: anchor.latestRequestAt }),
+          ...(anchor.cacheReadInputSource !== 'reported'
             ? {}
-            : { cacheMissInputTokens: anchor.cacheMissInputTokens }),
+            : {
+                cacheReadInputTokens: anchor.cacheReadInputTokens,
+                cacheReadInputSource: anchor.cacheReadInputSource,
+              }),
+          ...(anchor.cacheWriteInputSource !== 'reported'
+            ? {}
+            : {
+                cacheWriteInputTokens: anchor.cacheWriteInputTokens,
+                cacheWriteInputSource: anchor.cacheWriteInputSource,
+              }),
+          ...(anchor.cacheMissInputSource === undefined
+            ? {}
+            : {
+                cacheMissInputTokens: anchor.cacheMissInputTokens,
+                cacheMissInputSource: anchor.cacheMissInputSource,
+              }),
           ...(anchor.outputTokens === undefined ? {} : { outputTokens: anchor.outputTokens }),
         };
       }

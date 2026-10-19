@@ -1318,6 +1318,8 @@ export interface WorkHubDelegationStopRequestedMessage {
   userText: string;
   /** Added for distinct-target confirmation; older claims remain readable. */
   workId?: string;
+  /** Host-derived binding captured under target admission; never retarget on replay. */
+  executionBinding?: string;
 }
 
 /** Durable observed result of a direct-stop attempt. */
@@ -1683,7 +1685,7 @@ const WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE =
       'targetSessionName',
       'userText',
     ],
-    ['workId'],
+    ['workId', 'executionBinding'],
   );
 const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
   defineObjectShape<WorkHubDelegationStopResolvedMessage>()(
@@ -1914,6 +1916,11 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       hasExactShape(message, WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE) &&
       (message.workId === undefined ||
         (typeof message.workId === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(message.workId))) &&
+      (message.executionBinding === undefined ||
+        (typeof message.executionBinding === 'string' &&
+          message.executionBinding.length > 0 &&
+          message.executionBinding.length <= 4096 &&
+          !message.executionBinding.includes('\0'))) &&
       message.schemaVersion === WORKHUB_COORDINATION_STOP_SCHEMA_VERSION &&
       isWorkHubActionIdentity(message) &&
       typeof message.stopsActionId === 'string' &&
