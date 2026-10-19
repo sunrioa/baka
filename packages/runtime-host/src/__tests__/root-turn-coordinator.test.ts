@@ -4184,6 +4184,169 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
+for (const scope of ['preserve', 'full', 'upgrade'] as const)
+  test('exact Root stop preserves later accepted work only when requested (' + scope + ')', {
+    timeout: 20_000,
+  }, async () => {
+    const entered = {
+      a: deferred<BackendSendInput>(),
+      b: deferred<BackendSendInput>(),
+      c: deferred<BackendSendInput>(),
+    };
+    const release = { a: deferred<void>(), b: deferred<void>(), c: deferred<void>() };
+    const stopEntered = deferred<void>();
+    const seen: string[] = [];
+    let stopCount = 0;
+    const fixture = await createFailureFixture({
+      registerBackend: (backends) =>
+        backends.register(
+          'ai-sdk',
+          (context) =>
+            new (class extends FakeBackend {
+              override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+                const key = input.text;
+                assert.ok(
+                  key === 'a' || key === 'b' || key === 'c',
+                  'no correction or another task is folded into the successor',
+                );
+                seen.push(key);
+                entered[key].resolve(input);
+                await release[key].promise;
+                yield {
+                  type: 'complete',
+                  id: randomUUID(),
+                  turnId: input.turnId,
+                  ts: Date.now(),
+                  stopReason: 'end_turn',
+                };
+              }
+              override async stop(): Promise<void> {
+                stopCount++;
+                stopEntered.resolve();
+              }
+            })(context),
+        ),
+    });
+    const stopping: Promise<void>[] = [];
+    try {
+      const context = operationContext(fixture.hostEpoch, fixture.acquireResidency);
+      const started = await fixture.interactiveTurns.handlers['turn.start'](
+        {
+          sessionId: fixture.sessionId,
+          turnId: 'stop-queue-a',
+          content: { text: 'a' },
+        },
+        context,
+      );
+      assertStartedTurn(started);
+      await entered.a.promise;
+      for (const [messageId, text, placement] of [
+        ['a-correction', 'do not move this correction to b', 'current_turn'],
+        ['accepted-b', 'b', 'next_turn'],
+        ['accepted-c', 'c', 'next_turn'],
+      ] as const)
+        assert.ok(
+          (
+            await fixture.messages.handlers['turn.message.submit'](
+              {
+                originHostEpoch: fixture.hostEpoch,
+                sessionId: fixture.sessionId,
+                messageId,
+                content: { text },
+                placement,
+              },
+              context,
+            )
+          ).ok,
+        );
+      const identity = {
+        sessionId: fixture.sessionId,
+        turnId: started.result.turn.turnId,
+        runId: started.result.turn.runId,
+      };
+      const stop =
+        scope === 'full'
+          ? fixture.coordinator.stopRoot(identity)
+          : fixture.coordinator.stopRootPreservingFollowups(identity);
+      stopping.push(stop);
+      void stop.catch(() => undefined);
+      await stopEntered.promise;
+      if (scope === 'upgrade') {
+        const broad = fixture.coordinator.stopRoot(identity);
+        stopping.push(broad);
+        void broad.catch(() => undefined);
+        await waitUntil(
+          async () =>
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'accepted-b',
+            ),
+        );
+      }
+      release.a.resolve();
+      await Promise.all(stopping);
+      assert.equal((await fixture.coordinator.read(identity)).status, 'cancelled');
+      assert.equal(
+        await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+          fixture.sessionId,
+          'a-correction',
+        ),
+        true,
+      );
+      if (scope === 'preserve') {
+        const b = await entered.b.promise;
+        assert.ok(b.runId);
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), {
+          kind: 'active',
+          sessionId: fixture.sessionId,
+          turnId: b.turnId,
+          runId: b.runId,
+        });
+        const queue = fixture.messages.projection(fixture.sessionId);
+        assert.deepEqual(
+          queue.followup.map((item) => item.messageId),
+          ['accepted-c'],
+        );
+        await fixture.coordinator.stopRootPreservingFollowups(identity);
+        assert.equal(stopCount, 1, 'a stale A retry does not stop active B');
+        assert.deepEqual(fixture.messages.projection(fixture.sessionId), queue);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+          );
+        release.b.resolve();
+        await entered.c.promise;
+        release.c.resolve();
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a', 'b', 'c']);
+      } else {
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a']);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            true,
+          );
+      }
+      assert.equal(stopCount, 1);
+      assert.equal(fixture.drainRequested(), false);
+      await fixture.coordinator.close();
+      await fixture.messages.close();
+    } finally {
+      for (const gate of Object.values(release)) gate.resolve();
+      await Promise.allSettled(stopping);
+      await fixture.coordinator.close();
+      await fixture.dispose();
+    }
+  });
+
 test('active WorkHub authority authenticates user/feedback origin and refuses other or completed Turns', async () => {
   for (const [toolProfile, feedback] of [
     ['workhub-coordination-v1', false],

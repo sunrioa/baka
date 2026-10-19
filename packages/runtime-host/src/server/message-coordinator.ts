@@ -406,6 +406,7 @@ interface SessionState {
   stopFence?: {
     readonly identity: RuntimeMessageRunIdentity;
     readonly result: QueueFenceResult;
+    readonly preserveFollowups: boolean;
   };
   pendingInterrupts: Map<string, PendingInterrupt>;
 }
@@ -1051,8 +1052,15 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         'Terminal transition found closed admission without a stop fence',
       );
     }
-    if (this.#draining && !state.stopFence) {
-      this.#commitQueueFence(identity);
+    if (this.#draining) {
+      if (!state.stopFence) this.#commitQueueFence(identity);
+      else if (state.stopFence.preserveFollowups && state.followup.length) {
+        // Shutdown releases local leases for recovery; it is not a later user
+        // request to cancel unrelated work. Do not put those Messages into the
+        // original root-only stop's durable cancellation result.
+        this.#retractQueued(state);
+        this.#mutated(state);
+      }
     }
     state.phase = 'closed';
     const folded = state.steering.splice(0);
@@ -1422,8 +1430,11 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     }
   }
 
-  commitStopFence(identity: RuntimeMessageRunIdentity): QueueFenceResult {
-    return this.#commitQueueFence(identity);
+  commitStopFence(
+    identity: RuntimeMessageRunIdentity,
+    preserveFollowups = false,
+  ): QueueFenceResult {
+    return this.#commitQueueFence(identity, preserveFollowups);
   }
 
   async close(): Promise<void> {
@@ -2577,7 +2588,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     run.released = true;
   }
 
-  #commitQueueFence(identity: RuntimeMessageRunIdentity): QueueFenceResult {
+  #commitQueueFence(
+    identity: RuntimeMessageRunIdentity,
+    preserveFollowups = false,
+  ): QueueFenceResult {
     const state = this.#requireState(identity.sessionId);
     if (state.transition) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -2589,7 +2603,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       if (!sameRun(existing.identity, identity)) {
         throw new RuntimeMessageAuthorityInvariantError('Stop fence belongs to another root Turn');
       }
-      return existing.result;
+      if (!existing.preserveFollowups || preserveFollowups) return existing.result;
+      // An explicit full stop may supersede an earlier root-only stop. It
+      // retracts only the remaining queue; the first fence's retractions were
+      // already persisted under this same Session lane. Never restore them.
     }
     if (!state.reservedRoot || !sameRun(state.reservedRoot, identity)) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -2602,18 +2619,19 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       );
     }
     state.phase = 'closed';
-    const retracted = this.#retractQueued(state);
+    const retracted = this.#retractQueued(state, preserveFollowups);
     state.generation += 1;
+    for (const entry of state.followup) entry.generation = state.generation;
     this.#mutated(state);
     const result = { queueRevision: state.revision, retracted };
-    state.stopFence = { identity: { ...identity }, result };
+    state.stopFence = { identity: { ...identity }, result, preserveFollowups };
     return result;
   }
 
-  #retractQueued(state: SessionState): RetractedMessageSnapshot[] {
-    const entries = [...state.steering, ...state.followup];
+  #retractQueued(state: SessionState, preserveFollowups = false): RetractedMessageSnapshot[] {
+    const entries = [...state.steering, ...(preserveFollowups ? [] : state.followup)];
     state.steering = [];
-    state.followup = [];
+    if (!preserveFollowups) state.followup = [];
     for (const entry of entries) this.#releaseEntry(entry);
     return entries.map(retractedSnapshot);
   }
