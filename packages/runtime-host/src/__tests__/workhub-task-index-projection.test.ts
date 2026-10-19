@@ -1,0 +1,280 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  WORKHUB_COORDINATION_SESSION_ROLE,
+  type WorkHubDelegationAssignedMessage,
+} from '@maka/core/session';
+import { createSessionStore, type SessionAuthorityStore } from '@maka/storage/session-store';
+import { createWorkHubTaskIndexProjection } from '../server/workhub-task-index-projection.js';
+import { createWorkHubTaskDiscoveryRuntime } from '../server/workhub-task-discovery-runtime.js';
+import type { WorkHubTaskDetail, WorkHubTaskStatus } from '../protocol/workhub-tasks.js';
+import { HOST_OPERATION_SPECS } from '../protocol/index.js';
+
+function assigned(actionId: string, sessionId: string, text = 'Original request') {
+  const suffix = createHash('sha256').update(actionId).digest('hex').slice(0, 48);
+  const content = normalizeMessageContent({ text: 'Prepared task instruction' });
+  const assignment: WorkHubDelegationAssignedMessage = {
+    type: 'workhub_coordination',
+    kind: 'delegation_assigned',
+    schemaVersion: 1,
+    id: `wha_${suffix}`,
+    turnId: actionId,
+    coordinationTurnId: actionId,
+    actionId,
+    actionFingerprint: `sha256:${'a'.repeat(64)}`,
+    ts: 10,
+    targetSessionId: sessionId,
+    targetSessionName: 'Container',
+    targetTurnId: `turn-${actionId}`,
+    targetMessageId: `whm_${suffix}`,
+    delegationId: `whd_${suffix}`,
+    disposition: 'delegate_existing',
+    userText: text,
+    delegationText: content.text,
+  };
+  return {
+    assignment,
+    admission: {
+      sessionId,
+      turnId: `turn-${actionId}`,
+      runId: `run-${actionId}`,
+      messageId: `whm_${suffix}`,
+      content,
+      submittedContentDigest: messageContentDigest(content),
+      submittedPlacement: 'current_turn' as const,
+      placement: 'current_turn' as const,
+      disposition: 'steering' as const,
+      skillInvocation: { loaded: [], failed: [], receipts: [] },
+      admittedAt: 10,
+    },
+  };
+}
+
+async function coordination(store: SessionAuthorityStore, root: string) {
+  await store.createStableSession({
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    requestFingerprint: `sha256:${'b'.repeat(64)}`,
+    input: {
+      cwd: root,
+      name: 'WorkHub',
+      role: WORKHUB_COORDINATION_SESSION_ROLE,
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+      toolProfile: 'workhub-coordination-v2',
+    },
+  });
+}
+
+function projection(store: SessionAuthorityStore, states: Map<string, WorkHubTaskStatus>) {
+  return createWorkHubTaskIndexProjection({
+    stores: store,
+    index: store.workHubTaskIndex!,
+    project: async (source) =>
+      ({
+        task: {
+          workId: source.work?.id ?? source.actionId,
+          actionId: source.actionId,
+          delegationId: source.delegationId,
+          targetSessionId: source.targetSessionId,
+          targetSessionName: source.targetSessionName,
+          targetMessageId: source.targetMessageId,
+          text: 'Display excerpt',
+          createdAt: source.ts,
+          status: states.get(source.work?.id ?? source.actionId) ?? 'pending_acceptance',
+        },
+      }) satisfies WorkHubTaskDetail,
+    activity: async () => undefined,
+    onError: (error) => {
+      throw error;
+    },
+  });
+}
+
+test('task discovery rebuilds all ages, full requests, corrections and stable titles without duplicating manual Sessions', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-index-projection-'));
+  let store = createSessionStore(root);
+  const states = new Map<string, WorkHubTaskStatus>();
+  let runtime = projection(store, states);
+  try {
+    await coordination(store, root);
+    const sources: ReturnType<typeof assigned>[] = [];
+    for (let n = 0; n < 35; n++) {
+      const h = await store.create({
+        cwd: root,
+        name: `Container ${n}`,
+        model: 'model',
+        llmConnectionSlug: 'test',
+        permissionMode: 'ask',
+      });
+      const request = assigned(
+        `work-${n}`,
+        h.id,
+        n === 0 ? `${'x'.repeat(100_000)}\n原始要求 needle-original-xyz` : `Original ${n}`,
+      );
+      request.assignment.ts = n + 10;
+      request.assignment.targetSessionName = h.name;
+      request.assignment.taskTitle = `编译诊断 ${n}`;
+      await store.assignWorkHubMessage(request);
+      sources.push(request);
+    }
+    const manual = await store.create({
+      cwd: root,
+      name: 'Manual unclaimed work',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    const first = await runtime.query({});
+    assert.equal(first.items.length, 10);
+    const all = [...first.items];
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = await runtime.query({ cursor });
+      all.push(...page.items);
+      cursor = page.nextCursor;
+    }
+    assert.equal(all.length, 36);
+    assert.equal(new Set(all.map((x) => `${x.kind}:${x.id}`)).size, 36);
+    assert.equal(all.filter((x) => x.kind === 'session').length, 1);
+    assert.equal(all.find((x) => x.kind === 'session')?.id, manual.id);
+    assert.ok(
+      all.some((x) => x.id === 'work-0'),
+      'no age or recent-32 cutoff',
+    );
+    assert.ok(
+      all.filter((x) => x.kind === 'task').every((x) => x.state === 'ended'),
+      'state comes from execution projection, not assignment admission',
+    );
+    assert.equal((await runtime.query({ query: 'needle-original-xyz' })).items[0]?.id, 'work-0');
+    const original = sources[0]!.assignment;
+    await store.rename(original.targetSessionId, 'Renamed container');
+    await runtime.notify(original.targetSessionId);
+    const renamed = await runtime.query({ query: 'renamed' });
+    assert.equal(
+      renamed.items[0]?.title,
+      '编译诊断 0',
+      'task title does not follow the Session rename',
+    );
+    const correction = assigned(
+      'correction',
+      original.targetSessionId,
+      '版本纠正 needle-correction-xyz',
+    );
+    correction.assignment.targetSessionName = 'Renamed container';
+    correction.assignment.schemaVersion = 4;
+    correction.assignment.work = {
+      id: 'work-0',
+      generationId: 'work-0',
+      continuesActionId: 'work-0',
+    };
+    correction.assignment.ts = 90;
+    await store.assignWorkHubMessage(correction);
+    const corrected = await runtime.query({ query: '版本纠正' });
+    assert.equal(corrected.items.length, 1);
+    assert.equal(corrected.items[0]?.id, 'work-0');
+    assert.equal(corrected.items[0]?.title, '编译诊断 0');
+    states.set('work-0', 'running');
+    await runtime.notify(original.targetSessionId);
+    assert.equal(
+      (await runtime.query({})).items[0]?.id,
+      'work-0',
+      'older running task sorts before newer ended tasks',
+    );
+    const stable = await runtime.query({ query: '编译' });
+    assert.ok(stable.nextCursor);
+    const expected = await runtime.query({ query: '编译', cursor: stable.nextCursor });
+    await runtime.rebuild();
+    assert.deepEqual(await runtime.query({ query: '编译', cursor: stable.nextCursor }), expected);
+    await runtime.close();
+    await store.close?.();
+    store = createSessionStore(root);
+    runtime = projection(store, states);
+    assert.deepEqual(
+      await runtime.query({ query: '编译', cursor: stable.nextCursor }),
+      expected,
+      'pagination resumes after reopening the production store',
+    );
+    assert.equal((await store.readHeaderSnapshot(original.targetSessionId)).permissionMode, 'ask');
+    assert.deepEqual(await store.readWorkHubAssignment(original.actionId), original);
+  } finally {
+    await runtime.close();
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('find protocol bounds pages, keeps manual availability distinct and makes unsupported discovery explicit', async () => {
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.find'];
+  assert.deepEqual(spec.decodeInput({ query: '  登录   限流  ', cwd: '/repo' }), {
+    query: '登录   限流',
+    cwd: '/repo',
+  });
+  const item = {
+    kind: 'task',
+    id: 'work',
+    title: 'Login',
+    state: 'ended',
+    lastActivityAt: 1,
+    location: 'repo',
+    available: true,
+    summary: '',
+    segments: 1,
+  };
+  const page = { items: [item], match: 'all', nextCursor: null };
+  assert.deepEqual(spec.decodeOutput(page), page);
+  assert.deepEqual(
+    spec.decodeOutput({
+      ...page,
+      items: [{ ...item, kind: 'session', state: 'available', location: null }],
+    }),
+    { ...page, items: [{ ...item, kind: 'session', state: 'available', location: null }] },
+  );
+  for (const bad of [
+    { ...page, items: Array.from({ length: 11 }, (_, n) => ({ ...item, id: `work-${n}` })) },
+    { ...page, items: [item, item] },
+    { ...page, items: [{ ...item, summary: '😀'.repeat(201) }] },
+    { ...page, items: [{ ...item, kind: 'session' }] },
+    { ...page, items: [{ ...item, kind: 'session', state: 'available', segments: 2 }] },
+    { ...page, items: [{ ...item, state: 'available' }] },
+    { ...page, items: [{ ...item, permissions: 'bypass' }] },
+    { ...page, nextCursor: 0 },
+  ])
+    assert.throws(() => spec.decodeOutput(bad));
+  const runtime = createWorkHubTaskDiscoveryRuntime({
+    readContext: async () => {
+      throw new Error('must not read');
+    },
+    onError: (error) => {
+      throw error;
+    },
+  });
+  const unavailable = await runtime.handlers['workhub.tasks.find']({});
+  assert.equal(unavailable.ok, false);
+  if (!unavailable.ok) assert.equal(unavailable.error.code, 'operation_unavailable');
+});

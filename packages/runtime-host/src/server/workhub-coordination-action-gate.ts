@@ -218,6 +218,7 @@ export interface WorkHubRetirementResult {
 }
 
 export interface WorkHubDelegationAssignmentInput {
+  readonly taskTitle?: string;
   readonly inputOrigin?: 'user' | 'feedback';
   readonly taskInput?: WorkHubTaskInputRequest;
   readonly work?: WorkHubWorkBinding;
@@ -570,6 +571,7 @@ export class WorkHubCoordinationActionGate {
         return this.#assign(
           {
             ...delegationAssignment(input, fingerprint, sessionId, proposal.title),
+            taskTitle: await this.#taskTitle(source),
             work: {
               id: source.work?.id ?? source.actionId,
               generationId: input.actionId,
@@ -695,6 +697,7 @@ export class WorkHubCoordinationActionGate {
         ...delegationAssignment(input, fingerprint, target.sessionId, target.sessionName),
         ...(source
           ? {
+              taskTitle: await this.#taskTitle(source),
               work: {
                 id: source.work?.id ?? source.actionId,
                 generationId: source.work?.generationId ?? source.actionId,
@@ -727,6 +730,13 @@ export class WorkHubCoordinationActionGate {
           : {}),
       },
       context,
+    );
+  }
+
+  async #taskTitle(source: WorkHubDelegationAssignedMessage): Promise<string> {
+    const origin = await this.#effects.readAssignment(source.work?.id ?? source.actionId);
+    return (
+      origin?.taskTitle ?? origin?.targetSessionName ?? source.taskTitle ?? source.targetSessionName
     );
   }
 

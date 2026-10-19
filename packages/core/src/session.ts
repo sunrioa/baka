@@ -1228,6 +1228,8 @@ interface WorkHubCoordinationMessageEnvelope {
  */
 export interface WorkHubDelegationAssignedMessage extends WorkHubCoordinationMessageEnvelope {
   kind: 'delegation_assigned';
+  /** Initial task title, independent of later Session renames. Absent in legacy facts. */
+  taskTitle?: string;
   /** Absent on legacy records: do not guess that equal Session identities mean equal work. */
   work?: WorkHubWorkBinding;
   /** Absent on old records; never synthesize a historical creation snapshot from defaults. */
@@ -1604,6 +1606,7 @@ const WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE =
       'work',
       'settings',
       'inputOrigin',
+      'taskTitle',
     ],
   );
 const WORKHUB_DELEGATION_REPLACEMENT_REQUESTED_MESSAGE_SHAPE =
@@ -2029,6 +2032,11 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
     message.kind === 'delegation_assigned' &&
     hasExactShape(message, WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE) &&
     (message.settings === undefined || isWorkHubTaskSettingsSnapshot(message.settings)) &&
+    (message.taskTitle === undefined ||
+      (typeof message.taskTitle === 'string' &&
+        message.taskTitle.trim().length > 0 &&
+        Array.from(message.taskTitle).length <= 512 &&
+        !/[\u0000-\u001f\u007f]/u.test(message.taskTitle))) &&
     (message.inputOrigin === undefined ||
       message.inputOrigin === 'user' ||
       message.inputOrigin === 'feedback') &&

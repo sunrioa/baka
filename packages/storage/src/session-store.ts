@@ -167,6 +167,19 @@ export function createSessionStore(workspaceRoot: string): SessionAuthorityStore
 }
 
 class SqliteSessionStore implements SessionAuthorityStore {
+  readonly workHubTaskIndex: NonNullable<SessionAuthorityStore['workHubTaskIndex']> = {
+    query: (input) => this.metadata.workHubTaskIndex.query(input),
+    read: (kind, id) => this.metadata.workHubTaskIndex.read(kind, id),
+    put: (document, through) => this.metadata.workHubTaskIndex.put(document, through),
+    refresh: (document, revision) => this.metadata.workHubTaskIndex.refresh(document, revision),
+    markDirty: (sessionId) => this.metadata.workHubTaskIndex.markDirty(sessionId),
+    dirty: (afterKey) => this.metadata.workHubTaskIndex.dirty(afterKey),
+    containsSession: (sessionId) => this.metadata.workHubTaskIndex.containsSession(sessionId),
+    watermark: () => this.metadata.workHubTaskIndex.watermark(),
+    advance: (sequence) => this.metadata.workHubTaskIndex.advance(sequence),
+    remove: (kind, id) => this.metadata.workHubTaskIndex.remove(kind, id),
+    rebuild: () => this.metadata.workHubTaskIndex.rebuild(),
+  };
   private readonly metadata: SqliteSessionMetadataStore;
   private readonly workspaceRoot: string;
   private readonly transcriptChangeListeners = new Set<(sessionId: string) => void>();
@@ -473,6 +486,16 @@ class SqliteSessionStore implements SessionAuthorityStore {
     );
   }
 
+  async readWorkHubAssignmentByMessage(messageId: string) {
+    if (!/^whm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+    const fact = await this.readWorkHubCoordinationMessage(`wha_${messageId.slice(4)}`);
+    return fact?.type === 'workhub_coordination' &&
+      fact.kind === 'delegation_assigned' &&
+      fact.targetMessageId === messageId
+      ? fact
+      : undefined;
+  }
+
   async readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined> {
@@ -485,6 +508,13 @@ class SqliteSessionStore implements SessionAuthorityStore {
   ): Promise<SessionMessageScanPage> {
     await this.ensureReady();
     return this.metadata.readWorkHubAssignmentsPage(request);
+  }
+
+  async readWorkHubTaskFactsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubTaskFactsPage(request);
   }
 
   async readWorkHubReplacement(

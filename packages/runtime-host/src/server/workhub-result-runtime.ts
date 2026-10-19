@@ -42,6 +42,7 @@ import {
 } from './workhub-result-coordinator.js';
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
+import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
 import {
   WORKHUB_TASK_MAX_ITEMS,
   WORKHUB_TASK_TEXT_MAX_BYTES,
@@ -838,5 +839,17 @@ export function createWorkHubResultRuntime(options: {
       return { status: outcome.result.status, targetSessionId: assignment.targetSessionId };
     },
   };
-  return { coordinator, tool, notify, handlers };
+  async function projectTask(source: WorkHubDelegationAssignedMessage, detail = false) {
+    const current = await readCurrentWorkHubTaskSource(options, source.work?.id ?? source.actionId);
+    if (!current) return undefined;
+    const basic = await admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, current.targetSessionId],
+      (lease) => taskProjection(current, lease, detail),
+    );
+    if (!basic || !['running', 'waiting_for_user'].includes(basic.task.status)) return basic;
+    const lanes = await taskLanes(current);
+    if (lanes.length <= 2) return basic;
+    return admission.runMany(lanes, (lease) => taskProjection(current, lease, detail, lanes));
+  }
+  return { coordinator, tool, notify, handlers, projectTask };
 }

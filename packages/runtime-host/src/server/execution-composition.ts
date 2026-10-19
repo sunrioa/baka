@@ -20,6 +20,8 @@
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubContextObserver } from './workhub-context-observation.js';
 import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
+import { createWorkHubTaskIndexProjection } from './workhub-task-index-projection.js';
+import { createWorkHubTaskDiscoveryRuntime } from './workhub-task-discovery-runtime.js';
 import {
   workHubPendingStopBinding,
   workHubStopBindingMatches,
@@ -30,6 +32,7 @@ import {
   WorkHubFreshSourceUnavailableError,
 } from './workhub-evidence-runtime.js';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
+import { sanitizeUnicodeText } from '@maka/core/text-sanitize';
 import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
@@ -924,6 +927,7 @@ export async function createExecutionRuntimeHostComposition(
     let rootCoordinator: RootTurnCoordinator | undefined;
     let workHubCoordination: HostWorkHubCoordinationCoordinator;
     let workHubResults: ReturnType<typeof createWorkHubResultRuntime> | undefined;
+    let workHubTaskIndex: ReturnType<typeof createWorkHubTaskIndexProjection> | undefined;
     let workHubEvidence: ReturnType<typeof createWorkHubEvidenceRuntime> | undefined;
     let workHubInspection: MakaTool | undefined;
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
@@ -1033,6 +1037,7 @@ export async function createExecutionRuntimeHostComposition(
           }
         }
         hostChanges.publishSessionCatalog(sessionId, attention);
+        sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
       },
       context.sessionAccessAuthority,
       async (sessionId, execution) => {
@@ -1052,6 +1057,7 @@ export async function createExecutionRuntimeHostComposition(
     unsubscribeTranscriptChanges = stores.sessionStore.subscribeTranscriptChanges((sessionId) => {
       continuityCoordinator.enqueueCanonicalRefresh(sessionId);
       sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+      sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
       sessionAdmission.detach(() => workHubEvidence?.notify());
       if (rootRecoveryCompleted) taskGrants?.notify();
     });
@@ -1059,6 +1065,7 @@ export async function createExecutionRuntimeHostComposition(
       (sessionId) => {
         continuityCoordinator.enqueueTranscriptAdvanced(sessionId);
         sessionAdmission.detach(() => workHubResults?.notify(sessionId));
+        sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
         sessionAdmission.detach(() => workHubEvidence?.notify());
         if (rootRecoveryCompleted) taskGrants?.notify();
         sessionAdmission.detach(() => promptSuggestions?.reconcile(sessionId));
@@ -2839,6 +2846,11 @@ export async function createExecutionRuntimeHostComposition(
                     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
                     targetSessionId: input.targetSessionId,
                     targetSessionName: input.targetSessionName,
+                    taskTitle:
+                      sanitizeUnicodeText(input.taskTitle ?? input.targetSessionName, {
+                        maxCodePoints: 512,
+                        truncatedSuffix: '',
+                      }) || 'WorkHub task',
                     targetTurnId: turnId,
                     targetMessageId: messageId,
                     delegationId,
@@ -2993,6 +3005,39 @@ export async function createExecutionRuntimeHostComposition(
       onError: (error) =>
         console.error(
           `[runtime-host] WorkHub result reconciliation failed: ${boundedFailureDiagnostic(error)}`,
+        ),
+    });
+    if (stores.sessionStore.workHubTaskIndex) {
+      const results = workHubResults;
+      workHubTaskIndex = createWorkHubTaskIndexProjection({
+        stores: stores.sessionStore,
+        index: stores.sessionStore.workHubTaskIndex,
+        project: (source) => results.projectTask(source),
+        activity: async ({ task }) =>
+          task.execution
+            ? (
+                await stores.runtimeEventStore.readRunInvocation(
+                  task.targetSessionId,
+                  task.execution.runId,
+                )
+              )?.terminalEvent?.ts
+            : undefined,
+        onError: (error) =>
+          console.error(
+            `[runtime-host] WorkHub task index refresh failed: ${boundedFailureDiagnostic(error)}`,
+          ),
+      });
+    }
+    const workHubTaskDiscovery = createWorkHubTaskDiscoveryRuntime({
+      projection: workHubTaskIndex,
+      readContext: createWorkHubContextObserver({
+        sessions: stores.sessionStore,
+        runtime: stores.runtimeEventStore,
+        catalog: runtimePolicyStores.connectionCatalog,
+      }),
+      onError: (error) =>
+        console.error(
+          `[runtime-host] WorkHub discovery failed: ${boundedFailureDiagnostic(error)}`,
         ),
     });
     const workHubTaskInput = createWorkHubTaskInputRuntime({
@@ -3243,7 +3288,9 @@ export async function createExecutionRuntimeHostComposition(
           workHubCoordination.handlers,
           workHubResults.handlers,
           workHubTaskInput.handlers,
+          workHubTaskDiscovery.handlers,
         ],
+        close: [() => workHubTaskIndex?.close()],
       }),
       createRuntimeHostDomainModule({
         id: 'configuration',

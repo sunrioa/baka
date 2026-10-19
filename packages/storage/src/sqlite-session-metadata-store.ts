@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import { SqliteWorkHubTaskIndex, type WorkHubTaskIndexStore } from './sqlite-workhub-task-index.js';
 import {
   workHubPeerQuestionIdentity,
   workHubPeerInboxId,
@@ -489,6 +490,38 @@ export class SqliteSessionMetadataStore {
   private readonly databaseLease?: OperationalStateDatabaseLease;
   private readonly now: () => number;
   private closed = false;
+  readonly workHubTaskIndex: WorkHubTaskIndexStore = {
+    query: async (input) => this.readTransaction(() => this.taskIndex().query(input)),
+    read: async (kind, id) => this.readTransaction(() => this.taskIndex().read(kind, id)),
+    put: async (document, throughSequence) =>
+      this.transaction(() => {
+        const index = this.taskIndex();
+        if (document.kind === 'session' && index.containsSession(document.currentSessionId)) {
+          index.remove('session', document.id);
+          return;
+        }
+        index.upsert(document);
+        if (document.kind === 'task')
+          for (const sessionId of document.sessionIds) index.remove('session', sessionId);
+        index.markDirty(document.currentSessionId);
+        if (throughSequence !== undefined) index.advance(throughSequence);
+      }),
+    refresh: async (document, expectedDirtyRevision) =>
+      this.transaction(() => this.taskIndex().upsert(document, expectedDirtyRevision)),
+    markDirty: async (sessionId) => this.transaction(() => this.taskIndex().markDirty(sessionId)),
+    dirty: async (afterKey) => this.readTransaction(() => this.taskIndex().dirty(afterKey)),
+    containsSession: async (sessionId) =>
+      this.readTransaction(() => this.taskIndex().containsSession(sessionId)),
+    watermark: async () => this.readTransaction(() => this.taskIndex().watermark()),
+    advance: async (sequence) => this.transaction(() => this.taskIndex().advance(sequence)),
+    remove: async (kind, id) => this.transaction(() => this.taskIndex().remove(kind, id)),
+    rebuild: async () => this.transaction(() => this.taskIndex().rebuild()),
+  };
+
+  private taskIndex(): SqliteWorkHubTaskIndex {
+    this.assertOpen();
+    return new SqliteWorkHubTaskIndex(this.db);
+  }
 
   constructor(
     private readonly path: string,
@@ -3447,6 +3480,12 @@ export class SqliteSessionMetadataStore {
     return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, true);
   }
 
+  async readWorkHubTaskFactsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, 'task_facts');
+  }
+
   async hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
     this.assertOpen();
     assertSafeSessionId(turnId);
@@ -3526,7 +3565,7 @@ export class SqliteSessionMetadataStore {
   private async readMessageScanPage(
     sessionId: string,
     request: SessionMessageScanRequest,
-    filter: boolean | { readonly peerActionId: string; readonly now: number },
+    filter: boolean | 'task_facts' | { readonly peerActionId: string; readonly now: number },
   ): Promise<SessionMessageScanPage> {
     this.assertOpen();
     assertSafeSessionId(sessionId);
@@ -3551,6 +3590,7 @@ export class SqliteSessionMetadataStore {
             ON payload.session_id = message.session_id AND payload.sequence = message.sequence
           WHERE message.session_id = ? AND message.sequence ${backward ? '<' : '>'} ?
             ${filter === true ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
+            ${filter === 'task_facts' ? "AND message.message_type='workhub_coordination' AND ((message.message_id GLOB 'wha_*' AND length(message.message_id)=52) OR (message.message_id GLOB 'whti_*' AND length(message.message_id)=53))" : ''}
             ${
               peer
                 ? `AND message.message_type = 'workhub_peer_inbox' AND message.message_id GLOB 'whpi_*' AND length(message.message_id) = 53

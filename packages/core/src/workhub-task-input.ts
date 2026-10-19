@@ -43,6 +43,10 @@ export interface WorkHubTaskInputMessage extends WorkHubTaskInputSource {
   readonly inputId: string;
   readonly text: string;
   readonly targetSessionId: string;
+  /** Authenticated original coordinator input, distinct from its prepared worker instruction. */
+  readonly originalUserText?: string;
+  readonly inputOrigin?: 'user' | 'feedback';
+  readonly sourceMessageId?: string;
   readonly targetMessageId: string;
   /** The prepared target content at this commit. Later edits are not delivery proof. */
   readonly targetContentDigest: `sha256:${string}`;
@@ -69,7 +73,7 @@ const shape = defineObjectShape<WorkHubTaskInputMessage>()(
     'targetContentDigest',
     'mode',
   ],
-  ['execution'],
+  ['execution', 'originalUserText', 'inputOrigin', 'sourceMessageId'],
 );
 const entity = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
@@ -98,6 +102,18 @@ export function isWorkHubTaskInputMessage(value: unknown): value is WorkHubTaskI
     new TextEncoder().encode(value.text).length > WORKHUB_TASK_INPUT_TEXT_MAX_BYTES ||
     typeof value.targetContentDigest !== 'string' ||
     !/^sha256:[a-f0-9]{64}$/u.test(value.targetContentDigest)
+  )
+    return false;
+  if (
+    (value.originalUserText !== undefined &&
+      (typeof value.originalUserText !== 'string' ||
+        !value.originalUserText.trim() ||
+        new TextEncoder().encode(value.originalUserText).length >
+          WORKHUB_TASK_INPUT_TEXT_MAX_BYTES)) ||
+    (value.inputOrigin !== undefined &&
+      value.inputOrigin !== 'user' &&
+      value.inputOrigin !== 'feedback') ||
+    (value.sourceMessageId !== undefined && !entity(value.sourceMessageId))
   )
     return false;
   if (value.mode === 'steering')
