@@ -163,6 +163,14 @@ export type {
 } from './session-store-contract.js';
 
 export type ExecutionSessionWriter = SessionAuthorityStore;
+export type {
+  WorkHubTaskIndexDocument,
+  WorkHubTaskIndexEntry,
+  WorkHubTaskIndexQuery,
+  WorkHubTaskIndexPage,
+  WorkHubTaskIndexStore,
+} from './session-store-contract.js';
+export { WorkHubTaskIndexCursorError } from './sqlite-workhub-task-index.js';
 export type { RuntimeTranscriptRun, RuntimeTranscriptTurn } from './runtime-transcript-query.js';
 export type ExecutionAgentRunWriter = DurableAgentRunStore;
 export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
@@ -542,6 +550,22 @@ async function createExecutionStoresForWrite(
     close: () => {},
   });
 
+  const taskIndex = sessionStore.workHubTaskIndex;
+  const guardedTaskIndex: SessionAuthorityStore['workHubTaskIndex'] =
+    taskIndex &&
+    Object.freeze<NonNullable<SessionAuthorityStore['workHubTaskIndex']>>({
+      query: (input) => run(() => taskIndex.query(input)),
+      read: (kind, id) => run(() => taskIndex.read(kind, id)),
+      put: (document, through) => run(() => taskIndex.put(document, through)),
+      refresh: (document, revision) => run(() => taskIndex.refresh(document, revision)),
+      markDirty: (sessionId) => run(() => taskIndex.markDirty(sessionId)),
+      dirty: (afterKey) => run(() => taskIndex.dirty(afterKey)),
+      containsSession: (sessionId) => run(() => taskIndex.containsSession(sessionId)),
+      watermark: () => run(() => taskIndex.watermark()),
+      advance: (sequence) => run(() => taskIndex.advance(sequence)),
+      remove: (kind, id) => run(() => taskIndex.remove(kind, id)),
+      rebuild: () => run(() => taskIndex.rebuild()),
+    });
   const stores: InteractiveExecutionStoresWriter = {
     interactionStore,
     graphControlStore,
@@ -551,6 +575,9 @@ async function createExecutionStoresForWrite(
     purgeConversationOperationalState: (sessionId) =>
       run(() => conversationOperationalStateStore.purge(sessionId)),
     sessionStore: {
+      ...(guardedTaskIndex ? { workHubTaskIndex: guardedTaskIndex } : {}),
+      readWorkHubTaskFactsPage: (request) =>
+        run(() => sessionStore.readWorkHubTaskFactsPage(request)),
       ready: () => run(() => sessionStore.ready()),
       create: (input, initialBoundary) => run(() => sessionStore.create(input, initialBoundary)),
       createImportedSession: (input, messages, externalOrigin, options) =>
@@ -569,6 +596,8 @@ async function createExecutionStoresForWrite(
         run(() => sessionStore.createStableSession(request, initialBoundary)),
       assignWorkHubMessage: (request) => run(() => sessionStore.assignWorkHubMessage(request)),
       readWorkHubAssignment: (actionId) => run(() => sessionStore.readWorkHubAssignment(actionId)),
+      readWorkHubAssignmentByMessage: (messageId) =>
+        run(() => sessionStore.readWorkHubAssignmentByMessage(messageId)),
       commitWorkHubTaskInput: (request) => run(() => sessionStore.commitWorkHubTaskInput(request)),
       commitWorkHubPeerQuestion: (question) =>
         run(() => sessionStore.commitWorkHubPeerQuestion(question)),

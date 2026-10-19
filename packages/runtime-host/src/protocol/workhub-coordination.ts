@@ -974,7 +974,7 @@ function decodeWorkHubCoordinationCreateContext(value: unknown): WorkHubCoordina
   };
 }
 
-function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservation {
+export function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservation {
   const context = requireShapedRecord(
     value,
     'WorkHub context observation',

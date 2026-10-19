@@ -73,6 +73,8 @@ export type ImportSessionBundleFailure =
 export type ImportSessionBundleResult =
   | {
       ok: true;
+      /** The identity checked by the bundle codec, not the first sorted imported id. */
+      rootSessionId: string;
       sessionIds: string[];
       artifactFiles: number;
       contextRefs: number;
@@ -97,10 +99,11 @@ export async function importSessionBundle(
     // Session id, and the bundle is the only thing that knows which one.
     const inspection = await service.inspect({ source: { path: input.source }, limits });
     const manifest = readExportManifest(inspection.stateIdentity.bytes);
+    const rootSessionId = manifest?.rootSessionId ?? inspection.manifest.envelope.sessionId;
     const hydration = await service.hydrate({
       source: { path: input.source },
       limits,
-      expectedSessionId: manifest?.rootSessionId ?? inspection.manifest.envelope.sessionId,
+      expectedSessionId: rootSessionId,
       destinationRoot: join(staging, 'hydrated'),
     });
 
@@ -109,7 +112,7 @@ export async function importSessionBundle(
       bundleStateRoot: hydration.stateRoot,
       ...(input.lease ? { lease: input.lease } : {}),
     });
-    return { ok: true, ...merged, manifest };
+    return { ok: true, ...merged, manifest, rootSessionId };
   } catch (error) {
     if (error instanceof SessionBundleImportError) {
       switch (error.code) {

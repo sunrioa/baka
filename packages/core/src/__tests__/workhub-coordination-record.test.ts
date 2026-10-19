@@ -48,6 +48,17 @@ describe('WorkHub Coordination stored records', () => {
       mode: 'queued_supplement',
     } as const;
     assert.deepEqual(decodeCanonicalMessage(input), input);
+    const prepared = {
+      ...input,
+      originalUserText: '只补刚才的边界，不改接口',
+      inputOrigin: 'user',
+      sourceMessageId: 'real-user-message',
+    };
+    assert.deepEqual(decodeCanonicalMessage(prepared), prepared);
+    assert.deepEqual(decodeCanonicalMessage({ ...prepared, inputOrigin: 'feedback' }), {
+      ...prepared,
+      inputOrigin: 'feedback',
+    });
     const steering = {
       ...input,
       mode: 'steering',
@@ -61,6 +72,10 @@ describe('WorkHub Coordination stored records', () => {
       { ...input, workId: '../foreign' },
       { ...input, targetContentDigest: 'not-a-digest' },
       { ...input, delivered: true },
+      { ...prepared, originalUserText: ' ' },
+      { ...prepared, originalUserText: '中'.repeat(17_000) },
+      { ...prepared, inputOrigin: 'model_claimed_user' },
+      { ...prepared, sourceMessageId: '../outside' },
       { ...input, execution: steering.execution },
       { ...steering, execution: undefined },
       { ...steering, execution: { ...steering.execution, permissionMode: 'bypass' } },
@@ -90,6 +105,15 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
+    assert.deepEqual(decodeCanonicalMessage({ ...assigned, taskTitle: 'Initial objective' }), {
+      ...assigned,
+      taskTitle: 'Initial objective',
+    });
+    for (const taskTitle of ['', ' ', null, ['title'], 'bad\nname', 'x'.repeat(513)])
+      assert.throws(
+        () => decodeCanonicalMessage({ ...assigned, taskTitle }),
+        /Invalid stored message schema/u,
+      );
     const settings = snapshotWorkHubTaskSettings(
       {
         id: 'payments',

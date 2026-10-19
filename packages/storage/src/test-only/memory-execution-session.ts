@@ -743,6 +743,42 @@ export function createMemorySessionStore(
         }
         return { records, highWaterSequence: all.length ? all.length - 1 : null };
       }),
+    readWorkHubTaskFactsPage: async (request) =>
+      read((s) => {
+        requireHeader(s, HUB);
+        const all = messages(s).get(HUB)!;
+        let selected = all
+          .map((message, sequence) => ({ message, sequence }))
+          .filter(
+            (r) =>
+              r.message.type === 'workhub_coordination' &&
+              (r.message.kind === 'delegation_assigned' || r.message.kind === 'task_input') &&
+              r.sequence > (request.afterSequence ?? -1) &&
+              r.sequence < (request.beforeSequence ?? Infinity),
+          );
+        if (request.beforeSequence !== undefined) selected.reverse();
+        let bytes = 0;
+        const records = [];
+        for (const record of selected.slice(0, request.maxMessages)) {
+          const size = Buffer.byteLength(JSON.stringify(record.message));
+          if (records.length && bytes + size > request.maxStoredBytes) break;
+          records.push(record);
+          bytes += size;
+        }
+        return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
+    readWorkHubAssignmentByMessage: async (messageId) =>
+      read((s) => {
+        if (!/^whm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+        const fact = messages(s)
+          .get(HUB)
+          ?.find((m) => m.id === `wha_${messageId.slice(4)}`);
+        return fact?.type === 'workhub_coordination' &&
+          fact.kind === 'delegation_assigned' &&
+          fact.targetMessageId === messageId
+          ? fact
+          : undefined;
+      }),
     readWorkHubAssignmentsPage: async (request) =>
       read((s) => {
         requireHeader(s, HUB);

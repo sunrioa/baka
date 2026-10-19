@@ -214,6 +214,74 @@ export interface WorkHubTaskInputCommitRequest {
   readonly expectedAdmission?: PendingMessageAdmission;
 }
 
+/** Rebuildable lookup data only. None of these fields authorizes an operation. */
+export interface WorkHubTaskIndexDocument {
+  readonly kind: 'task' | 'session';
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly state:
+    | 'queued'
+    | 'running'
+    | 'waiting_for_user'
+    | 'ended'
+    | 'failed'
+    | 'stopped'
+    | 'unavailable';
+  readonly activityAt: number;
+  readonly cwd: string;
+  readonly available: boolean;
+  readonly currentSessionId: string;
+  readonly sourceActionId: string | null;
+  readonly originActionId: string | null;
+  readonly sessionIds: readonly string[];
+  /** Full searchable source text; never replaced by a display excerpt. */
+  readonly requests: string;
+  readonly brief: string;
+  readonly sessionNames: string;
+}
+
+export type WorkHubTaskIndexHit = Omit<
+  WorkHubTaskIndexDocument,
+  'sessionIds' | 'requests' | 'brief' | 'sessionNames'
+> & { readonly segmentCount: number };
+
+export interface WorkHubTaskIndexQuery {
+  readonly query?: string;
+  readonly cwd?: string;
+  readonly cursor?: string;
+}
+
+export interface WorkHubTaskIndexPage {
+  readonly items: readonly WorkHubTaskIndexHit[];
+  readonly match: 'all' | 'any' | 'recent' | 'unmatched';
+  readonly nextCursor: string | null;
+}
+
+export type WorkHubTaskIndexEntry = WorkHubTaskIndexDocument & {
+  readonly dirtyRevision: number;
+};
+
+/** Narrow projection operations; the owning Session store supplies its writer lease. */
+export interface WorkHubTaskIndexStore {
+  query(input: WorkHubTaskIndexQuery): Promise<WorkHubTaskIndexPage>;
+  read(
+    kind: WorkHubTaskIndexDocument['kind'],
+    id: string,
+  ): Promise<WorkHubTaskIndexEntry | undefined>;
+  put(document: WorkHubTaskIndexDocument, throughSequence?: number): Promise<void>;
+  refresh(document: WorkHubTaskIndexDocument, expectedDirtyRevision: number): Promise<boolean>;
+  markDirty(sessionId?: string): Promise<void>;
+  dirty(
+    afterKey?: string,
+  ): Promise<readonly Pick<WorkHubTaskIndexEntry, 'kind' | 'id' | 'dirtyRevision'>[]>;
+  containsSession(sessionId: string): Promise<boolean>;
+  watermark(): Promise<number>;
+  advance(throughSequence: number): Promise<void>;
+  remove(kind: WorkHubTaskIndexDocument['kind'], id: string): Promise<void>;
+  rebuild(): Promise<void>;
+}
+
 export interface WorkHubMessageAssignmentResult {
   readonly kind: 'assigned' | 'existing';
   readonly targetCreated: boolean;
@@ -412,6 +480,10 @@ export interface CoordinationTranscriptIndexState {
 }
 
 export interface SessionAuthorityStore extends SessionStore, MessageAdmissionStore {
+  /** Rebuildable task lookup, never a substitute for canonical assignment ownership. */
+  readonly workHubTaskIndex?: WorkHubTaskIndexStore;
+  /** Canonical assignment, input and retirement facts for the rebuildable task projection. */
+  readWorkHubTaskFactsPage(request: SessionMessageScanRequest): Promise<SessionMessageScanPage>;
   readCoordinationTranscriptIndexState(): Promise<CoordinationTranscriptIndexState>;
   appendCoordinationTranscriptIndex(
     records: readonly CoordinationTranscriptReference[],
@@ -511,6 +583,9 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     request: WorkHubMessageAssignmentRequest,
   ): Promise<WorkHubMessageAssignmentResult>;
   readWorkHubAssignment(actionId: string): Promise<WorkHubDelegationAssignedMessage | undefined>;
+  readWorkHubAssignmentByMessage(
+    messageId: string,
+  ): Promise<WorkHubDelegationAssignedMessage | undefined>;
   commitWorkHubTaskInput(request: WorkHubTaskInputCommitRequest): Promise<WorkHubTaskInputMessage>;
   /** Atomic question in A plus a small inbox reference in B; no execution admission. */
   commitWorkHubPeerQuestion(

@@ -1383,6 +1383,312 @@ test('composition drain preserves usage admission until active Runtime work sett
   });
 });
 
+test('WorkHub find reads configured connection pricing through the production composition', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    try {
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const session = await stores.sessionStore.create({
+        cwd: root,
+        name: 'Pricing discovery target',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const usage = await openInteractiveUsageStoresForWrite(owner.lease);
+      const snapshot = await usage.pricing.snapshot();
+      await usage.pricing.upsert(snapshot.revision, {
+        modelKey: 'fake:fake-model',
+        inputUsdPer1M: 2,
+        outputUsdPer1M: 3,
+        cacheReadUsdPer1M: 0.2,
+      });
+      const result = await composition.handlers['workhub.tasks.find'](
+        { query: session.name },
+        {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'pricing-discovery',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        },
+      );
+      assert.ok(result.ok, JSON.stringify(result));
+      const hit = result.result.items.find((item) => item.id === session.id);
+      assert.ok(hit);
+      assert.equal(hit.context?.estimates?.costs.pricingSource, 'configured_connection_override');
+      assert.equal(
+        hit.context?.estimates?.costs.reuseInputBaseline.status,
+        'unknown',
+        'price is known but no measured model request exists',
+      );
+      assert.equal(hit.context?.estimates?.costs.reuseInputBaseline.uncachedUsd, null);
+      assert.equal(
+        (await stores.sessionStore.readHeaderSnapshot(session.id)).permissionMode,
+        'ask',
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+for (const withChild of [false, true]) {
+  test(
+    withChild
+      ? 'WorkHub find discovers an imported root when its child sorts first'
+      : 'WorkHub find discovers a manual Session imported after its first lookup',
+    async () => {
+      await withCompositionRoot(async ({ root: sourceRoot, owner: sourceOwner }) => {
+        const sourceConnectionId = await configureFakeDefaultTarget(sourceOwner);
+        const source = await createExecutionRuntimeHostComposition(compositionContext(sourceOwner));
+        const context: ConnectionContext = {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'import-discovery',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        };
+        try {
+          const sourceStores = await openInteractiveExecutionStoresForWrite(sourceOwner.lease);
+          const created = await sourceStores.sessionStore.createStableSession({
+            sessionId: 'zz-manual-discovery',
+            requestFingerprint: `sha256:${'d'.repeat(64)}`,
+            input: {
+              cwd: sourceRoot,
+              name: 'Imported manual discovery',
+              model: 'fake-model',
+              llmConnectionId: sourceConnectionId,
+              llmConnectionSlug: 'fake',
+              permissionMode: 'ask',
+            },
+          });
+          assert.equal(created.kind, 'created');
+          const manual = created.record.header;
+          if (withChild) {
+            const child = await sourceStores.sessionStore.createStableSession({
+              sessionId: 'aa-imported-child',
+              requestFingerprint: `sha256:${'e'.repeat(64)}`,
+              input: {
+                cwd: sourceRoot,
+                name: 'Imported child',
+                model: 'fake-model',
+                llmConnectionId: sourceConnectionId,
+                llmConnectionSlug: 'fake',
+                permissionMode: 'ask',
+                subagentParent: {
+                  kind: 'subagent',
+                  parentSessionId: manual.id,
+                  spawnedBy: {
+                    parentRunId: 'parent-run',
+                    parentTurnId: 'parent-turn',
+                    toolCallId: 'spawn',
+                  },
+                  lifecycle: 'foreground',
+                },
+              },
+            });
+            assert.equal(child.kind, 'created');
+            assert.ok(
+              'aa-imported-child' < manual.id,
+              'regression requires the child to sort before the root',
+            );
+          }
+          const bundle = join(sourceRoot, 'manual-discovery.maka-session');
+          const exported = await source.handlers['session-bundle.export'](
+            { sessionId: manual.id, destination: bundle },
+            context,
+          );
+          assert.ok(exported.ok, JSON.stringify(exported));
+          await withCompositionRoot(async ({ owner }) => {
+            await configureFakeDefaultTarget(owner);
+            const target = await createExecutionRuntimeHostComposition(compositionContext(owner));
+            try {
+              const before = await target.handlers['workhub.tasks.find']({}, context);
+              assert.ok(before.ok);
+              assert.deepEqual(before.result.items, []);
+              const imported = await target.handlers['session-bundle.import'](
+                { source: bundle },
+                context,
+              );
+              assert.ok(imported.ok, JSON.stringify(imported));
+              assert.equal(imported.result.sessionCount, withChild ? 2 : 1);
+              const after = await target.handlers['workhub.tasks.find'](
+                { query: manual.name },
+                context,
+              );
+              assert.ok(after.ok, JSON.stringify(after));
+              assert.equal(
+                after.result.items.find((item) => item.kind === 'session' && item.id === manual.id)
+                  ?.available,
+                true,
+              );
+              assert.equal(
+                after.result.items.some((item) => item.id === 'aa-imported-child'),
+                false,
+              );
+              const all = await target.handlers['workhub.tasks.find']({}, context);
+              assert.ok(all.ok);
+              assert.deepEqual(
+                all.result.items.map((item) => item.id),
+                [manual.id],
+                'the root is discovered and its subagent remains ineligible',
+              );
+            } finally {
+              await target.close();
+            }
+          });
+        } finally {
+          await source.close();
+        }
+      });
+    },
+  );
+}
+
+test('WorkHub find removes a directly deleted manual Session without requiring restart', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'remove-discovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const manual = await stores.sessionStore.create({
+        cwd: root,
+        name: 'Deleted manual discovery',
+        model: 'fake-model',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        permissionMode: 'ask',
+      });
+      const before = await composition.handlers['workhub.tasks.find'](
+        { query: manual.name },
+        context,
+      );
+      assert.ok(before.ok);
+      assert.equal(before.result.items[0]?.id, manual.id);
+      const current = await stores.sessionStore.readCatalogRecord(manual.id);
+      const removed = await composition.handlers['session.remove'](
+        { sessionId: manual.id, expectedRevision: current.revision },
+        context,
+      );
+      assert.ok(removed.ok, JSON.stringify(removed));
+      const after = await composition.handlers['workhub.tasks.find'](
+        { query: manual.name },
+        context,
+      );
+      assert.ok(after.ok);
+      assert.deepEqual(after.result.items, []);
+      assert.equal(
+        await stores.sessionStore.workHubTaskIndex!.read('session', manual.id),
+        undefined,
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
+test('WorkHub find refreshes an already-terminal stop recorded only in the coordination ledger', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const { composition, manager } = await createCapturedExecutionComposition(owner);
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'retirement-discovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const target = await manager.createSession({
+        cwd: root,
+        name: 'Terminal discovery target',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const resolved = await composition.handlers['workhub.coordination.resolve']({}, context);
+      assert.ok(resolved.ok, JSON.stringify(resolved));
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        target.id,
+        'discovery-terminal-task',
+        'Return the completed task output.',
+      );
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const source = await stores.sessionStore.readWorkHubAssignment('discovery-terminal-task');
+      assert.ok(source);
+      await waitFor(async () => {
+        const result = await composition.handlers['workhub.tasks.read'](
+          { actionId: source.actionId, delegationId: source.delegationId },
+          context,
+        );
+        return result.ok && result.result.task.status === 'pending_acceptance';
+      });
+      await waitFor(async () => manager.runningTurnIds(target.id).length === 0);
+      const first = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(first.ok, JSON.stringify(first));
+      assert.equal(first.result.items.find((item) => item.id === source.actionId)?.state, 'ended');
+      // Flush the initial terminal/catalog notifications before exercising a
+      // later ledger-only change; a previously dirty task would mask the bug.
+      const warmed = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(warmed.ok, JSON.stringify(warmed));
+      assert.equal(warmed.result.items.find((item) => item.id === source.actionId)?.state, 'ended');
+      assert.equal(
+        (await stores.sessionStore.workHubTaskIndex!.read('task', source.actionId))?.dirtyRevision,
+        0,
+        'the task is cleanly cached before the ledger-only stop',
+      );
+      const before = await stores.runtimeEventStore.listSessionInvocations(target.id);
+      const stopped = await actWorkHub(
+        composition,
+        {
+          actionId: 'discovery-stop-terminal',
+          userText: 'Stop that completed task.',
+          proposal: { operation: 'stop', expects: { targetSessionId: target.id } },
+        },
+        context,
+      );
+      assert.ok(stopped.ok, JSON.stringify(stopped));
+      assert.equal(stopped.result.disposition, 'stop_work');
+      if (stopped.result.disposition !== 'stop_work') throw new Error('Expected task stop');
+      assert.equal(stopped.result.outcome, 'already_terminal');
+      assert.equal(
+        (await stores.sessionStore.workHubTaskIndex!.read('task', source.actionId))?.dirtyRevision,
+        0,
+        'no target notification invalidates the cached task',
+      );
+      assert.deepEqual(
+        await stores.runtimeEventStore.listSessionInvocations(target.id),
+        before,
+        'stopping the ended task creates no target Run or runtime event',
+      );
+      const after = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(after.ok, JSON.stringify(after));
+      assert.equal(
+        after.result.items.find((item) => item.id === source.actionId)?.state,
+        'stopped',
+      );
+      const detail = await composition.handlers['workhub.tasks.read'](
+        { actionId: source.actionId, delegationId: source.delegationId },
+        context,
+      );
+      assert.ok(detail.ok, JSON.stringify(detail));
+      assert.equal(detail.result.task.status, 'stopped');
+      assert.equal((await stores.sessionStore.readHeaderSnapshot(target.id)).permissionMode, 'ask');
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('hosted execution settles while its tracked environment resource remains verifiable', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
@@ -7548,7 +7854,7 @@ test('native input lineage accepts its own execution history cursor across the 1
   });
 });
 
-test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
+test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async (t) => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
@@ -7556,6 +7862,22 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
     const notificationStarted = deferred<void>();
     const finishNotifications = deferred<void>();
     const notifications: string[] = [];
+    const deliveries: Array<{ at: number; actionId: string; result: string }> = [];
+    let resultRoot: RootTurnCoordinator | undefined;
+    const deliver = RootTurnCoordinator.prototype.startWorkHubResult;
+    t.mock.method(
+      RootTurnCoordinator.prototype,
+      'startWorkHubResult',
+      async function (
+        this: RootTurnCoordinator,
+        ...args: Parameters<RootTurnCoordinator['startWorkHubResult']>
+      ) {
+        resultRoot = this;
+        const result = await deliver.apply(this, args);
+        deliveries.push({ at: Date.now(), actionId: args[0].actionId, result });
+        return result;
+      },
+    );
     const sends: Array<{ sessionId: string; text: string }> = [];
     let { composition, manager } = await createCapturedExecutionComposition(owner, {
       coordinationBackendFactory: (context) =>
@@ -7715,12 +8037,22 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       assert.equal(busy.error.code, 'session_busy');
       assert.equal((await query()).tasks.length, 2, 'busy coordination never appends a new task');
       finishNotifications.resolve();
-      await waitFor(async () => {
-        return (
-          notifications.length === 2 &&
-          manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID).length === 0
-        );
-      });
+      try {
+        await waitFor(async () => {
+          return (
+            notifications.length === 2 &&
+            manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID).length === 0
+          );
+        });
+      } catch (error) {
+        console.error('WorkHub result wait diagnostic', {
+          notifications,
+          runningTurns: manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID),
+          root: resultRoot?.readRootState(WORKHUB_COORDINATION_SESSION_ID),
+          deliveries: deliveries.slice(-24),
+        });
+        throw error;
+      }
       const afterEnd = await composition.handlers['workhub.coordination.continue'](
         afterEndInput,
         context,
