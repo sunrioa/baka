@@ -88,14 +88,42 @@ export function createWorkHubResultRuntime(options: {
       await stores.sessionStore.listPendingSandboxBoundaryRequests(sessionId),
     ).pending;
   }
-  async function isActive(assignment: WorkHubDelegationAssignedMessage): Promise<boolean> {
+  async function visible(
+    assignment: WorkHubDelegationAssignedMessage,
+    includeStopped: boolean,
+    observedLatest?: WorkHubDelegationAssignedMessage,
+  ) {
+    if (!observedLatest)
+      return (
+        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+          [assignment.targetSessionId],
+          undefined,
+          includeStopped,
+        )
+      ).some(
+        (a) => a.actionId === assignment.actionId && a.delegationId === assignment.delegationId,
+      );
+    // Read-only discovery already located the canonical latest fact at its
+    // watermark. Do not re-scan every task's target ledger to rediscover its
+    // generation. Effect paths never pass this advisory observation.
+    return (
+      (observedLatest.work?.id ?? observedLatest.actionId) ===
+        (assignment.work?.id ?? assignment.actionId) &&
+      (observedLatest.work?.generationId ?? observedLatest.actionId) ===
+        (assignment.work?.generationId ?? assignment.actionId) &&
+      observedLatest.targetSessionId === assignment.targetSessionId &&
+      !(await stores.sessionStore.readWorkHubSupersession(assignment.delegationId)) &&
+      !(await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId))
+    );
+  }
+  async function isActive(
+    assignment: WorkHubDelegationAssignedMessage,
+    observedLatest?: WorkHubDelegationAssignedMessage,
+  ): Promise<boolean> {
     try {
       const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
       if (header.isArchived) return false;
-      const active = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([
-        assignment.targetSessionId,
-      ]);
-      if (!active.some((a) => a.delegationId === assignment.delegationId && a.returnResults))
+      if (!assignment.returnResults || !(await visible(assignment, false, observedLatest)))
         return false;
       // Retirement intent takes precedence even before its final receipt exists.
       if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
@@ -225,8 +253,9 @@ export function createWorkHubResultRuntime(options: {
     assignment: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
     lanes: readonly string[] = [],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ) {
-    if (!(await isActive(assignment))) return [];
+    if (!(await isActive(assignment, observedLatest))) return [];
     const disposition = await messages.readMessageExecutionDispositionAdmitted(
       assignment.targetSessionId,
       assignment.targetMessageId,
@@ -284,9 +313,10 @@ export function createWorkHubResultRuntime(options: {
     lease: SessionAdmissionLease,
     detail = false,
     lanes: readonly string[] = [],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ): Promise<WorkHubTaskDetail | undefined> {
     try {
-      return await taskProjectionLocked(assignment, lease, detail, lanes);
+      return await taskProjectionLocked(assignment, lease, detail, lanes, observedLatest);
     } catch (error) {
       if (isSessionNotFoundError(error)) return undefined;
       throw error;
@@ -297,6 +327,7 @@ export function createWorkHubResultRuntime(options: {
     lease: SessionAdmissionLease,
     detail: boolean,
     lanes: readonly string[],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ): Promise<WorkHubTaskDetail | undefined> {
     const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
     if (
@@ -307,17 +338,7 @@ export function createWorkHubResultRuntime(options: {
       header.id === WORKHUB_COORDINATION_SESSION_ID
     )
       return undefined;
-    const visible = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
-      [assignment.targetSessionId],
-      undefined,
-      true,
-    );
-    if (
-      !visible.some(
-        (a) => a.actionId === assignment.actionId && a.delegationId === assignment.delegationId,
-      )
-    )
-      return undefined;
+    if (!(await visible(assignment, true, observedLatest))) return undefined;
     if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return undefined;
     const task: WorkHubTask = {
       workId: assignment.work?.id ?? assignment.actionId,
@@ -392,7 +413,7 @@ export function createWorkHubResultRuntime(options: {
     const waitReason = executions.readWorkHubDispatchWait(identity);
     if (waitReason) return { task: { ...task, execution, status: 'waiting_resource', waitReason } };
     const snapshot = await executions.read(identity);
-    const requests = await taskRequests(assignment, lease, lanes);
+    const requests = await taskRequests(assignment, lease, lanes, observedLatest);
     const status: WorkHubTask['status'] =
       snapshot.status === 'completed'
         ? 'pending_acceptance'
@@ -848,12 +869,14 @@ export function createWorkHubResultRuntime(options: {
     if (!current) return undefined;
     const basic = await admission.runMany(
       [WORKHUB_COORDINATION_SESSION_ID, current.targetSessionId],
-      (lease) => taskProjection(current, lease, detail),
+      (lease) => taskProjection(current, lease, detail, [], source),
     );
     if (!basic || !['running', 'waiting_for_user'].includes(basic.task.status)) return basic;
     const lanes = await taskLanes(current);
     if (lanes.length <= 2) return basic;
-    return admission.runMany(lanes, (lease) => taskProjection(current, lease, detail, lanes));
+    return admission.runMany(lanes, (lease) =>
+      taskProjection(current, lease, detail, lanes, source),
+    );
   }
   return { coordinator, tool, notify, handlers, projectTask };
 }

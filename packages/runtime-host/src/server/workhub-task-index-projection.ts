@@ -327,7 +327,26 @@ export function createWorkHubTaskIndexProjection(options: {
       // must not reinsert a Session after a newer archive/delete notification.
       const task = serialized(async () => {
         try {
-          await index.markDirty(sessionId);
+          let affected = sessionId;
+          const seen = new Set<string>();
+          for (;;) {
+            if (seen.has(affected)) {
+              await index.markDirty();
+              break;
+            }
+            seen.add(affected);
+            await index.markDirty(affected);
+            const current = await header(affected);
+            if (!current) {
+              // A deleted child no longer exposes its immutable parent link.
+              // Conservatively invalidate on this rare lifecycle event rather
+              // than retaining the parent's now-settled interaction status.
+              await index.markDirty();
+              break;
+            }
+            if (!current.subagentParent) break;
+            affected = current.subagentParent.parentSessionId;
+          }
           await manual(sessionId);
         } catch (error) {
           options.onError(error);

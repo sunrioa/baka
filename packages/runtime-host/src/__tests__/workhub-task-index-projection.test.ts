@@ -33,6 +33,9 @@ import {
 import { createSessionStore, type SessionAuthorityStore } from '@maka/storage/session-store';
 import { createWorkHubTaskIndexProjection } from '../server/workhub-task-index-projection.js';
 import { createWorkHubTaskDiscoveryRuntime } from '../server/workhub-task-discovery-runtime.js';
+import { createWorkHubResultRuntime } from '../server/workhub-result-runtime.js';
+import { createWorkHubEvidenceRuntime } from '../server/workhub-evidence-runtime.js';
+import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import type { WorkHubTaskDetail, WorkHubTaskStatus } from '../protocol/workhub-tasks.js';
 import { HOST_OPERATION_SPECS } from '../protocol/index.js';
 
@@ -303,6 +306,202 @@ test('unused task discovery does not maintain an index for ordinary Session even
       manual.id,
       'first lookup backfills the latest catalog',
     );
+  } finally {
+    await runtime.close();
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('child and nested-child notifications refresh the parent task when entering and leaving user waiting', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-index-child-'));
+  const store = createSessionStore(root);
+  const states = new Map<string, WorkHubTaskStatus>([['parent-work', 'running']]);
+  const runtime = projection(store, states);
+  try {
+    await coordination(store, root);
+    const parent = await store.create({
+      cwd: root,
+      name: 'Parent work',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    const request = assigned('parent-work', parent.id);
+    request.assignment.targetSessionName = parent.name;
+    await store.assignWorkHubMessage(request);
+    const child = await store.create({
+      cwd: root,
+      name: 'Child work',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: parent.id,
+        spawnedBy: {
+          parentRunId: 'parent-run',
+          parentTurnId: 'parent-turn',
+          toolCallId: 'spawn-child',
+        },
+        lifecycle: 'foreground',
+      },
+    });
+    const nested = await store.create({
+      cwd: root,
+      name: 'Nested child',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: child.id,
+        spawnedBy: {
+          parentRunId: 'child-run',
+          parentTurnId: 'child-turn',
+          toolCallId: 'spawn-nested',
+        },
+        lifecycle: 'foreground',
+      },
+    });
+    const status = async () => {
+      const page = await runtime.query({});
+      assert.deepEqual(
+        page.items.map((item) => item.id),
+        ['parent-work'],
+      );
+      return page.items[0]!.state;
+    };
+    assert.equal(await status(), 'running');
+    for (const session of [child, nested]) {
+      states.set('parent-work', 'waiting_for_user');
+      await runtime.notify(session.id);
+      assert.equal(await status(), 'waiting_for_user');
+      states.set('parent-work', 'running');
+      await runtime.notify(session.id);
+      assert.equal(await status(), 'running');
+    }
+    states.set('parent-work', 'waiting_for_user');
+    await runtime.notify(nested.id);
+    assert.equal(await status(), 'waiting_for_user');
+    await store.remove(nested.id);
+    states.set('parent-work', 'running');
+    await runtime.notify(nested.id);
+    assert.equal(await status(), 'running', 'deletion cannot leave a stale parent wait');
+  } finally {
+    await runtime.close();
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('index refresh uses the production result and evidence projections without rescanning target assignment ledgers', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-index-ledger-scan-'));
+  const store = createSessionStore(root);
+  type ResultOptions = Parameters<typeof createWorkHubResultRuntime>[0];
+  let targetScans = 0;
+  let deliveryReads = 0;
+  const observedStore = new Proxy(store, {
+    get(target, property) {
+      if (property === 'readActiveWorkHubAssignmentsByTarget')
+        return (
+          ...args: Parameters<SessionAuthorityStore['readActiveWorkHubAssignmentsByTarget']>
+        ) => {
+          targetScans++;
+          return target.readActiveWorkHubAssignmentsByTarget(...args);
+        };
+      const value = Reflect.get(target, property);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const stores = { sessionStore: observedStore } as ResultOptions['stores'];
+  const executions = {
+    readRootState: () => ({ kind: 'idle' }),
+    readLatestRootTurnLineage: async (ref: unknown) => ref,
+    readWorkHubDispatchWait: () => undefined,
+    read: async () => ({ status: 'completed', terminalEventId: 'terminal' }),
+  } as unknown as ResultOptions['executions'];
+  const messages = {
+    readMessageExecutionDispositionAdmitted: async () => ({
+      kind: 'owned_root',
+      turnId: 'task-turn',
+      runId: 'task-run',
+    }),
+  } as unknown as ResultOptions['messages'];
+  const admission = new SessionAdmissionGate();
+  const onError = (error: unknown) => {
+    throw error;
+  };
+  const evidence = createWorkHubEvidenceRuntime({
+    stores,
+    executions,
+    messages,
+    admission,
+    reader: {} as never,
+    hasLiveResources: async () => false,
+    hasBlockingGoal: () => false,
+    acquireResidency: () => ({ release() {} }),
+    onError,
+  });
+  const results = createWorkHubResultRuntime({
+    stores,
+    executions,
+    messages,
+    evidence,
+    admission,
+    interactions: {} as never,
+    readTurnResult: async () => {
+      deliveryReads++;
+      return '';
+    },
+    readTurnInput: async () => {
+      throw new Error('discovery must not read transcript inputs');
+    },
+    acquireResidency: () => ({ release() {} }),
+    onError,
+  });
+  const runtime = createWorkHubTaskIndexProjection({
+    stores: observedStore,
+    index: store.workHubTaskIndex!,
+    project: (source) => results.projectTask(source),
+    activity: async () => undefined,
+    onError,
+  });
+  try {
+    await coordination(store, root);
+    for (let n = 0; n < 35; n++) {
+      const h = await store.create({
+        cwd: root,
+        name: `Work ${n}`,
+        model: 'model',
+        llmConnectionSlug: 'test',
+        permissionMode: 'ask',
+      });
+      const request = assigned(`work-${n}`, h.id);
+      request.assignment.targetSessionName = h.name;
+      request.assignment.returnResults = true;
+      await store.assignWorkHubMessage(request);
+    }
+    const all = [];
+    let cursor: string | undefined;
+    do {
+      const page = await runtime.query({ cursor });
+      all.push(...page.items);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    assert.equal(all.length, 35);
+    assert.ok(all.every((item) => item.state === 'ended'));
+    assert.equal(deliveryReads, 0, 'discovery does not read deliveries');
+    assert.equal(targetScans, 0, 'the full projection chain must not re-scan task ledgers');
+    await runtime.rebuild();
+    assert.equal(targetScans, 0, 'rebuild reuses the canonical watermark scan too');
+    const source = await store.readWorkHubAssignment('work-0');
+    assert.ok(source);
+    await results.handlers['workhub.tasks.read'](
+      { actionId: source.actionId, delegationId: source.delegationId },
+      {} as never,
+    );
+    assert.ok(targetScans > 0, 'the non-index read path still revalidates current authority');
   } finally {
     await runtime.close();
     await store.close?.();
