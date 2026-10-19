@@ -29,7 +29,6 @@ import {
   type RuntimeEvent,
 } from '@maka/core/runtime-event';
 import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
-import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import type { WorkHubAdmittedAction } from '../server/workhub-coordination-action-gate.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
 import {
@@ -199,10 +198,6 @@ test('WorkHub workspace slots retain conflict FIFO, inode aliases and cancellati
   inodeAlias.release();
   assert.throws(() => slots.acquire('relative'), /Invalid WorkHub workspace/);
 });
-const workHubRoutingDecisions = new WeakMap<
-  ExecutionRuntimeHostComposition,
-  Map<string, WorkHubRoutingDecision>
->();
 const HANDOFF_TEST_COMPOSITION = createRunCompositionSnapshot({
   composerId: 'test.handoff',
   composerRevision: '1',
@@ -3858,9 +3853,7 @@ test('production WorkHub inspects an independent Session through its provider to
 test('default production WorkHub selects and delegates through its durable Host interaction', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
-    const { composition, manager } = await createCapturedExecutionComposition(owner, {
-      defaultWorkHubRouting: true,
-    });
+    const { composition, manager } = await createCapturedExecutionComposition(owner, {});
     const context: ConnectionContext = {
       hostEpoch: 'execution-composition-test',
       connectionId: 'selection-client',
@@ -4165,8 +4158,8 @@ for (const restart of [false, true]) {
           );
           assert.equal(
             delivery?.execution.kind === 'workhub_coordination' &&
-              delivery.execution.routingDecision,
-            undefined,
+              'routingDecision' in delivery.execution,
+            false,
           );
         }
         await waitFor(async () =>
@@ -5554,7 +5547,6 @@ test('one WorkHub Turn admits independent goals in private or registered workspa
     const workerInputs: Array<{ sessionId: string; cwd: string; input: BackendSendInput }> = [];
     const coordinationInputs: BackendSendInput[] = [];
     const { composition, manager } = await createCapturedExecutionComposition(owner, {
-      defaultWorkHubRouting: true,
       coordinationBackendFactory: (backendContext) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
@@ -6408,7 +6400,6 @@ test('one real coordination message can establish distinct objectives and queue 
     const release = deferred<void>();
     const sends: Array<{ sessionId: string; text: string }> = [];
     const { composition } = await createCapturedExecutionComposition(owner, {
-      defaultWorkHubRouting: true,
       primaryBackendFactory: (context) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
@@ -6545,7 +6536,6 @@ test('work replacement retires ancestor sources even when the objective returns 
     const sends: Array<{ sessionId: string; text: string }> = [];
     const movedReady = deferred<void>();
     const { composition } = await createCapturedExecutionComposition(owner, {
-      defaultWorkHubRouting: true,
       primaryBackendFactory: (context) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
@@ -7129,9 +7119,6 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
       const queuedIds = (await stores.sessionStore.listMessageAdmissions(target.id)).map(
         (item) => item.messageId,
       );
-      workHubRoutingDecisions
-        .get(composition)!
-        .set('busy-input-coordinator', { kind: 'routing', disposition: 'answer_here' });
       assert.ok(
         (
           await composition.handlers['workhub.coordination.answer'](
@@ -9540,7 +9527,6 @@ async function createCapturedExecutionComposition(
       'retainUntilProcessExit' | 'requestDrain'
     >;
     readonly safeBoundaryResume?: boolean;
-    readonly defaultWorkHubRouting?: boolean;
     readonly onWorkHubResult?: (input: BackendSendInput) => void;
     readonly primaryBackendFactory?: BackendFactory;
     readonly coordinationBackendFactory?: BackendFactory;
@@ -9556,7 +9542,6 @@ async function createCapturedExecutionComposition(
   const primaryBackendFactory =
     options.primaryBackendFactory ?? ((context) => new FakeBackend(context));
   const residencies = options.residencies;
-  const routingDecisions = new Map<string, WorkHubRoutingDecision>();
   let manager: SessionManager | undefined;
   SessionManager.prototype.recoverInterruptedSessionsStrict = async function (stores) {
     manager = this;
@@ -9598,21 +9583,10 @@ async function createCapturedExecutionComposition(
                 }
               })(context))
             : primaryBackendFactory(context),
-        workHubRoutingModel: options.defaultWorkHubRouting
-          ? undefined
-          : {
-              decide: async ({ turnId }) => {
-                const decision = routingDecisions.get(turnId);
-                if (!decision)
-                  throw new Error(`Missing fake WorkHub routing decision for ${turnId}`);
-                return decision;
-              },
-            },
       },
     );
     await composition.recover();
     if (!manager) throw new Error('Production execution composition did not construct Runtime');
-    workHubRoutingDecisions.set(composition, routingDecisions);
     return { composition, manager };
   } finally {
     if (originalSafeBoundaryResume === undefined) {
@@ -9820,9 +9794,6 @@ async function actWorkHub(
     assert.ok(registered.ok, JSON.stringify(registered));
     const { userText, attachments, ...action } = input;
     const turnId = randomUUID();
-    const decisions = workHubRoutingDecisions.get(composition);
-    assert.ok(decisions, 'Production composition is missing its fake WorkHub routing model');
-    decisions.set(turnId, routingDecisionForAction(action));
     const started = await composition.handlers['workhub.coordination.answer'](
       { turnId, text: userText, ...(attachments ? { attachments } : {}) },
       context,
@@ -9847,22 +9818,4 @@ async function actWorkHub(
   } finally {
     await desktop.close();
   }
-}
-
-function routingDecisionForAction(
-  action: Omit<WorkHubAdmittedAction, 'userText' | 'attachments'>,
-): WorkHubRoutingDecision {
-  if ('operation' in action.proposal) {
-    return { kind: 'linked', operation: action.proposal.operation };
-  }
-  if (action.proposal.disposition === 'create_new') {
-    return { kind: 'routing', disposition: 'create_new' };
-  }
-  assert.ok(action.candidateSetId, 'Delegation requires a candidate set');
-  return {
-    kind: 'routing',
-    disposition: 'delegate_existing',
-    candidateSetId: action.candidateSetId,
-    candidateRef: action.proposal.candidateRef,
-  };
 }

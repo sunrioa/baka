@@ -26,7 +26,6 @@ import {
   readWorkHubEvidenceExecution,
 } from './workhub-evidence-runtime.js';
 import type { WorkHubActionReceipt } from '@maka/core/workhub-action-result';
-import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import { createHash, randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
@@ -248,13 +247,6 @@ export type RootMessageStartRequest =
       prepareFreshContent(lease: SessionAdmissionLease): Promise<RootMessageContentPreparation>;
     });
 
-export interface HostWorkHubRoutingDecisionPreparation {
-  readonly header: SessionHeader;
-  readonly turnId: string;
-  readonly content: MessageContent;
-  readonly inputClosedSignal?: AbortSignal;
-}
-
 export type RootMessageContentPreparation =
   | {
       readonly kind: 'ready';
@@ -392,9 +384,6 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       content: MessageContent;
     }) => void,
     private readonly directoryHostId?: string,
-    private readonly prepareWorkHubRoutingDecision?: (
-      input: HostWorkHubRoutingDecisionPreparation,
-    ) => Promise<WorkHubRoutingDecision | undefined>,
     private readonly workHubExecutionSlots?: import('./workhub-execution-slots.js').WorkHubExecutionSlots,
   ) {
     this.stores = authenticateExecutionStoresWriter(stores, 'interactive');
@@ -1533,7 +1522,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       const header = await this.stores.sessionStore.readHeaderSnapshot(input.sessionId);
       const turnId = input.rootIdentity?.turnId ?? randomUUID();
       const previous = this.rootAdmissionOwner.latestAdmission(input.sessionId)?.execution;
-      let execution: RootExecutionDescriptor = {
+      const execution: RootExecutionDescriptor = {
         kind: isWorkHubCoordinationSessionId(header.id)
           ? ('workhub_coordination' as const)
           : ('external_message' as const),
@@ -1546,7 +1535,6 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         return { deferred: true };
       const unavailableReason = runtimeHostExecutionUnavailableReason(header, execution);
       if (unavailableReason) return { error: unavailableReason };
-      execution = await this.prepareFreshWorkHubExecution(header, turnId, input.content, execution);
       const reservation = this.reserveRootTurn(input.sessionId);
       if (!reservation) return { error: 'Another root Turn is being admitted' };
       try {
@@ -1592,30 +1580,6 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         throw error;
       }
     });
-  }
-
-  private async prepareFreshWorkHubExecution(
-    header: SessionHeader,
-    turnId: string,
-    content: MessageContent,
-    execution: RootExecutionDescriptor,
-    inputClosedSignal?: AbortSignal,
-  ): Promise<RootExecutionDescriptor> {
-    if (
-      execution.kind !== 'workhub_coordination' ||
-      execution.feedback ||
-      execution.operation === 'action' ||
-      !this.prepareWorkHubRoutingDecision
-    ) {
-      return execution;
-    }
-    const routingDecision = await this.prepareWorkHubRoutingDecision({
-      header,
-      turnId,
-      content,
-      ...(inputClosedSignal ? { inputClosedSignal } : {}),
-    });
-    return routingDecision === undefined ? execution : { ...execution, routingDecision };
   }
 
   prepareMessage(input: HostMessagePreparationInput): Promise<
@@ -2118,12 +2082,11 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     return (await this.readActiveWorkHubRoutingRequest(turnId))?.content;
   }
 
-  /** Reads both user authority and the advisory routing decision of the exact live WorkHub Turn. */
+  /** Reads authority from the exact live WorkHub Turn; no pre-routing model is involved. */
   readActiveWorkHubRoutingRequest(turnId: string): Promise<
     | {
         readonly content: MessageContent;
         readonly runId: string;
-        readonly decision?: WorkHubRoutingDecision;
         readonly sourceMessageId?: string;
       }
     | undefined
@@ -2163,9 +2126,6 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         content,
         ...(admission.userMessageId && !admission.execution.feedback
           ? { sourceMessageId: admission.userMessageId }
-          : {}),
-        ...(admission.execution.routingDecision
-          ? { decision: admission.execution.routingDecision }
           : {}),
       };
     });
@@ -2326,16 +2286,10 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
             operationUnavailable('WorkHub Desktop capability binding is unavailable'),
           );
         }
-        const freshExecution = await this.prepareFreshWorkHubExecution(
-          header,
-          request.turnId,
-          canonicalContent.content,
-          {
-            ...request.execution,
-            ...(capabilityBinding ? { capabilityBinding } : {}),
-          },
-          context.inputClosedSignal,
-        );
+        const freshExecution = {
+          ...request.execution,
+          ...(capabilityBinding ? { capabilityBinding } : {}),
+        };
         if (!this.beginRootAdmission(reservation)) {
           return completedStart(sessionBusy('Root Turn reservation is no longer current'));
         }
@@ -3553,7 +3507,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     const turnId = randomUUID();
     const header = await this.stores.sessionStore.readHeaderSnapshot(batch.sessionId);
     await this.prepareFreshAgentGraphEpoch(header);
-    const execution = await this.prepareFreshWorkHubExecution(header, turnId, batch.content, {
+    const execution: RootExecutionDescriptor = {
       kind:
         previous.descriptor.kind === 'workhub_coordination'
           ? 'workhub_coordination'
@@ -3563,7 +3517,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       previous.descriptor.capabilityBinding
         ? { capabilityBinding: previous.descriptor.capabilityBinding }
         : {}),
-    });
+    };
     const admitted = await this.rootAdmissionOwner.admitRootTurn({
       sessionId: batch.sessionId,
       turnId,
@@ -3774,31 +3728,12 @@ function rootExecutionMatches(
   incoming: RootExecutionDescriptor,
 ): boolean {
   if (stored.kind === 'workhub_coordination' && incoming.kind === 'workhub_coordination') {
-    const {
-      capabilityBinding: _storedBinding,
-      routingDecision: _storedDecision,
-      ...storedIdentity
-    } = stored;
-    const {
-      capabilityBinding: _incomingBinding,
-      routingDecision: _incomingDecision,
-      actionId,
-      ...incomingIdentity
-    } = incoming;
-    if (incoming.routingDecision === undefined) {
-      return isDeepStrictEqual(storedIdentity, {
-        ...incomingIdentity,
-        ...(stored.actionId === undefined ? {} : { actionId }),
-      });
-    }
-    return isDeepStrictEqual(
-      { ...storedIdentity, routingDecision: stored.routingDecision },
-      {
-        ...incomingIdentity,
-        ...(actionId === undefined ? {} : { actionId }),
-        routingDecision: incoming.routingDecision,
-      },
-    );
+    const { capabilityBinding: _storedBinding, ...storedIdentity } = stored;
+    const { capabilityBinding: _incomingBinding, actionId, ...incomingIdentity } = incoming;
+    return isDeepStrictEqual(storedIdentity, {
+      ...incomingIdentity,
+      ...(stored.actionId === undefined ? {} : { actionId }),
+    });
   }
   return isDeepStrictEqual(stored, incoming);
 }

@@ -606,8 +606,6 @@ export interface ShellSettings {
 }
 
 export interface AppSettings {
-  /** Host-owned projection. apiKey is masked; writes go to the Host credential vault. */
-  jev: { enabled: boolean; apiKey: string };
   schemaVersion: 1;
   network: AppNetworkSettings;
   botChat: BotChatSettings;
@@ -799,7 +797,6 @@ export type SettingsTestResultCode =
   | 'bot_connection_failed';
 
 export type UpdateAppSettingsInput = Partial<{
-  jev: Partial<AppSettings['jev']>;
   network: Partial<{
     proxy: NetworkProxySettingsPatch;
   }>;
@@ -896,7 +893,6 @@ export function createDefaultSettings(): AppSettings {
     },
     privacy: defaultPrivacySettings(),
     projects: defaultProjectPreferencesSettings(),
-    jev: { enabled: false, apiKey: '' },
     chatDefaults: defaultChatDefaultsSettings(),
     notifications: {
       runComplete: true,

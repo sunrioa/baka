@@ -47,7 +47,9 @@ import {
 
 export function decodeCanonicalRuntimePolicy(value: unknown): RuntimePolicy {
   const decoded = normalizeRuntimePolicy(value);
-  assertCanonicalValue(value, decoded, 'runtime policy');
+  // Only the retired optional field is ignored. All live fields remain canonical.
+  const { jev: _retiredJev, ...canonical } = value as Record<string, unknown>;
+  assertCanonicalValue(canonical, decoded, 'runtime policy');
   return decoded;
 }
 
@@ -229,7 +231,7 @@ function normalizeRuntimePolicyFields(
     subagents,
     shell,
     externalAgents,
-    ...(policy.jev === undefined ? {} : { jev: normalizeJev(policy.jev) }),
+    // Legacy `jev` is accepted by the document decoder but never activated.
   };
 }
 
@@ -240,8 +242,6 @@ function withoutShell(policy: RuntimePolicy): Omit<RuntimePolicy, 'shell'> {
 
 function normalizeMutationOperation(operation: Record<string, unknown>): RuntimePolicyMutation {
   switch (operation.kind) {
-    case 'set_jev':
-      return { kind: operation.kind, value: normalizeJev(operation.value) };
     case 'set_network_proxy':
       return { kind: operation.kind, value: normalizeNetworkProxy(operation.value) };
     case 'set_personalization':
@@ -519,10 +519,4 @@ function normalizeExternalAgents(value: unknown): RuntimePolicy['externalAgents'
     throw domainError('Antigravity executable must be an absolute macOS path');
   }
   return { antigravity: { executable } };
-}
-
-function normalizeJev(value: unknown): { enabled: boolean } {
-  const item = exactRecord(value, 'Jev settings', ['enabled']);
-  if (typeof item.enabled !== 'boolean') throw domainError('Jev enabled must be boolean');
-  return { enabled: item.enabled };
 }

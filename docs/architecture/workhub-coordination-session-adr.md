@@ -19,17 +19,18 @@
 
 # ADR: One WorkHub Coordination Session per Runtime Host
 
-- Status: Accepted
+- Status: Historical baseline; task-centric changes are governed by [the 2026-10-19 ADR](./workhub-task-centric-adr.zh-CN.md)
 - Date: 2026-08-25
 - Scope: WorkHub architecture
 - Decision source: [Discussion #3286](https://github.com/apache/maka/discussions/3286#discussioncomment-18135855)
 - Delivery tracker: [Issue #3492](https://github.com/apache/maka/issues/3492)
 
-The one-Session ownership decision remains in force. This change establishes the
-shared Intent, Recall, and deterministic Policy contracts plus a production-model
-adapter, but it does not change the default routing strategy. The default can move
-only after production-path comparative evidence required by the delivery tracker.
-See the [current domain language](../workhub-domain-language.md).
+The one-Coordination-Session ownership decision remains in force. The optional
+Intent/Recall/Jev pre-router and admission-bound routing decisions have been removed.
+The coordinator model makes task choices directly; the Host still validates
+execution identity, ownership, permissions, admission and idempotency. Legacy
+policy and root-admission routing fields are readable but inactive; retained
+credentials are not deleted. See the [current domain language](../workhub-domain-language.md).
 
 ## Context
 
@@ -153,64 +154,18 @@ than inferring an operation target from a similarly named Session.
 The decision flow is:
 
 ```text
-user input
-  -> intent analysis
-  -> Session Resolver or linked-target resolution
-  -> Coordination policy
-  -> routing disposition or linked-operation proposal
-  -> deterministic Action Gate
+admitted user message or authenticated result notification
+  -> coordination model with task tools
+  -> proposed task action
+  -> deterministic ownership, execution identity and admission checks
   -> owning Host / Session
 ```
 
-Intent describes what the user wants; it does not select authority. The Session
-Resolver returns bounded existing-Session evidence and never creates a Session.
-Linked-target resolution starts from a bounded WorkHub-owned delegation and
-follows its durable Message, Turn, and continuation lineage. Coordination policy
-combines that evidence into an advisory proposal. Missing, stale, or ambiguous
-linkage fails closed instead of falling back to name similarity.
-
-All model and routing output is advisory. Before any write, a deterministic
-**Action Gate** admits or rejects the proposed routing disposition or linked
-operation. The gate
-enforces Runtime Host and target validity, archive and waiting state, self-route
-exclusion, explicit `create_new`, and existing tool and permission ceilings. For a
-replacement, the gate additionally requires explicit correction evidence in the
-trusted user text, claims the source delegation in Coordination transcript order,
-and rejects any later competing replacement intent. Neither a model nor a routing
-policy can directly authorize a write, Stop, or expansion of execution authority.
-
-The optional model-routing adapter first calls a tool-free Intent model using the
-Coordination Session's saved connection, model, and thinking setting. Only
-`execute` and ordinary `continue` invoke a second tool-free Recall call. Recall sees
-at most 32 candidates containing a request-scoped opaque reference, bounded
-Session/workspace names, state, and recency bucket; it does not receive stable
-Session identity, paths, file contents, tools, or capabilities. Intent sees the
-current request and at most eight bounded user/assistant messages, but no candidates.
-
-The deterministic Coordination Policy maps those assessments to one disposition or
-linked operation. Invalid model output, provider failure, unavailable candidates,
-empty recall, and ambiguity all fail closed to `clarify`; none implies `create_new`.
-When that adapter is explicitly installed at composition, the result is stored on
-the root-Turn admission and reused by recovery. Every fresh root, including queued
-follow-ups and pending-message recovery, receives its own decision. The main
-Coordination model receives that bound result in its Turn prompt. A side-effecting
-proposal that changes its operation, candidate set, or candidate reference is
-rejected before the existing Action Gate. `answer_here` and `clarify` remain normal
-transcript outcomes.
-
-Before any production default changes, model strategies must be compared through
-the repository's existing `maka eval` Experiment/Cell/Attempt/Result path while
-exercising the production projection and admission seams. A separate WorkHub-only
-evaluation framework is deliberately not introduced here. The required evidence
-must report Intent accuracy, recall-kind accuracy, Recall@K, MRR, outcome accuracy,
-unsafe binds, implicit creation, unnecessary clarification, latency, token usage,
-and cost separately.
-
-Intent output contains no target. Session Resolver output contains only bounded
-opaque candidate references; it cannot return creation or a disposition. Linked
-target evidence is likewise advisory and cannot prove ownership. Model ranking or
-tool selection alone cannot authorize work, and every resulting proposal still goes
-through the Host-owned Gate with the original trusted user request.
+There is no auxiliary intent or recall model, pre-bound target decision, or
+natural-language intent check in the Host. The original request and authenticated
+trigger remain evidence for the model; resource ownership and permissions remain
+Host facts. Existing linked replacement and candidate protocols are transitional
+until the corresponding task-centric ADR step removes them, not new requirements.
 
 ## Delegation links rather than copies transcripts
 

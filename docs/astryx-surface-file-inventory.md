@@ -21,7 +21,6 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 
 | Path | Why |
 |------|-----|
-| `apps/desktop/src/renderer/features/jev-settings/index.tsx` | barrel re-export |
 | `apps/desktop/src/renderer/main.tsx` | bundle entry, not a surface |
 
 ## Files

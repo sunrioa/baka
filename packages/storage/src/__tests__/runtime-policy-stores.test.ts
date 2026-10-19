@@ -5101,16 +5101,19 @@ async function withTempDir(run: (base: string) => Promise<void>): Promise<void> 
   }
 }
 
-test('Jev policy and credentials persist in Host stores without exposing the key in projections', async () => {
-  await withInteractiveOwner(async ({ stores }) => {
+test('legacy Jev policy stays disabled and retained credentials are not exposed', async () => {
+  await withInteractiveOwner(async ({ root, stores }) => {
+    await writeFile(
+      join(root, 'runtime-policy.json'),
+      JSON.stringify({
+        schemaVersion: 4,
+        revision: 7,
+        policy: { ...createDefaultRuntimePolicy(), jev: { enabled: true } },
+      }),
+    );
     const before = await stores.runtimePolicy.getSnapshot();
-    assert.equal(before.policy.jev?.enabled ?? false, false);
-    const changed = await stores.runtimePolicy.mutate({
-      expectedRevision: before.revision,
-      operation: { kind: 'set_jev', value: { enabled: true } },
-    });
-    assert.equal(changed.kind, 'committed');
-    assert.equal((await stores.runtimePolicy.getSnapshot()).policy.jev?.enabled, true);
+    assert.equal(before.revision, 7);
+    assert.equal('jev' in before.policy, false);
     const locator = { scope: 'jev', kind: 'api_key' } as const;
     const saved = await stores.credentialVault.set({
       locator,
