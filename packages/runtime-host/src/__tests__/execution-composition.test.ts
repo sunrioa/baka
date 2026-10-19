@@ -7900,8 +7900,11 @@ test('a pre-commit legacy task input claim survives protocol decoding and Host r
   });
 });
 
-for (const entry of ['pane', 'model', 'fresh'] as const)
-  test(`task-centric ${entry} input continues settled stopped work without resuming old tools or replaying a stop on the successor`, async (t) => {
+for (const { entry, pendingStop } of [
+  ...(['pane', 'model', 'fresh'] as const).map((entry) => ({ entry, pendingStop: false })),
+  ...(['fresh', 'legacy'] as const).map((entry) => ({ entry, pendingStop: true })),
+])
+  test(`task-centric ${entry} input ${pendingStop ? 'rejects a newer unresolved Stop despite older terminal receipts' : 'continues settled stopped work without resuming old tools or replaying a stop on the successor'}`, async (t) => {
     let executions: RootTurnCoordinator | undefined;
     const readRoot = RootTurnCoordinator.prototype.readRootState;
     t.mock.method(
@@ -8031,6 +8034,91 @@ for (const entry of ['pane', 'model', 'fresh'] as const)
         assert.equal(stopped.result.outcome, 'stop_delivered');
         assert.ok(executions);
         await waitFor(async () => executions!.readRootState(target.id).kind === 'idle');
+        if (pendingStop) {
+          const noop = await composition.handlers['workhub.tasks.stop'](
+            {
+              turnId: 'stopped-input-coordinator',
+              actionId: 'terminal-noop',
+              taskIds: [source.work.id],
+            },
+            context,
+          );
+          assert.ok(noop.ok && noop.result.kind === 'result', JSON.stringify(noop));
+          assert.equal(noop.result.targets[0]?.outcome, 'already_terminal');
+          const firstStop = await stores.sessionStore.readWorkHubStopRequest(source.delegationId);
+          assert.ok(firstStop?.executionBinding);
+          // A constructed, immutable crash-window fact: actual Stop delivery is
+          // covered above; continuation admission and its effects below are real.
+          const actionId = 'unfinished-stop';
+          const actionFingerprint =
+            `sha256:${createHash('sha256').update(actionId).digest('hex')}` as const;
+          await stores.sessionStore.claimWorkHubAction({
+            actionId,
+            operation: 'stop',
+            actionFingerprint,
+            subject: source.delegationId,
+          });
+          await stores.sessionStore.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
+            {
+              ...firstStop,
+              taskStop: true,
+              workId: source.work.id,
+              actionId,
+              actionFingerprint,
+              id:
+                'whq_' +
+                createHash('sha256')
+                  .update(JSON.stringify([source.delegationId, actionId]))
+                  .digest('hex')
+                  .slice(0, 48),
+              ts: Date.now(),
+            },
+          ]);
+          const beforeSessions = (await stores.sessionStore.listHeaders()).length;
+          const beforeSends = seen.length;
+          const attempt =
+            entry === 'fresh'
+              ? await composition.handlers['workhub.tasks.continue'](
+                  {
+                    turnId: 'stopped-input-coordinator',
+                    actionId: 'must-not-continue',
+                    taskId: source.work.id,
+                    text: 'Ordinary task continuation must wait for Stop settlement',
+                    container: 'fresh',
+                  },
+                  context,
+                )
+              : await composition.handlers['workhub.coordination.actFromTurn'](
+                  {
+                    turnId: 'stopped-input-coordinator',
+                    actionId: 'must-not-continue',
+                    proposal: {
+                      disposition: 'continue_work',
+                      workId: source.work.id,
+                      sourceActionId: source.actionId,
+                      container: 'reuse',
+                    },
+                    delegationText: 'Ordinary task continuation must wait for Stop settlement',
+                  },
+                  context,
+                );
+          assert.ok(
+            !attempt.ok,
+            'no continuation may enter while the newer Stop is unresolved: ' +
+              JSON.stringify(attempt),
+          );
+          assert.equal(
+            await stores.sessionStore.readWorkHubAssignment('must-not-continue'),
+            undefined,
+          );
+          assert.equal((await stores.sessionStore.listHeaders()).length, beforeSessions);
+          assert.equal(
+            (await stores.sessionStore.readLatestWorkHubAssignment(source.work.id))?.actionId,
+            source.actionId,
+          );
+          assert.equal(seen.length, beforeSends);
+          return;
+        }
         const text = 'Ordinary task continuation: apply only this new requirement';
         let targetSessionId = target.id;
         let messageId: string;

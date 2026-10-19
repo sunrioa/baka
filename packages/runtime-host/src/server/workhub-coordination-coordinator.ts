@@ -287,8 +287,8 @@ export class HostWorkHubCoordinationCoordinator {
       readReplacementAbort: (delegationId) =>
         this.#stores.readWorkHubReplacementAbort(delegationId),
       readSupersession: (delegationId) => this.#stores.readWorkHubSupersession(delegationId),
-      readStopRequest: (delegationId, actionId) =>
-        this.#stores.readWorkHubStopRequest(delegationId, actionId),
+      readStopRequest: (delegationId, actionId, latest) =>
+        this.#stores.readWorkHubStopRequest(delegationId, actionId, latest),
       readStopResolution: (delegationId, actionId) =>
         this.#stores.readWorkHubStopResolution(delegationId, actionId),
 

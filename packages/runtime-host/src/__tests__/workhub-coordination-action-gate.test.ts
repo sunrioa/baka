@@ -578,6 +578,77 @@ describe('WorkHub Coordination Action Gate', () => {
     assert.equal(effects.actionClaims.has('resume-action'), false);
   });
 
+  test('fresh resume admission refuses a newer pending Stop despite an older no-op receipt', async () => {
+    // External execution eligibility is injected; this checks the real Gate's
+    // admission callback, not a claim that a provider Root was resumed/stopped.
+    const effects = fakeEffects([session('payments', { name: 'Payments' })]);
+    delegatedTo(effects, 'payments');
+    const source = effects.assignmentRecords.get('source-action')!;
+    const first: WorkHubDelegationStopRequestedMessage = {
+      type: 'workhub_coordination',
+      kind: 'delegation_stop_requested',
+      schemaVersion: 3,
+      id: 'first-stop',
+      turnId: 'stop-turn',
+      coordinationTurnId: 'stop-turn',
+      ts: 1,
+      actionId: 'earlier-noop',
+      actionFingerprint: `sha256:${'a'.repeat(64)}`,
+      stopsActionId: source.actionId,
+      stopsDelegationId: source.delegationId,
+      targetSessionId: source.targetSessionId,
+      targetMessageId: source.targetMessageId,
+      targetSessionName: source.targetSessionName,
+      userText: 'Stop the task',
+      taskStop: true,
+      workId: source.work?.id ?? source.actionId,
+      executionBinding: 'original-root',
+    };
+    const observed: WorkHubDelegationStopResolvedMessage = {
+      type: 'workhub_coordination',
+      kind: 'delegation_stop_resolved',
+      schemaVersion: 3,
+      id: 'observed-stop',
+      turnId: first.turnId,
+      coordinationTurnId: first.coordinationTurnId,
+      ts: 2,
+      actionId: first.actionId,
+      actionFingerprint: first.actionFingerprint,
+      stopsActionId: source.actionId,
+      stopsDelegationId: source.delegationId,
+      targetSessionId: source.targetSessionId,
+      targetTurnId: 'original-turn',
+      outcome: 'already_terminal',
+      taskStop: true,
+    };
+    effects.stopRequests.set(source.delegationId, first);
+    effects.stopResolutions.set(source.delegationId, observed);
+    effects.stopResolutions.set(JSON.stringify([source.delegationId, first.actionId]), observed);
+    effects.stopRequests.set(JSON.stringify([source.delegationId, 'later-stop']), {
+      ...first,
+      id: 'later-stop',
+      actionId: 'later-stop',
+      ts: 3,
+    });
+    // The production store keeps terminal no-ops linked, including stopped
+    // records requested by resume. Do not let the older fake's broad retirement
+    // filter accidentally make this pass before the pending-state check.
+    effects.listActiveAssignments = async (targetSessionId) =>
+      targetSessionId === source.targetSessionId ? [source] : [];
+    await assert.rejects(
+      new WorkHubCoordinationActionGate(effects).act(
+        {
+          actionId: 'must-not-resume',
+          userText: 'Resume Payments',
+          proposal: resumeProposal('payments'),
+        },
+        CONTEXT,
+      ),
+      (error) => error instanceof WorkHubActionGateFailure && error.code === 'action_conflict',
+    );
+    assert.equal(effects.resumeCalls.length, 0);
+  });
+
   test('lets the resume effect skip repair on replay and recheck inside fresh admission', async () => {
     const effects = fakeEffects([session('payments', { name: 'Payments' })]);
     delegatedTo(effects, 'payments');
@@ -2212,7 +2283,11 @@ function fakeEffects(initialSessions: WorkHubActionGateSession[]) {
     async readSupersession(delegationId: string) {
       return supersessions.get(delegationId);
     },
-    async readStopRequest(delegationId: string, actionId?: string) {
+    async readStopRequest(delegationId: string, actionId?: string, latest?: true) {
+      if (latest)
+        return [...stopRequests.values()]
+          .reverse()
+          .find((q) => q.stopsDelegationId === delegationId);
       const first = stopRequests.get(delegationId);
       return !actionId || first?.actionId === actionId
         ? first
