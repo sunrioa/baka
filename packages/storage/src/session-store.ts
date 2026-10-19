@@ -582,6 +582,15 @@ class SqliteSessionStore implements SessionAuthorityStore {
     actionId?: string,
   ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
     if (!actionId) {
+      const retirement = await this.readWorkHubCoordinationMessage(
+        `whzs_${workHubIdentitySuffix(delegationId)}`,
+      );
+      if (
+        retirement?.type === 'workhub_coordination' &&
+        retirement.kind === 'delegation_stop_resolved' &&
+        retirement.outcome !== 'not_owned'
+      )
+        return retirement;
       const terminal = await this.readWorkHubCoordinationMessage(
         `whzt_${workHubIdentitySuffix(delegationId)}`,
       );
@@ -608,6 +617,12 @@ class SqliteSessionStore implements SessionAuthorityStore {
       primary.actionId !== actionId
         ? undefined
         : primary);
+    if (!message && !actionId) {
+      // Modern no-ops are per-action observations, not permanent retirement.
+      const first = await this.readWorkHubStopRequest(delegationId);
+      if (first?.taskStop === true)
+        return this.readWorkHubStopResolution(delegationId, first.actionId);
+    }
     return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_resolved'
       ? message
       : undefined;

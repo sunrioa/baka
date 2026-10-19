@@ -316,25 +316,7 @@ export function createWorkHubTaskStopRuntime(options: {
       WORKHUB_COORDINATION_SESSION_ID,
       ...items.map((item) => item.target.targetSessionId),
     ];
-    let needsConfirmation = false;
-    if (!saved)
-      await admission.runMany(sessionIds, async (lease) => {
-        await assertActive(input, authority);
-        await validateFresh(items, lease);
-        needsConfirmation = authority.origin !== 'user' || items.length > 1;
-        for (const item of items)
-          needsConfirmation ||= await sessions.hasOtherWorkHubStopTarget(
-            input.turnId,
-            item.target.workId,
-          );
-        if (needsConfirmation && !options.requestForm)
-          throw new WorkHubActionEffectFailure(
-            'operation_unavailable',
-            'Stop confirmation is unavailable',
-          );
-        await claim(input.actionId, parent, items[0]!.source.delegationId);
-      });
-    if (needsConfirmation) {
+    async function confirm(): Promise<boolean> {
       const answer = await options.requestForm!({
         sessionId: WORKHUB_COORDINATION_SESSION_ID,
         turnId: input.turnId,
@@ -373,66 +355,93 @@ export function createWorkHubTaskStopRuntime(options: {
           ],
         }),
       });
-      if (answer.answer.action !== 'accept' || answer.answer.values.stop !== 'confirm')
-        return { actionId: input.actionId, kind: 'cancelled', taskIds: input.taskIds };
+      return answer.answer.action === 'accept' && answer.answer.values.stop === 'confirm';
     }
-    const requests = await admission.runMany(sessionIds, async (lease) => {
-      const raced = await sessions.readWorkHubStopRequest(
-        items[0]!.source.delegationId,
-        input.actionId,
-      );
-      const replay = saved !== undefined || raced !== undefined;
-      if (
-        raced &&
-        (raced.actionFingerprint !== parent ||
-          !isDeepStrictEqual(
-            raced.stopSet?.targets.map(targetIdentity),
-            items.map((item) => targetIdentity(item.target)),
-          ))
-      )
-        conflict('The admitted task stop set changed');
-      if (!replay) {
-        await assertActive(input, authority);
-        await validateFresh(items, lease);
-      }
-      for (const [index, item] of items.entries()) {
-        const identity = child(input, item, index, parent);
-        await claim(identity.actionId, identity.fingerprint, item.source.delegationId);
-      }
-      const userText =
-        saved?.userText ??
-        raced?.userText ??
-        (authority.content.text.trim()
-          ? truncateUtf8(authority.content.text, WORKHUB_COORDINATION_TEXT_MAX_BYTES, '…')
-          : '[Host source reference: the original user message has no text; read its canonical source Turn.]');
-      const prepared: WorkHubDelegationStopRequestedMessage[] = [];
-      for (const [index, item] of items.entries()) {
-        const identity = child(input, item, index, parent);
-        prepared.push(
-          await options.coordination.prepareTaskStop(
-            {
-              source: item.source,
-              target: item.target,
-              actionId: identity.actionId,
-              actionFingerprint: identity.fingerprint,
-              coordinationTurnId: input.turnId,
-              userText,
-              replay,
-              ...(index === 0
-                ? {
-                    stopSet: {
-                      actionId: input.actionId,
-                      targets: items.map((entry) => entry.target),
-                    },
-                  }
-                : {}),
-            },
-            lease,
-          ),
+    const admit = (confirmed: boolean) =>
+      admission.runMany(sessionIds, async (lease) => {
+        const raced = await sessions.readWorkHubStopRequest(
+          items[0]!.source.delegationId,
+          input.actionId,
         );
-      }
-      return prepared;
-    });
+        const replay = saved !== undefined || raced !== undefined;
+        if (
+          raced &&
+          (raced.taskStop !== true ||
+            raced.coordinationTurnId !== input.turnId ||
+            raced.actionFingerprint !== parent ||
+            !isDeepStrictEqual(
+              raced.stopSet?.targets.map(targetIdentity),
+              items.map((item) => targetIdentity(item.target)),
+            ))
+        )
+          conflict('The admitted task stop set changed');
+        if (!replay) {
+          await assertActive(input, authority);
+          await validateFresh(items, lease);
+          await claim(input.actionId, parent, items[0]!.source.delegationId);
+          let needsConfirmation = authority.origin !== 'user' || items.length > 1;
+          for (const item of items)
+            needsConfirmation ||= await sessions.hasOtherWorkHubStopTarget(
+              input.turnId,
+              item.target.workId,
+            );
+          if (needsConfirmation && !confirmed) {
+            if (!options.requestForm)
+              throw new WorkHubActionEffectFailure(
+                'operation_unavailable',
+                'Stop confirmation is unavailable',
+              );
+            return undefined;
+          }
+        }
+        for (const [index, item] of items.entries()) {
+          const identity = child(input, item, index, parent);
+          await claim(identity.actionId, identity.fingerprint, item.source.delegationId);
+        }
+        const userText =
+          saved?.userText ??
+          raced?.userText ??
+          (authority.content.text.trim()
+            ? truncateUtf8(authority.content.text, WORKHUB_COORDINATION_TEXT_MAX_BYTES, '…')
+            : '[Host source reference: the original user message has no text; read its canonical source Turn.]');
+        const prepared: WorkHubDelegationStopRequestedMessage[] = [];
+        for (const [index, item] of items.entries()) {
+          const identity = child(input, item, index, parent);
+          prepared.push(
+            await options.coordination.prepareTaskStop(
+              {
+                source: item.source,
+                target: item.target,
+                actionId: identity.actionId,
+                actionFingerprint: identity.fingerprint,
+                coordinationTurnId: input.turnId,
+                userText,
+                replay,
+                ...(index === 0
+                  ? {
+                      stopSet: {
+                        actionId: input.actionId,
+                        targets: items.map((entry) => entry.target),
+                      },
+                    }
+                  : {}),
+              },
+              lease,
+            ),
+          );
+        }
+        return prepared;
+      });
+    // The distinct-target check and the first visible stop request share one
+    // admission. A concurrent single-target command must observe that request.
+    // Only native confirmation waits outside the leases, then revalidates all.
+    let requests = await admit(false);
+    if (!requests) {
+      if (!(await confirm()))
+        return { actionId: input.actionId, kind: 'cancelled', taskIds: input.taskIds };
+      requests = await admit(true);
+      if (!requests) conflict('The confirmed stop set could not be admitted');
+    }
     const results = new Map<string, WorkHubTaskStopTargetResult>();
     const queueFirst = [...items.entries()].sort(
       ([, a], [, b]) =>

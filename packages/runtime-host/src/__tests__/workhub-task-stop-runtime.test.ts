@@ -281,6 +281,21 @@ test('single user target stops directly; a second distinct target requires confi
   assert.deepEqual(f.effects, ['a', 'b']);
 });
 
+test('concurrent distinct single-target stops cannot both bypass second-target confirmation', async () => {
+  const f = fixture();
+  const result = await Promise.all([
+    stop(f, { ...input, actionId: 'parallel-a', taskIds: ['a'] }),
+    stop(f, { ...input, actionId: 'parallel-b', taskIds: ['b'] }),
+  ]);
+  assert.ok(result.every((item) => item.kind === 'result'));
+  assert.equal(
+    f.state.forms,
+    1,
+    'publishing the first request and checking the second target must be one admission',
+  );
+  assert.deepEqual([...f.effects].sort(), ['a', 'b']);
+});
+
 test('feedback cannot bypass confirmation, and cancellation has no committed stop or effect', async () => {
   const f = fixture();
   f.state.origin = 'feedback';

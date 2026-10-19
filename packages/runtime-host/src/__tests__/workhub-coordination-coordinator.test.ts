@@ -3010,124 +3010,211 @@ const unusedCoordinationOperation: CoordinationExecutions['runWorkHubCoordinatio
  * under the same Session admission the coordinator uses, so the fake can
  * reproduce the ordering the real ledger enforces.
  */
-test('task Stop fact writer requires coordinator and target leases and survives SQLite reopen', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'maka-task-stop-facts-'));
-  let store = createSessionStore(root);
-  const admission = new SessionAdmissionGate();
-  try {
-    const host = coordinator(
-      root,
-      store,
-      undefined,
-      undefined,
-      undefined,
-      admission,
-      {},
-      {
-        readStopBinding: async () => 'exact-binding',
-      },
-    );
-    assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
-    const worker = await store.create({
-      cwd: root,
-      name: 'Task',
-      model: 'model',
-      llmConnectionSlug: 'test',
-      permissionMode: 'ask',
-    });
-    const source: WorkHubDelegationAssignedMessage = {
-      type: 'workhub_coordination',
-      kind: 'delegation_assigned',
-      schemaVersion: 4,
-      id: 'wha_' + createHash('sha256').update('source-task').digest('hex').slice(0, 48),
-      turnId: 'source-turn',
-      ts: 1,
-      coordinationTurnId: 'source-turn',
-      actionId: 'source-task',
-      actionFingerprint: `sha256:${'a'.repeat(64)}`,
-      delegationId: 'delegation-task',
-      disposition: 'delegate_existing',
-      targetSessionId: worker.id,
-      targetSessionName: 'Task',
-      targetMessageId: 'message-task',
-      targetTurnId: 'worker-turn',
-      userText: 'Original requirement',
-      work: { id: 'source-task', generationId: 'source-task' },
-    };
-    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [source]);
-    const target = {
-      workId: 'source-task',
-      generationId: 'source-task',
-      sourceActionId: source.actionId,
-      sourceDelegationId: source.delegationId,
-      targetSessionId: worker.id,
-      targetMessageId: source.targetMessageId,
-      executionBinding: 'exact-binding',
-    };
-    const input = {
-      source,
-      target,
-      actionId: 'stop-action',
-      actionFingerprint: `sha256:${'b'.repeat(64)}` as const,
-      coordinationTurnId: 'stop-turn',
-      userText: 'Stop it',
-      replay: false,
-      stopSet: { actionId: 'stop-action', targets: [target] },
-    };
-    await store.claimWorkHubAction({
-      actionId: input.actionId,
-      operation: 'stop',
-      actionFingerprint: input.actionFingerprint,
-      subject: source.delegationId,
-    });
-    for (const ids of [[WORKHUB_COORDINATION_SESSION_ID], [worker.id]]) {
-      await assert.rejects(admission.runMany(ids, (lease) => host.prepareTaskStop(input, lease)));
-      assert.equal(
-        await store.readWorkHubStopRequest(source.delegationId, input.actionId),
+for (const scenario of [
+  'modern',
+  'legacy-delivered',
+  'legacy-terminal',
+  'old-upgraded-noop',
+] as const)
+  test(`task Stop fact writer requires coordinator and target leases and survives SQLite reopen (${scenario})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-task-stop-facts-'));
+    let store = createSessionStore(root);
+    const admission = new SessionAdmissionGate();
+    try {
+      const host = coordinator(
+        root,
+        store,
         undefined,
+        undefined,
+        undefined,
+        admission,
+        {},
+        {
+          readStopBinding: async () => 'exact-binding',
+        },
       );
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const worker = await store.create({
+        cwd: root,
+        name: 'Task',
+        model: 'model',
+        llmConnectionSlug: 'test',
+        permissionMode: 'ask',
+      });
+      const source: WorkHubDelegationAssignedMessage = {
+        type: 'workhub_coordination',
+        kind: 'delegation_assigned',
+        schemaVersion: 4,
+        id: 'wha_' + createHash('sha256').update('source-task').digest('hex').slice(0, 48),
+        turnId: 'source-turn',
+        ts: 1,
+        coordinationTurnId: 'source-turn',
+        actionId: 'source-task',
+        actionFingerprint: `sha256:${'a'.repeat(64)}`,
+        delegationId: 'delegation-task',
+        disposition: 'delegate_existing',
+        targetSessionId: worker.id,
+        targetSessionName: 'Task',
+        targetMessageId: 'message-task',
+        targetTurnId: 'worker-turn',
+        userText: 'Original requirement',
+        work: { id: 'source-task', generationId: 'source-task' },
+      };
+      await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [source]);
+      const target = {
+        workId: 'source-task',
+        generationId: 'source-task',
+        sourceActionId: source.actionId,
+        sourceDelegationId: source.delegationId,
+        targetSessionId: worker.id,
+        targetMessageId: source.targetMessageId,
+        executionBinding: 'exact-binding',
+      };
+      const input = {
+        source,
+        target,
+        actionId: 'stop-action',
+        actionFingerprint: `sha256:${'b'.repeat(64)}` as const,
+        coordinationTurnId: 'stop-turn',
+        userText: 'Stop it',
+        replay: false,
+        stopSet: { actionId: 'stop-action', targets: [target] },
+      };
+      await store.claimWorkHubAction({
+        actionId: input.actionId,
+        operation: 'stop',
+        actionFingerprint: input.actionFingerprint,
+        subject: source.delegationId,
+      });
+      for (const ids of [[WORKHUB_COORDINATION_SESSION_ID], [worker.id]]) {
+        await assert.rejects(admission.runMany(ids, (lease) => host.prepareTaskStop(input, lease)));
+        assert.equal(
+          await store.readWorkHubStopRequest(source.delegationId, input.actionId),
+          undefined,
+        );
+      }
+      const otherGate = new SessionAdmissionGate();
+      await assert.rejects(
+        otherGate.runMany([WORKHUB_COORDINATION_SESSION_ID, worker.id], (lease) =>
+          host.prepareTaskStop(input, lease),
+        ),
+      );
+      const prepare = () =>
+        admission.runMany([WORKHUB_COORDINATION_SESSION_ID, worker.id], (lease) =>
+          host.prepareTaskStop(input, lease),
+        );
+      const request = await prepare();
+      assert.deepEqual(await prepare(), request);
+      const resolved = await host.resolveTaskStop({
+        request,
+        outcome: 'already_terminal',
+        targetTurnId: 'worker-turn',
+      });
+      assert.equal(
+        (await store.readWorkHubStopResolution(source.delegationId))?.actionId,
+        input.actionId,
+        'the first modern no-op is readable without becoming a retirement aggregate',
+      );
+      if (scenario === 'old-upgraded-noop') {
+        // Compatibility fixture for an older writer's immutable aggregate slot.
+        await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
+          {
+            ...resolved,
+            id:
+              'whzt_' + createHash('sha256').update(source.delegationId).digest('hex').slice(0, 48),
+          },
+        ]);
+      }
+      await store.close?.();
+      store = createSessionStore(root);
+      assert.deepEqual(
+        await store.readWorkHubStopRequest(source.delegationId, input.actionId),
+        request,
+      );
+      assert.deepEqual(
+        await store.readWorkHubStopResolution(source.delegationId, input.actionId),
+        resolved,
+      );
+      const history = await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID);
+      const replay = history.find((message) => message.id === request.id);
+      assert.deepEqual(
+        replay,
+        request,
+        'native transcript round trip retains the new stop scope fields',
+      );
+      // This fixture writes coordination facts, not a worker Message admission.
+      // Active-link projection with real pending admissions is covered in storage.
+      const successor = coordinator(
+        root,
+        store,
+        undefined,
+        undefined,
+        undefined,
+        admission,
+        {},
+        {
+          readStopBinding: async () => 'resumed-binding',
+        },
+      );
+      const laterTarget = { ...target, executionBinding: 'resumed-binding' };
+      const later = {
+        ...input,
+        target: laterTarget,
+        actionId: 'stop-resumed',
+        actionFingerprint: `sha256:${'c'.repeat(64)}` as const,
+        stopSet: { actionId: 'stop-resumed', targets: [laterTarget] },
+      };
+      await store.claimWorkHubAction({
+        actionId: later.actionId,
+        operation: 'stop',
+        actionFingerprint: later.actionFingerprint,
+        subject: source.delegationId,
+      });
+      let laterRequest: typeof request;
+      if (scenario.startsWith('legacy')) {
+        const { taskStop: _marker, stopSet: _set, ...legacy } = request;
+        laterRequest = {
+          ...legacy,
+          actionId: later.actionId,
+          actionFingerprint: later.actionFingerprint,
+          id:
+            'whq_' +
+            createHash('sha256')
+              .update(JSON.stringify([source.delegationId, later.actionId]))
+              .digest('hex')
+              .slice(0, 48),
+          executionBinding: laterTarget.executionBinding,
+        };
+        await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [laterRequest]);
+      } else
+        laterRequest = await admission.runMany(
+          [WORKHUB_COORDINATION_SESSION_ID, worker.id],
+          (lease) => successor.prepareTaskStop(later, lease),
+        );
+      const outcome = scenario === 'legacy-terminal' ? 'already_terminal' : 'stop_delivered';
+      await successor.resolveTaskStop({
+        request: laterRequest,
+        outcome,
+        targetTurnId: 'resumed-worker-turn',
+      });
+      await store.close?.();
+      store = createSessionStore(root);
+      assert.equal(
+        (await store.readWorkHubStopResolution(source.delegationId))?.actionId,
+        later.actionId,
+        'the earlier modern no-op cannot mask actual retirement of a later owned Root',
+      );
+      assert.deepEqual(
+        await store.readWorkHubStopResolution(source.delegationId, input.actionId),
+        resolved,
+        'the original per-action no-op receipt remains immutable',
+      );
+      assert.equal((await store.readWorkHubStopResolution(source.delegationId))?.outcome, outcome);
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
     }
-    const otherGate = new SessionAdmissionGate();
-    await assert.rejects(
-      otherGate.runMany([WORKHUB_COORDINATION_SESSION_ID, worker.id], (lease) =>
-        host.prepareTaskStop(input, lease),
-      ),
-    );
-    const prepare = () =>
-      admission.runMany([WORKHUB_COORDINATION_SESSION_ID, worker.id], (lease) =>
-        host.prepareTaskStop(input, lease),
-      );
-    const request = await prepare();
-    assert.deepEqual(await prepare(), request);
-    const resolved = await host.resolveTaskStop({
-      request,
-      outcome: 'already_terminal',
-      targetTurnId: 'worker-turn',
-    });
-    await store.close?.();
-    store = createSessionStore(root);
-    assert.deepEqual(
-      await store.readWorkHubStopRequest(source.delegationId, input.actionId),
-      request,
-    );
-    assert.deepEqual(
-      await store.readWorkHubStopResolution(source.delegationId, input.actionId),
-      resolved,
-    );
-    const history = await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID);
-    const replay = history.find((message) => message.id === request.id);
-    assert.deepEqual(
-      replay,
-      request,
-      'native transcript round trip retains the new stop scope fields',
-    );
-    // This fixture writes coordination facts, not a worker Message admission.
-    // Active-link projection with real pending admissions is covered in storage.
-  } finally {
-    await store.close?.();
-    await rm(root, { recursive: true, force: true });
-  }
-});
+  });
 
 function coordinationExecutions(admission: SessionAdmissionGate) {
   const admitted = new Set<string>();

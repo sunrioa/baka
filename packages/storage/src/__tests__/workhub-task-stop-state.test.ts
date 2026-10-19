@@ -33,7 +33,14 @@ import { assignmentRequest, createCoordinationSession } from './fixtures/workhub
 
 const suffix = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 48);
 
-for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'delivered'] as const)
+for (const scenario of [
+  'modern',
+  'legacy',
+  'mixed-modern',
+  'mixed-legacy',
+  'delivered',
+  'retired-after-noop',
+] as const)
   test(
     'active linkage pairs aggregate stop outcomes with their own request (' + scenario + ')',
     async () => {
@@ -56,6 +63,7 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
           modern: boolean,
           primary: boolean,
           outcome: WorkHubDelegationStopResolvedMessage['outcome'],
+          retirementSlot = false,
         ) => {
           const actionSuffix = suffix(JSON.stringify([assignment.delegationId, actionId]));
           const request: WorkHubDelegationStopRequestedMessage = {
@@ -97,7 +105,10 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
           await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
             request,
             resolution,
-            { ...resolution, id: (primary ? 'whz_' : 'whzt_') + delegationSuffix },
+            {
+              ...resolution,
+              id: (retirementSlot ? 'whzs_' : primary ? 'whz_' : 'whzt_') + delegationSuffix,
+            },
           ]);
         };
         const modern =
@@ -108,13 +119,26 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
           'matched-stop',
           modern,
           !mixed,
-          scenario === 'delivered' ? 'stop_delivered' : 'already_terminal',
+          scenario === 'retired-after-noop'
+            ? 'not_owned'
+            : scenario === 'delivered'
+              ? 'stop_delivered'
+              : 'already_terminal',
         );
+        if (scenario === 'retired-after-noop') {
+          await append('modern-noop', true, false, 'already_terminal');
+          await append('actual-retirement', true, false, 'stop_delivered', true);
+        }
         await store.close?.();
         store = createSessionStore(root);
         // Persistence/projection fixture only: these facts do not execute Stop
         // or prove a Runtime outcome. The execution composition tests do that.
         const active = await store.readActiveWorkHubAssignmentsByTarget([target.id]);
+        if (scenario === 'retired-after-noop')
+          assert.equal(
+            (await store.readWorkHubStopResolution(assignment.delegationId))?.actionId,
+            'actual-retirement',
+          );
         assert.deepEqual(
           active.map((item) => item.actionId),
           modern && scenario !== 'delivered' ? [assignment.actionId] : [],

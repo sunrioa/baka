@@ -18,7 +18,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { WorkHubTaskStopSet, WorkHubTaskStopTarget } from '@maka/core/workhub-task-stop';
+import {
+  workHubStopRetiresDelegation,
+  type WorkHubTaskStopSet,
+  type WorkHubTaskStopTarget,
+} from '@maka/core/workhub-task-stop';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import type {
   WorkHubTaskInputRequest,
@@ -722,6 +726,25 @@ export class HostWorkHubCoordinationCoordinator {
       }),
       additionalMessages: async (resolved) => {
         const primary = await this.#stores.readWorkHubStopResolution(request.stopsDelegationId);
+        const priorRequest =
+          primary?.outcome === 'already_terminal'
+            ? await this.#stores.readWorkHubStopRequest(request.stopsDelegationId, primary.actionId)
+            : undefined;
+        const priorNoop =
+          primary !== undefined &&
+          priorRequest !== undefined &&
+          !workHubStopRetiresDelegation(priorRequest, primary);
+        if (request.taskStop === true || priorNoop) {
+          // A modern no-op must not occupy the immutable retirement slot.
+          if (!workHubStopRetiresDelegation(request, resolved)) return [];
+          if (primary && primary.outcome !== 'not_owned' && !priorNoop) return [];
+          return [
+            {
+              ...resolved,
+              id: `whzs_${workHubDestructiveClaimIdentitySuffix(request.stopsDelegationId)}`,
+            },
+          ];
+        }
         // Keep immutable per-action receipts; the delegation slot aggregates only
         // terminal knowledge. Upgrade not_owned at a distinct immutable identity;
         // appendMessages never replaces an existing identity.

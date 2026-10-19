@@ -19,7 +19,7 @@
 
 import { z } from 'zod';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
-import { workHubStopRetiresDelegation } from '@maka/core/workhub-task-stop';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import {
   WORKHUB_INBOX_MAX_ITEMS,
   type WorkHubPendingInteraction,
@@ -117,19 +117,6 @@ export function createWorkHubResultRuntime(options: {
       !(await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId))
     );
   }
-  async function readStopProjection(delegationId: string) {
-    const first = await stores.sessionStore.readWorkHubStopRequest(delegationId);
-    if (!first) return undefined;
-    const resolution = await stores.sessionStore.readWorkHubStopResolution(delegationId);
-    const matched =
-      resolution?.actionId && resolution.actionId !== first.actionId
-        ? await stores.sessionStore.readWorkHubStopRequest(delegationId, resolution.actionId)
-        : first;
-    return {
-      resolution,
-      retires: workHubStopRetiresDelegation(matched ?? first, resolution),
-    };
-  }
   async function isActive(
     assignment: WorkHubDelegationAssignedMessage,
     observedLatest?: WorkHubDelegationAssignedMessage,
@@ -141,7 +128,8 @@ export function createWorkHubResultRuntime(options: {
         return false;
       // Retirement intent takes precedence even before its final receipt exists.
       if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
-      if ((await readStopProjection(assignment.delegationId))?.retires) return false;
+      if ((await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))?.retires)
+        return false;
       return true;
     } catch (error) {
       if (isSessionNotFoundError(error)) return false;
@@ -368,7 +356,7 @@ export function createWorkHubResultRuntime(options: {
       createdAt: assignment.ts,
       status: 'queued',
     };
-    const stopped = await readStopProjection(assignment.delegationId);
+    const stopped = await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId);
     if (stopped?.retires)
       return { task: { ...task, status: stopped.resolution ? 'stopped' : 'stopping' } };
     const disposition = await messages.readMessageExecutionDispositionAdmitted(

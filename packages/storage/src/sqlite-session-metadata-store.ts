@@ -2934,9 +2934,20 @@ export class SqliteSessionMetadataStore {
         ) {
           continue;
         }
+        const retirement = this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `whzs_${terminalSuffix}`,
+        );
         const stopResolution =
-          this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whzt_${terminalSuffix}`) ??
-          this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whz_${terminalSuffix}`);
+          retirement?.type === 'workhub_coordination' &&
+          retirement.kind === 'delegation_stop_resolved' &&
+          retirement.outcome !== 'not_owned'
+            ? retirement
+            : (this.readMessageByIdSync(
+                WORKHUB_COORDINATION_SESSION_ID,
+                `whzt_${terminalSuffix}`,
+              ) ??
+              this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whz_${terminalSuffix}`));
         if (
           !includeStopped &&
           stopResolution?.type === 'workhub_coordination' &&
