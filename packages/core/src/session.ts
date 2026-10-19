@@ -1343,6 +1343,8 @@ export interface WorkHubDelegationStopResolvedMessage {
   targetTurnId?: string;
   /** Task-scoped non-ownership may have no execution Turn to identify. */
   taskStop?: true;
+  /** A terminal execution fragment still held this logical dependency wait. */
+  cancelledWaitRequestId?: string;
 }
 
 /**
@@ -1712,7 +1714,7 @@ const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
       'targetSessionId',
       'outcome',
     ],
-    ['targetTurnId', 'taskStop'],
+    ['targetTurnId', 'taskStop', 'cancelledWaitRequestId'],
   );
 const WORKHUB_DELEGATION_CREATE_SHAPE = defineObjectShape<WorkHubDelegationCreateSpec>()(
   ['title', 'workspace'],
@@ -1959,6 +1961,13 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       typeof message.targetSessionId === 'string' &&
       message.targetSessionId.length > 0 &&
       (message.taskStop === undefined || message.taskStop === true) &&
+      (message.cancelledWaitRequestId === undefined ||
+        (message.taskStop === true &&
+          message.outcome === 'already_terminal' &&
+          typeof message.targetTurnId === 'string' &&
+          message.targetTurnId.length > 0 &&
+          typeof message.cancelledWaitRequestId === 'string' &&
+          /^[A-Za-z0-9_-]{1,128}$/u.test(message.cancelledWaitRequestId))) &&
       isWorkHubDelegationStopResolution(
         message.outcome,
         message.targetTurnId,

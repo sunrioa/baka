@@ -37,6 +37,7 @@ export interface WorkHubTaskStopTargetResult {
   readonly targetSessionId: string;
   readonly outcome: WorkHubDelegationStopOutcome | 'recovering';
   readonly targetTurnId?: string;
+  readonly cancelledWaitRequestId?: string;
 }
 export type WorkHubTaskStopResult =
   | { readonly actionId: string; readonly kind: 'cancelled'; readonly taskIds: readonly string[] }
@@ -66,7 +67,7 @@ function targetResult(value: unknown): WorkHubTaskStopTargetResult {
       'targetSessionId',
       'outcome',
     ],
-    ['targetTurnId'],
+    ['targetTurnId', 'cancelledWaitRequestId'],
   );
   const outcome = item.outcome;
   if (
@@ -86,6 +87,15 @@ function targetResult(value: unknown): WorkHubTaskStopTargetResult {
     (outcome === 'cancelled_pending' && targetTurnId !== undefined)
   )
     throw invalidProtocolFrame('Task stop outcome changed its execution scope');
+  const cancelledWaitRequestId =
+    item.cancelledWaitRequestId === undefined
+      ? undefined
+      : requireEntityId(item.cancelledWaitRequestId, 'Cancelled WorkHub wait');
+  if (
+    cancelledWaitRequestId !== undefined &&
+    (outcome !== 'already_terminal' || targetTurnId === undefined)
+  )
+    throw invalidProtocolFrame('Only an ended execution fragment can cancel its pending wait');
   return {
     workId: requireEntityId(item.workId, 'Stopped work'),
     generationId: requireEntityId(item.generationId, 'Stopped generation'),
@@ -94,6 +104,7 @@ function targetResult(value: unknown): WorkHubTaskStopTargetResult {
     targetSessionId: requireEntityId(item.targetSessionId, 'Stopped Session'),
     outcome,
     ...(targetTurnId === undefined ? {} : { targetTurnId }),
+    ...(cancelledWaitRequestId === undefined ? {} : { cancelledWaitRequestId }),
   };
 }
 

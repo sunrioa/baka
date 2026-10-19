@@ -247,8 +247,8 @@ test('retained execution contract cannot read or assign after its root lease is 
 
 for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
   for (const stopState of (mode === 'continuation'
-    ? ['none', 'modern_noop', 'modern_retired']
-    : ['none', 'modern_noop']) as readonly string[])
+    ? ['none', 'modern_noop', 'modern_retired', 'modern_pending']
+    : ['none', 'modern_noop', 'modern_pending']) as readonly string[])
     test(`leased task input ${mode} is atomic, source-bound and replayable without changing FIFO or defaults (${stopState})`, async () => {
       await withComposition(async (storage, root, owner) => {
         const store = storage.execution.sessionStore;
@@ -325,6 +325,28 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
             targetTurnId: source.targetTurnId,
           };
           await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [q, r]);
+          if (stopState === 'modern_pending') {
+            const later = {
+              ...q,
+              actionId: 'later-stop',
+              ts: 12,
+              id:
+                'whq_' +
+                createHash('sha256')
+                  .update(JSON.stringify([source.delegationId, 'later-stop']))
+                  .digest('hex')
+                  .slice(0, 48),
+            };
+            await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [later]);
+            assert.equal(
+              (await store.readWorkHubStopRequest(source.delegationId))?.actionId,
+              q.actionId,
+            );
+            assert.equal(
+              (await store.readWorkHubStopRequest(source.delegationId, undefined, true))?.actionId,
+              later.actionId,
+            );
+          }
         }
         const independent = assignmentRequest(
           'independent-c',
@@ -406,6 +428,12 @@ for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
                 ...(mode === 'queued_supplement' ? { expectedAdmission: original.admission } : {}),
               });
         const pendingBefore = await store.listMessageAdmissions(target.id);
+        if (stopState === 'modern_pending') {
+          await assert.rejects(commit(), /being retired/);
+          assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
+          assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
+          return;
+        }
         for (const invalid of [
           { ...input, generationId: 'retired-generation' },
           { ...input, sourceDelegationId: 'foreign-delegation' },

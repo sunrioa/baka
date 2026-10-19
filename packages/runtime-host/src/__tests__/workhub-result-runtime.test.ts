@@ -165,7 +165,14 @@ test('result notifications include the latest delivered user correction from the
   );
 });
 
-for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'delivered'] as const)
+for (const scenario of [
+  'modern',
+  'legacy',
+  'mixed-modern',
+  'mixed-legacy',
+  'delivered',
+  'later-pending',
+] as const)
   test(
     'stop projection uses the matching request and preserves terminal no-op results (' +
       scenario +
@@ -195,10 +202,15 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
         ...(modern ? { taskStop: true, workId: 'action', executionBinding: 'root-binding' } : {}),
       });
       const modern =
-        scenario === 'modern' || scenario === 'mixed-modern' || scenario === 'delivered';
+        scenario === 'modern' ||
+        scenario === 'mixed-modern' ||
+        scenario === 'delivered' ||
+        scenario === 'later-pending';
+      const pending = scenario === 'later-pending';
       const matched = request('matched-stop', modern);
       const mixed = scenario.startsWith('mixed-');
-      const primary = mixed ? request('earlier-stop', !modern) : matched;
+      const primary = mixed || pending ? request('earlier-stop', pending || !modern) : matched;
+      const observed = pending ? primary : matched;
       const resolution: import('@maka/core/session').WorkHubDelegationStopResolvedMessage = {
         type: 'workhub_coordination',
         kind: 'delegation_stop_resolved',
@@ -207,8 +219,8 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
         turnId: 'coordinator-turn',
         coordinationTurnId: 'coordinator-turn',
         ts: 2,
-        actionId: matched.actionId,
-        actionFingerprint: matched.actionFingerprint,
+        actionId: observed.actionId,
+        actionFingerprint: observed.actionFingerprint,
         stopsActionId: 'action',
         stopsDelegationId: 'delegation',
         targetSessionId: 'target',
@@ -216,14 +228,17 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy', 'del
         outcome: scenario === 'delivered' ? 'stop_delivered' : 'already_terminal',
       };
       if (scenario === 'delivered') f.setStatus('cancelled');
-      f.setStopRecords(primary, resolution, mixed ? matched : undefined);
+      f.setStopRecords(primary, resolution, mixed || pending ? matched : undefined);
       const result = await f.handlers['workhub.tasks.read'](
         { actionId: 'action', delegationId: 'delegation' },
         {} as never,
       );
       assert.ok(result.ok);
-      const noop = modern && scenario !== 'delivered';
-      assert.equal(result.result.task.status, noop ? 'pending_acceptance' : 'stopped');
+      const noop = modern && scenario !== 'delivered' && !pending;
+      assert.equal(
+        result.result.task.status,
+        pending ? 'stopping' : noop ? 'pending_acceptance' : 'stopped',
+      );
       assert.equal(result.result.delivery !== undefined, noop);
       await f.reconcile();
       assert.equal(f.notifications.length, noop ? 1 : 0);
@@ -320,12 +335,15 @@ function fixture(childRequest = false) {
         readHeaderSnapshot: async () => ({ id: 'target', name: 'Release', isArchived: false }),
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async () => undefined,
-        readWorkHubStopRequest: async (_delegationId: string, actionId?: string) =>
-          actionId && secondaryStopRequest?.actionId === actionId
+        readWorkHubStopRequest: async (_delegationId: string, actionId?: string, latest?: true) =>
+          (latest && secondaryStopRequest) ||
+          (actionId && secondaryStopRequest?.actionId === actionId)
             ? secondaryStopRequest
             : (stopRequest ?? (stopped ? {} : undefined)),
-        readWorkHubStopResolution: async () =>
-          stopResolution ?? (stopResolved ? { outcome: 'stop_delivered' } : undefined),
+        readWorkHubStopResolution: async (_id: string, actionId?: string) =>
+          actionId && stopResolution?.actionId !== actionId
+            ? undefined
+            : (stopResolution ?? (stopResolved ? { outcome: 'stop_delivered' } : undefined)),
         listPendingSandboxBoundaryRequests: async () => [],
       },
       interactionStore: {

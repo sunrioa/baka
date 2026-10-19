@@ -555,22 +555,10 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async readWorkHubStopRequest(
     delegationId: string,
     actionId?: string,
+    latest?: true,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined> {
-    const first = await this.readWorkHubCoordinationMessage(
-      `whq_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      actionId &&
-      first?.type === 'workhub_coordination' &&
-      first.kind === 'delegation_stop_requested' &&
-      first.actionId !== actionId
-        ? await this.readWorkHubCoordinationMessage(
-            `whq_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-          )
-        : first;
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_requested'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopRequest(delegationId, actionId, latest);
   }
 
   hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {

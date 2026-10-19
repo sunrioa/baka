@@ -2266,7 +2266,36 @@ export class SqliteSessionMetadataStore {
   private readWorkHubStopRequestSync(
     delegationId: string,
     actionId?: string,
+    latest?: true,
   ): WorkHubDelegationStopRequestedMessage | undefined {
+    if (latest) {
+      if (actionId !== undefined) throw new Error('Latest Stop lookup cannot select an action');
+      // Canonical transcript order, not model text timestamps. Filter inline
+      // records in SQL, but also decode chunked legacy candidates.
+      const rows = this.db
+        .prepare(`SELECT message.sequence, message.record_json,
+        payload.record_bytes, payload.sha256 FROM session_messages AS message
+        LEFT JOIN session_message_payloads AS payload ON payload.session_id=message.session_id
+          AND payload.sequence=message.sequence
+        WHERE message.session_id=? AND message.message_type='workhub_coordination'
+          AND message.message_id GLOB 'whq_*' AND length(message.message_id)=52
+          AND (json_extract(message.record_json, '$.stopsDelegationId')=? OR payload.record_bytes IS NOT NULL)
+        ORDER BY message.sequence DESC`)
+        .iterate(
+          WORKHUB_COORDINATION_SESSION_ID,
+          delegationId,
+        ) as Iterable<StoredSessionMessagePayloadRow>;
+      for (const row of rows) {
+        const value = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+        if (
+          value.type === 'workhub_coordination' &&
+          value.kind === 'delegation_stop_requested' &&
+          value.stopsDelegationId === delegationId
+        )
+          return value;
+      }
+      return undefined;
+    }
     const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
     const first = this.readMessageByIdSync(
       WORKHUB_COORDINATION_SESSION_ID,
@@ -2284,6 +2313,17 @@ export class SqliteSessionMetadataStore {
       (!actionId || value.actionId === actionId)
       ? value
       : undefined;
+  }
+
+  async readWorkHubStopRequest(
+    delegationId: string,
+    actionId?: string,
+    latest?: true,
+  ): Promise<WorkHubDelegationStopRequestedMessage | undefined> {
+    this.assertOpen();
+    return this.readTransaction(() =>
+      this.readWorkHubStopRequestSync(delegationId, actionId, latest),
+    );
   }
 
   private readWorkHubStopResolutionSync(
@@ -2337,6 +2377,13 @@ export class SqliteSessionMetadataStore {
 
   private readWorkHubStopProjectionSync(delegationId: string) {
     const request = this.readWorkHubStopRequestSync(delegationId);
+    const latest = request && this.readWorkHubStopRequestSync(delegationId, undefined, true);
+    const ownResolution =
+      latest &&
+      (this.readWorkHubStopResolutionSync(delegationId, latest.actionId) ??
+        this.readWorkHubStopResolutionSync(delegationId));
+    if (latest && (!ownResolution || ownResolution.actionId !== latest.actionId))
+      return { request: latest, resolution: undefined, retires: true };
     const resolution = this.readWorkHubStopResolutionSync(delegationId);
     const matched = resolution
       ? this.readWorkHubStopRequestSync(delegationId, resolution.actionId)

@@ -118,6 +118,18 @@ test('a modern terminal Stop observation does not block legacy direct correction
   assert.equal(f.continuations, 0);
 });
 
+test('a later pending Stop blocks both native and legacy input despite an earlier terminal no-op', async () => {
+  for (const request of [input, modernInput]) {
+    const f = fixture();
+    f.state = 'modern_pending';
+    const result = await f.handlers['workhub.tasks.send'](request, context);
+    assert.ok(!result.ok && result.error.code === 'operation_conflict', JSON.stringify(result));
+    assert.equal(f.commits, 0);
+    assert.equal(f.continuations, 0);
+    assert.equal(f.hydrations, 0);
+  }
+});
+
 test('a saved legacy continuation retains its pre-upgrade six-field action fingerprint', async () => {
   const f = fixture();
   f.state = 'ended';
@@ -431,14 +443,18 @@ function fixture() {
         readWorkHubReplacement: async () => (f.state === 'replacement' ? {} : undefined),
         readWorkHubReplacementAbort: async () => (f.state === 'aborted' ? {} : undefined),
         readWorkHubSupersession: async () => (f.state === 'superseded' ? {} : undefined),
-        readWorkHubStopRequest: async () =>
+        readWorkHubStopRequest: async (_id: string, _actionId?: string, latest?: true) =>
           f.state === 'stopped'
             ? {}
-            : f.state === 'modern_noop'
-              ? { actionId: 'noop', stopsDelegationId: 'delegation', taskStop: true }
+            : ['modern_noop', 'modern_pending'].includes(f.state)
+              ? {
+                  actionId: f.state === 'modern_pending' && latest ? 'later-pending' : 'noop',
+                  stopsDelegationId: 'delegation',
+                  taskStop: true,
+                }
               : undefined,
-        readWorkHubStopResolution: async () =>
-          f.state === 'modern_noop'
+        readWorkHubStopResolution: async (_id: string, actionId?: string) =>
+          ['modern_noop', 'modern_pending'].includes(f.state) && actionId !== 'later-pending'
             ? { actionId: 'noop', stopsDelegationId: 'delegation', outcome: 'already_terminal' }
             : undefined,
         readHeaderSnapshot: async () => ({

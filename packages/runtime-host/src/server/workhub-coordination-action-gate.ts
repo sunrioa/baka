@@ -222,6 +222,7 @@ export interface WorkHubDelegationResumeInput {
 export interface WorkHubRetirementResult {
   readonly outcome: WorkHubDelegationStopOutcome | 'recovering';
   readonly targetTurnId?: string;
+  readonly cancelledWaitRequestId?: string;
 }
 
 export interface WorkHubDelegationAssignmentInput {
@@ -279,6 +280,7 @@ export interface WorkHubDelegationStopResolutionInput {
   readonly request: WorkHubDelegationStopRequestedMessage;
   readonly outcome: WorkHubDelegationStopOutcome;
   readonly targetTurnId?: string;
+  readonly cancelledWaitRequestId?: string;
 }
 
 export type WorkHubActionEffectFailureCode =

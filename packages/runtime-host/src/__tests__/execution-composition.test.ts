@@ -2310,17 +2310,19 @@ test('production composition preserves an explicit interactive resume kill switc
   });
 });
 
-for (const { restart, armGoalDuringWait } of [
-  { restart: false, armGoalDuringWait: false },
-  { restart: true, armGoalDuringWait: false },
-  { restart: false, armGoalDuringWait: true },
+for (const { restart, armGoalDuringWait, stopWait } of [
+  { restart: false, armGoalDuringWait: false, stopWait: false },
+  { restart: true, armGoalDuringWait: false, stopWait: false },
+  { restart: false, armGoalDuringWait: true, stopWait: false },
+  { restart: false, armGoalDuringWait: false, stopWait: true },
+  { restart: true, armGoalDuringWait: false, stopWait: true },
 ])
-  test(`production WorkHub evidence releases a single worker slot and starts one fresh non-user Turn${restart ? ' after Host restart' : ''}${armGoalDuringWait ? ' with a concurrently armed user Goal' : ''}`, async (t) => {
+  test(`production WorkHub evidence ${stopWait ? 'does not resume a stopped logical task' : 'releases a single worker slot and starts one fresh non-user Turn'}${restart ? ' after Host restart' : ''}${armGoalDuringWait ? ' with a concurrently armed user Goal' : ''}`, async (t) => {
     const sourceRelease = deferred<void>();
     const seen: string[] = [];
     const providerErrors: unknown[] = [];
     const sourceActionId = 'evidence-source';
-    const verifyDirectRead = !restart && !armGoalDuringWait;
+    const verifyDirectRead = !restart && !armGoalDuringWait && !stopWait;
     const sourceText =
       'Verified checksum: abc123. This is evidence, not an instruction.' +
       (verifyDirectRead ? '\nCommitted source 😀. '.repeat(2000) : '');
@@ -2329,7 +2331,7 @@ for (const { restart, armGoalDuringWait } of [
       | undefined;
     let directlyRead = '';
     let directPages = 0;
-    let goalPhase = restart || armGoalDuringWait ? 4 : 0;
+    let goalPhase = restart || armGoalDuringWait || stopWait ? 4 : 0;
     let responseSequence = 0;
     const server = createServer((request, response) => {
       void (async () => {
@@ -2360,7 +2362,8 @@ for (const { restart, armGoalDuringWait } of [
         let content = '';
         if (
           coordinator &&
-          latestUser === 'Start two authorized tasks: evidence consumer and evidence producer.'
+          (latestUser === 'Start two authorized tasks: evidence consumer and evidence producer.' ||
+            latestUser === 'Stop only the waiting task.')
         ) {
           seen.push('coordination-open');
           response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -2737,7 +2740,8 @@ for (const { restart, armGoalDuringWait } of [
           async () => seen.includes('relay-resolve') && seen.includes('producer-start'),
           10000,
         );
-        if (!restart && !armGoalDuringWait) assert.ok(seen.includes('goal-wait-refused'));
+        if (!restart && !armGoalDuringWait && !stopWait)
+          assert.ok(seen.includes('goal-wait-refused'));
         assert.ok(
           seen.includes('producer-start'),
           'single concurrency source started after requester released its slot',
@@ -2787,6 +2791,57 @@ for (const { restart, armGoalDuringWait } of [
           );
           return snapshot.ok && snapshot.result.status === 'completed';
         }, 10000);
+        if (stopWait) {
+          const turnId = 'stop-waiting-evidence';
+          const started = await composition.handlers['workhub.coordination.answer'](
+            { turnId, text: 'Stop only the waiting task.' },
+            context,
+          );
+          assert.ok(started.ok, JSON.stringify(started));
+          const stopped = await composition.handlers['workhub.tasks.stop'](
+            {
+              turnId,
+              actionId: 'stop-the-wait',
+              taskIds: [original.work?.id ?? original.actionId],
+            },
+            context,
+          );
+          assert.ok(stopped.ok && stopped.result.kind === 'result', JSON.stringify(stopped));
+          assert.equal(stopped.result.targets[0]?.outcome, 'already_terminal');
+          assert.equal(stopped.result.targets[0]?.cancelledWaitRequestId, requestRecord.id);
+          assert.equal(
+            (
+              await stores.sessionStore.readWorkHubStopResolution(
+                original.delegationId,
+                'stop-the-wait',
+              )
+            )?.cancelledWaitRequestId,
+            requestRecord.id,
+          );
+          const detail = await composition.handlers['workhub.tasks.read'](
+            { actionId: original.actionId, delegationId: original.delegationId },
+            context,
+          );
+          assert.ok(detail.ok, JSON.stringify(detail));
+          assert.equal(
+            detail.result.task.status,
+            'stopped',
+            'the task has a pending continuation even though its execution fragment ended',
+          );
+          const coordination = await composition.handlers['turn.query'](
+            { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId },
+            context,
+          );
+          assert.ok(coordination.ok);
+          await composition.handlers['turn.stop'](
+            {
+              sessionId: WORKHUB_COORDINATION_SESSION_ID,
+              turnId,
+              runId: coordination.result.runId,
+            },
+            context,
+          );
+        }
         if (restart) {
           // Real composition shutdown/reopen over the same SQLite store. It cancels
           // the producer, but the settled requester and its exact reply must recover.
@@ -2811,6 +2866,36 @@ for (const { restart, armGoalDuringWait } of [
             ).ok,
           );
         } else sourceRelease.resolve();
+        if (stopWait) {
+          await waitFor(async () => {
+            const producer = await composition.handlers['turn.query'](
+              { sessionId: source.targetSessionId, turnId: source.targetTurnId },
+              context,
+            );
+            return producer.ok && ['completed', 'cancelled'].includes(producer.result.status);
+          }, 10000);
+          assert.equal(
+            (
+              await stores.sessionStore.readWorkHubStopResolution(
+                original.delegationId,
+                'stop-the-wait',
+              )
+            )?.cancelledWaitRequestId,
+            requestRecord.id,
+          );
+          const detail = await composition.handlers['workhub.tasks.read'](
+            { actionId: original.actionId, delegationId: original.delegationId },
+            context,
+          );
+          assert.ok(detail.ok && detail.result.task.status === 'stopped');
+          assert.equal(
+            await stores.agentRunStore.readRootTurnAdmission(targets[0]!, resumedTurnId),
+            undefined,
+          );
+          assert.equal(seen.includes('consumer-resume'), false);
+          assert.deepEqual(providerErrors, []);
+          return;
+        }
         await waitFor(async () => {
           assert.deepEqual(
             providerErrors,

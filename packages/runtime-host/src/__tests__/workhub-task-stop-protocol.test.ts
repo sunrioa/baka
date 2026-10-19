@@ -74,6 +74,11 @@ test('stop outcomes distinguish pending recovery, cancellation and exact executi
   assert.deepEqual(spec.decodeOutput(cancelled), cancelled);
   const recovering = { ...result, targets: [{ ...target, outcome: 'recovering' }] };
   assert.deepEqual(spec.decodeOutput(recovering), recovering);
+  const cancelledWait = {
+    ...result,
+    targets: [{ ...target, cancelledWaitRequestId: 'waiting-request' }],
+  };
+  assert.deepEqual(spec.decodeOutput(cancelledWait), cancelledWait);
   for (const invalid of [
     { ...result, kind: 'all_stopped' },
     { ...result, targets: [] },
@@ -83,6 +88,12 @@ test('stop outcomes distinguish pending recovery, cancellation and exact executi
     { ...result, targets: [{ ...target, outcome: 'stop_delivered', targetTurnId: undefined }] },
     { ...result, targets: [{ ...target, outcome: 'cancelled_pending' }] },
     { ...result, targets: [{ ...target, confirmed: true }] },
+    { ...cancelledWait, targets: [{ ...cancelledWait.targets[0], targetTurnId: undefined }] },
+    { ...cancelledWait, targets: [{ ...cancelledWait.targets[0], outcome: 'stop_delivered' }] },
+    {
+      ...cancelledWait,
+      targets: [{ ...cancelledWait.targets[0], cancelledWaitRequestId: '../foreign' }],
+    },
     { ...cancelled, targets: [target] },
   ])
     assert.throws(() => spec.decodeOutput(invalid));

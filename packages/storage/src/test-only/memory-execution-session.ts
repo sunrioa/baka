@@ -383,7 +383,21 @@ function hubMessage(s: MemoryState, id: string): StoredMessage | undefined {
     .get(HUB)
     ?.find((m) => m.id === id);
 }
-function stopRequest(s: MemoryState, id: string, actionId?: string) {
+function stopRequest(s: MemoryState, id: string, actionId?: string, latest?: true) {
+  if (latest) {
+    if (actionId !== undefined) throw new Error('Latest Stop lookup cannot select an action');
+    const value = [...(messages(s).get(HUB) ?? [])]
+      .reverse()
+      .find(
+        (m) =>
+          m.type === 'workhub_coordination' &&
+          m.kind === 'delegation_stop_requested' &&
+          m.stopsDelegationId === id,
+      );
+    return value?.type === 'workhub_coordination' && value.kind === 'delegation_stop_requested'
+      ? value
+      : undefined;
+  }
   const scoped = actionId
     ? hubMessage(s, 'whq_' + suffix(JSON.stringify([id, actionId])))
     : undefined;
@@ -423,8 +437,12 @@ function stopResolution(
   return first?.taskStop === true ? stopResolution(s, id, first.actionId) : undefined;
 }
 function stopProjection(s: MemoryState, id: string) {
-  const request = stopRequest(s, id),
-    resolution = stopResolution(s, id);
+  const request = stopRequest(s, id);
+  const latest = request && stopRequest(s, id, undefined, true);
+  const ownResolution = latest && (stopResolution(s, id, latest.actionId) ?? stopResolution(s, id));
+  if (latest && (!ownResolution || ownResolution.actionId !== latest.actionId))
+    return { request: latest, resolution: undefined, retires: true };
+  const resolution = stopResolution(s, id);
   const matched = resolution ? stopRequest(s, id, resolution.actionId) : request;
   return {
     request,
@@ -1435,7 +1453,8 @@ export function createMemorySessionStore(
           ? m
           : undefined;
       }),
-    readWorkHubStopRequest: async (id, actionId) => read((s) => stopRequest(s, id, actionId)),
+    readWorkHubStopRequest: async (id, actionId, latest) =>
+      read((s) => stopRequest(s, id, actionId, latest)),
     hasOtherWorkHubStopTarget: async (turnId, workId) =>
       read((s) =>
         (messages(s).get(HUB) ?? []).some(

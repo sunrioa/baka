@@ -486,6 +486,9 @@ export function createWorkHubTaskStopRuntime(options: {
             request,
             outcome: result.outcome,
             ...(result.targetTurnId ? { targetTurnId: result.targetTurnId } : {}),
+            ...(result.cancelledWaitRequestId
+              ? { cancelledWaitRequestId: result.cancelledWaitRequestId }
+              : {}),
           });
         else
           results.set(item.target.workId, {
@@ -499,6 +502,9 @@ export function createWorkHubTaskStopRuntime(options: {
           ...scope(item.target),
           outcome: resolved.outcome,
           ...(resolved.targetTurnId ? { targetTurnId: resolved.targetTurnId } : {}),
+          ...(resolved.cancelledWaitRequestId
+            ? { cancelledWaitRequestId: resolved.cancelledWaitRequestId }
+            : {}),
         });
     }
     return {

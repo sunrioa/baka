@@ -721,6 +721,9 @@ export class HostWorkHubCoordinationCoordinator {
           ? { taskStop: true as const }
           : {}),
         ...(input.targetTurnId ? { targetTurnId: input.targetTurnId } : {}),
+        ...(input.cancelledWaitRequestId
+          ? { cancelledWaitRequestId: input.cancelledWaitRequestId }
+          : {}),
       }),
       additionalMessages: async (resolved) => {
         const primary = await this.#stores.readWorkHubStopResolution(request.stopsDelegationId);

@@ -2430,6 +2430,9 @@ export async function createExecutionRuntimeHostComposition(
       const current = workHubEvidence
         ? await workHubEvidence.taskExecution(source, original)
         : await coordinator.readLatestRootTurnLineage(original);
+      // taskExecution hides inactive waits during a pending Stop. The immutable
+      // request remains readable: a completed fragment is not a completed task.
+      const waiting = await workHubEvidence?.waitingObservation(source, current);
       return {
         binding: JSON.stringify([
           source.actionId,
@@ -2441,6 +2444,7 @@ export async function createExecutionRuntimeHostComposition(
         ]),
         execution: { sessionId: current.sessionId, turnId: current.turnId, runId: current.runId },
         initialExecution: original,
+        ...(waiting ? { pendingContinuationRequestId: waiting.eventKey } : {}),
       };
     };
     const observeWorkHubContext = createWorkHubContextObserver({
@@ -3884,7 +3888,7 @@ export async function retireWorkHubDelegation(
     authorized = original;
   }
   if (!authorized) return { outcome: 'not_owned' };
-  return stopOwnedWorkHubRoot(
+  const result = await stopOwnedWorkHubRoot(
     deps.taskStop
       ? {
           readRootState: (id) => deps.coordinator.readRootState(id),
@@ -3895,6 +3899,15 @@ export async function retireWorkHubDelegation(
     authorized,
     retirement.cancellationClaimId,
   );
+  if (deps.taskStop && result.outcome === 'already_terminal') {
+    const target = await deps.readStopTarget(assignment);
+    if (
+      target.pendingContinuationRequestId &&
+      workHubStopBindingMatches(assignment, retirement.executionBinding!, target)
+    )
+      return { ...result, cancelledWaitRequestId: target.pendingContinuationRequestId };
+  }
+  return result;
 }
 
 /**

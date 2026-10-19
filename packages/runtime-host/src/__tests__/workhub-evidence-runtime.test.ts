@@ -150,8 +150,8 @@ function fixture() {
           assignments.filter((a) => ids.includes(a.targetSessionId) && active.has(a.actionId)),
         readWorkHubReplacement: async (id: string) => (replaced.has(id) ? {} : undefined),
         readWorkHubSupersession: async () => undefined,
-        readWorkHubStopRequest: async (id: string, actionId?: string) =>
-          [...stopRequests.values()].find(
+        readWorkHubStopRequest: async (id: string, actionId?: string, latest?: true) =>
+          (latest ? [...stopRequests.values()].reverse() : [...stopRequests.values()]).find(
             (q) => q.stopsDelegationId === id && (!actionId || q.actionId === actionId),
           ) ?? (stopped.has(id) ? {} : undefined),
         readWorkHubStopResolution: async (id: string, actionId?: string) =>

@@ -129,13 +129,14 @@ export function workHubStopRetiresDelegation(
   >,
   resolution?: Pick<
     WorkHubDelegationStopResolvedMessage,
-    'actionId' | 'stopsDelegationId' | 'outcome'
+    'actionId' | 'stopsDelegationId' | 'outcome' | 'cancelledWaitRequestId'
   >,
 ): boolean {
   if (resolution?.outcome === 'not_owned') return false;
   return !(
     request.taskStop === true &&
     resolution?.outcome === 'already_terminal' &&
+    resolution.cancelledWaitRequestId === undefined &&
     resolution.actionId === request.actionId &&
     resolution.stopsDelegationId === request.stopsDelegationId
   );

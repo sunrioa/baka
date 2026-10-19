@@ -25,8 +25,14 @@ export async function readWorkHubStopProjection(
   sessions: Pick<ExecutionSessionWriter, 'readWorkHubStopRequest' | 'readWorkHubStopResolution'>,
   delegationId: string,
 ) {
-  const first = await sessions.readWorkHubStopRequest(delegationId);
-  if (!first) return undefined;
+  const original = await sessions.readWorkHubStopRequest(delegationId);
+  if (!original) return undefined;
+  const first = (await sessions.readWorkHubStopRequest(delegationId, undefined, true)) ?? original;
+  const ownResolution =
+    (await sessions.readWorkHubStopResolution(delegationId, first.actionId)) ??
+    (await sessions.readWorkHubStopResolution(delegationId));
+  if (!ownResolution || ownResolution.actionId !== first.actionId)
+    return { resolution: undefined, retires: true };
   const resolution = await sessions.readWorkHubStopResolution(delegationId);
   const matched =
     resolution?.actionId && resolution.actionId !== first.actionId

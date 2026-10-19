@@ -28,6 +28,7 @@ import {
   isWorkHubTaskStopSet,
   isWorkHubTaskStopTarget,
   WORKHUB_TASK_STOP_MAX_TARGETS,
+  workHubStopRetiresDelegation,
 } from '../workhub-task-stop.js';
 
 const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
@@ -404,6 +405,33 @@ describe('WorkHub Coordination stored records', () => {
     assert.throws(() => decodeCanonicalMessage(legacyUnknownTurn));
     assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, taskStop: false }));
     assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, outcome: 'stop_delivered' }));
+    const cancelledWait = {
+      ...resolved,
+      taskStop: true,
+      outcome: 'already_terminal',
+      cancelledWaitRequestId: 'waiting-request',
+    } as const;
+    assert.deepEqual(decodeCanonicalMessage(cancelledWait), cancelledWait);
+    assert.equal(
+      workHubStopRetiresDelegation({ ...requested, taskStop: true }, cancelledWait),
+      true,
+    );
+    assert.equal(
+      workHubStopRetiresDelegation(
+        { ...requested, taskStop: true },
+        { ...cancelledWait, cancelledWaitRequestId: undefined },
+      ),
+      false,
+    );
+    for (const invalid of [
+      { ...cancelledWait, taskStop: undefined },
+      { ...cancelledWait, targetTurnId: undefined },
+      { ...cancelledWait, outcome: 'stop_delivered' },
+      { ...cancelledWait, cancelledWaitRequestId: '' },
+      { ...cancelledWait, cancelledWaitRequestId: '../foreign' },
+      { ...cancelledWait, cancelledWaitRequestId: false },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid));
     const bound = {
       ...requested,
       workId: 'original-action',
