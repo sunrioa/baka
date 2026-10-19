@@ -101,6 +101,7 @@ export * from './workhub-interactions.js';
 export * from './workhub-tasks.js';
 export * from './workhub-task-discovery.js';
 export * from './workhub-task-actions.js';
+export * from './workhub-task-stop.js';
 export * from './websocket-path.js';
 export { INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID } from '../composition-identity.js';
 
@@ -108,7 +109,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 230 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 231 as const;
+// 231: Task Stop binds the server-verified target set and original coordinator origin.
 // 222: WorkHub removes pre-routing decisions and the Jev policy mutation / settings.
 // Legacy policies, credentials, usage and admission records remain readable but inactive.
 // 213: Stable WorkHub work identity, paginated source discovery and work-bound continuation.

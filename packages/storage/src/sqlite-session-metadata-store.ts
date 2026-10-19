@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import { workHubStopRetiresDelegation } from '@maka/core/workhub-task-stop';
 import { SqliteWorkHubTaskIndex, type WorkHubTaskIndexStore } from './sqlite-workhub-task-index.js';
 import {
   workHubPeerQuestionIdentity,
@@ -2942,7 +2943,30 @@ export class SqliteSessionMetadataStore {
           stopResolution.kind === 'delegation_stop_resolved' &&
           stopResolution.outcome !== 'not_owned'
         ) {
-          continue;
+          let retires = true;
+          if (stopResolution.outcome === 'already_terminal') {
+            const first = this.readMessageByIdSync(
+              WORKHUB_COORDINATION_SESSION_ID,
+              `whq_${terminalSuffix}`,
+            );
+            const actionSuffix = createHash('sha256')
+              .update(JSON.stringify([assignment.delegationId, stopResolution.actionId]))
+              .digest('hex')
+              .slice(0, 48);
+            const matched =
+              first?.type === 'workhub_coordination' &&
+              first.kind === 'delegation_stop_requested' &&
+              first.actionId === stopResolution.actionId
+                ? first
+                : this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whq_${actionSuffix}`);
+            if (
+              matched?.type === 'workhub_coordination' &&
+              matched.kind === 'delegation_stop_requested' &&
+              matched.stopsDelegationId === assignment.delegationId
+            )
+              retires = workHubStopRetiresDelegation(matched, stopResolution);
+          }
+          if (retires) continue;
         }
         const workId = assignment.work?.id ?? assignment.actionId;
         if (!generations.has(workId)) {

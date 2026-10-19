@@ -18,6 +18,10 @@
  */
 
 import { defineObjectShape, hasExactShape, isRecord } from './record-schema.js';
+import type {
+  WorkHubDelegationStopRequestedMessage,
+  WorkHubDelegationStopResolvedMessage,
+} from './session.js';
 
 export const WORKHUB_TASK_STOP_MAX_TARGETS = 8;
 
@@ -114,5 +118,25 @@ export function isWorkHubTaskStopFields(value: Record<string, unknown>): boolean
     first.targetSessionId === value.targetSessionId &&
     first.targetMessageId === value.targetMessageId &&
     first.executionBinding === value.executionBinding
+  );
+}
+
+/** Projection policy only, never permission to cancel a Message or stop a Root. */
+export function workHubStopRetiresDelegation(
+  request: Pick<
+    WorkHubDelegationStopRequestedMessage,
+    'actionId' | 'stopsDelegationId' | 'taskStop'
+  >,
+  resolution?: Pick<
+    WorkHubDelegationStopResolvedMessage,
+    'actionId' | 'stopsDelegationId' | 'outcome'
+  >,
+): boolean {
+  if (resolution?.outcome === 'not_owned') return false;
+  return !(
+    request.taskStop === true &&
+    resolution?.outcome === 'already_terminal' &&
+    resolution.actionId === request.actionId &&
+    resolution.stopsDelegationId === request.stopsDelegationId
   );
 }

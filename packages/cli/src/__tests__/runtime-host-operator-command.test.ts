@@ -516,6 +516,7 @@ describe('Runtime Host operator commands', () => {
         'workhub.tasks.continue',
         'workhub.tasks.find',
         'workhub.tasks.start',
+        'workhub.tasks.stop',
       ],
     );
   });

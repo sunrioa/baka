@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { WorkHubTaskStopSet, WorkHubTaskStopTarget } from '@maka/core/workhub-task-stop';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import type {
   WorkHubTaskInputRequest,
@@ -398,6 +399,107 @@ export class HostWorkHubCoordinationCoordinator {
     });
   }
 
+  /** Server-only task snapshots; the caller already owns the complete set's admission. */
+  prepareTaskStop(
+    input: {
+      readonly source: WorkHubDelegationAssignedMessage;
+      readonly target: WorkHubTaskStopTarget;
+      readonly actionId: string;
+      readonly actionFingerprint: `sha256:${string}`;
+      readonly coordinationTurnId: string;
+      readonly userText: string;
+      readonly stopSet?: WorkHubTaskStopSet;
+      /** Only a verified, already-committed anchor permits historical no-op receipts. */
+      readonly replay: boolean;
+    },
+    admission: SessionAdmissionLease,
+  ): Promise<WorkHubDelegationStopRequestedMessage> {
+    const { source, target } = input;
+    let suffix: string;
+    return this.#commitCoordinationFact({
+      admission,
+      admissionSessionIds: [WORKHUB_COORDINATION_SESSION_ID, target.targetSessionId],
+      read: async () => {
+        const first = await this.#stores.readWorkHubStopRequest(source.delegationId);
+        suffix = workHubDestructiveClaimIdentitySuffix(
+          first && first.actionId !== input.actionId
+            ? JSON.stringify([source.delegationId, input.actionId])
+            : source.delegationId,
+        );
+        return this.#stores.readWorkHubStopRequest(source.delegationId, input.actionId);
+      },
+      build: (existing) => ({
+        type: 'workhub_coordination',
+        kind: 'delegation_stop_requested',
+        schemaVersion: WORKHUB_COORDINATION_STOP_SCHEMA_VERSION,
+        id: `whq_${suffix}`,
+        turnId: input.coordinationTurnId,
+        ts: existing?.ts ?? Date.now(),
+        actionId: input.actionId,
+        actionFingerprint: input.actionFingerprint,
+        coordinationTurnId: input.coordinationTurnId,
+        stopsActionId: target.sourceActionId,
+        stopsDelegationId: target.sourceDelegationId,
+        targetSessionId: target.targetSessionId,
+        targetMessageId: target.targetMessageId,
+        targetSessionName: source.targetSessionName,
+        userText: input.userText,
+        workId: target.workId,
+        executionBinding: target.executionBinding,
+        taskStop: true,
+        ...(input.stopSet ? { stopSet: input.stopSet } : {}),
+      }),
+      beforeAppend: async (lease) => {
+        const canonical = await this.#stores.readWorkHubAssignment(target.sourceActionId);
+        const claim = await this.#stores.readWorkHubActionClaim(input.actionId);
+        if (
+          !canonical ||
+          !isDeepStrictEqual(canonical, source) ||
+          (source.work?.id ?? source.actionId) !== target.workId ||
+          (source.work?.generationId ?? source.actionId) !== target.generationId ||
+          source.actionId !== target.sourceActionId ||
+          source.delegationId !== target.sourceDelegationId ||
+          source.targetSessionId !== target.targetSessionId ||
+          source.targetMessageId !== target.targetMessageId ||
+          claim?.operation !== 'stop' ||
+          claim.actionFingerprint !== input.actionFingerprint ||
+          claim.subject !== source.delegationId
+        )
+          throw new WorkHubActionGateFailure('action_conflict', 'Task stop snapshot changed');
+        if (target.targetSessionId === WORKHUB_COORDINATION_SESSION_ID)
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'The coordinator is not a task target',
+          );
+        if (!input.replay) {
+          const [head, header] = await Promise.all([
+            this.#stores.readLatestWorkHubAssignment(target.workId),
+            this.#stores.readHeaderSnapshot(target.targetSessionId),
+          ]);
+          if (
+            header.isArchived ||
+            !head ||
+            (head.work?.generationId ?? head.actionId) !== target.generationId ||
+            !this.#readStopBinding ||
+            !(this.#isStopBindingCurrent
+              ? await this.#isStopBindingCurrent(source, target.executionBinding, lease)
+              : (await this.#readStopBinding(source, lease)) === target.executionBinding)
+          )
+            throw new WorkHubActionGateFailure(
+              'action_conflict',
+              'Task stop target is no longer current',
+            );
+        }
+      },
+      conflictMessage: 'Task stop action already owns a different snapshot',
+      unknownOutcomeMessage: 'Task stop request outcome is unknown',
+    });
+  }
+
+  resolveTaskStop(input: Parameters<WorkHubActionGateEffects['resolveStop']>[0]) {
+    return this.#resolveStop(input);
+  }
+
   async #prepareStop(
     input: Parameters<WorkHubActionGateEffects['prepareStop']>[0],
   ): Promise<WorkHubDelegationStopRequestedMessage> {
@@ -688,6 +790,7 @@ export class HostWorkHubCoordinationCoordinator {
   }
 
   #commitCoordinationFact<T extends StoredMessage>(options: {
+    readonly admission?: SessionAdmissionLease;
     readonly admissionSessionIds?: readonly string[];
     readonly read: () => Promise<T | undefined>;
     readonly build: (existing: T | undefined, lease: SessionAdmissionLease) => T | Promise<T>;
@@ -696,36 +799,41 @@ export class HostWorkHubCoordinationCoordinator {
     readonly beforeAppend: (lease: SessionAdmissionLease) => Promise<void>;
     readonly unknownOutcomeMessage: string;
   }): Promise<T> {
-    return this.#admission.runMany(
-      options.admissionSessionIds ?? [WORKHUB_COORDINATION_SESSION_ID],
-      async (lease) => {
-        const existing = await options.read();
-        const requested = await options.build(existing, lease);
-        if (existing) {
-          if (!isDeepStrictEqual(existing, requested)) {
-            throw new WorkHubActionGateFailure('action_conflict', options.conflictMessage);
-          }
-          return existing;
+    const sessionIds = options.admissionSessionIds ?? [WORKHUB_COORDINATION_SESSION_ID];
+    const commit = async (lease: SessionAdmissionLease) => {
+      const existing = await options.read();
+      const requested = await options.build(existing, lease);
+      if (existing) {
+        if (!isDeepStrictEqual(existing, requested)) {
+          throw new WorkHubActionGateFailure('action_conflict', options.conflictMessage);
         }
-        await options.beforeAppend(lease);
-        try {
-          await this.#stores.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
-            requested,
-            ...((await options.additionalMessages?.(requested)) ?? []),
-          ]);
-          await this.#continuity.refreshCanonical(WORKHUB_COORDINATION_SESSION_ID, lease);
-          return requested;
-        } catch {
-          const replay = await options.read().catch(() => undefined);
-          if (replay && isDeepStrictEqual(replay, requested)) return replay;
-          this.#requestDrain();
-          throw new WorkHubActionEffectFailure(
-            'commit_outcome_unknown',
-            options.unknownOutcomeMessage,
-          );
-        }
-      },
-    );
+        return existing;
+      }
+      await options.beforeAppend(lease);
+      try {
+        await this.#stores.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
+          requested,
+          ...((await options.additionalMessages?.(requested)) ?? []),
+        ]);
+        await this.#continuity.refreshCanonical(WORKHUB_COORDINATION_SESSION_ID, lease);
+        return requested;
+      } catch {
+        const replay = await options.read().catch(() => undefined);
+        if (replay && isDeepStrictEqual(replay, requested)) return replay;
+        this.#requestDrain();
+        throw new WorkHubActionEffectFailure(
+          'commit_outcome_unknown',
+          options.unknownOutcomeMessage,
+        );
+      }
+    };
+    if (!options.admission) return this.#admission.runMany(sessionIds, commit);
+    const lease = options.admission;
+    return this.#admission.runAdmitted(WORKHUB_COORDINATION_SESSION_ID, lease, async () => {
+      for (const sessionId of sessionIds)
+        await this.#admission.runAdmitted(sessionId, lease, () => undefined);
+      return commit(lease);
+    });
   }
 
   async #works(

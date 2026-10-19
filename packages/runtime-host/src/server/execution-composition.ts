@@ -20,6 +20,7 @@
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubContextObserver } from './workhub-context-observation.js';
 import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
+import { createWorkHubTaskStopRuntime } from './workhub-task-stop-runtime.js';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import { createWorkHubTaskIndexProjection } from './workhub-task-index-projection.js';
 import { createWorkHubTaskDiscoveryRuntime } from './workhub-task-discovery-runtime.js';
@@ -3067,6 +3068,37 @@ export async function createExecutionRuntimeHostComposition(
           `[runtime-host] WorkHub task input failed: ${boundedFailureDiagnostic(error)}`,
         ),
     });
+    const workHubTaskStop = createWorkHubTaskStopRuntime({
+      stores,
+      messages,
+      executions: coordinator,
+      admission: sessionAdmission,
+      evidence: workHubEvidence,
+      coordination: workHubCoordination,
+      readStopTarget,
+      retireTaskStop: (source, request, validate) =>
+        retireWorkHubDelegation(
+          source,
+          {
+            cause: 'direct_stop',
+            cancellationClaimId: request.actionId,
+            executionBinding: request.executionBinding,
+          },
+          {
+            messages,
+            coordinator,
+            readStopTarget,
+            taskStop: {
+              validate,
+              stopRoot: (identity, input) =>
+                coordinator.stopRootPreservingFollowups(identity, input),
+            },
+          },
+        ),
+      requestForm: (input) => interactions.requestForm(input),
+      onError: (error) =>
+        console.error(`[runtime-host] Task stop failed: ${boundedFailureDiagnostic(error)}`),
+    });
     scheduledTasks = new HostScheduledTaskCoordinator({
       store: openedScheduledTaskStore,
       sessions: stores.sessionStore,
@@ -3315,6 +3347,7 @@ export async function createExecutionRuntimeHostComposition(
           workHubCoordination.handlers,
           workHubResults.handlers,
           workHubTaskInput.handlers,
+          workHubTaskStop.handlers,
           workHubTaskDiscovery.handlers,
         ],
         close: [() => workHubTaskIndex?.close()],
@@ -3751,8 +3784,18 @@ export async function retireWorkHubDelegation(
       source: WorkHubDelegationAssignedMessage,
       lease?: SessionAdmissionLease,
     ) => Promise<WorkHubStopTarget>;
+    /** Server-only task Stop scope. No fallback to a Session-wide stop. */
+    readonly taskStop?: {
+      readonly validate: (lease: SessionAdmissionLease) => Promise<boolean>;
+      readonly stopRoot: RootTurnCoordinator['stopRootPreservingFollowups'];
+    };
   },
 ): Promise<WorkHubRetirementResult> {
+  if (
+    deps.taskStop &&
+    (retirement.cause !== 'direct_stop' || retirement.executionBinding === undefined)
+  )
+    throw new Error('Task Stop requires a confirmed execution binding');
   let authorized: WorkHubStopTarget['execution'];
   let disposition: Awaited<ReturnType<HostMessageCoordinator['cancelMessageIfPending']>>;
   try {
@@ -3763,6 +3806,8 @@ export async function retireWorkHubDelegation(
       retirement.executionBinding === undefined
         ? undefined
         : async (lease) => {
+            if (deps.taskStop && !(await deps.taskStop.validate(lease)))
+              throw new WorkHubStopTargetChangedError();
             const target = await deps.readStopTarget(assignment, lease);
             if (!workHubStopBindingMatches(assignment, retirement.executionBinding!, target))
               throw new WorkHubStopTargetChangedError();
@@ -3796,7 +3841,17 @@ export async function retireWorkHubDelegation(
     authorized = original;
   }
   if (!authorized) return { outcome: 'not_owned' };
-  return stopOwnedWorkHubRoot(deps.coordinator, authorized, retirement.cancellationClaimId);
+  return stopOwnedWorkHubRoot(
+    deps.taskStop
+      ? {
+          readRootState: (id) => deps.coordinator.readRootState(id),
+          read: (identity) => deps.coordinator.read(identity),
+          stopRoot: deps.taskStop.stopRoot,
+        }
+      : deps.coordinator,
+    authorized,
+    retirement.cancellationClaimId,
+  );
 }
 
 /**
