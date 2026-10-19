@@ -62,6 +62,7 @@ import {
   type HostMessageRootState,
 } from '../server/message-coordinator.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { retireWorkHubDelegation } from '../server/execution-composition.js';
 
 const ROOT = { sessionId: 'session-1', turnId: 'turn-1', runId: 'run-1' } as const;
 const EMPTY_SKILL_INVOCATION = { loaded: [], failed: [], receipts: [] } as const;
@@ -635,6 +636,81 @@ test('batch cancellation requires the exact Session lease and preserves other qu
     ['batch-unrelated'],
   );
 });
+
+for (const refusal of ['scope', 'binding', 'read-error'] as const)
+  test(`task Stop cancellation preserves its batch lease and queue on ${refusal}`, async () => {
+    const fixture = createFixture();
+    fixture.coordinator.reserveRootTurn(ROOT);
+    await submit(fixture, 'linked-message', 'target task', 'next_turn');
+    await submit(fixture, 'other-message', 'unrelated task', 'next_turn');
+    const source: Parameters<typeof retireWorkHubDelegation>[0] = {
+      type: 'workhub_coordination',
+      schemaVersion: 1,
+      kind: 'delegation_assigned',
+      id: `wha_${'d'.repeat(48)}`,
+      actionId: 'task-source',
+      delegationId: `whd_${'d'.repeat(48)}`,
+      actionFingerprint: `sha256:${'d'.repeat(64)}`,
+      turnId: 'coordination',
+      coordinationTurnId: 'coordination',
+      ts: 1,
+      disposition: 'delegate_existing',
+      targetSessionId: ROOT.sessionId,
+      targetSessionName: 'Target task',
+      targetTurnId: ROOT.turnId,
+      targetMessageId: 'linked-message',
+      userText: 'Target task',
+    };
+    let stops = 0;
+    const unexpectedStop = async () => {
+      stops++;
+      throw new Error('A refused target must not stop any Root');
+    };
+    const outcome = fixture.sessionAdmission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, ROOT.sessionId],
+      async (lease) => {
+        const result = await retireWorkHubDelegation(
+          source,
+          {
+            cancellationClaimId: 'original-stop',
+            cause: 'direct_stop',
+            executionBinding: 'captured-original-root',
+          },
+          {
+            messages: fixture.coordinator,
+            coordinator: {
+              readRootState: () => {
+                throw new Error('A refused target needs no Root observation');
+              },
+              read: async () => {
+                throw new Error('A refused target needs no Root observation');
+              },
+              stopRoot: unexpectedStop,
+            },
+            readStopTarget: async () => {
+              if (refusal === 'read-error') throw new Error('injected target storage failure');
+              return { binding: 'different-execution' };
+            },
+            taskStop: {
+              validate: async () => refusal !== 'scope',
+              stopRoot: unexpectedStop,
+            },
+          },
+          { pendingOnly: true, admission: lease },
+        );
+        // A caller can still record this normal refusal in the same batch.
+        await fixture.sessionAdmission.runAdmitted(ROOT.sessionId, lease, async () => {});
+        return result;
+      },
+    );
+    if (refusal === 'read-error') await assert.rejects(outcome, /injected target storage failure/);
+    else assert.deepEqual(await outcome, { outcome: 'not_owned' });
+    assert.equal(stops, 0);
+    assert.deepEqual(
+      fixture.coordinator.projection(ROOT.sessionId).followup.map((entry) => entry.messageId),
+      ['linked-message', 'other-message'],
+    );
+  });
 
 test('exact pending cancellation removes only the linked Message', async () => {
   const fixture = createFixture();

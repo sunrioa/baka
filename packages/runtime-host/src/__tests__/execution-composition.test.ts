@@ -134,6 +134,7 @@ import { WorkHubExecutionSlots } from '../server/workhub-execution-slots.js';
 import { readLedgerMessages } from './fixtures/ledger-transcript.js';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
+import { HostWorkHubCoordinationCoordinator } from '../server/workhub-coordination-coordinator.js';
 import { clientSubscription } from './fixtures/client-session-subscription.js';
 
 const require = createRequire(import.meta.url);
@@ -824,7 +825,7 @@ for (const scopeCurrent of [true, false])
           cancelMessageIfPending: (sessionId, _id, _claim, validate) =>
             admission.run(sessionId, async (lease) => {
               trace.push('locked');
-              await validate?.(lease);
+              if ((await validate?.(lease)) === false) return { kind: 'not_owned' };
               trace.push('cancel');
               return { kind: 'owned_root', turnId: identity.turnId, runId: identity.runId };
             }),
@@ -933,7 +934,7 @@ for (const scenario of [
         messages: {
           cancelMessageIfPending: async (sessionId, _messageId, _claim, validate) =>
             admission.run(sessionId, async (lease) => {
-              await validate?.(lease);
+              if ((await validate?.(lease)) === false) return { kind: 'not_owned' };
               cancellations++;
               if (scenario === 'changed-after-validation') active = resumed;
               return { kind: 'owned_root', turnId: original.turnId, runId: original.runId };
@@ -1013,7 +1014,7 @@ for (const legacy of [false, true])
           messages: {
             cancelMessageIfPending: async (sessionId, _messageId, _claimId, validate) =>
               admission.run(sessionId, async (lease) => {
-                await validate?.(lease);
+                if ((await validate?.(lease)) === false) return { kind: 'not_owned' };
                 if (phase === 'pending') return { kind: 'cancelled_pending' };
                 return { kind: 'owned_root', turnId: initial.turnId, runId: initial.runId };
               }),
@@ -5531,8 +5532,9 @@ test('WorkHub creates new work through the production assignment composition', a
   });
 });
 
-for (const pendingDuringPlan of [false, true])
-  test(`WorkHub Resume and Stop ${pendingDuringPlan ? 'reject a Stop committed after resume planning' : 'follow logical lineage across repeated physical handoffs'}`, async (t) => {
+for (const scenario of ['normal', 'pending-stop', 'stale-stop'] as const)
+  test(`WorkHub Resume and Stop ${scenario === 'pending-stop' ? 'reject a Stop committed after resume planning' : scenario === 'stale-stop' ? 'settle stale Stop replay after an ordinary resume without stopping its successor' : 'follow logical lineage across repeated physical handoffs'}`, async (t) => {
+    const pendingDuringPlan = scenario === 'pending-stop';
     await withCompositionRoot(async ({ root, owner }) => {
       const connectionId = await configureFakeDefaultTarget(owner);
       let pauseNext = true;
@@ -5776,6 +5778,123 @@ for (const pendingDuringPlan of [false, true])
               ?.latestDelegationActionId,
             'workhub-resume-stop-delegation',
           );
+
+        if (scenario === 'stale-stop') {
+          // Commit the real native request but lose its result write. Ordinary
+          // Session resume remains allowed; replay must settle the old binding,
+          // never stop that successor or poison its enclosing admission lease.
+          const desktop = composition.clientCapabilities!.attachConnection(
+            clientCapabilityConnectionIdentity(context.connectionId),
+            { send: async () => {} },
+          );
+          try {
+            assert.ok(
+              (
+                await composition.handlers['client.capability.replace'](
+                  { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+                  context,
+                )
+              ).ok,
+            );
+            const command = {
+              turnId: 'native-stop-before-manual-resume',
+              actionId: 'stale-native-stop',
+              taskIds: [inputSource.work!.id],
+            };
+            assert.ok(
+              (
+                await composition.handlers['workhub.coordination.answer'](
+                  { turnId: command.turnId, text: 'Stop the original Payments task.' },
+                  context,
+                )
+              ).ok,
+            );
+            t.mock.method(
+              HostWorkHubCoordinationCoordinator.prototype,
+              'resolveTaskStop',
+              async () => {
+                throw new Error('simulated loss before native Stop receipt commit');
+              },
+              { times: 1 },
+            );
+            const interrupted = await composition.handlers['workhub.tasks.stop'](command, context);
+            assert.ok(!interrupted.ok, JSON.stringify(interrupted));
+            if (!interrupted.ok) assert.equal(interrupted.error.code, 'commit_outcome_unknown');
+            assert.ok(
+              await inputStores.sessionStore.readWorkHubStopRequest(
+                inputSource.delegationId,
+                command.actionId,
+              ),
+            );
+            assert.equal(
+              await inputStores.sessionStore.readWorkHubStopResolution(
+                inputSource.delegationId,
+                command.actionId,
+              ),
+              undefined,
+            );
+            const stopped = await composition.handlers['turn.query'](
+              { sessionId: target.id, turnId: original.result.turnId },
+              context,
+            );
+            assert.ok(stopped.ok);
+            const plan = await composition.handlers['turn.resume.query'](
+              { sessionId: target.id, sourceRunId: stopped.result.runId },
+              context,
+            );
+            assert.ok(plan.ok, JSON.stringify(plan));
+            assert.notEqual(plan.result.disposition, 'parked', JSON.stringify(plan));
+            if (plan.result.disposition === 'parked') return;
+            pauseNext = false;
+            const resumed = await composition.handlers['turn.resume.start'](
+              {
+                sessionId: target.id,
+                turnId: 'ordinary-successor-after-stop-request',
+                sourceRunId: plan.result.sourceRunId,
+                sourceRuntimeEventHighWater: plan.result.sourceRuntimeEventHighWater,
+              },
+              context,
+            );
+            assert.ok(resumed.ok, JSON.stringify(resumed));
+            assert.equal(resumed.result.kind, 'started');
+            if (resumed.result.kind !== 'started') return;
+            assert.equal(resumed.result.turn.status, 'running');
+            const before = await inputStores.runtimeEventStore.listSessionInvocations(target.id);
+            const settled = await composition.handlers['workhub.tasks.stop'](command, context);
+            assert.ok(settled.ok, JSON.stringify(settled));
+            assert.equal(settled.result.kind, 'result');
+            if (settled.result.kind === 'result')
+              assert.deepEqual(
+                settled.result.targets.map((row) => row.outcome),
+                ['not_owned'],
+              );
+            assert.equal(
+              (
+                await inputStores.sessionStore.readWorkHubStopResolution(
+                  inputSource.delegationId,
+                  command.actionId,
+                )
+              )?.outcome,
+              'not_owned',
+            );
+            assert.deepEqual(
+              await composition.handlers['workhub.tasks.stop'](command, context),
+              settled,
+            );
+            assert.deepEqual(
+              await inputStores.runtimeEventStore.listSessionInvocations(target.id),
+              before,
+            );
+            const live = await composition.handlers['turn.query'](
+              { sessionId: target.id, turnId: resumed.result.turn.turnId },
+              context,
+            );
+            assert.ok(live.ok && live.result.status === 'running');
+          } finally {
+            await desktop.close();
+          }
+          return;
+        }
 
         pauseNext = !pendingDuringPlan;
         boundary = deferred<void>();

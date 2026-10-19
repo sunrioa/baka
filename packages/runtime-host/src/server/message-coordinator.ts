@@ -245,6 +245,7 @@ type HostMessageResolvedDisposition =
 
 export type HostMessageCancellationDisposition =
   | HostMessageResolvedDisposition
+  | { readonly kind: 'not_owned' }
   | { readonly kind: 'cancelled_pending' };
 
 export type HostMessageExecutionDisposition =
@@ -739,7 +740,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     sessionId: string,
     messageId: string,
     cancellationClaimId: string,
-    validate?: (lease: SessionAdmissionLease) => Promise<void>,
+    validate?: (lease: SessionAdmissionLease) => Promise<void | boolean>,
   ): Promise<HostMessageCancellationDisposition> {
     return this.#sessionAdmission.run(sessionId, (lease) =>
       this.cancelMessageIfPendingAdmitted(
@@ -758,7 +759,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     messageId: string,
     cancellationClaimId: string,
     lease: SessionAdmissionLease,
-    validate?: (lease: SessionAdmissionLease) => Promise<void>,
+    validate?: (lease: SessionAdmissionLease) => Promise<void | boolean>,
   ): Promise<HostMessageCancellationDisposition> {
     return this.#sessionAdmission.runAdmitted(sessionId, lease, async () => {
       const disposition = await this.#resolveMessageExecution(sessionId, messageId);
@@ -774,7 +775,9 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       }
       // Reconcile an already committed cancellation first; validation guards
       // new effects, not this caller's tombstone after a lost response/crash.
-      await validate?.(lease);
+      // Stale scope is a normal refusal, not a failed admitted leaf. Throwing
+      // and catching outside runAdmitted would still poison the batch lease.
+      if ((await validate?.(lease)) === false) return { kind: 'not_owned' };
       if (disposition.kind !== 'pending') return disposition;
 
       const state = this.#sessions.get(sessionId);

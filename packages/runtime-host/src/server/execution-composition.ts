@@ -3785,8 +3785,6 @@ export async function createExecutionRuntimeHostComposition(
   }
 }
 
-class WorkHubStopTargetChangedError extends Error {}
-
 interface WorkHubRetirementDependencies {
   readonly messages: Pick<HostMessageCoordinator, 'cancelMessageIfPending'> &
     Partial<Pick<HostMessageCoordinator, 'cancelMessageIfPendingAdmitted'>>;
@@ -3841,32 +3839,28 @@ export async function retireWorkHubDelegation(
     retirement.executionBinding === undefined
       ? undefined
       : async (lease: SessionAdmissionLease) => {
-          if (deps.taskStop && !(await deps.taskStop.validate(lease)))
-            throw new WorkHubStopTargetChangedError();
+          if (deps.taskStop && !(await deps.taskStop.validate(lease))) return false;
           const target = await deps.readStopTarget(assignment, lease);
           if (!workHubStopBindingMatches(assignment, retirement.executionBinding!, target))
-            throw new WorkHubStopTargetChangedError();
+            return false;
           authorized = target.execution;
+          return true;
         };
-  try {
-    disposition = pending
-      ? await deps.messages.cancelMessageIfPendingAdmitted!(
-          assignment.targetSessionId,
-          assignment.targetMessageId,
-          retirement.cancellationClaimId,
-          pending.admission,
-          validate,
-        )
-      : await deps.messages.cancelMessageIfPending(
-          assignment.targetSessionId,
-          assignment.targetMessageId,
-          retirement.cancellationClaimId,
-          validate,
-        );
-  } catch (error) {
-    if (error instanceof WorkHubStopTargetChangedError) return { outcome: 'not_owned' };
-    throw error;
-  }
+  disposition = pending
+    ? await deps.messages.cancelMessageIfPendingAdmitted!(
+        assignment.targetSessionId,
+        assignment.targetMessageId,
+        retirement.cancellationClaimId,
+        pending.admission,
+        validate,
+      )
+    : await deps.messages.cancelMessageIfPending(
+        assignment.targetSessionId,
+        assignment.targetMessageId,
+        retirement.cancellationClaimId,
+        validate,
+      );
+  if (disposition.kind === 'not_owned') return { outcome: 'not_owned' };
   if (disposition.kind === 'recovering') return { outcome: 'recovering' };
   if (disposition.kind === 'cancelled') return { outcome: 'already_terminal' };
   if (disposition.kind === 'cancelled_pending') return { outcome: 'cancelled_pending' };
