@@ -1434,63 +1434,117 @@ test('WorkHub find reads configured connection pricing through the production co
   });
 });
 
-test('WorkHub find discovers a manual Session imported after its first lookup', async () => {
-  await withCompositionRoot(async ({ root: sourceRoot, owner: sourceOwner }) => {
-    const sourceConnectionId = await configureFakeDefaultTarget(sourceOwner);
-    const source = await createExecutionRuntimeHostComposition(compositionContext(sourceOwner));
-    const context: ConnectionContext = {
-      hostEpoch: 'execution-composition-test',
-      connectionId: 'import-discovery',
-      principal: 'local_os_user',
-      acquireResidency: () => ({ release() {} }),
-    };
-    try {
-      const sourceStores = await openInteractiveExecutionStoresForWrite(sourceOwner.lease);
-      const manual = await sourceStores.sessionStore.create({
-        cwd: sourceRoot,
-        name: 'Imported manual discovery',
-        model: 'fake-model',
-        llmConnectionId: sourceConnectionId,
-        llmConnectionSlug: 'fake',
-        permissionMode: 'ask',
-      });
-      const bundle = join(sourceRoot, 'manual-discovery.maka-session');
-      const exported = await source.handlers['session-bundle.export'](
-        { sessionId: manual.id, destination: bundle },
-        context,
-      );
-      assert.ok(exported.ok, JSON.stringify(exported));
-      await withCompositionRoot(async ({ owner }) => {
-        await configureFakeDefaultTarget(owner);
-        const target = await createExecutionRuntimeHostComposition(compositionContext(owner));
+for (const withChild of [false, true]) {
+  test(
+    withChild
+      ? 'WorkHub find discovers an imported root when its child sorts first'
+      : 'WorkHub find discovers a manual Session imported after its first lookup',
+    async () => {
+      await withCompositionRoot(async ({ root: sourceRoot, owner: sourceOwner }) => {
+        const sourceConnectionId = await configureFakeDefaultTarget(sourceOwner);
+        const source = await createExecutionRuntimeHostComposition(compositionContext(sourceOwner));
+        const context: ConnectionContext = {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'import-discovery',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        };
         try {
-          const before = await target.handlers['workhub.tasks.find']({}, context);
-          assert.ok(before.ok);
-          assert.deepEqual(before.result.items, []);
-          const imported = await target.handlers['session-bundle.import'](
-            { source: bundle },
+          const sourceStores = await openInteractiveExecutionStoresForWrite(sourceOwner.lease);
+          const created = await sourceStores.sessionStore.createStableSession({
+            sessionId: 'zz-manual-discovery',
+            requestFingerprint: `sha256:${'d'.repeat(64)}`,
+            input: {
+              cwd: sourceRoot,
+              name: 'Imported manual discovery',
+              model: 'fake-model',
+              llmConnectionId: sourceConnectionId,
+              llmConnectionSlug: 'fake',
+              permissionMode: 'ask',
+            },
+          });
+          assert.equal(created.kind, 'created');
+          const manual = created.record.header;
+          if (withChild) {
+            const child = await sourceStores.sessionStore.createStableSession({
+              sessionId: 'aa-imported-child',
+              requestFingerprint: `sha256:${'e'.repeat(64)}`,
+              input: {
+                cwd: sourceRoot,
+                name: 'Imported child',
+                model: 'fake-model',
+                llmConnectionId: sourceConnectionId,
+                llmConnectionSlug: 'fake',
+                permissionMode: 'ask',
+                subagentParent: {
+                  kind: 'subagent',
+                  parentSessionId: manual.id,
+                  spawnedBy: {
+                    parentRunId: 'parent-run',
+                    parentTurnId: 'parent-turn',
+                    toolCallId: 'spawn',
+                  },
+                  lifecycle: 'foreground',
+                },
+              },
+            });
+            assert.equal(child.kind, 'created');
+            assert.ok(
+              'aa-imported-child' < manual.id,
+              'regression requires the child to sort before the root',
+            );
+          }
+          const bundle = join(sourceRoot, 'manual-discovery.maka-session');
+          const exported = await source.handlers['session-bundle.export'](
+            { sessionId: manual.id, destination: bundle },
             context,
           );
-          assert.ok(imported.ok, JSON.stringify(imported));
-          const after = await target.handlers['workhub.tasks.find'](
-            { query: manual.name },
-            context,
-          );
-          assert.ok(after.ok, JSON.stringify(after));
-          assert.equal(
-            after.result.items.find((item) => item.kind === 'session' && item.id === manual.id)
-              ?.available,
-            true,
-          );
+          assert.ok(exported.ok, JSON.stringify(exported));
+          await withCompositionRoot(async ({ owner }) => {
+            await configureFakeDefaultTarget(owner);
+            const target = await createExecutionRuntimeHostComposition(compositionContext(owner));
+            try {
+              const before = await target.handlers['workhub.tasks.find']({}, context);
+              assert.ok(before.ok);
+              assert.deepEqual(before.result.items, []);
+              const imported = await target.handlers['session-bundle.import'](
+                { source: bundle },
+                context,
+              );
+              assert.ok(imported.ok, JSON.stringify(imported));
+              assert.equal(imported.result.sessionCount, withChild ? 2 : 1);
+              const after = await target.handlers['workhub.tasks.find'](
+                { query: manual.name },
+                context,
+              );
+              assert.ok(after.ok, JSON.stringify(after));
+              assert.equal(
+                after.result.items.find((item) => item.kind === 'session' && item.id === manual.id)
+                  ?.available,
+                true,
+              );
+              assert.equal(
+                after.result.items.some((item) => item.id === 'aa-imported-child'),
+                false,
+              );
+              const all = await target.handlers['workhub.tasks.find']({}, context);
+              assert.ok(all.ok);
+              assert.deepEqual(
+                all.result.items.map((item) => item.id),
+                [manual.id],
+                'the root is discovered and its subagent remains ineligible',
+              );
+            } finally {
+              await target.close();
+            }
+          });
         } finally {
-          await target.close();
+          await source.close();
         }
       });
-    } finally {
-      await source.close();
-    }
-  });
-});
+    },
+  );
+}
 
 test('WorkHub find removes a directly deleted manual Session without requiring restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
