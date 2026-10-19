@@ -71,6 +71,450 @@ const CONTEXT: ConnectionContext = {
   acquireResidency: () => ({ release() {} }),
 };
 
+describe('task-centric start and selection', () => {
+  test('start separates task title and real user authority from the worker prompt and effective creation settings', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-task-start-')));
+    const store = createSessionStore(root);
+    try {
+      const assigned: Parameters<WorkHubActionGateEffects['assign']>[0][] = [];
+      const authority = {
+        runId: 'root-run',
+        content: { text: '用户原话和纠正' },
+        origin: 'user' as const,
+        sourceMessageId: 'root-message',
+      };
+      const host = coordinator(
+        root,
+        store,
+        undefined,
+        undefined,
+        {
+          ...coordinationExecutions(new SessionAdmissionGate()).executions,
+          readActiveWorkHubRoutingRequest: async () => authority,
+        },
+        undefined,
+        {
+          assign: async (input) => {
+            await input.validateFreshTarget?.();
+            assigned.push(input);
+            return { messageId: 'message' };
+          },
+        },
+      );
+      const defaults = {
+        model: {
+          llmConnectionId: 'selected',
+          llmConnectionSlug: 'selected',
+          model: 'selected-model',
+        },
+        permissionMode: 'ask' as const,
+        thinkingLevel: 'high' as const,
+      };
+      const title = '完整任务标题'.repeat(20);
+      const result = await host.handlers['workhub.tasks.start'](
+        {
+          turnId: 'root-turn',
+          actionId: 'independent',
+          title,
+          text: 'Only the prepared worker prompt',
+          create: { workspace: { kind: 'isolated' } },
+          newWorkDefaults: defaults,
+        },
+        CONTEXT,
+      );
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(assigned.length, 1);
+      const action = assigned[0]!;
+      assert.equal(action.taskTitle, title);
+      assert.equal(Array.from(action.create!.title).length, 64);
+      assert.equal(action.userText, authority.content.text);
+      assert.equal(action.delegationText, 'Only the prepared worker prompt');
+      assert.equal(action.inputOrigin, 'user');
+      assert.deepEqual(action.work, {
+        id: 'independent',
+        generationId: 'independent',
+        sourceMessageId: 'root-message',
+      });
+      assert.deepEqual(action.create?.defaults, defaults);
+      assert.deepEqual(action.create?.workspace, {
+        kind: 'host_path',
+        path: join(root, 'workhub-tasks', workHubCreatedSessionId('independent')),
+      });
+      assert.equal(
+        action.taskInput,
+        undefined,
+        'new work is not steering or a replayed correction',
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  for (const lostAuthority of [false, true])
+    test(
+      'manual start outside recent candidates preserves configuration and validates its Root (lost=' +
+        lostAuthority +
+        ')',
+      async () => {
+        const root = await mkdtemp(join(tmpdir(), 'maka-task-manual-'));
+        const store = createSessionStore(root);
+        try {
+          let active = true;
+          const authority = {
+            runId: 'active-root',
+            content: { text: '接入这个已有会话，不改配置' },
+            origin: 'feedback' as const,
+          };
+          const old = await store.create({
+            cwd: root,
+            name: 'Old manual name',
+            model: 'manual-model',
+            llmConnectionSlug: 'manual-connection',
+            permissionMode: 'ask',
+          });
+          for (let index = 0; index < 40; index++)
+            await store.create({
+              cwd: root,
+              name: 'Recent ' + index,
+              model: 'other-model',
+              llmConnectionSlug: 'other',
+              permissionMode: 'bypass',
+            });
+          const actions: Parameters<WorkHubActionGateEffects['assign']>[0][] = [];
+          const host = coordinator(
+            root,
+            store,
+            undefined,
+            undefined,
+            {
+              ...coordinationExecutions(new SessionAdmissionGate()).executions,
+              readActiveWorkHubRoutingRequest: async () => (active ? authority : undefined),
+            },
+            undefined,
+            {
+              assign: async (input) => {
+                if (lostAuthority) active = false;
+                await input.validateFreshTarget?.();
+                actions.push(input);
+                return persistTestAssignment(store, input, 'target-turn');
+              },
+            },
+          );
+          assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+          const before = await store.readHeaderSnapshot(old.id);
+          const candidates = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+          assert.ok(candidates.ok);
+          assert.equal(
+            candidates.result.candidates.some((candidate) => candidate.sessionId === old.id),
+            false,
+          );
+          const result = await host.handlers['workhub.tasks.start'](
+            {
+              turnId: 'root',
+              actionId: 'manual-task',
+              title: 'Independent title',
+              text: 'Worker content',
+              sessionRef: old.id,
+            },
+            CONTEXT,
+          );
+          assert.equal(result.ok, !lostAuthority, JSON.stringify(result));
+          assert.deepEqual(
+            await store.readHeaderSnapshot(old.id),
+            before,
+            'no persistent settings or permission rewrites',
+          );
+          assert.equal(actions.length, lostAuthority ? 0 : 1);
+          if (!lostAuthority) {
+            const fact = await store.readWorkHubAssignment('manual-task');
+            assert.ok(fact);
+            assert.equal(fact.taskTitle, 'Independent title');
+            assert.equal(
+              actions[0]!.inputOrigin,
+              'feedback',
+              'historical feedback is not promoted to user authority',
+            );
+            assert.equal(fact.work?.id, 'manual-task');
+            assert.equal(fact.work?.continuesActionId, undefined);
+            assert.equal(actions[0]!.create, undefined);
+          } else {
+            assert.equal(await store.readWorkHubAssignment('manual-task'), undefined);
+          }
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+  for (const scenario of [
+    'task',
+    'session',
+    'new',
+    'cancel',
+    'generation',
+    'workspace',
+    'run',
+    'invalid',
+    'outside',
+    'claim',
+    'observation',
+    'unrelated',
+  ] as const)
+    test(
+      'selection only returns an offered target or explicit new choice (' + scenario + ')',
+      async () => {
+        const root = await mkdtemp(join(tmpdir(), 'maka-task-ask-'));
+        const store = createSessionStore(root);
+        try {
+          let runId = 'root-run';
+          const authority = () => ({
+            runId,
+            content: { text: '继续那个' },
+            origin: 'user' as const,
+          });
+          const executions = {
+            ...coordinationExecutions(new SessionAdmissionGate()).executions,
+            readActiveWorkHubRoutingRequest: async () => authority(),
+          };
+          const manual = await store.create({
+            cwd: root,
+            name: 'A'.repeat(300),
+            model: 'manual-model',
+            llmConnectionSlug: 'test',
+            permissionMode: 'ask',
+          });
+          let forms = 0,
+            assignments = 0;
+          const options: Pick<
+            HostWorkHubCoordinationCoordinatorOptions,
+            'requestForm' | 'readWorkContext'
+          > = {
+            requestForm: async (input) => {
+              const form = await input.create();
+              forms++;
+              assert.equal(form.kind, 'form');
+              const field = form.fields[0]!;
+              assert.equal(field.kind, 'single_select');
+              if (field.kind !== 'single_select') assert.fail('Expected selection');
+              assert.equal(field.options.at(-1)!.value, 'new_task');
+              assert.equal(
+                new Set(field.options.map((option) => option.label)).size,
+                field.options.length,
+              );
+              assert.ok(
+                field.options.every((option) => Buffer.byteLength(option.label, 'utf8') <= 256),
+              );
+              let value =
+                field.options[scenario === 'session' || scenario === 'workspace' ? 1 : 0]!.value;
+              if (scenario === 'new') value = 'new_task';
+              if (scenario === 'invalid') value = 'bad-json';
+              if (scenario === 'outside') value = JSON.stringify(['task', 'not-offered', 'source']);
+              if (scenario === 'generation')
+                // Deliberately pause after an offered option, then advance
+                // the canonical generation through an actual atomic create.
+                await persistTestAssignment(
+                  store,
+                  {
+                    actionId: 'next',
+                    work: { id: 'source', generationId: 'next', continuesActionId: 'source' },
+                    actionFingerprint: `sha256:${'8'.repeat(64)}`,
+                    targetSessionId: 'next-session',
+                    targetSessionName: 'Next',
+                    disposition: 'create_new',
+                    userText: 'Next generation',
+                    create: { title: 'Next', workspace: { kind: 'host_path', path: root } },
+                  },
+                  'next-turn',
+                  {
+                    sessionId: 'next-session',
+                    requestFingerprint: `sha256:${'8'.repeat(64)}`,
+                    input: {
+                      cwd: root,
+                      name: 'Next',
+                      model: 'manual-model',
+                      llmConnectionSlug: 'test',
+                      permissionMode: 'ask',
+                    },
+                  },
+                );
+              if (scenario === 'workspace')
+                await store.updateHeader(manual.id, { cwd: join(root, 'moved') });
+              if (scenario === 'run') runId = 'different-root';
+              if (scenario === 'unrelated')
+                await persistTestAssignment(
+                  store,
+                  {
+                    actionId: 'independent-b',
+                    actionFingerprint: `sha256:${'5'.repeat(64)}`,
+                    targetSessionId: manual.id,
+                    targetSessionName: manual.name,
+                    disposition: 'delegate_existing',
+                    userText: 'Unrelated B',
+                  },
+                  'b-turn',
+                );
+              return {
+                createdAt: Date.now(),
+                answer:
+                  scenario === 'cancel'
+                    ? { action: 'cancel' }
+                    : { action: 'accept', values: { target: value } },
+              };
+            },
+            readWorkContext:
+              scenario === 'observation'
+                ? async () => {
+                    runId = 'changed-during-observation';
+                    return {
+                      currentModelId: 'manual-model',
+                      currentConnectionId: null,
+                      currentConnectionSlug: 'test',
+                      configuredInputLimit: null,
+                      lastRequest: { status: 'unknown', reason: 'not_observed' },
+                    };
+                  }
+                : undefined,
+          };
+          const makeHost = () =>
+            coordinator(
+              root,
+              store,
+              undefined,
+              undefined,
+              executions,
+              undefined,
+              {
+                assign: async () => {
+                  assignments++;
+                  return { messageId: 'should-not-be-sent' };
+                },
+              },
+              options,
+            );
+          const host = makeHost();
+          assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+          await persistTestAssignment(
+            store,
+            {
+              actionId: 'source',
+              actionFingerprint: `sha256:${'7'.repeat(64)}`,
+              targetSessionId: manual.id,
+              targetSessionName: manual.name,
+              disposition: 'delegate_existing',
+              userText: 'Initial',
+              taskTitle: 'Task title independent of Session',
+            },
+            'source-turn',
+          );
+          if (scenario === 'claim')
+            await store.claimWorkHubAction({
+              actionId: 'select',
+              operation: 'create_new',
+              subject: manual.id,
+              actionFingerprint: `sha256:${'6'.repeat(64)}`,
+            });
+          const input = {
+            turnId: 'root-turn',
+            actionId: 'select',
+            question: '继续哪个？',
+            choices: [
+              { kind: 'task' as const, id: 'source' },
+              { kind: 'session' as const, id: manual.id },
+            ],
+          };
+          const result = await host.handlers['workhub.tasks.ask'](input, CONTEXT);
+          assert.equal(assignments, 0, 'selection never delegates');
+          assert.equal(await store.readWorkHubAssignment('select'), undefined);
+          if (scenario === 'new' || scenario === 'cancel') {
+            assert.deepEqual(result, {
+              ok: true,
+              result: { kind: scenario === 'new' ? 'new_task' : 'cancelled' },
+            });
+          } else if (scenario === 'task' || scenario === 'session' || scenario === 'unrelated') {
+            assert.deepEqual(result, {
+              ok: true,
+              result: {
+                kind: 'selected',
+                target: input.choices[scenario === 'session' ? 1 : 0],
+                ...(scenario === 'session' ? {} : { generationId: 'source' }),
+              },
+            });
+          } else {
+            assert.equal(result.ok, false, JSON.stringify(result));
+            if (!result.ok)
+              assert.equal(result.error.code, 'operation_conflict', JSON.stringify(result));
+          }
+          assert.equal(forms, scenario === 'claim' ? 0 : 1);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+  test('selection reuses the durable Form answer after coordinator reconstruction without rebuilding the offer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-task-selection-replay-'));
+    const store = createSessionStore(root);
+    try {
+      const manual = await store.create({
+        cwd: root,
+        name: 'Manual',
+        model: 'model',
+        llmConnectionSlug: 'test',
+        permissionMode: 'ask',
+      });
+      const executions = {
+        ...coordinationExecutions(new SessionAdmissionGate()).executions,
+        readActiveWorkHubRoutingRequest: async () => ({
+          runId: 'run',
+          content: { text: 'Choose' },
+          origin: 'user' as const,
+        }),
+      };
+      let value: string | undefined,
+        requestId: string | undefined,
+        offers = 0;
+      const makeHost = () =>
+        coordinator(root, store, undefined, undefined, executions, undefined, undefined, {
+          requestForm: async (input) => {
+            if (!value) {
+              const form = await input.create();
+              offers++;
+              const field = form.fields[0]!;
+              assert.equal(field.kind, 'single_select');
+              if (field.kind !== 'single_select') assert.fail('Expected selection');
+              value = field.options[0]!.value;
+              requestId = input.requestId;
+            } else assert.equal(input.requestId, requestId);
+            return {
+              createdAt: Date.now(),
+              answer: { action: 'accept', values: { target: value } },
+            };
+          },
+        });
+      const input = {
+        turnId: 'turn',
+        actionId: 'selection',
+        question: 'Which?',
+        choices: [{ kind: 'session' as const, id: manual.id }],
+      };
+      const host = makeHost();
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const result = await host.handlers['workhub.tasks.ask'](input, CONTEXT);
+      assert.ok(result.ok);
+      assert.deepEqual(await makeHost().handlers['workhub.tasks.ask'](input, CONTEXT), result);
+      assert.equal(offers, 1);
+      const conflict = await makeHost().handlers['workhub.tasks.ask'](
+        { ...input, question: 'Changed?' },
+        CONTEXT,
+      );
+      assert.equal(conflict.ok, false);
+      assert.equal(offers, 1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Host WorkHub Coordination coordinator', () => {
   test('binds A/B/A follow-ups to this round of work across restart and unrelated Session activity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-workhub-objectives-'));
@@ -2617,7 +3061,7 @@ function coordinator(
   sessionActions: Partial<HostWorkHubCoordinationCoordinatorOptions['sessionActions']> = {},
   options: Pick<
     HostWorkHubCoordinationCoordinatorOptions,
-    'requestForm' | 'readStopBinding' | 'isStopBindingCurrent'
+    'requestForm' | 'readStopBinding' | 'isStopBindingCurrent' | 'readWorkContext'
   > = {},
 ) {
   const assign =
@@ -2709,10 +3153,12 @@ async function persistTestAssignment(
   store: SessionAuthorityStore,
   input: Parameters<WorkHubActionGateEffects['assign']>[0],
   targetTurnId: string,
+  create?: Parameters<SessionAuthorityStore['assignWorkHubMessage']>[0]['create'],
 ): Promise<{ readonly turnId: string }> {
   const suffix = createHash('sha256').update(input.actionId, 'utf8').digest('hex').slice(0, 48);
   const content = normalizeMessageContent({ text: input.delegationText ?? input.userText });
   const result = await store.assignWorkHubMessage({
+    ...(create ? { create } : {}),
     assignment: {
       type: 'workhub_coordination',
       id: `wha_${suffix}`,
@@ -2722,6 +3168,7 @@ async function persistTestAssignment(
       kind: 'delegation_assigned',
       actionId: input.actionId,
       ...(input.work ? { work: input.work } : {}),
+      ...(input.taskTitle === undefined ? {} : { taskTitle: input.taskTitle }),
       actionFingerprint: input.actionFingerprint,
       coordinationTurnId: input.actionId,
       targetSessionId: input.targetSessionId,

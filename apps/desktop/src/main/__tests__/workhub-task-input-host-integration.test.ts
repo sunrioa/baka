@@ -39,7 +39,7 @@ import { RuntimeHostSessionObserver } from '../runtime-host-session-observer.js'
 import { DesktopTranscriptRangeStore } from '../../renderer/platform/desktop/desktop-transcript-range-store.js';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 
-test('Desktop task input reaches the real native provider, supplements queued A in FIFO, and continues ended work while the coordinator is busy', { timeout: 30_000 }, async (t) => {
+test('Desktop task start and input reach the native provider, supplement queued A in FIFO, and continue ended work while the coordinator is busy', { timeout: 30_000 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'maka-desktop-task-input-'));
   const root = join(base, 'root');
   const firstWorker = deferred<void>(), releaseFirst = deferred<void>(), releaseB = deferred<void>();
@@ -105,8 +105,11 @@ test('Desktop task input reaches the real native provider, supplements queued A 
     ], call: async () => assert.fail('This journey does not invoke a Desktop UI tool') });
     await client.resolveWorkHubCoordinationSession();
     await client.answerWorkHubCoordination({ turnId: coordinationTurn, text: 'Coordinate these independent tasks and remain available.' });
-    await client.actWorkHubCoordinationFromTurn({ turnId: coordinationTurn, actionId: 'native-input-action', proposal: { disposition: 'create_new', title: 'Native input task' },
-      delegationText: 'NATIVE_TASK_INPUT', create: { workspace: { kind: 'isolated' } }, newWorkDefaults: { permissionMode: 'ask' } });
+    const started = await connection.request('workhub.tasks.start', { turnId: coordinationTurn, actionId: 'native-input-action', title: 'Native input task',
+      text: 'NATIVE_TASK_INPUT', create: { workspace: { kind: 'isolated' } }, newWorkDefaults: {
+        model: { llmConnectionId: created.connection.connectionId, llmConnectionSlug: 'desktop-native-input', model: 'fake-model' }, permissionMode: 'ask',
+      } });
+    assert.equal(started.workId, 'native-input-action');
     const firstTask = (await client.queryWorkHubTasks()).tasks.find(task => task.actionId === 'native-input-action'); assert.ok(firstTask?.workId);
     const source = (await client.readWorkHubTaskHistory({ workId: firstTask.workId })).assignments[0]!;
     const before = await client.getSession(source.targetSessionId); assert.ok(before);
@@ -117,6 +120,34 @@ test('Desktop task input reaches the real native provider, supplements queued A 
     const read = async (inputId: string, workId: string) => await handlers.get('workhub:readTaskInput')!(event, { inputId, workId }) as Awaited<ReturnType<DesktopRuntimeHostClient['readWorkHubTaskInput']>>;
     const input = (a: WorkHubTaskAssignment, inputId: string, text: string): OperationInput<'workhub.tasks.send'> => ({ workId: a.workId, generationId: a.generationId, sourceActionId: a.actionId, sourceDelegationId: a.delegationId, inputId, text });
     await withTimeout(firstWorker.promise, 10_000, 'Native worker did not request its first step');
+    const selectionInput = { turnId: coordinationTurn, actionId: 'native-selection', question: 'Which task should continue?',
+      choices: [{ kind: 'task' as const, id: source.workId }] };
+    const selecting = connection.request('workhub.tasks.ask', selectionInput);
+    void selecting.catch(() => undefined);
+    let pending: import('@maka/runtime-host/protocol').InteractionPendingSnapshot | undefined;
+    await waitFor(async () => {
+      const opened = await client!.openSession(WORKHUB_COORDINATION_SESSION_ID);
+      try {
+        pending = opened.snapshot.interactions.pending.find(item => item.request.kind === 'form' && item.request.toolUseId === 'native-selection');
+        return pending !== undefined;
+      } finally { await opened.close(); }
+    }, { timeoutMs: 10_000, pollMs: 10, message: 'The native task selection never reached the original interaction authority' });
+    assert.ok(pending); assert.equal(pending.request.kind, 'form');
+    if (pending.request.kind !== 'form') assert.fail('No native selection Form');
+    const targetField = pending.request.fields[0]!;
+    assert.equal(targetField.kind, 'single_select');
+    if (targetField.kind !== 'single_select') assert.fail('No native selection options');
+    assert.equal(targetField.options.at(-1)!.value, 'new_task');
+    await client.answerInteraction({ sessionId: WORKHUB_COORDINATION_SESSION_ID, interactionId: pending.interactionId,
+      answer: { kind: 'form', action: 'accept', values: { target: targetField.options[0]!.value } } });
+    const selection = await selecting;
+    assert.equal(selection.kind, 'selected');
+    if (selection.kind !== 'selected') assert.fail('Original task not selected');
+    assert.deepEqual(selection.target, { kind: 'task', id: source.workId });
+    assert.equal(selection.generationId, source.generationId);
+    assert.deepEqual(await connection.request('workhub.tasks.ask', selectionInput), selection, 'durable Form replay does not need a second user answer');
+    assert.equal((await client.queryWorkHubTasks()).tasks.length, 1, 'selection alone never delegates another message');
+    assert.equal(requests.length, 1, 'asking does not steer or interrupt the blocked worker');
     const observer = new RuntimeHostSessionObserver({ client, emitSessionsChanged() {} });
     try {
       const store = new DesktopTranscriptRangeStore(desktopSessionKey({ hostId: client.hostId, sessionId: source.targetSessionId }));
@@ -141,10 +172,8 @@ test('Desktop task input reaches the real native provider, supplements queued A 
     await client.startTurn({ sessionId: source.targetSessionId, turnId: 'unrelated-b', content: { text: 'UNRELATED_B' } });
     await waitFor(() => queueOrder.includes('UNRELATED_B'), { timeoutMs: 10000, pollMs: 10, message: 'The unrelated B request was not observed' });
     const delegate = async (actionId: string, text: string) => {
-      const candidates = await client!.listWorkHubCoordinationCandidates();
-      const candidate = candidates.candidates.find(item => item.sessionId === source.targetSessionId); assert.ok(candidate);
-      await client!.actWorkHubCoordinationFromTurn({ turnId: coordinationTurn, actionId, candidateSetId: candidates.candidateSetId,
-        proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef }, delegationText: text });
+      await connection!.request('workhub.tasks.start', { turnId: coordinationTurn, actionId,
+        title: text, sessionRef: source.targetSessionId, text });
       const task = (await client!.queryWorkHubTasks()).tasks.find(item => item.actionId === actionId); assert.ok(task?.workId);
       return (await client!.readWorkHubTaskHistory({ workId: task.workId })).assignments[0]!;
     };

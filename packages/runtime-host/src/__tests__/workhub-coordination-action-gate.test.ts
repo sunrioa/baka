@@ -56,6 +56,132 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('WorkHub Coordination Action Gate', () => {
+  test('independent task start uses exact old Session outside discovery without borrowing another task identity', async () => {
+    for (const changed of [false, true]) {
+      const effects = fakeEffects([
+        session('old', { lastMessageAt: 1 }),
+        ...Array.from({ length: 40 }, (_, index) =>
+          session('recent-' + index, { lastMessageAt: 100 + index }),
+        ),
+      ]);
+      const gate = new WorkHubCoordinationActionGate(effects);
+      assert.equal(
+        (await gate.candidates()).candidates.some((candidate) => candidate.sessionId === 'old'),
+        false,
+      );
+      const target = await gate.nativeTaskCandidate('old');
+      assert.ok(target);
+      const original = effects.assign;
+      effects.assign = async (input) => {
+        if (changed) effects.sessions[0]!.cwd = '/moved';
+        await input.validateFreshTarget?.();
+        // Simulated durable effects persist only data, not ephemeral closures.
+        const { validateFreshTarget: _validate, ...data } = input;
+        return original.call(effects, data);
+      };
+      const operation = gate.act(
+        {
+          actionId: 'new-task',
+          taskStart: { turnId: 'root', title: 'Title independent of Session name' },
+          userText: 'Original user request',
+          proposal: { disposition: 'delegate_existing', candidateRef: 'old' },
+          delegationText: 'Prepared task',
+          selectedTarget: {
+            sessionId: 'old',
+            workspaceDigest:
+              'sha256:' +
+              createHash('sha256').update(JSON.stringify(target.workspace)).digest('hex'),
+          },
+        },
+        CONTEXT,
+      );
+      if (changed) {
+        await assert.rejects(operation, /selected work changed/);
+        assert.deepEqual(effects.assignments, []);
+      } else {
+        const receipt = await operation;
+        assert.equal(receipt.disposition, 'delegate_existing');
+        if (receipt.disposition !== 'delegate_existing')
+          assert.fail('Expected independent assignment');
+        assert.equal(receipt.workId, 'new-task');
+        assert.deepEqual(effects.assignments[0]?.work, {
+          id: 'new-task',
+          generationId: 'new-task',
+        });
+        assert.equal(effects.assignments[0]?.taskTitle, 'Title independent of Session name');
+        assert.equal(effects.assignments[0]?.taskInput, undefined);
+        assert.deepEqual(effects.retirements, []);
+      }
+    }
+  });
+
+  test('modern start replays committed work after a workspace move but rejects changed title or target', async () => {
+    const effects = fakeEffects([session('manual'), session('other')]);
+    // This fixture deliberately calls the final validation, then strips only
+    // ephemeral callbacks before storing its simulated durable assignment.
+    const assign = effects.assign;
+    effects.assign = async (input) => {
+      await input.validateFreshTarget?.();
+      const { validateFreshTarget: _validate, ...data } = input;
+      return assign.call(effects, data);
+    };
+    const target = await new WorkHubCoordinationActionGate(effects).nativeTaskCandidate('manual');
+    assert.ok(target);
+    const input = {
+      actionId: 'independent',
+      taskStart: { turnId: 'root', title: 'Independent title' },
+      userText: 'Original text',
+      proposal: { disposition: 'delegate_existing' as const, candidateRef: 'manual' },
+      selectedTarget: {
+        sessionId: 'manual',
+        workspaceDigest:
+          'sha256:' + createHash('sha256').update(JSON.stringify(target.workspace)).digest('hex'),
+      },
+    };
+    const gate = new WorkHubCoordinationActionGate(effects);
+    const first = await gate.act(input, CONTEXT);
+    effects.sessions[0]!.cwd = '/moved';
+    const replay = {
+      ...input,
+      selectedTarget: { ...input.selectedTarget, workspaceDigest: 'changed-observation' },
+    };
+    assert.deepEqual(await gate.act(replay, CONTEXT), first);
+    const restarted = new WorkHubCoordinationActionGate(effects);
+    assert.deepEqual(await restarted.act(replay, CONTEXT), first);
+    assert.equal(effects.assignmentRecords.size, 1);
+    assert.equal(effects.assignmentRecords.get('independent')?.taskTitle, input.taskStart.title);
+    await assert.rejects(
+      restarted.act(
+        { ...replay, taskStart: { ...input.taskStart, title: 'Changed title' } },
+        CONTEXT,
+      ),
+      /different proposal/,
+    );
+    await assert.rejects(
+      new WorkHubCoordinationActionGate(effects).act(
+        {
+          ...replay,
+          taskStart: { ...input.taskStart, turnId: 'different-root' },
+        },
+        CONTEXT,
+      ),
+      /different proposal/,
+    );
+    await assert.rejects(
+      new WorkHubCoordinationActionGate(effects).act(
+        {
+          ...input,
+          selectedTarget: {
+            sessionId: 'other',
+            workspaceDigest: input.selectedTarget.workspaceDigest,
+          },
+        },
+        CONTEXT,
+      ),
+      /different proposal/,
+    );
+  });
+
   test('fresh continuation fixes its source and revalidates generation and workspace at final admission', async () => {
     for (const changed of ['none', 'workspace', 'generation'] as const) {
       const effects = fakeEffects([session('original')]);
@@ -2291,6 +2417,7 @@ function assignmentRecord(
     kind: 'delegation_assigned',
     actionId: input.actionId,
     ...(input.work ? { work: input.work } : {}),
+    ...(input.taskTitle === undefined ? {} : { taskTitle: input.taskTitle }),
     actionFingerprint: input.actionFingerprint,
     coordinationTurnId: input.actionId,
     targetSessionId: input.targetSessionId,
