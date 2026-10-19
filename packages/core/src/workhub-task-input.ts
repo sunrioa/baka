@@ -32,8 +32,17 @@ export interface WorkHubTaskInputRequest extends WorkHubTaskInputSource {
   readonly text: string;
 }
 
+/** Host-authenticated provenance; never accepted from a task-input wire request. */
+export interface WorkHubTaskInputProvenance {
+  readonly originalUserText?: string;
+  readonly inputOrigin?: 'user' | 'feedback';
+  readonly sourceMessageId?: string;
+}
+
 /** An accepted user input, committed with its target admission/update, not a model acknowledgment. */
-export interface WorkHubTaskInputMessage extends WorkHubTaskInputSource {
+export interface WorkHubTaskInputMessage
+  extends WorkHubTaskInputSource,
+    WorkHubTaskInputProvenance {
   readonly type: 'workhub_coordination';
   readonly kind: 'task_input';
   readonly schemaVersion: 1;
@@ -43,10 +52,6 @@ export interface WorkHubTaskInputMessage extends WorkHubTaskInputSource {
   readonly inputId: string;
   readonly text: string;
   readonly targetSessionId: string;
-  /** Authenticated original coordinator input, distinct from its prepared worker instruction. */
-  readonly originalUserText?: string;
-  readonly inputOrigin?: 'user' | 'feedback';
-  readonly sourceMessageId?: string;
   readonly targetMessageId: string;
   /** The prepared target content at this commit. Later edits are not delivery proof. */
   readonly targetContentDigest: `sha256:${string}`;
@@ -132,7 +137,7 @@ export function isWorkHubTaskInputMessage(value: unknown): value is WorkHubTaskI
 /** Retry identity excludes delivery facts, which may advance after a committed input. */
 export function workHubTaskInputMatches(
   a: WorkHubTaskInputMessage,
-  b: WorkHubTaskInputSource & { readonly inputId: string; readonly text: string },
+  b: WorkHubTaskInputRequest & WorkHubTaskInputProvenance,
 ): boolean {
   return (
     a.inputId === b.inputId &&
@@ -140,6 +145,9 @@ export function workHubTaskInputMatches(
     a.workId === b.workId &&
     a.generationId === b.generationId &&
     a.sourceActionId === b.sourceActionId &&
-    a.sourceDelegationId === b.sourceDelegationId
+    a.sourceDelegationId === b.sourceDelegationId &&
+    (a.originalUserText ?? a.text) === (b.originalUserText ?? b.text) &&
+    (a.inputOrigin ?? 'user') === (b.inputOrigin ?? 'user') &&
+    a.sourceMessageId === b.sourceMessageId
   );
 }

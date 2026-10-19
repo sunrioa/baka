@@ -17,16 +17,16 @@
  * under the License.
  */
 
-import { WORKHUB_TASK_INPUT_TEXT_MAX_BYTES, type WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
+import { WORKHUB_TASK_INPUT_TEXT_MAX_BYTES } from '@maka/core/workhub-task-input';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
-import type { WorkHubTaskAssignment, WorkHubTaskInputResult } from '@maka/runtime-host/protocol';
+import type { WorkHubTaskAssignment, WorkHubTaskInputResult, WorkHubTaskSendInput } from '@maka/runtime-host/protocol';
 import { isRecord } from '@maka/core/record-schema';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import type { WorkHubServices } from '../ports.js';
 import type { WorkHubTaskViewSnapshot } from './task-view-model.js';
 
 type RecoveryStorage = Pick<Storage, 'getItem' | 'setItem'>;
-interface Attempt { input: WorkHubTaskInputRequest; targetSessionId: string; draftVersion: number; editorDraft: string }
+interface Attempt { input: WorkHubTaskSendInput; targetSessionId: string; draftVersion: number; editorDraft: string }
 interface Recovery { draft: string; draftVersion: number; attempt?: Attempt }
 export interface WorkHubTaskInputSnapshot extends Recovery {
   readonly sending: boolean;
@@ -38,14 +38,12 @@ export interface WorkHubTaskInputSnapshot extends Recovery {
 }
 const entity = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
 const sourceFields = ['workId', 'generationId', 'sourceActionId', 'sourceDelegationId'] as const;
+const taskFields = ['workId', 'generationId'] as const;
 
-/** Historical inspection never silently turns a direct send into a different source. */
+/** Inspection changes visible history, not the task generation receiving a new input. */
 export function workHubTaskInputSource(view: WorkHubTaskViewSnapshot): WorkHubTaskAssignment | undefined {
-  const a = view.assignment;
-  if (!view.ready || !view.executionsReady || !a || a.superseded ||
-      a.actionId !== view.assignments[0]?.actionId || ['cancelled', 'unavailable'].includes(a.state)) return undefined;
-  const latest = view.executions.at(-1);
-  if (view.execution && (view.execution.turnId !== latest?.turnId || view.execution.runId !== latest.runId)) return undefined;
+  const a = view.assignments[0];
+  if (!view.ready || !a || a.superseded || a.state === 'unavailable') return undefined;
   return a;
 }
 
@@ -87,14 +85,15 @@ export function createWorkHubTaskInputModel(
       const a = value.attempt;
       if (!isRecord(a) || !isRecord(a.input)) throw new Error('Invalid pending task input');
       const input = a.input;
-      if (Object.keys(input).length !== 6 ||
-          !entity(input.inputId) || !sourceFields.every(field => entity(input[field])) || input.workId !== workId ||
+      const fields = Object.hasOwn(input, 'sourceActionId') || Object.hasOwn(input, 'sourceDelegationId') ? sourceFields : taskFields;
+      if (Object.keys(input).length !== fields.length + 2 ||
+          !entity(input.inputId) || !fields.every(field => entity(input[field])) || input.workId !== workId ||
           typeof input.text !== 'string' || !input.text.trim() ||
           new TextEncoder().encode(input.text).length > WORKHUB_TASK_INPUT_TEXT_MAX_BYTES ||
           typeof a.targetSessionId !== 'string' || parseDesktopSessionKey(a.targetSessionId).hostId !== host.hostId ||
           !Number.isSafeInteger(a.draftVersion) || (a.draftVersion as number) < 0 || (a.draftVersion as number) > result.draftVersion ||
           (a.editorDraft !== undefined && (typeof a.editorDraft !== 'string' || a.editorDraft.length > 120000))) throw new Error('Invalid pending task input');
-      result.attempt = { input: input as unknown as WorkHubTaskInputRequest, targetSessionId: a.targetSessionId, draftVersion: a.draftVersion as number,
+      result.attempt = { input: input as unknown as WorkHubTaskSendInput, targetSessionId: a.targetSessionId, draftVersion: a.draftVersion as number,
         // Older reservations have no editor snapshot. Only their unchanged
         // version can use the saved draft; a later edit must never be cleared.
         editorDraft: typeof a.editorDraft === 'string' ? a.editorDraft : result.draftVersion === a.draftVersion ? result.draft : input.text };
@@ -122,7 +121,8 @@ export function createWorkHubTaskInputModel(
   function accept(attempt: Attempt, receipt: WorkHubTaskInputResult): boolean {
     if (state.attempt?.input.inputId !== attempt.input.inputId) return false;
     if (receipt.inputId !== attempt.input.inputId || receipt.targetSessionId !== attempt.targetSessionId ||
-        sourceFields.some(field => receipt[field] !== attempt.input[field]) ||
+        receipt.workId !== attempt.input.workId || receipt.generationId !== attempt.input.generationId ||
+        ('sourceActionId' in attempt.input && (receipt.sourceActionId !== attempt.input.sourceActionId || receipt.sourceDelegationId !== attempt.input.sourceDelegationId)) ||
         (state.receipt && (receipt.acceptedAt !== state.receipt.acceptedAt || receipt.targetMessageId !== state.receipt.targetMessageId || receipt.mode !== state.receipt.mode))) {
       publish({ error: 'identity' }); return false;
     }
@@ -177,16 +177,16 @@ export function createWorkHubTaskInputModel(
     async send(source: WorkHubTaskAssignment, text: string): Promise<boolean> {
       const current = currentSource();
       if (closed || sending || !current || current.workId !== workId || source.workId !== workId ||
-          ['generationId', 'actionId', 'delegationId', 'targetSessionId'].some(field => current[field as keyof WorkHubTaskAssignment] !== source[field as keyof WorkHubTaskAssignment])) return false;
+          ['generationId', 'targetSessionId'].some(field => current[field as keyof WorkHubTaskAssignment] !== source[field as keyof WorkHubTaskAssignment])) return false;
       if (state.attempt && !state.receipt && !state.rejected) return false;
       if (corrupt) { publish({ error: 'storage' }); return false; }
       if (!text.trim() || new TextEncoder().encode(text).length > WORKHUB_TASK_INPUT_TEXT_MAX_BYTES) { publish({ error: 'length' }); return false; }
       const attempt: Attempt = {
-        input: { inputId: newId(), workId, generationId: source.generationId, sourceActionId: source.actionId, sourceDelegationId: source.delegationId, text },
+        input: { inputId: newId(), workId, generationId: source.generationId, text },
         targetSessionId: source.targetSessionId, draftVersion: recovery.draftVersion, editorDraft: recovery.draft,
       };
       try {
-        if (!entity(attempt.input.inputId) || !sourceFields.every(field => entity(attempt.input[field])) || parseDesktopSessionKey(attempt.targetSessionId).hostId !== host.hostId) throw new Error('Input source changed Host');
+        if (!entity(attempt.input.inputId) || !taskFields.every(field => entity(attempt.input[field])) || parseDesktopSessionKey(attempt.targetSessionId).hostId !== host.hostId) throw new Error('Input source changed Host');
       } catch { publish({ error: 'identity' }); return false; }
       const next = { ...recovery, attempt };
       try { persist(next); }

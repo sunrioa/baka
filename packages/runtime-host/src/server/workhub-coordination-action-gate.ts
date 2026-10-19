@@ -52,7 +52,10 @@ import type {
 import { WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS } from '../protocol/index.js';
 import type { ConnectionContext } from './operation-dispatcher.js';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
-import type { WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
+import type {
+  WorkHubTaskInputRequest,
+  WorkHubTaskInputProvenance,
+} from '@maka/core/workhub-task-input';
 import type {
   WorkHubTargetExecutionAuthority,
   WorkHubTargetExecutionPreparationInput,
@@ -73,8 +76,9 @@ export interface WorkHubAdmittedAction
     readonly sourceActionId: string;
     readonly container?: 'fresh';
   };
-  /** Only the native task-input command supplies this accepted user input identity. */
-  readonly taskInput?: WorkHubTaskInputRequest;
+  /** Supplied only by the shared Host task-input path, never a model proposal. */
+  readonly taskInput?: WorkHubTaskInputRequest & WorkHubTaskInputProvenance;
+  readonly validateTaskInput?: () => Promise<void>;
   readonly create?: { readonly workspace: WorkspaceTarget };
   readonly userText: string;
   readonly attachments?: AttachmentRef[];
@@ -220,7 +224,7 @@ export interface WorkHubRetirementResult {
 export interface WorkHubDelegationAssignmentInput {
   readonly taskTitle?: string;
   readonly inputOrigin?: 'user' | 'feedback';
-  readonly taskInput?: WorkHubTaskInputRequest;
+  readonly taskInput?: WorkHubTaskInputRequest & WorkHubTaskInputProvenance;
   readonly work?: WorkHubWorkBinding;
   /** Rechecked under the target admission lease, only before a fresh assignment. */
   readonly validateFreshTarget?: () => Promise<void>;
@@ -741,6 +745,7 @@ export class WorkHubCoordinationActionGate {
   }
 
   async #continuedSource(input: AdmittedWorkHubAction, targetSessionId: string) {
+    await input.validateTaskInput?.();
     const ref = input.selectedTarget?.sourceTask;
     if (!ref) return undefined;
     const source = await this.#effects.readAssignment(ref.actionId);
@@ -757,12 +762,12 @@ export class WorkHubCoordinationActionGate {
           input.continuation.workId !== (source.work?.id ?? source.actionId))) ||
       source.delegationId !== ref.delegationId ||
       source.targetSessionId !== targetSessionId ||
-      !(await this.#effects.listActiveAssignments(targetSessionId)).some(
+      !(await this.#effects.listActiveAssignments(targetSessionId, !!input.continuation)).some(
         (link) => link.actionId === ref.actionId && link.delegationId === ref.delegationId,
       ) ||
       (await this.#effects.readReplacement(source.delegationId)) ||
       ((await this.#effects.readStopRequest(source.delegationId)) &&
-        (await this.#effects.readStopResolution(source.delegationId))?.outcome !== 'not_owned')
+        !(await this.#effects.readStopResolution(source.delegationId)))
     )
       throw new WorkHubActionGateFailure(
         'action_conflict',
@@ -1454,6 +1459,7 @@ function actionRequestFingerprint(input: WorkHubAdmittedAction): `sha256:${strin
     coordinationRunId: _coordinationRunId,
     sourceMessageId: _sourceMessageId,
     inputOrigin: _inputOrigin,
+    validateTaskInput: _validateTaskInput,
     ...proposal
   } = input;
   if (input.continuation) {

@@ -41,6 +41,16 @@ answers questions, clarifies requests, coordinates ordinary tasks, and operates
 Maka through restricted Desktop capabilities. Docked and floating presentations
 share one live renderer and the same Host-owned conversation.
 
+The staged task-input bridge addresses a task generation, not the historical
+assignment currently inspected. The Host resolves its exact current source
+under admission: pending input supplements in place; owned active work uses
+Steering at a consumable boundary; settled work admits an ordinary new Turn.
+It does not approve an interaction or resume interrupted tools. Saved legacy
+six-field attempts retain their old source and replay identity. The formal
+model `workhub.tasks.continue` bridge shares this path and authenticates original
+user/feedback provenance. The six model tools and unified on-demand read surface
+are not yet published; see the [implementation record](workhub-task-centric-implementation.zh-CN.md).
+
 ## Ownership
 
 **Coordination Session** owns WorkHub messages, model Turns, and durable delegation

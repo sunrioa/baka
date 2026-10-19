@@ -7275,8 +7275,10 @@ test('work replacement retires ancestor sources even when the objective returns 
   });
 });
 
-for (const finalBoundary of [false, true])
-  test(`native task input reaches the next actual provider request without another coordinator request${finalBoundary ? ' and retains work ownership after the final pull' : ''}`, async (t) => {
+for (const { entry, finalBoundary } of (['native', 'task-aware', 'model'] as const).flatMap(
+  (entry) => [false, true].map((finalBoundary) => ({ entry, finalBoundary })),
+))
+  test(`${entry} task input reaches the next actual provider request without another coordinator request${finalBoundary ? ' and retains work ownership after the final pull' : ''}`, async (t) => {
     const firstRequest = deferred<void>();
     const releaseFirst = deferred<void>();
     const beforeTerminal = deferred<void>();
@@ -7457,10 +7459,49 @@ for (const finalBoundary of [false, true])
           sourceDelegationId: a.delegationId,
           text: 'CORRECTION_INPUT: use the new user evidence.',
         };
-        const accepted = await composition.handlers['workhub.tasks.send'](source, context);
+        const send = async () => {
+          if (entry === 'model') {
+            const outcome = await composition.handlers['workhub.tasks.continue'](
+              {
+                turnId: 'input-provider-coordinator',
+                actionId: source.inputId,
+                taskId: source.workId,
+                text: source.text,
+              },
+              context,
+            );
+            if (!outcome.ok) return outcome;
+            assert.equal(outcome.result.container, 'reuse');
+            if (outcome.result.container !== 'reuse')
+              assert.fail('Expected an ordinary task input');
+            return { ok: true as const, result: outcome.result.input };
+          }
+          return composition.handlers['workhub.tasks.send'](
+            entry === 'native'
+              ? source
+              : {
+                  inputId: source.inputId,
+                  workId: source.workId,
+                  generationId: source.generationId,
+                  text: source.text,
+                },
+            context,
+          );
+        };
+        const accepted = await send();
         assert.ok(accepted.ok, JSON.stringify(accepted));
         assert.equal(accepted.result.mode, 'steering');
         assert.equal(accepted.result.delivery, 'queued');
+        const fact = await stores.sessionStore.readWorkHubTaskInput(source.inputId);
+        assert.equal(
+          fact?.originalUserText,
+          entry === 'native'
+            ? undefined
+            : entry === 'model'
+              ? 'Coordinate this task and remain available for other requests.'
+              : source.text,
+        );
+        assert.equal(fact?.inputOrigin, entry === 'native' ? undefined : 'user');
         assert.equal(workerRequests.length, 1, 'an already-sent request cannot be rewritten');
         assert.equal(coordinatorRequests, 1, 'direct input does not create a coordinator request');
         releaseFirst.resolve();
@@ -7486,10 +7527,7 @@ for (const finalBoundary of [false, true])
         );
         assert.ok(delivered.ok, JSON.stringify(delivered));
         assert.equal(delivered.result.delivery, 'delivered');
-        assert.deepEqual(
-          await composition.handlers['workhub.tasks.send'](source, context),
-          delivered,
-        );
+        assert.deepEqual(await send(), delivered);
         if (finalBoundary) {
           const task = await composition.handlers['workhub.tasks.read'](
             { actionId: a.actionId, delegationId: a.delegationId },
@@ -7574,7 +7612,256 @@ for (const finalBoundary of [false, true])
     });
   });
 
-test('native task input supplements queued A behind unrelated B, keeps C FIFO and continues A while coordination stays busy', async () => {
+for (const entry of ['pane', 'model', 'fresh'] as const)
+  test(`task-centric ${entry} input continues settled stopped work without resuming old tools or replaying a stop on the successor`, async (t) => {
+    let executions: RootTurnCoordinator | undefined;
+    const readRoot = RootTurnCoordinator.prototype.readRootState;
+    t.mock.method(
+      RootTurnCoordinator.prototype,
+      'readRootState',
+      function (this: RootTurnCoordinator, sessionId: string) {
+        executions = this;
+        return readRoot.call(this, sessionId);
+      },
+    );
+    await withCompositionRoot(async ({ root, owner }) => {
+      const connectionId = await configureFakeDefaultTarget(owner);
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const first = deferred<void>(),
+        second = deferred<void>(),
+        releaseSecond = deferred<void>();
+      const seen: BackendSendInput[] = [];
+      const { composition, manager } = await createCapturedExecutionComposition(owner, {
+        safeBoundaryResume: false,
+        primaryBackendFactory: (context) =>
+          new (class extends FakeBackend {
+            override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+              seen.push(input);
+              if (input.text === 'Original stopped objective') {
+                first.resolve();
+                yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+                return;
+              }
+              if (input.text.startsWith('Ordinary task continuation')) {
+                second.resolve();
+                await releaseSecond.promise;
+                // The fake otherwise echoes a fresh history reference at
+                // 9 characters / 45ms. Keep its reply, not its actual input
+                // captured above, bounded independently of context length.
+                yield* super.send({ ...input, text: 'Done' });
+                return;
+              }
+              yield* super.send(input);
+            }
+          })(context),
+        coordinationBackendFactory: (context) =>
+          new (class extends FakeBackend {
+            override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+              yield* super.send({ ...input, text: FAKE_HOLD_OPEN_PROMPT });
+            }
+          })(context),
+      });
+      const context: ConnectionContext = {
+        hostEpoch: 'test',
+        connectionId: 'common-stopped-input',
+        principal: 'local_os_user',
+        acquireResidency: () => ({ release() {} }),
+      };
+      let desktop:
+        | ReturnType<NonNullable<typeof composition.clientCapabilities>['attachConnection']>
+        | undefined;
+      try {
+        const target = await manager.createSession({
+          cwd: root,
+          name: 'Stopped objective',
+          llmConnectionId: connectionId,
+          llmConnectionSlug: 'fake',
+          model: 'fake-model',
+          permissionMode: 'ask',
+        });
+        assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+        await delegateWorkHubTarget(
+          composition,
+          context,
+          target.id,
+          'stopped-objective',
+          'Original stopped objective',
+        );
+        await first.promise;
+        desktop = composition.clientCapabilities!.attachConnection(
+          clientCapabilityConnectionIdentity(context.connectionId),
+          { send: async () => {} },
+        );
+        const source = await stores.sessionStore.readWorkHubAssignment('stopped-objective');
+        assert.ok(source?.work);
+        assert.ok(
+          (
+            await composition.handlers['client.capability.replace'](
+              { registrationId: randomUUID(), offers: workHubDesktopCapabilityOffers() },
+              context,
+            )
+          ).ok,
+        );
+        assert.ok(
+          (
+            await composition.handlers['workhub.coordination.answer'](
+              {
+                turnId: 'stopped-input-coordinator',
+                text: 'Stop this task, then continue the same objective with the new requirement.',
+              },
+              context,
+            )
+          ).ok,
+        );
+        const sessionsBefore = (await stores.sessionStore.listHeaders()).length;
+        const busy = await composition.handlers['workhub.tasks.continue'](
+          {
+            turnId: 'stopped-input-coordinator',
+            actionId: 'busy-fresh',
+            taskId: source.work.id,
+            text: 'Do not create while busy',
+            container: 'fresh',
+          },
+          context,
+        );
+        assert.ok(!busy.ok, JSON.stringify(busy));
+        assert.equal(await stores.sessionStore.readWorkHubAssignment('busy-fresh'), undefined);
+        assert.equal((await stores.sessionStore.listHeaders()).length, sessionsBefore);
+        const stopInput: WorkHubCoordinationActFromTurnInput = {
+          turnId: 'stopped-input-coordinator',
+          actionId: 'stop-original-task',
+          proposal: { operation: 'stop', expects: { targetSessionId: target.id } },
+        };
+        const stopped = await composition.handlers['workhub.coordination.actFromTurn'](
+          stopInput,
+          context,
+        );
+        assert.ok(
+          stopped.ok && stopped.result.disposition === 'stop_work',
+          JSON.stringify(stopped),
+        );
+        assert.equal(stopped.result.outcome, 'stop_delivered');
+        assert.ok(executions);
+        await waitFor(async () => executions!.readRootState(target.id).kind === 'idle');
+        const text = 'Ordinary task continuation: apply only this new requirement';
+        let targetSessionId = target.id;
+        let messageId: string;
+        if (entry === 'pane') {
+          const outcome = await composition.handlers['workhub.tasks.send'](
+            {
+              inputId: 'settled-input',
+              workId: source.work.id,
+              generationId: source.work.generationId,
+              text,
+            },
+            context,
+          );
+          assert.ok(outcome.ok, JSON.stringify(outcome));
+          assert.equal(outcome.result.mode, 'continuation');
+          messageId = outcome.result.targetMessageId;
+        } else {
+          const outcome = await composition.handlers['workhub.tasks.continue'](
+            {
+              turnId: 'stopped-input-coordinator',
+              actionId: 'settled-input',
+              taskId: source.work.id,
+              text,
+              container: entry === 'fresh' ? 'fresh' : 'reuse',
+            },
+            context,
+          );
+          assert.ok(outcome.ok, JSON.stringify(outcome));
+          if (outcome.result.container === 'reuse') {
+            assert.equal(outcome.result.input.mode, 'continuation');
+            messageId = outcome.result.input.targetMessageId;
+          } else {
+            targetSessionId = outcome.result.action.targetSessionId;
+            assert.notEqual(targetSessionId, target.id);
+            assert.ok(outcome.result.action.targetMessageId);
+            messageId = outcome.result.action.targetMessageId;
+          }
+        }
+        await withTimeout(
+          second.promise,
+          10000,
+          'The new task input did not start an ordinary execution',
+        );
+        const latest = await stores.sessionStore.readLatestWorkHubAssignment(source.work.id);
+        assert.ok(latest?.work);
+        assert.equal(latest.work.id, source.work.id);
+        assert.equal(
+          latest.work.generationId,
+          entry === 'fresh' ? 'settled-input' : source.work.generationId,
+        );
+        assert.equal(latest.targetSessionId, targetSessionId);
+        const proof = await stores.agentRunStore.readRootTurnSourceMessageReceipt(
+          targetSessionId,
+          messageId,
+        );
+        assert.ok(proof);
+        assert.equal(
+          proof.admission.execution.kind,
+          'external_message',
+          'normal continuation never replays a safe-boundary tool',
+        );
+        assert.notEqual(proof.admission.turnId, source.targetTurnId);
+        if (entry !== 'fresh') {
+          const accepted = await stores.sessionStore.readWorkHubTaskInput('settled-input');
+          assert.ok(accepted);
+          assert.equal(
+            accepted.turnId,
+            source.coordinationTurnId,
+            'the input fact keeps its exact source binding',
+          );
+          assert.equal(
+            latest.coordinationTurnId,
+            entry === 'model' ? 'stopped-input-coordinator' : source.coordinationTurnId,
+          );
+          assert.equal(
+            accepted.originalUserText,
+            entry === 'model'
+              ? 'Stop this task, then continue the same objective with the new requirement.'
+              : text,
+          );
+        }
+        assert.equal(seen.length, 2);
+        assert.equal(seen.filter((input) => input.text === 'Original stopped objective').length, 1);
+        assert.deepEqual(
+          await composition.handlers['workhub.coordination.actFromTurn'](stopInput, context),
+          stopped,
+        );
+        const stillRunning = await composition.handlers['turn.query'](
+          {
+            sessionId: targetSessionId,
+            turnId: proof.admission.turnId,
+          },
+          context,
+        );
+        assert.ok(
+          stillRunning.ok && stillRunning.result.status === 'running',
+          JSON.stringify(stillRunning),
+        );
+        assert.equal(stillRunning.result.runId, proof.admission.runId);
+        assert.equal(seen.length, 2, 'the old Stop neither replays a tool nor starts another task');
+        const header = await stores.sessionStore.readHeaderSnapshot(targetSessionId);
+        assert.equal(header.permissionMode, 'ask');
+        assert.equal(header.model, 'fake-model');
+        assert.equal(header.cwd, entry === 'fresh' ? await realpath(root) : root);
+        releaseSecond.resolve();
+        await waitFor(async () => manager.runningTurnIds(targetSessionId).length === 0);
+      } finally {
+        releaseSecond.resolve();
+        await desktop?.close();
+        await composition.close();
+      }
+    });
+  });
+
+for (const entry of ['native', 'task-aware', 'model'] as const)
+  test(`${entry} task input supplements queued A behind unrelated B, keeps C FIFO and continues A while coordination stays busy`, () =>
+    queuedTaskInputJourney(entry));
+
+async function queuedTaskInputJourney(entry: 'native' | 'task-aware' | 'model') {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
@@ -7679,21 +7966,49 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
         sourceDelegationId: a.delegationId,
         text: 'Use the new evidence for A',
       };
-      const accepted = await composition.handlers['workhub.tasks.send'](input, context);
+      const send = async (value: typeof input) => {
+        if (entry === 'model') {
+          const outcome = await composition.handlers['workhub.tasks.continue'](
+            {
+              turnId: 'busy-input-coordinator',
+              actionId: value.inputId,
+              taskId: value.workId,
+              text: value.text,
+            },
+            context,
+          );
+          if (!outcome.ok) return outcome;
+          assert.equal(outcome.result.container, 'reuse');
+          if (outcome.result.container !== 'reuse') assert.fail('Expected a reused task input');
+          return { ok: true as const, result: outcome.result.input };
+        }
+        return composition.handlers['workhub.tasks.send'](
+          entry === 'native'
+            ? value
+            : {
+                inputId: value.inputId,
+                workId: value.workId,
+                generationId: value.generationId,
+                text: value.text,
+              },
+          context,
+        );
+      };
+      const accepted = await send(input);
       assert.ok(accepted.ok, JSON.stringify(accepted));
       assert.equal(accepted.result.mode, 'queued_supplement');
       assert.equal(accepted.result.delivery, 'queued');
       assert.equal(accepted.result.targetSessionId, target.id);
-      assert.deepEqual(await composition.handlers['workhub.tasks.send'](input, context), accepted);
+      assert.deepEqual(await send(input), accepted);
       for (const invalid of [
         { ...input, text: 'Changed under the same ID' },
-        { ...input, inputId: 'foreign-input', sourceDelegationId: 'foreign' },
-        { ...input, inputId: 'stale-input', generationId: 'stale' },
+        { ...input, inputId: 'foreign-input', workId: 'foreign-work' },
+        ...(entry === 'native'
+          ? [{ ...input, inputId: 'foreign-source', sourceDelegationId: 'foreign' }]
+          : []),
+        ...(entry !== 'model' ? [{ ...input, inputId: 'stale-input', generationId: 'stale' }] : []),
       ])
-        assert.equal(
-          (await composition.handlers['workhub.tasks.send'](invalid, context)).ok,
-          false,
-        );
+        assert.equal((await send(invalid)).ok, false);
       assert.ok(
         (await stores.sessionStore.listMessageAdmissions(target.id)).every(
           (item) => item.disposition === 'followup',
@@ -7724,12 +8039,27 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
       );
       assert.ok(delivered.ok, JSON.stringify(delivered));
       assert.equal(delivered.result.delivery, 'delivered');
-      const continued = await composition.handlers['workhub.tasks.send'](
-        { ...input, inputId: 'after-A', text: 'Continue only objective A' },
-        context,
-      );
+      const continued = await send({
+        ...input,
+        inputId: 'after-A',
+        text: 'Continue only objective A',
+      });
       assert.ok(continued.ok, JSON.stringify(continued));
       assert.equal(continued.result.mode, 'continuation');
+      const continuedFact = await stores.sessionStore.readWorkHubTaskInput('after-A');
+      assert.equal(continuedFact?.turnId, a.coordinationTurnId);
+      assert.equal(
+        continuedFact?.originalUserText,
+        entry === 'native'
+          ? undefined
+          : entry === 'model'
+            ? 'Keep coordinating unrelated user input'
+            : 'Continue only objective A',
+      );
+      assert.equal(
+        (await stores.sessionStore.readLatestWorkHubAssignment(a.work!.id))?.coordinationTurnId,
+        entry === 'model' ? 'busy-input-coordinator' : a.coordinationTurnId,
+      );
       await waitFor(
         async () => sends.some((item) => item.text === 'Continue only objective A'),
         10000,
@@ -7747,7 +8077,15 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
       ({ composition, manager } = await createCapturedExecutionComposition(owner));
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
       const beforeReplay = await stores.runtimeEventStore.listSessionInvocations(target.id);
-      assert.deepEqual(await composition.handlers['workhub.tasks.send'](input, context), delivered);
+      assert.deepEqual(
+        entry === 'model'
+          ? await composition.handlers['workhub.tasks.input.read'](
+              { workId: input.workId, inputId: input.inputId },
+              context,
+            )
+          : await send(input),
+        delivered,
+      );
       assert.deepEqual(
         await stores.runtimeEventStore.listSessionInvocations(target.id),
         beforeReplay,
@@ -7759,7 +8097,7 @@ test('native task input supplements queued A behind unrelated B, keeps C FIFO an
       await composition.close();
     }
   });
-});
+}
 
 test('native input lineage accepts its own execution history cursor across the 16-root page boundary', async () => {
   await withCompositionRoot(async ({ root, owner }) => {

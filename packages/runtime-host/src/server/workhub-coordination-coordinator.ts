@@ -18,11 +18,14 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
+import type {
+  WorkHubTaskInputRequest,
+  WorkHubTaskInputProvenance,
+} from '@maka/core/workhub-task-input';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { normalizeMessageContent } from '@maka/core/events';
+import { normalizeMessageContent, type AttachmentRef } from '@maka/core/events';
 import type { SessionConfigurationTransitionRequest } from '@maka/runtime/session-manager';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
 import {
@@ -1197,10 +1200,15 @@ export class HostWorkHubCoordinationCoordinator {
     });
   }
 
-  /** Native user input does not allocate or wait for a Coordination model Turn. */
+  /** The shared task-input path never allocates another coordinator model Turn. */
   async continueTaskInput(
-    input: WorkHubTaskInputRequest,
+    input: WorkHubTaskInputRequest & WorkHubTaskInputProvenance,
     context: ConnectionContext,
+    origin?: {
+      readonly coordinationTurnId?: string;
+      readonly attachments?: AttachmentRef[];
+      readonly validateTaskInput: () => Promise<void>;
+    },
   ): Promise<WorkHubCoordinationActResult> {
     const source = await this.#stores.readWorkHubAssignment(input.sourceActionId);
     if (
@@ -1220,8 +1228,11 @@ export class HostWorkHubCoordinationCoordinator {
     return this.#actionGate.act(
       {
         actionId: `whtinput_${suffix}`,
-        userText: input.text,
-        inputOrigin: 'user',
+        userText: input.originalUserText ?? input.text,
+        inputOrigin: input.inputOrigin ?? 'user',
+        ...(input.sourceMessageId ? { sourceMessageId: input.sourceMessageId } : {}),
+        ...(origin?.attachments ? { attachments: origin.attachments } : {}),
+        ...(origin ? { validateTaskInput: origin.validateTaskInput } : {}),
         delegationText: input.text,
         taskInput: input,
         continuation: { workId: input.workId, sourceActionId: input.sourceActionId },
@@ -1236,7 +1247,7 @@ export class HostWorkHubCoordinationCoordinator {
         },
       },
       context,
-      source.coordinationTurnId,
+      origin?.coordinationTurnId ?? source.coordinationTurnId,
     );
   }
 

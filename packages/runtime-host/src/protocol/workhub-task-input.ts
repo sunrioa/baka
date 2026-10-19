@@ -33,8 +33,28 @@ import {
   requireUtf8String,
 } from './codec.js';
 import type { SessionExecutionScope } from './session-continuity.js';
+import {
+  decodeWorkHubCoordinationActResult,
+  type WorkHubCoordinationActResult,
+} from './workhub-coordination.js';
 
-export type WorkHubTaskSendInput = WorkHubTaskInputRequest;
+/** New inputs name a task generation. Exact sources remain readable for saved legacy attempts. */
+export type WorkHubTaskSendInput =
+  | Pick<WorkHubTaskInputRequest, 'workId' | 'generationId' | 'inputId' | 'text'>
+  | WorkHubTaskInputRequest;
+export interface WorkHubTaskContinueFromTurnInput {
+  readonly turnId: string;
+  readonly actionId: string;
+  readonly taskId: string;
+  readonly text: string;
+  readonly container?: 'reuse' | 'fresh';
+}
+export type WorkHubTaskContinueResult =
+  | { readonly container: 'reuse'; readonly input: WorkHubTaskInputResult }
+  | {
+      readonly container: 'fresh';
+      readonly action: Extract<WorkHubCoordinationActResult, { disposition: 'create_new' }>;
+    };
 export interface WorkHubTaskInputReadInput {
   readonly workId: string;
   readonly inputId: string;
@@ -102,6 +122,15 @@ function decodeResult(value: unknown): WorkHubTaskInputResult {
     ...(execution ? { execution } : {}),
   };
 }
+function inputText(value: unknown): string {
+  const text = requireUtf8String(
+    value,
+    'WorkHub task input text',
+    WORKHUB_TASK_INPUT_TEXT_MAX_BYTES,
+  );
+  if (!text.trim()) throw invalidProtocolFrame('Empty WorkHub task input');
+  return text;
+}
 const errors = [
   'host_not_ready',
   'host_draining',
@@ -121,23 +150,88 @@ export const WORKHUB_TASK_INPUT_OPERATION_SPECS = {
     availability: 'ready',
     errors,
     decodeInput(value: unknown): WorkHubTaskSendInput {
-      const item = requireExactRecord(value, 'WorkHub task input', [
-        ...sourceKeys,
-        'inputId',
-        'text',
-      ]);
-      const text = requireUtf8String(
-        item.text,
-        'WorkHub task input text',
-        WORKHUB_TASK_INPUT_TEXT_MAX_BYTES,
+      const item = requireShapedRecord(
+        value,
+        'WorkHub task input',
+        ['workId', 'generationId', 'inputId', 'text'],
+        ['sourceActionId', 'sourceDelegationId'],
       );
-      if (!text.trim()) throw invalidProtocolFrame('Empty WorkHub task input');
-      return { ...source(item), inputId: requireEntityId(item.inputId, 'WorkHub input'), text };
+      const base = {
+        workId: requireEntityId(item.workId, 'WorkHub work'),
+        generationId: requireEntityId(item.generationId, 'WorkHub generation'),
+        inputId: requireEntityId(item.inputId, 'WorkHub input'),
+        text: inputText(item.text),
+      };
+      const exact =
+        Object.hasOwn(item, 'sourceActionId') || Object.hasOwn(item, 'sourceDelegationId');
+      return exact ? { ...base, ...source(item) } : base;
     },
     decodeOutput: decodeResult,
     assertOutputForInput(input, output) {
-      if (input.inputId !== output.inputId || sourceKeys.some((key) => input[key] !== output[key]))
+      if (
+        input.inputId !== output.inputId ||
+        input.workId !== output.workId ||
+        input.generationId !== output.generationId ||
+        ('sourceActionId' in input &&
+          (input.sourceActionId !== output.sourceActionId ||
+            input.sourceDelegationId !== output.sourceDelegationId))
+      )
         throw invalidProtocolFrame('WorkHub input receipt changed source');
+    },
+  }),
+  'workhub.tasks.continue': defineOperation({
+    mode: 'command',
+    availability: 'ready',
+    errors,
+    decodeInput(value: unknown): WorkHubTaskContinueFromTurnInput {
+      const item = requireShapedRecord(
+        value,
+        'WorkHub task continuation',
+        ['turnId', 'actionId', 'taskId', 'text'],
+        ['container'],
+      );
+      if (item.container !== undefined && !['reuse', 'fresh'].includes(String(item.container)))
+        throw invalidProtocolFrame('Invalid WorkHub continuation container');
+      return {
+        turnId: requireEntityId(item.turnId, 'WorkHub coordinator Turn'),
+        actionId: requireEntityId(item.actionId, 'WorkHub action'),
+        taskId: requireEntityId(item.taskId, 'WorkHub task'),
+        text: inputText(item.text),
+        ...(item.container === undefined ? {} : { container: item.container as 'reuse' | 'fresh' }),
+      };
+    },
+    decodeOutput(value: unknown): WorkHubTaskContinueResult {
+      const item = requireShapedRecord(
+        value,
+        'WorkHub task continuation receipt',
+        ['container'],
+        ['input', 'action'],
+      );
+      if (
+        item.container === 'reuse' &&
+        Object.keys(item).length === 2 &&
+        !Object.hasOwn(item, 'action')
+      )
+        return { container: 'reuse', input: decodeResult(item.input) };
+      if (
+        item.container === 'fresh' &&
+        Object.keys(item).length === 2 &&
+        !Object.hasOwn(item, 'input')
+      ) {
+        const action = decodeWorkHubCoordinationActResult(item.action);
+        if (action.disposition === 'create_new' && action.workId)
+          return { container: 'fresh', action };
+      }
+      throw invalidProtocolFrame('Invalid WorkHub task continuation receipt');
+    },
+    assertOutputForInput(input, output) {
+      if (
+        output.container !== (input.container ?? 'reuse') ||
+        (output.container === 'reuse'
+          ? output.input.inputId !== input.actionId || output.input.workId !== input.taskId
+          : output.action.workId !== input.taskId)
+      )
+        throw invalidProtocolFrame('WorkHub task continuation changed identity');
     },
   }),
   'workhub.tasks.input.read': defineOperation({

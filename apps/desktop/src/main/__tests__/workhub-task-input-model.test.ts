@@ -20,8 +20,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deferred } from '@maka/core/test-only/async-primitives';
-import type { WorkHubTaskInputRequest } from '@maka/core/workhub-task-input';
-import type { WorkHubTaskAssignment, WorkHubTaskInputResult } from '@maka/runtime-host/protocol';
+import type { WorkHubTaskAssignment, WorkHubTaskInputResult, WorkHubTaskSendInput } from '@maka/runtime-host/protocol';
 import type { WorkHubTaskSendResult } from '../../shared/workhub-conversation.js';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import { createWorkHubTaskInputModel, workHubTaskInputSource } from '../../renderer/features/workhub/testing.js';
@@ -38,9 +37,9 @@ function memoryStorage() {
   const values = new Map<string, string>();
   return { values, getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => { values.set(key, value); } };
 }
-function receipt(input: WorkHubTaskInputRequest, targetSessionId: string, delivery: WorkHubTaskInputResult['delivery'] = 'queued'): WorkHubTaskInputResult {
+function receipt(input: WorkHubTaskSendInput, targetSessionId: string, delivery: WorkHubTaskInputResult['delivery'] = 'queued'): WorkHubTaskInputResult {
   const { text: _text, ...source } = input;
-  return { ...source, targetSessionId, targetMessageId: `message-${input.inputId}`, acceptedAt: 7, mode: 'steering', delivery,
+  return { ...source, sourceActionId: 'sourceActionId' in input ? input.sourceActionId : 'host-resolved-action', sourceDelegationId: 'sourceDelegationId' in input ? input.sourceDelegationId : 'host-resolved-delegation', targetSessionId, targetMessageId: `message-${input.inputId}`, acceptedAt: 7, mode: 'steering', delivery,
     ...(delivery === 'delivered' ? { execution: { turnId: 'delivered-turn', runId: 'delivered-run' } } : {}) };
 }
 type Services = Pick<WorkHubServices, 'sendTaskInput' | 'readTaskInput'>;
@@ -48,7 +47,7 @@ type Services = Pick<WorkHubServices, 'sendTaskInput' | 'readTaskInput'>;
 test('A → B → A and reload retain source-bound IDs, drafts and newer edits after a late old acknowledgment', async () => {
   const storage = memoryStorage(), a = task('a'), b = task('b');
   const response = deferred<WorkHubTaskSendResult>();
-  let submitted!: WorkHubTaskInputRequest;
+  let submitted!: WorkHubTaskSendInput;
   const services: Services = { sendTaskInput: async (id, input) => { assert.equal(id, owner()); submitted = input; return response.promise; },
     readTaskInput: async () => receipt(submitted, a.targetSessionId) };
   const firstA = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'original-input');
@@ -75,7 +74,7 @@ test('A → B → A and reload retain source-bound IDs, drafts and newer edits a
 
   const base = memoryStorage(); let writable = true, active = true;
   const storageWithFailures = { ...base, setItem: (key: string, value: string) => { if (!writable) throw new Error('Quota exceeded'); base.setItem(key, value); } };
-  const late = deferred<WorkHubTaskSendResult>(); let reserved!: WorkHubTaskInputRequest;
+  const late = deferred<WorkHubTaskSendResult>(); let reserved!: WorkHubTaskSendInput;
   const race: Services = { sendTaskInput: async (_owner, input) => { reserved = input; return late.promise; },
     readTaskInput: async () => receipt(reserved, a.targetSessionId, 'delivered') };
   const old = createWorkHubTaskInputModel(race, owner(), a.workId, () => active ? a : undefined, storageWithFailures, () => 'old-owner-input');
@@ -94,9 +93,9 @@ test('A → B → A and reload retain source-bound IDs, drafts and newer edits a
 });
 
 test('an unknown send and absent receipt never become a new ID; explicit retry keeps the old payload across a generation change', async () => {
-  const a = task('a'), storage = memoryStorage(), calls: WorkHubTaskInputRequest[] = [];
+  const a = task('a'), storage = memoryStorage(), calls: WorkHubTaskSendInput[] = [];
   let current = a;
-  const services: Services = { sendTaskInput: async (_id, input) => { calls.push(input); return calls.length === 1 ? { kind: 'unknown' } : { kind: 'accepted', receipt: receipt(input, input.sourceActionId === a.actionId ? a.targetSessionId : current.targetSessionId, 'delivered') }; },
+  const services: Services = { sendTaskInput: async (_id, input) => { calls.push(input); return calls.length === 1 ? { kind: 'unknown' } : { kind: 'accepted', receipt: receipt(input, input.generationId === a.generationId ? a.targetSessionId : current.targetSessionId, 'delivered') }; },
     readTaskInput: async () => { throw new Error('not_found while the original command may still be arriving'); } };
   const model = createWorkHubTaskInputModel(services, owner(), a.workId, () => current, storage, () => `input-${calls.length + 1}`);
   model.writeDraft('Original payload'); assert.equal(await model.send(a, model.readDraft()), false);
@@ -112,7 +111,8 @@ test('an unknown send and absent receipt never become a new ID; explicit retry k
   assert.equal(model.snapshot().receipt?.targetSessionId, a.targetSessionId, 'an old unknown receipt stays bound to its old container');
   assert.equal(await model.send(a, 'stale callback'), false);
   assert.equal(await model.send(current, model.readDraft()), true);
-  assert.equal(calls[2]!.sourceActionId, 'new-action'); assert.notEqual(calls[2]!.inputId, 'input-1');
+  assert.deepEqual(Object.keys(calls[2]!).sort(), ['generationId', 'inputId', 'text', 'workId']);
+  assert.equal(calls[2]!.generationId, current.generationId); assert.notEqual(calls[2]!.inputId, 'input-1');
   model.close();
 });
 
@@ -120,7 +120,7 @@ test('reload reconciles accepted delivery without replaying a command and clears
   for (const legacy of [false, true]) {
     const a = task('a'), storage = memoryStorage();
     const editorDraft = '  Correction before reload\n', wireText = 'Correction before reload';
-    let submitted!: WorkHubTaskInputRequest, sends = 0;
+    let submitted!: WorkHubTaskSendInput, sends = 0;
     const services: Services = { sendTaskInput: async (_owner, input) => { sends++; submitted = input; return { kind: 'unknown' }; },
       readTaskInput: async (_owner, input) => { assert.equal(input.inputId, submitted.inputId); return receipt(submitted, a.targetSessionId, 'delivered'); } };
     const first = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'reload-input');
@@ -141,7 +141,7 @@ test('reload reconciles accepted delivery without replaying a command and clears
 
 test('late receipt reads cannot replace a newer input or downgrade proven delivery', async () => {
   const a = task('a'), storage = memoryStorage(), delayed = deferred<WorkHubTaskInputResult>();
-  const calls: WorkHubTaskInputRequest[] = [];
+  const calls: WorkHubTaskSendInput[] = [];
   let reads = 0;
   const services: Services = { sendTaskInput: async (_owner, input) => { calls.push(input); return { kind: 'accepted', receipt: receipt(input, a.targetSessionId, calls.length > 1 ? 'delivered' : 'queued') }; },
     readTaskInput: async () => { reads++; return delayed.promise; } };
@@ -157,7 +157,7 @@ test('late receipt reads cannot replace a newer input or downgrade proven delive
 
 test('foreign or contradictory receipts remain unknown and cannot clear the draft', async () => {
   const a = task('a'), storage = memoryStorage();
-  let input!: WorkHubTaskInputRequest;
+  let input!: WorkHubTaskSendInput;
   const services: Services = { sendTaskInput: async (_owner, request) => { input = request; return { kind: 'accepted', receipt: receipt(request, task('a', 'foreign-host').targetSessionId) }; },
     readTaskInput: async () => receipt(input, a.targetSessionId) };
   const model = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'identity-input');
@@ -179,7 +179,7 @@ test('unavailable, full or unreadable recovery storage never dispatches or overw
     assert.equal(model.snapshot().error, 'storage'); model.close();
   }
   assert.equal(sends, 0); assert.equal(corrupt.values.get(key), '{unreadable pending input');
-  const saved = memoryStorage(); let capacity = Infinity, submitted!: WorkHubTaskInputRequest;
+  const saved = memoryStorage(); let capacity = Infinity, submitted!: WorkHubTaskSendInput;
   const bounded = { ...saved, setItem: (id: string, value: string) => { if (value.length > capacity) throw new Error('Quota exceeded'); saved.setItem(id, value); } };
   const pending: Services = { sendTaskInput: async (_owner, input) => { submitted = input; return { kind: 'unknown' }; },
     readTaskInput: async () => receipt(submitted, a.targetSessionId, 'delivered') };
@@ -216,7 +216,7 @@ test('UTF-8 size, current-source identity and same-Host targeting are checked be
   assert.equal(model.snapshot().error, 'identity'); assert.equal(sends, 0); model.close();
 });
 
-test('queued/shared/ended current work accepts input, but historical generations and earlier executions do not', () => {
+test('input follows the current task generation even while an earlier assignment or execution is inspected', () => {
   const a = task('a');
   const view = { assignments: [a], assignment: a, historyCursor: null, ready: true, loadingEarlier: false,
     executions: [{ sessionId: a.targetSessionId, turnId: 'turn-a', runId: 'run-a', status: 'completed' as const, terminalEventId: 'completed-a' }],
@@ -227,7 +227,60 @@ test('queued/shared/ended current work accepts input, but historical generations
     assert.equal(workHubTaskInputSource({ ...view, assignments: [assignment], assignment, executions: [], execution: undefined }), assignment);
   }
   assert.equal(workHubTaskInputSource({ ...view, ready: false }), undefined);
-  assert.equal(workHubTaskInputSource({ ...view, assignment: { ...a, superseded: true } }), undefined);
-  assert.equal(workHubTaskInputSource({ ...view, assignments: [{ ...a, actionId: 'new-action' }, a] }), undefined);
-  assert.equal(workHubTaskInputSource({ ...view, executions: [...view.executions, { sessionId: a.targetSessionId, turnId: 'later', runId: 'later-run', status: 'running' }] }), undefined);
+  const unavailable = { ...a, state: 'unavailable' as const };
+  assert.equal(workHubTaskInputSource({ ...view, assignments: [unavailable] }), undefined);
+  const superseded = { ...a, superseded: true };
+  assert.equal(workHubTaskInputSource({ ...view, assignments: [superseded] }), undefined);
+  const current = { ...a, actionId: 'new-action', generationId: 'new-generation', targetSessionId: desktopSessionKey({ hostId: 'host-a', sessionId: 'fresh-session' }) };
+  assert.equal(workHubTaskInputSource({ ...view, assignment: superseded, assignments: [current, a] }), current, 'history selection does not become input routing authority');
+  assert.equal(workHubTaskInputSource({ ...view, executionsReady: false, executions: [] }), a, 'task identity does not depend on the inspected execution page');
+  assert.equal(workHubTaskInputSource({ ...view, executions: [...view.executions, { sessionId: a.targetSessionId, turnId: 'later', runId: 'later-run', status: 'running' }] }), a);
+  const cancelled = { ...a, state: 'cancelled' as const };
+  assert.equal(workHubTaskInputSource({ ...view, assignments: [cancelled] }), cancelled, 'settled cancellation can receive an ordinary new input; Host checks actual readiness');
+});
+
+test('saved six-field attempts remain exact on reload and never retarget to a new task segment', async () => {
+  const a = task('a'), storage = memoryStorage();
+  const input = { inputId: 'legacy-input', workId: a.workId, generationId: a.generationId, sourceActionId: a.actionId, sourceDelegationId: a.delegationId, text: 'Old reserved input' };
+  const key = JSON.stringify(['workhub-task-input-v1', owner(), a.workId]);
+  storage.setItem(key, JSON.stringify({ draft: input.text, draftVersion: 1, attempt: { input, targetSessionId: a.targetSessionId, draftVersion: 1, editorDraft: input.text } }));
+  const current = { ...a, generationId: 'new-generation', actionId: 'new-action', delegationId: 'new-delegation', targetSessionId: desktopSessionKey({ hostId: 'host-a', sessionId: 'fresh' }) };
+  let wrongSource = true;
+  const services: Services = {
+    sendTaskInput: async (_owner, submitted) => {
+      assert.deepEqual(submitted, input, 'do not rewrite a saved exact-source payload');
+      return { kind: 'accepted', receipt: { ...receipt(submitted, a.targetSessionId), ...(wrongSource ? { sourceActionId: 'foreign-source' } : {}) } };
+    },
+    readTaskInput: async () => { throw new Error('unconfirmed'); },
+  };
+  const model = createWorkHubTaskInputModel(services, owner(), a.workId, () => current, storage);
+  assert.equal(await model.retry(), false);
+  assert.equal(model.snapshot().error, 'identity');
+  assert.equal(model.readDraft(), input.text);
+  wrongSource = false;
+  assert.equal(await model.retry(), true);
+  assert.equal(model.snapshot().receipt?.targetSessionId, a.targetSessionId);
+  assert.equal(model.snapshot().receipt?.generationId, a.generationId);
+  model.close();
+});
+
+test('task-aware receipts may bind the actual same-generation source, never a foreign generation or Session', async () => {
+  const a = task('a'), storage = memoryStorage();
+  let foreignGeneration = true;
+  const services: Services = {
+    sendTaskInput: async (_owner, submitted) => ({ kind: 'accepted', receipt: {
+      ...receipt(submitted, a.targetSessionId), sourceActionId: 'actual-running-source', sourceDelegationId: 'actual-running-delegation',
+      ...(foreignGeneration ? { generationId: 'foreign-generation' } : {}),
+    } }),
+    readTaskInput: async () => { throw new Error('unconfirmed'); },
+  };
+  const model = createWorkHubTaskInputModel(services, owner(), a.workId, () => a, storage, () => 'modern-input');
+  model.writeDraft('Apply to this task');
+  assert.equal(await model.send(a, model.readDraft()), false);
+  assert.equal(model.snapshot().error, 'identity');
+  foreignGeneration = false;
+  assert.equal(await model.retry(), true);
+  assert.equal(model.snapshot().receipt?.sourceActionId, 'actual-running-source');
+  assert.equal(model.readDraft(), '');
+  model.close();
 });
