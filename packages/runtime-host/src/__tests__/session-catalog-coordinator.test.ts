@@ -1893,9 +1893,29 @@ test('fresh WorkHub segments inherit effective persistent settings, not defaults
     assert.ok(resolved.length > 0, 'inherited model still passes current execution authorization');
     assert.equal('rememberForTurn' in prepared.input, false);
     assert.equal('sandboxGrants' in prepared.input, false);
+    const legacy = await fixture.coordinator.prepareWorkHubContinuation(request, {
+      ...source,
+      llmConnectionId: null,
+    });
+    assert.equal(legacy.input.llmConnectionId, source.llmConnectionId);
+    assert.equal(legacy.input.model, 'edited-model');
+    assert.equal(legacy.input.permissionMode, 'ask');
+    assert.equal(legacy.input.toolMode, 'code_mode');
+    assert.equal(legacy.input.thinkingLevel, undefined);
     await assert.rejects(
-      fixture.coordinator.prepareWorkHubContinuation(request, { ...source, llmConnectionId: null }),
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        llmConnectionId: null,
+        llmConnectionSlug: 'missing-source-connection',
+      }),
       /connection is unavailable/,
+    );
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        llmConnectionId: 'stale-connection-id',
+      }),
+      /identity changed|changed during selection/,
     );
     await assert.rejects(
       fixture.coordinator.prepareWorkHubContinuation(request, {
@@ -1928,6 +1948,79 @@ test('fresh WorkHub segments inherit effective persistent settings, not defaults
     assert.equal(external.input.executorId, 'remote');
     assert.deepEqual(external.input.executorConfig, executorSource.executorConfig);
     assert.equal(external.input.permissionMode, 'ask');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy WorkHub fresh binds its current slug, not the default, and detects a later rebind', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-legacy-settings-')));
+  try {
+    const policy = importTargetPolicy({
+      defaultTarget: { connectionId: 'different-default', modelId: 'default-model' },
+      connections: [
+        { connectionId: 'source-identity', slug: 'source-slug', enabledModelIds: ['source-model'] },
+        {
+          connectionId: 'different-default',
+          slug: 'default-slug',
+          enabledModelIds: ['default-model'],
+        },
+      ],
+    });
+    let replaced = false;
+    const fixture = createFixture({
+      runtimePolicy: {
+        ...policy,
+        connectionCatalog: {
+          ...policy.connectionCatalog,
+          getSnapshot: async () => {
+            const snapshot = await policy.connectionCatalog.getSnapshot();
+            return {
+              ...snapshot,
+              connections: snapshot.connections.map((entry) =>
+                replaced && entry.slug === 'source-slug'
+                  ? { ...entry, connectionId: 'replacement-identity' }
+                  : entry,
+              ),
+            };
+          },
+        },
+      },
+    });
+    const legacy = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        llmConnectionId: undefined,
+        llmConnectionSlug: 'source-slug',
+        model: 'source-model',
+        permissionMode: 'ask',
+      },
+      'current_segment',
+    );
+    const bound = await fixture.coordinator.resolveWorkHubSettings(legacy);
+    assert.equal(bound.llmConnectionId, 'source-identity');
+    assert.equal(legacy.llmConnectionId, null, 'does not rewrite or backfill old Session history');
+    const prepared = await fixture.coordinator.prepareWorkHubContinuation(
+      {
+        sessionId: 'fresh-legacy',
+        workspace: { kind: 'host_path', path: root },
+        name: 'Same task',
+      },
+      legacy,
+    );
+    assert.equal(prepared.input.llmConnectionId, 'source-identity');
+    assert.equal(prepared.input.llmConnectionSlug, 'source-slug');
+    assert.equal(prepared.input.model, 'source-model');
+    assert.equal(prepared.input.permissionMode, 'ask');
+    replaced = true;
+    const current = await fixture.coordinator.resolveWorkHubSettings(legacy);
+    assert.equal(current.llmConnectionId, 'replacement-identity');
+    assert.notDeepEqual(
+      current,
+      bound,
+      'the production lock-time settings comparison detects a slug rebind',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -762,19 +762,19 @@ export class SqliteRuntimeStore
           ...(anchor.latestRequestAt === undefined
             ? {}
             : { latestRequestAt: anchor.latestRequestAt }),
-          ...(anchor.cacheReadInputSource !== 'reported'
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheReadInputSource !== 'reported'
             ? {}
             : {
                 cacheReadInputTokens: anchor.cacheReadInputTokens,
                 cacheReadInputSource: anchor.cacheReadInputSource,
               }),
-          ...(anchor.cacheWriteInputSource !== 'reported'
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheWriteInputSource !== 'reported'
             ? {}
             : {
                 cacheWriteInputTokens: anchor.cacheWriteInputTokens,
                 cacheWriteInputSource: anchor.cacheWriteInputSource,
               }),
-          ...(anchor.cacheMissInputSource === undefined
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheMissInputSource === undefined
             ? {}
             : {
                 cacheMissInputTokens: anchor.cacheMissInputTokens,

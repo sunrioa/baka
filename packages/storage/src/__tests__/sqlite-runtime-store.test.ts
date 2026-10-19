@@ -83,6 +83,7 @@ describe('SqliteRuntimeStore', () => {
               requestedAt: 8,
               latestRequestAt: 10,
               usageScope: 'last_completed_request',
+              cacheSourceVersion: 2,
               cacheReadInputTokens: 500,
               cacheWriteInputTokens: 25,
               cacheMissInputTokens: 75,
@@ -172,6 +173,44 @@ describe('SqliteRuntimeStore', () => {
       );
       assert.equal(latest.cacheWriteInputTokens, undefined);
       assert.equal(latest.cacheMissInputTokens, undefined);
+      await store.appendRuntimeEvent(root.sessionId, root.runId, {
+        ...usage,
+        id: 'legacy-source-labels',
+        ts: 2,
+        actions: {
+          tokenUsage: {
+            input: 50000,
+            output: 0,
+            lastRequestAnchor: {
+              inputTokens: 700,
+              outputTokens: 0,
+              modelId: 'fake-model',
+              connectionId: 'fake-connection',
+              usageScope: 'last_completed_request',
+              requestedAt: 100,
+              cacheReadInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              cacheMissInputTokens: 700,
+              cacheReadInputSource: 'reported',
+              cacheWriteInputSource: 'reported',
+              cacheMissInputSource: 'explicit',
+            },
+          },
+        },
+      });
+      const legacy = await store.readLatestSessionRequestObservation(root.sessionId);
+      assert.ok(legacy.status === 'observed');
+      assert.equal(legacy.inputTokens, 700);
+      assert.equal(legacy.requestedAt, 100, 'paired request time remains usable');
+      assert.equal(
+        legacy.cacheReadInputTokens,
+        undefined,
+        'old source labels could come from SDK-filled zeros',
+      );
+      assert.equal(legacy.cacheWriteInputTokens, undefined);
+      assert.equal(legacy.cacheMissInputTokens, undefined);
+      assert.equal(legacy.cacheReadInputSource, undefined);
+      assert.equal(legacy.cacheMissInputSource, undefined);
     });
   });
 

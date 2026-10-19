@@ -26,7 +26,6 @@ import {
 } from '@maka/core/llm-connections';
 import { lookupModelMetadata } from '@maka/core/model-metadata';
 import { providerAcceptsOutputTokenLimit } from '@maka/core/provider-registry';
-import type { CacheMissInputSource } from '@maka/core/usage-stats/types';
 import { rawFinishReasonString } from './model-protocol.js';
 import type {
   ModelMessage,
@@ -450,6 +449,7 @@ export class ModelAdapter {
         let requestHasResponseEvidence = false;
         let stepHasResponseEvidence = false;
         let latestStepFinishHadUsableUsage: boolean | undefined;
+        let latestStepRawUsage: AiSdkUsageLike['raw'];
         let streamedFinishReason: string | undefined;
         let streamedRawFinishReason: string | undefined;
         let streamedFinishDisposition: ModelFinishDisposition | undefined;
@@ -463,6 +463,7 @@ export class ModelAdapter {
             if (chunk.type === 'start-step') {
               stepHasResponseEvidence = false;
               latestStepFinishHadUsableUsage = undefined;
+              latestStepRawUsage = undefined;
             }
             if (
               chunk.type === 'finish' ||
@@ -473,9 +474,11 @@ export class ModelAdapter {
                 rawFinishReasonString(chunk.rawFinishReason) ?? streamedRawFinishReason;
               streamedFinishReason = chunkFinishReason(chunk) ?? streamedFinishReason;
               if (chunk.type !== 'finish') {
+                latestStepRawUsage = (chunk.usage as AiSdkUsageLike | undefined)?.raw;
                 latestStepFinishHadUsableUsage =
                   normalizeAiSdkUsage(chunk.usage as AiSdkUsageLike | undefined, {
                     rawFinishReason: chunk.rawFinishReason,
+                    wire: resolvedRuntime.wire,
                   }) !== undefined;
               }
               streamedFinishDisposition = classifyModelFinishBoundary({
@@ -536,7 +539,16 @@ export class ModelAdapter {
             streamedFinishReason ?? rawFinishReasonString(sdkFinishReason) ?? 'unknown';
           const rawFinishReason =
             streamedRawFinishReason ?? rawFinishReasonString(sdkFinishReason) ?? finishReason;
-          const usage = normalizeAiSdkUsage(sdkUsage, { rawFinishReason });
+          // SDK `usage` aliases its aggregate and drops raw fields even for
+          // one step. Keep that step's original vendor evidence alongside the
+          // unchanged numeric totals, before cache provenance is classified.
+          const usage = normalizeAiSdkUsage(
+            sdkUsage && latestStepRawUsage ? { ...sdkUsage, raw: latestStepRawUsage } : sdkUsage,
+            {
+              rawFinishReason,
+              wire: resolvedRuntime.wire,
+            },
+          );
           let settled = settleModelStepOutcome({
             aborted: continuation.abortSignal.aborted,
             failure,
@@ -1586,7 +1598,7 @@ export type NormalizedAiSdkUsage = NormalizedUsage;
 
 export function normalizeAiSdkUsage(
   usage: AiSdkUsageLike | undefined,
-  options: { rawFinishReason?: unknown } = {},
+  options: { rawFinishReason?: unknown; wire?: ResolvedModelRuntime['wire'] } = {},
 ): NormalizedUsage | undefined {
   if (!usage) return undefined;
   const reportedInputTokens =
@@ -1664,8 +1676,10 @@ export function normalizeAiSdkUsage(
   const cacheMissInputTokens =
     explicitCacheMissInputTokens ??
     Math.max(0, inputTokens - cacheHitInputTokens - cacheWriteInputTokens);
-  const cacheMissInputSource: CacheMissInputSource =
-    explicitCacheMissInputTokens !== undefined ? 'explicit' : 'derived';
+  const rawCache = rawCacheUsage(usage, options.wire);
+  const observedRead = rawCache ? rawCache.read : reportedCacheHitInputTokens;
+  const observedWrite = rawCache ? rawCache.write : reportedCacheWriteInputTokens;
+  const observedMiss = rawCache ? rawCache.miss : explicitCacheMissInputTokens;
   const reasoningTokens = reportedReasoningTokens ?? 0;
   const totalTokens = reportedTotalTokens ?? inputTokens + outputTokens;
   const raw = rawUsageFields(usage);
@@ -1675,20 +1689,64 @@ export function normalizeAiSdkUsage(
     outputTokens,
     cacheHitInputTokens,
     cacheMissInputTokens,
-    cacheMissInputSource,
+    cacheMissInputSource:
+      observedMiss !== undefined && observedMiss === cacheMissInputTokens ? 'explicit' : 'derived',
     cacheWriteInputTokens,
-    ...(reportedCacheHitInputTokens === undefined
-      ? {}
-      : { cacheReadInputSource: 'reported' as const }),
-    ...(reportedCacheWriteInputTokens === undefined
-      ? {}
-      : { cacheWriteInputSource: 'reported' as const }),
+    ...(observedRead !== undefined && observedRead === cacheHitInputTokens
+      ? { cacheReadInputSource: 'reported' as const }
+      : {}),
+    ...(observedWrite !== undefined && observedWrite === cacheWriteInputTokens
+      ? { cacheWriteInputSource: 'reported' as const }
+      : {}),
     reasoningTokens,
     totalTokens,
     ...(rawFinishReason !== undefined ? { rawFinishReason } : {}),
     ...(raw !== undefined ? { raw } : {}),
     cachedInputTokens: cacheHitInputTokens,
   };
+}
+
+/** SDK defaults are numeric normalization, not evidence that a provider reported zero. */
+function rawCacheUsage(
+  usage: AiSdkUsageLike,
+  wire: ResolvedModelRuntime['wire'] | undefined,
+): { read?: number; write?: number; miss?: number } | undefined {
+  const raw = usage.raw as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+    return wire === undefined ? undefined : {};
+  const record = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  // Raw vendor fields survive both SDK Chat converters, which otherwise
+  // synthesize cacheRead=0 and noCache=total-cacheRead before Maka sees them.
+  if (wire === 'openai-chat' || 'prompt_tokens' in raw || 'completion_tokens' in raw) {
+    const details = record(raw.prompt_tokens_details);
+    return {
+      read: finiteToken(raw.prompt_cache_hit_tokens) ?? finiteToken(details.cached_tokens),
+      write: finiteToken(details.cache_write_tokens),
+      miss: finiteToken(raw.prompt_cache_miss_tokens),
+    };
+  }
+  if (wire === 'openai-responses') {
+    const details = record(raw.input_tokens_details);
+    return {
+      read: finiteToken(details.cached_tokens),
+      write: finiteToken(details.cache_write_tokens),
+    };
+  }
+  if (wire === 'anthropic-messages')
+    return {
+      read: finiteToken(raw.cache_read_input_tokens),
+      write: finiteToken(raw.cache_creation_input_tokens),
+      miss: finiteToken(raw.input_tokens),
+    };
+  if (wire === 'google-generate')
+    return {
+      read: finiteToken(raw.cachedContentTokenCount),
+    };
+  // An unfamiliar raw schema cannot prove that its SDK's zero was reported.
+  return {};
 }
 
 function finiteToken(value: unknown): number | undefined {

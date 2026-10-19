@@ -2399,6 +2399,7 @@ export async function createExecutionRuntimeHostComposition(
             source.targetSessionId,
             source.targetMessageId,
           );
+      if (disposition.kind === 'pending') return { binding: workHubPendingStopBinding(source) };
       if (disposition.kind !== 'owned_root') return { binding: JSON.stringify(disposition) };
       const original = {
         sessionId: source.targetSessionId,
@@ -2418,6 +2419,7 @@ export async function createExecutionRuntimeHostComposition(
           current.runId,
         ]),
         execution: { sessionId: current.sessionId, turnId: current.turnId, runId: current.runId },
+        initialExecution: original,
       };
     };
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
@@ -2637,11 +2639,13 @@ export async function createExecutionRuntimeHostComposition(
           }
           const sourceSettings =
             !durable && input.freshSource
-              ? snapshotWorkHubTaskSettings(
-                  await stores.sessionStore.readHeaderSnapshot(
-                    input.freshSource.assignment.targetSessionId,
+              ? await sessionCatalog.resolveWorkHubSettings(
+                  snapshotWorkHubTaskSettings(
+                    await stores.sessionStore.readHeaderSnapshot(
+                      input.freshSource.assignment.targetSessionId,
+                    ),
+                    'current_segment',
                   ),
-                  'current_segment',
                 )
               : undefined;
           const prepareCreate = (
@@ -2704,11 +2708,13 @@ export async function createExecutionRuntimeHostComposition(
               async (lease) => {
                 await input.validateFreshTarget?.();
                 if (input.freshSource) {
-                  const currentSettings = snapshotWorkHubTaskSettings(
-                    await stores.sessionStore.readHeaderSnapshot(
-                      input.freshSource.assignment.targetSessionId,
+                  const currentSettings = await sessionCatalog.resolveWorkHubSettings(
+                    snapshotWorkHubTaskSettings(
+                      await stores.sessionStore.readHeaderSnapshot(
+                        input.freshSource.assignment.targetSessionId,
+                      ),
+                      'current_segment',
                     ),
-                    'current_segment',
                   );
                   if (JSON.stringify(currentSettings) !== JSON.stringify(sourceSettings))
                     throw new WorkHubActionEffectFailure(
@@ -2808,18 +2814,20 @@ export async function createExecutionRuntimeHostComposition(
                     ...(input.inputOrigin ? { inputOrigin: input.inputOrigin } : {}),
                     settings:
                       sourceSettings ??
-                      snapshotWorkHubTaskSettings(
-                        create
-                          ? {
-                              ...create.input,
-                              id: input.targetSessionId,
-                              model: create.input.model!,
-                              permissionMode: create.input.permissionMode!,
-                              backend: create.input.executorId ? 'plugin-executor' : 'ai-sdk',
-                            }
-                          : await stores.sessionStore.readHeaderSnapshot(input.targetSessionId),
-                        create ? 'creation' : 'current_segment',
-                      ),
+                      (await sessionCatalog.resolveWorkHubSettings(
+                        snapshotWorkHubTaskSettings(
+                          create
+                            ? {
+                                ...create.input,
+                                id: input.targetSessionId,
+                                model: create.input.model!,
+                                permissionMode: create.input.permissionMode!,
+                                backend: create.input.executorId ? 'plugin-executor' : 'ai-sdk',
+                              }
+                            : await stores.sessionStore.readHeaderSnapshot(input.targetSessionId),
+                          create ? 'creation' : 'current_segment',
+                        ),
+                      )),
                     actionFingerprint: input.actionFingerprint,
                     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
                     targetSessionId: input.targetSessionId,
@@ -3656,9 +3664,20 @@ interface WorkHubStopTarget {
     readonly turnId: string;
     readonly runId: string;
   };
+  readonly initialExecution?: WorkHubStopTarget['execution'];
 }
 
 class WorkHubStopTargetChangedError extends Error {}
+
+function workHubPendingStopBinding(source: WorkHubDelegationAssignedMessage): string {
+  return JSON.stringify([
+    'pending_message',
+    source.actionId,
+    source.delegationId,
+    source.targetSessionId,
+    source.targetMessageId,
+  ]);
+}
 
 /** Replays the committed stop's exact execution, never the delegation's later continuation. */
 export async function retireWorkHubDelegation(
@@ -3684,7 +3703,20 @@ export async function retireWorkHubDelegation(
         ? undefined
         : async (lease) => {
             const target = await deps.readStopTarget(assignment, lease);
-            if (target.binding !== retirement.executionBinding)
+            // Promotion of this exact pending Message into its first, exclusively
+            // owned root does not change the stop target. A later continuation
+            // is not that root, even though it descends from the same Message.
+            const pendingClaim =
+              retirement.executionBinding === workHubPendingStopBinding(assignment) ||
+              retirement.executionBinding === '{"kind":"pending"}';
+            const promotedOriginal =
+              pendingClaim &&
+              target.execution !== undefined &&
+              target.initialExecution !== undefined &&
+              target.execution.sessionId === target.initialExecution.sessionId &&
+              target.execution.turnId === target.initialExecution.turnId &&
+              target.execution.runId === target.initialExecution.runId;
+            if (target.binding !== retirement.executionBinding && !promotedOriginal)
               throw new WorkHubStopTargetChangedError();
             authorized = target.execution;
           },

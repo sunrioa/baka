@@ -310,6 +310,8 @@ export interface LastRequestAnchor {
   cacheReadInputSource?: 'reported';
   cacheWriteInputSource?: 'reported';
   cacheMissInputSource?: 'explicit' | 'derived';
+  /** v2 preserves raw SDK evidence; earlier source labels may describe SDK-filled zeros. */
+  cacheSourceVersion?: 2;
   usageScope?: 'last_completed_request';
   requestedAt?: number;
   /** Last attempted request may be later than the completed request whose usage anchors this record. */
@@ -342,6 +344,7 @@ const LAST_REQUEST_ANCHOR_SHAPE = defineObjectShape<LastRequestAnchor>()(
     'cacheReadInputSource',
     'cacheWriteInputSource',
     'cacheMissInputSource',
+    'cacheSourceVersion',
   ],
   ['payloadChars'],
 );
@@ -366,6 +369,7 @@ export function isLastRequestAnchor(value: unknown): value is LastRequestAnchor 
         (Number.isSafeInteger(value[key]) && (value[key] as number) >= 0),
     ) &&
     (value.usageScope === undefined || value.usageScope === 'last_completed_request') &&
+    (value.cacheSourceVersion === undefined || value.cacheSourceVersion === 2) &&
     (value.cacheReadInputSource === undefined ||
       (value.cacheReadInputSource === 'reported' && value.cacheReadInputTokens !== undefined)) &&
     (value.cacheWriteInputSource === undefined ||

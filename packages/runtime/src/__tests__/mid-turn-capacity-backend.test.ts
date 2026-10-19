@@ -223,6 +223,17 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
       ? { total: input, noCache: undefined, cacheRead: undefined, cacheWrite: undefined }
       : { total: input, noCache: input, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: output, text: output, reasoning: 0 },
+    raw: {
+      prompt_tokens: input,
+      completion_tokens: output,
+      ...(options.withoutCacheBreakdown
+        ? {}
+        : {
+            prompt_cache_hit_tokens: 0,
+            prompt_cache_miss_tokens: input,
+            prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+          }),
+    },
   });
   const firstStepUsage = (): ReturnType<typeof usage> => {
     // A usage object the SDK accepts but whose token counts are absent. The
@@ -1754,6 +1765,7 @@ describe('the shipped runtime default drives the proactive long-turn journey (is
     assert.equal(anchor?.cacheWriteInputSource, 'reported');
     assert.equal(anchor?.cacheMissInputSource, 'explicit');
     assert.equal(anchor?.usageScope, 'last_completed_request');
+    assert.equal(anchor?.cacheSourceVersion, 2);
     assert.equal(
       anchor?.cacheMissInputTokens,
       120,

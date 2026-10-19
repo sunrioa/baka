@@ -9551,6 +9551,12 @@ describe('AiSdkBackend usage telemetry', () => {
                       cacheRead: 20,
                       cacheWrite: 10,
                     },
+                    raw: {
+                      input_tokens: 70,
+                      cache_read_input_tokens: 20,
+                      cache_creation_input_tokens: 10,
+                      output_tokens: 5,
+                    },
                     outputTokens: {
                       total: 5,
                       text: 5,
@@ -9573,6 +9579,12 @@ describe('AiSdkBackend usage telemetry', () => {
                       noCache: 100,
                       cacheRead: 80,
                       cacheWrite: 20,
+                    },
+                    raw: {
+                      input_tokens: 100,
+                      cache_read_input_tokens: 80,
+                      cache_creation_input_tokens: 20,
+                      output_tokens: 7,
                     },
                     outputTokens: {
                       total: 7,
@@ -10210,6 +10222,12 @@ describe('AiSdkBackend usage telemetry', () => {
             noCache: 5,
             cacheRead: 3,
             cacheWrite: 2,
+          },
+          raw: {
+            input_tokens: 5,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 2,
+            output_tokens: 7,
           },
           outputTokens: {
             total: 7,

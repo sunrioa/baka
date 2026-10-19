@@ -2423,6 +2423,7 @@ export class AiSdkTurn {
                     lastRequestAnchor: {
                       inputTokens: anchorInputTokens,
                       usageScope: 'last_completed_request' as const,
+                      cacheSourceVersion: 2 as const,
                       ...(latestRequestAt === undefined ? {} : { latestRequestAt }),
                       ...(lastStepRequestedAt === undefined
                         ? {}

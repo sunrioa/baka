@@ -887,6 +887,82 @@ for (const scenario of [
     assert.equal(active, resumed);
   });
 
+for (const legacy of [false, true])
+  for (const phase of ['initial', 'resumed', 'unproven'] as const)
+    test(`pending WorkHub stop follows only the first Message execution (${phase}, legacy=${legacy})`, async () => {
+      const assignment: Parameters<typeof retireWorkHubDelegation>[0] = {
+        type: 'workhub_coordination',
+        id: `wha_${'b'.repeat(48)}`,
+        turnId: 'coordination',
+        ts: 1,
+        schemaVersion: 1,
+        kind: 'delegation_assigned',
+        actionId: 'pending-task',
+        actionFingerprint: `sha256:${'b'.repeat(64)}`,
+        coordinationTurnId: 'coordination',
+        targetSessionId: 'target',
+        targetSessionName: 'queued task',
+        targetTurnId: 'preceding-turn',
+        targetMessageId: `whm_${'b'.repeat(48)}`,
+        delegationId: `whd_${'b'.repeat(48)}`,
+        disposition: 'delegate_existing',
+        userText: 'work',
+      };
+      const initial = { sessionId: 'target', turnId: 'first', runId: 'first-run' };
+      const resumed = { sessionId: 'target', turnId: 'later', runId: 'later-run' };
+      const active = phase === 'resumed' ? resumed : initial;
+      const admission = new SessionAdmissionGate();
+      let stops = 0;
+      const result = await retireWorkHubDelegation(
+        assignment,
+        {
+          cancellationClaimId: 'pending-stop',
+          cause: 'direct_stop',
+          executionBinding: legacy
+            ? '{"kind":"pending"}'
+            : JSON.stringify([
+                'pending_message',
+                assignment.actionId,
+                assignment.delegationId,
+                assignment.targetSessionId,
+                assignment.targetMessageId,
+              ]),
+        },
+        {
+          messages: {
+            cancelMessageIfPending: async (sessionId, _messageId, _claimId, validate) =>
+              admission.run(sessionId, async (lease) => {
+                await validate?.(lease);
+                return { kind: 'owned_root', turnId: initial.turnId, runId: initial.runId };
+              }),
+          },
+          readStopTarget: async (_source, lease) => {
+            if (lease) await admission.runAdmitted('target', lease, async () => undefined);
+            return {
+              binding: 'current-execution',
+              execution: active,
+              ...(phase === 'unproven' ? {} : { initialExecution: initial }),
+            };
+          },
+          coordinator: {
+            readRootState: () => ({ kind: 'active', ...active }),
+            stopRoot: async (identity: typeof initial) => {
+              assert.deepEqual(identity, initial);
+              stops++;
+            },
+            read: async (identity: typeof initial) => ({
+              ...identity,
+              status: 'cancelled',
+              terminalEventId: 'first-terminal',
+              abortSource: workHubDirectStopAbortSource('pending-stop'),
+            }),
+          } as unknown as Parameters<typeof retireWorkHubDelegation>[2]['coordinator'],
+        },
+      );
+      assert.equal(stops, phase === 'initial' ? 1 : 0);
+      assert.equal(result.outcome, phase === 'initial' ? 'stop_delivered' : 'not_owned');
+    });
+
 test('WorkHub never reports a still-running root as already terminal', async () => {
   // The restart window: the execution is not registered in memory yet, so the
   // root looks inactive while its durable snapshot is still running.

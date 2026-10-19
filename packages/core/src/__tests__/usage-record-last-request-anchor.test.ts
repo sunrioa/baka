@@ -38,6 +38,7 @@ test('a last-request anchor accepts the new usage shape and retired payload key'
     requestedAt: 10,
     latestRequestAt: 12,
     usageScope: 'last_completed_request',
+    cacheSourceVersion: 2,
     cacheReadInputTokens: 100,
     cacheWriteInputTokens: 0,
     cacheMissInputTokens: 20,
@@ -46,6 +47,7 @@ test('a last-request anchor accepts the new usage shape and retired payload key'
     cacheMissInputSource: 'derived',
   };
   assert.equal(isLastRequestAnchor(observed), true);
+  assert.equal(isLastRequestAnchor({ ...observed, cacheSourceVersion: undefined }), true);
   for (const key of [
     'requestedAt',
     'latestRequestAt',
@@ -58,6 +60,8 @@ test('a last-request anchor accepts the new usage shape and retired payload key'
   assert.equal(isLastRequestAnchor({ inputTokens: 120, cacheReadInputSource: 'reported' }), false);
   assert.equal(isLastRequestAnchor({ ...observed, usageScope: 'latest_failed_request' }), false);
   assert.equal(isLastRequestAnchor({ ...observed, cacheMissInputSource: 'guessed' }), false);
+  for (const invalid of [0, 1, 3, '2', null])
+    assert.equal(isLastRequestAnchor({ ...observed, cacheSourceVersion: invalid }), false);
 });
 
 test('token-usage fields carry the anchor and reject a broken one', () => {

@@ -481,16 +481,37 @@ export class HostSessionCatalogCoordinator {
     );
   }
 
+  /** Resolves a legacy slug at the current snapshot without rewriting the source Session. */
+  async resolveWorkHubSettings(
+    source: WorkHubTaskSettingsSnapshot,
+  ): Promise<WorkHubTaskSettingsSnapshot> {
+    if (source.backend !== 'ai-sdk' || source.llmConnectionId !== null) return source;
+    // Legacy Sessions still execute by their exact catalog slug. Bind that
+    // current connection, never the WorkHub default, without rewriting the
+    // old Session or pretending this identity was known at its creation.
+    let catalog: ConnectionCatalogSnapshot;
+    try {
+      catalog = await this.#runtimePolicy.connectionCatalog.getSnapshot();
+    } catch {
+      throw new SessionOperationFailure('persistence_failed', 'Connection catalog is unavailable');
+    }
+    const connection = catalog.connections.find(
+      (entry) => entry.slug === source.llmConnectionSlug && entry.enabled,
+    );
+    if (!connection)
+      throw new SessionOperationFailure(
+        'operation_unavailable',
+        'The source model connection is unavailable',
+      );
+    return { ...source, llmConnectionId: connection.connectionId };
+  }
+
   /** Inherits only the authenticated current segment's persistent configuration. */
   async prepareWorkHubContinuation(
     input: Pick<SessionCreateInput, 'sessionId' | 'workspace' | 'name'>,
     source: WorkHubTaskSettingsSnapshot,
   ): Promise<CreateStableSessionRequest> {
-    if (source.backend === 'ai-sdk' && source.llmConnectionId === null)
-      throw new SessionOperationFailure(
-        'operation_unavailable',
-        'The source model connection is unavailable',
-      );
+    source = await this.resolveWorkHubSettings(source);
     const prepared = await this.prepareWorkHubCreate(
       {
         ...input,
