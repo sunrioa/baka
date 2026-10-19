@@ -100,7 +100,21 @@ test('task history never exposes an exclusive execution for queued, shared, canc
       delegationId: 'delegation-work',
     });
     assert.ok(!result.ok && result.error.code === 'not_found', JSON.stringify(result));
+    assert.equal(
+      await f.runtime.readAssignmentState('work', 'delegation-work'),
+      kind === 'pending'
+        ? 'queued'
+        : kind === 'shared_turn'
+          ? 'shared'
+          : kind === 'unowned'
+            ? 'unavailable'
+            : kind,
+    );
   }
+  await assert.rejects(
+    f.runtime.readAssignmentState('work', 'different-delegation'),
+    /unavailable/,
+  );
   f.setArchived();
   const result = await f.runtime.handlers['workhub.tasks.history']({ workId: 'work' });
   assert.ok(result.ok, JSON.stringify(result));

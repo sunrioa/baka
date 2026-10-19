@@ -223,6 +223,15 @@ export function createWorkHubTaskHistoryRuntime(options: {
       nextCursor: before > 0 ? encode({ kind: 'assignments', workId, before, through }) : null,
     };
   }
+  async function readAssignmentState(actionId: string, delegationId: string) {
+    const source = await stores.sessionStore.readWorkHubAssignment(actionId);
+    if (!source || source.delegationId !== delegationId)
+      throw new HistoryUnavailableError('The original assignment is unavailable');
+    return admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, source.targetSessionId],
+      async (lease) => (await projectAssignment(source, lease)).state,
+    );
+  }
   async function readExecutions(
     actionId: string,
     delegationId: string,
@@ -330,6 +339,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
   }
   return {
     readExecutions,
+    readAssignmentState,
     handlers: {
       'workhub.tasks.history': (input) =>
         query(() => readHistory(input.workId, input.cursor, input.actionId)),

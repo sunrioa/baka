@@ -164,6 +164,24 @@ function fixture() {
               .slice(0, input.maxMessages),
           };
         },
+        readWorkHubTaskFactsPage: async (input: (typeof catalogReads)[number]) => {
+          catalogReads.push(input);
+          const all = assignments.map((message, sequence) => ({ sequence, message }));
+          return {
+            highWaterSequence: all.at(-1)?.sequence ?? null,
+            records: all
+              .filter((row) => row.sequence < (input.beforeSequence ?? Number.MAX_SAFE_INTEGER))
+              .reverse()
+              .slice(0, input.maxMessages),
+          };
+        },
+        readWorkHubTaskInput: async (id: string) =>
+          [...records.values()].find(
+            (message) =>
+              message.type === 'workhub_coordination' &&
+              message.kind === 'task_input' &&
+              message.inputId === id,
+          ),
         readWorkHubTaskInputSuccessors: async () => [],
         listMessageAdmissions: async () => queuedInputs.map((messageId) => ({ messageId })),
         readWorkHubTaskInputByMessage: async (id: string) =>
