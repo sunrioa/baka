@@ -4184,7 +4184,7 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
-for (const scope of ['preserve', 'full', 'upgrade'] as const)
+for (const scope of ['preserve', 'full', 'upgrade', 'late_nack', 'late_ack'] as const)
   test('exact Root stop preserves later accepted work only when requested (' + scope + ')', {
     timeout: 20_000,
   }, async () => {
@@ -4194,6 +4194,8 @@ for (const scope of ['preserve', 'full', 'upgrade'] as const)
       c: deferred<BackendSendInput>(),
     };
     const release = { a: deferred<void>(), b: deferred<void>(), c: deferred<void>() };
+    const pullCorrection = deferred<void>();
+    const correctionPulled = deferred<void>();
     const stopEntered = deferred<void>();
     const seen: string[] = [];
     let stopCount = 0;
@@ -4211,7 +4213,41 @@ for (const scope of ['preserve', 'full', 'upgrade'] as const)
                 );
                 seen.push(key);
                 entered[key].resolve(input);
+                const steering =
+                  key === 'a' && (scope === 'late_nack' || scope === 'late_ack')
+                    ? await (async () => {
+                        await pullCorrection.promise;
+                        const leases = await input.pullSteering!();
+                        assert.equal(leases.length, 1);
+                        return leases;
+                      })()
+                    : [];
+                if (scope === 'late_ack')
+                  for (const lease of steering)
+                    yield {
+                      type: 'steering_message',
+                      id: randomUUID(),
+                      turnId: input.turnId,
+                      ts: Date.now(),
+                      messageId: lease.messageId,
+                      content: lease.content,
+                      submittedContentDigest: lease.submittedContentDigest,
+                    };
+                if (steering.length) correctionPulled.resolve();
                 await release[key].promise;
+                if (steering.length) {
+                  const leaseIds = steering.map((lease) => lease.id);
+                  if (scope === 'late_ack') input.ackSteering!(leaseIds);
+                  else {
+                    input.nackSteering!(leaseIds);
+                    await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+                    assert.deepEqual(
+                      fixture.messages.projection(fixture.sessionId).steering,
+                      [],
+                      'recovery cannot reopen the stopped A before its terminal event',
+                    );
+                  }
+                }
                 yield {
                   type: 'complete',
                   id: randomUUID(),
@@ -4259,6 +4295,14 @@ for (const scope of ['preserve', 'full', 'upgrade'] as const)
             )
           ).ok,
         );
+      const acceptedCorrection = (
+        await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)
+      ).find((entry) => entry.messageId === 'a-correction');
+      assert.ok(acceptedCorrection);
+      if (scope === 'late_nack' || scope === 'late_ack') {
+        pullCorrection.resolve();
+        await correctionPulled.promise;
+      }
       const identity = {
         sessionId: fixture.sessionId,
         turnId: started.result.turn.turnId,
@@ -4286,16 +4330,16 @@ for (const scope of ['preserve', 'full', 'upgrade'] as const)
       release.a.resolve();
       await Promise.all(stopping);
       assert.equal((await fixture.coordinator.read(identity)).status, 'cancelled');
-      assert.equal(
-        await fixture.stores.sessionStore.hasCancelledMessageAdmission(
-          fixture.sessionId,
-          'a-correction',
-        ),
-        true,
-      );
-      if (scope === 'preserve') {
+      if (scope === 'preserve' || scope === 'late_nack' || scope === 'late_ack') {
         const b = await entered.b.promise;
         assert.ok(b.runId);
+        await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+        const leaked = await b.pullSteering!();
+        try {
+          assert.deepEqual(leaked, [], 'a stopped A correction cannot become B steering');
+        } finally {
+          b.ackSteering!(leaked.map((lease) => lease.id));
+        }
         assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), {
           kind: 'active',
           sessionId: fixture.sessionId,
@@ -4335,11 +4379,56 @@ for (const scope of ['preserve', 'full', 'upgrade'] as const)
             true,
           );
       }
+      assert.equal(
+        await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+          fixture.sessionId,
+          'a-correction',
+        ),
+        scope !== 'late_ack',
+      );
+      if (scope === 'late_ack') {
+        assert.ok(
+          await fixture.stores.runtimeEventStore.readImmutableSteeringMessageProof(
+            fixture.sessionId,
+            'a-correction',
+          ),
+          'a durable echo remains consumed even when ack arrives after Stop',
+        );
+        assert.equal(
+          (await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)).length,
+          0,
+        );
+      }
+      if (scope === 'full') {
+        // Simulate the durable residue from a crash after the terminal event
+        // but before Message materialization. Runtime/Root proof and SQLite are
+        // real; inserting this pending fixture is not a whole-Host crash test.
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), { kind: 'idle' });
+        const messageId = 'a-unmaterialized-at-crash';
+        await fixture.stores.sessionStore.commitMessageAdmission({
+          ...acceptedCorrection,
+          messageId,
+        });
+        await fixture.messages.recoverPendingAfterHostRestart([fixture.sessionId]);
+        assert.equal(
+          await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+            fixture.sessionId,
+            messageId,
+          ),
+          true,
+        );
+        assert.deepEqual(
+          await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId),
+          [],
+        );
+        assert.deepEqual(seen, ['a'], 'recovery does not replay a cancelled Root correction');
+      }
       assert.equal(stopCount, 1);
       assert.equal(fixture.drainRequested(), false);
       await fixture.coordinator.close();
       await fixture.messages.close();
     } finally {
+      pullCorrection.resolve();
       for (const gate of Object.values(release)) gate.resolve();
       await Promise.allSettled(stopping);
       await fixture.coordinator.close();
