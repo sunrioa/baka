@@ -512,10 +512,10 @@ describe('Runtime Host operator commands', () => {
         'session-bundle.export',
         'session-bundle.import',
         // Local task-centric foundation, not yet a remote-owner capability.
+        'workhub.tasks.ask',
         'workhub.tasks.continue',
         'workhub.tasks.find',
         'workhub.tasks.start',
-        'workhub.tasks.ask',
       ],
     );
   });
