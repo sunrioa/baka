@@ -755,6 +755,16 @@ export class SqliteRuntimeStore
           connectionId: route.llmConnectionId,
           connectionSlug: route.llmConnectionSlug,
           inputTokens: anchor.inputTokens,
+          ...(anchor.requestedAt === undefined ? {} : { requestedAt: anchor.requestedAt }),
+          ...(anchor.cacheReadInputTokens === undefined
+            ? {}
+            : { cacheReadInputTokens: anchor.cacheReadInputTokens }),
+          ...(anchor.cacheWriteInputTokens === undefined
+            ? {}
+            : { cacheWriteInputTokens: anchor.cacheWriteInputTokens }),
+          ...(anchor.cacheMissInputTokens === undefined
+            ? {}
+            : { cacheMissInputTokens: anchor.cacheMissInputTokens }),
           ...(anchor.outputTokens === undefined ? {} : { outputTokens: anchor.outputTokens }),
         };
       }

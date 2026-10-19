@@ -2088,6 +2088,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
         readonly content: MessageContent;
         readonly runId: string;
         readonly sourceMessageId?: string;
+        readonly origin: 'user' | 'feedback';
       }
     | undefined
   > {
@@ -2116,6 +2117,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           (a) => a.actionId === feedback.actionId && a.delegationId === feedback.delegationId,
         );
         if (!assignment) return undefined;
+        // Keep historical action fingerprints replayable. This is background
+        // evidence only: authenticated origin below distinguishes it from a
+        // fresh user instruction; the model itself receives the notification.
         content = normalizeMessageContent({
           text: assignment.userText,
           ...(assignment.attachments ? { attachments: assignment.attachments } : {}),
@@ -2124,6 +2128,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       return {
         runId: active.runId,
         content,
+        origin: admission.execution.feedback ? 'feedback' : 'user',
         ...(admission.userMessageId && !admission.execution.feedback
           ? { sourceMessageId: admission.userMessageId }
           : {}),

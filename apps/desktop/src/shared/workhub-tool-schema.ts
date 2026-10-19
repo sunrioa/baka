@@ -174,7 +174,7 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
     container: z.enum(['reuse', 'fresh']).optional(),
     text: z.string().min(1).max(48000),
   }).strict().describe(
-    'Continue one objective using its exact workId and sourceActionId from works. Default/reuse appends to the original Session with its existing model/permissions/cwd and next-Turn FIFO. Choose container fresh to continue settled work in a new Session using visible WorkHub creation defaults and the original workspace; only short handoff references are added, not cold history. It preserves workId but starts a new generation. Use context observations when available; unknown or old observations are not current capacity, and there is no fixed age/token threshold. Neither choice stops/steers unrelated work or inherits expired grants. A busy/unsettled source cannot be silently retired. Refresh works after a source conflict instead of substituting a historical same-topic Session.',
+    'Continue one objective using its exact workId and sourceActionId from works. Default/reuse preserves current model/permissions/cwd: running input enters at the next consumable model boundary without interrupting tools; queued input preserves FIFO; settled work starts an ordinary new Turn. Choose container fresh only for settled work, inheriting the current segment persistent settings, including later explicit edits, and original workspace, not WorkHub new-task defaults or one-Turn approvals. Only bounded history references are added, not cold history or a generated handoff summary. It preserves workId but starts a new generation. Use context observations when available; unknown or old observations are not current capacity, and there is no fixed age/token threshold. Neither choice stops/steers unrelated work or inherits expired grants. A busy/unsettled source cannot be silently retired. Refresh works after a source conflict instead of substituting a historical same-topic Session.',
   ),
   z.object({
     operation: z.literal("projects"),
@@ -245,7 +245,7 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
     })
     .strict()
     .describe(
-      "Stop the delegated work identified by the exact targetSessionId from discovery or a prior delegation result. The Host revalidates execution ownership and identity; it does not infer stop intent from natural-language text. Respect the user request and do not invent authorization.",
+      "Stop the delegated work identified by the exact targetSessionId from discovery or a prior delegation result. The Host revalidates execution ownership and identity, not natural-language intent. A user-originated Turn can directly stop one distinct task; automatic notifications and second/distinct targets require Host user confirmation even with bypass. Clarify a known multi-task stop before issuing any stop. Respect the user request and do not invent authorization.",
     ),
   z
     .object({

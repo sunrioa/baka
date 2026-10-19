@@ -160,8 +160,6 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
           proposal.operation === 'correct' &&
           proposal.target.disposition === 'create_new');
       let context;
-      const freshDefaults = input.operation === 'continue_work' && input.container === 'fresh'
-        ? await deps.createDefaults(scope) : undefined;
       if (createsTarget) {
         const projectRef = input.operation === 'create_new' ? input.projectRef
           : input.operation === 'correct' && input.target.disposition === 'create_new' ? input.target.projectRef : undefined;
@@ -176,7 +174,6 @@ export function createWorkHubRuntime(deps: WorkHubRuntimeDeps) {
         ...('text' in input ? { delegationText: input.text } : {}),
         ...('candidateSetId' in input && input.candidateSetId ? { candidateSetId: input.candidateSetId } : {}),
         ...(context ? { create: { workspace: context.workspace }, newWorkDefaults: context.defaults } : {}),
-        ...(freshDefaults ? { newWorkDefaults: freshDefaults } : {}),
       });
       if (result.disposition === 'create_new' || (result.disposition === 'replace' && result.replacementDisposition === 'create_new')) {
         deps.changed(scope, 'created', result.targetSessionId);

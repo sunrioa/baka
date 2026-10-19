@@ -67,6 +67,9 @@ test('work context keeps the latest request on its own route and never presents 
   assert.deepEqual(context.lastRequest, { ...observed, matchesCurrentRoute: false });
   assert.equal('remainingTokens' in context, false);
   assert.equal(context.currentModelId, 'current-model');
+  assert.equal(context.estimates?.compaction.status, 'unknown');
+  assert.equal(context.estimates?.compaction.reason, 'route_changed');
+  assert.equal(context.estimates?.costs.reuseInputBaseline.uncachedUsd, null);
   const work = {
     workId: 'work',
     sourceActionId: 'source',
@@ -131,4 +134,83 @@ test('work context keeps the latest request on its own route and never presents 
   })('session');
   assert.equal(windowConflict.configuredInputLimit, null);
   assert.deepEqual(windowConflict.lastRequest, { status: 'unknown', reason: 'scan_limit' });
+});
+
+test('context estimates use the runtime window/reserve and explicit connection pricing without forcing a fresh route', async () => {
+  const header = {
+    model: 'current-model',
+    llmConnectionId: 'current-connection',
+    llmConnectionSlug: 'proxy',
+  };
+  const observe = createWorkHubContextObserver({
+    sessions: { readHeaderSnapshot: async () => header },
+    catalog: {
+      getSnapshot: async () =>
+        ({
+          connections: [
+            {
+              connectionId: header.llmConnectionId,
+              slug: 'proxy',
+              providerType: 'ollama',
+              models: [{ id: header.model, contextWindow: 128000, inputLimit: 100000 }],
+              modelOverrides: { [header.model]: { compactionThreshold: 128000 } },
+            },
+          ],
+        }) as unknown as ConnectionCatalogSnapshot,
+    },
+    readPricing: async () => [
+      {
+        modelKey: 'proxy:current-model',
+        inputUsdPer1M: 2,
+        outputUsdPer1M: 3,
+        cacheReadUsdPer1M: 0.2,
+      },
+    ],
+    runtime: {
+      readLatestSessionRequestObservation: async () => ({
+        status: 'observed',
+        eventId: 'usage',
+        runId: 'run',
+        observedAt: 200,
+        requestedAt: 100,
+        modelId: header.model,
+        connectionId: header.llmConnectionId,
+        connectionSlug: 'proxy',
+        inputTokens: 125000,
+        outputTokens: 1000,
+        cacheReadInputTokens: 120000,
+        cacheMissInputTokens: 5000,
+        cacheWriteInputTokens: 0,
+      }),
+    },
+  });
+  const result = await observe('source');
+  assert.equal(result.configuredInputLimit, 100000);
+  assert.deepEqual(result.estimates?.compaction, {
+    status: 'estimated',
+    reason: 'baseline_only',
+    baselineTokens: 126000,
+    replyReserveTokens: 2000,
+    configuredThreshold: 128000,
+    baselineAtOrOverWindow: true,
+    nextRequest: 'unknown',
+  });
+  assert.deepEqual(result.estimates?.cache, {
+    status: 'unknown',
+    reason: 'provider_state_not_observable',
+  });
+  assert.equal(result.lastRequest.status, 'observed');
+  assert.ok(result.lastRequest.status === 'observed');
+  assert.equal(
+    result.lastRequest.requestedAt,
+    100,
+    'activity/observation time is not request time',
+  );
+  assert.equal(result.lastRequest.cacheReadInputTokens, 120000);
+  assert.equal(result.estimates?.costs.pricingSource, 'configured_connection_override');
+  assert.equal(result.estimates?.costs.reuseInputBaseline.uncachedUsd, 0.252);
+  assert.equal(result.estimates?.costs.reuseInputBaseline.allCachedUsd, 0.0252);
+  assert.equal(result.estimates?.costs.compactionTotal, 'unknown');
+  assert.equal(result.estimates?.costs.freshWithSelectiveReadsTotal, 'unknown');
+  assert.equal('recommendedContainer' in result, false);
 });

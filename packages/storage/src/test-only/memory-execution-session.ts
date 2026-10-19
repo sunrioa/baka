@@ -1364,6 +1364,16 @@ export function createMemorySessionStore(
           ? m
           : undefined;
       }),
+    hasOtherWorkHubStopTarget: async (turnId, workId) =>
+      read((s) =>
+        (messages(s).get(HUB) ?? []).some(
+          (m) =>
+            m.type === 'workhub_coordination' &&
+            m.kind === 'delegation_stop_requested' &&
+            m.turnId === turnId &&
+            (m.workId ?? m.targetSessionId) !== workId,
+        ),
+      ),
     readWorkHubStopResolution: async (id, actionId) =>
       read((s) => {
         if (!actionId) {

@@ -1737,10 +1737,18 @@ describe('the shipped runtime default drives the proactive long-turn journey (is
     // Two steps: 100 + 120 reported input, and the send sum is both.
     assert.equal(usage?.input, 220);
     const anchor = usage?.lastRequestAnchor as
-      | { inputTokens: number; outputTokens?: number }
+      | import('@maka/core/usage-record-schema').LastRequestAnchor
       | undefined;
     assert.equal(anchor?.inputTokens, 120);
     assert.equal(anchor?.outputTokens, 10);
+    assert.equal(anchor?.cacheReadInputTokens, 0);
+    assert.equal(anchor?.cacheWriteInputTokens, 0);
+    assert.equal(
+      anchor?.cacheMissInputTokens,
+      120,
+      'last request, not send-level cumulative input',
+    );
+    assert.ok(Number.isSafeInteger(anchor?.requestedAt));
   });
 
   test('an anchor is discarded unless its invocation proves it came from this model', async () => {

@@ -302,6 +302,11 @@ export interface TokenUsageFields {
 export interface LastRequestAnchor {
   inputTokens: number;
   outputTokens?: number;
+  /** Per-physical-request normalized provider fields, never the send aggregate. */
+  cacheReadInputTokens?: number;
+  cacheWriteInputTokens?: number;
+  cacheMissInputTokens?: number;
+  requestedAt?: number;
   /**
    * The route that produced these counts.
    *
@@ -317,7 +322,15 @@ export interface LastRequestAnchor {
 
 const LAST_REQUEST_ANCHOR_SHAPE = defineObjectShape<LastRequestAnchor>()(
   ['inputTokens'],
-  ['outputTokens', 'modelId', 'connectionId'],
+  [
+    'outputTokens',
+    'modelId',
+    'connectionId',
+    'cacheReadInputTokens',
+    'cacheWriteInputTokens',
+    'cacheMissInputTokens',
+    'requestedAt',
+  ],
   ['payloadChars'],
 );
 
@@ -329,6 +342,11 @@ export function isLastRequestAnchor(value: unknown): value is LastRequestAnchor 
     value.inputTokens > 0 &&
     (value.outputTokens === undefined ||
       (isFiniteNumber(value.outputTokens) && value.outputTokens >= 0)) &&
+    ['cacheReadInputTokens', 'cacheWriteInputTokens', 'cacheMissInputTokens', 'requestedAt'].every(
+      (key) =>
+        value[key] === undefined ||
+        (Number.isSafeInteger(value[key]) && (value[key] as number) >= 0),
+    ) &&
     (value.payloadChars === undefined || isFiniteNumber(value.payloadChars))
   );
 }

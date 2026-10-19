@@ -48,6 +48,7 @@ import {
   isWorkHubCoordinationSessionId,
   isWorkHubCoordinationSessionTarget,
   type SessionHeader,
+  type WorkHubTaskSettingsSnapshot,
   type SessionHeaderPatch,
   type StoredMessage,
 } from '@maka/core/session';
@@ -478,6 +479,51 @@ export class HostSessionCatalogCoordinator {
         };
       },
     );
+  }
+
+  /** Inherits only the authenticated current segment's persistent configuration. */
+  async prepareWorkHubContinuation(
+    input: Pick<SessionCreateInput, 'sessionId' | 'workspace' | 'name'>,
+    source: WorkHubTaskSettingsSnapshot,
+  ): Promise<CreateStableSessionRequest> {
+    if (source.backend === 'ai-sdk' && source.llmConnectionId === null)
+      throw new SessionOperationFailure(
+        'operation_unavailable',
+        'The source model connection is unavailable',
+      );
+    const prepared = await this.prepareWorkHubCreate(
+      {
+        ...input,
+        ...(source.backend === 'plugin-executor'
+          ? {
+              executorId: source.executorId!,
+              ...(source.executorConfig ? { executorConfig: source.executorConfig } : {}),
+            }
+          : {
+              modelTarget: {
+                kind: 'explicit' as const,
+                connectionId: source.llmConnectionId!,
+                connectionSlug: source.llmConnectionSlug,
+                model: source.model,
+              },
+            }),
+        thinkingLevel: source.thinkingLevel,
+        // Explore is an existing restricted persistent mode, not a creation mode request.
+        // Keep its exact configuration below without creating a new permission exception.
+        permissionMode: source.permissionMode === 'explore' ? 'ask' : source.permissionMode,
+        collaborationMode: source.collaborationMode,
+        orchestrationMode: source.orchestrationMode,
+      },
+      { cwd: source.cwd, projectId: source.projectId },
+    );
+    return {
+      ...prepared,
+      input: {
+        ...prepared.input,
+        permissionMode: source.permissionMode,
+        toolMode: source.toolMode,
+      },
+    };
   }
 
   async #query(

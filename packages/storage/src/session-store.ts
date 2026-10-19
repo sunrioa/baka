@@ -543,6 +543,10 @@ class SqliteSessionStore implements SessionAuthorityStore {
       : undefined;
   }
 
+  hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
+    return this.metadata.hasOtherWorkHubStopTarget(turnId, workId);
+  }
+
   async readWorkHubStopResolution(
     delegationId: string,
     actionId?: string,

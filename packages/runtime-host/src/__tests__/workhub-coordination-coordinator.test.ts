@@ -222,6 +222,7 @@ describe('Host WorkHub Coordination coordinator', () => {
         undefined,
         {
           readActiveWorkHubRoutingRequest: async () => ({
+            origin: 'user',
             content: { text: 'Research an independent goal' },
             runId: 'active-run',
           }),
@@ -306,7 +307,9 @@ describe('Host WorkHub Coordination coordinator', () => {
         {
           ...executions,
           readActiveWorkHubRoutingRequest: async (turnId) =>
-            turnId === 'active-turn' ? { content: canonical, runId: 'active-run' } : undefined,
+            turnId === 'active-turn'
+              ? { content: canonical, runId: 'active-run', origin: 'user' }
+              : undefined,
         },
         admission,
         {
@@ -2338,6 +2341,138 @@ describe('Host WorkHub Coordination coordinator', () => {
   });
 });
 
+for (const scenario of ['user-second', 'feedback', 'declined', 'stale', 'concurrent'] as const)
+  test(`stop confirmation binds origin, distinct targets and exact execution (${scenario})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-stop-confirmation-'));
+    const store = createSessionStore(root);
+    let confirmations = 0;
+    let binding = 'execution-before';
+    const retired: string[] = [];
+    const makeHost = () =>
+      coordinator(
+        root,
+        store,
+        undefined,
+        undefined,
+        {
+          runWorkHubCoordinationOperation: unusedCoordinationOperation,
+          startWorkHubCoordinationMessage: async () => ({
+            ok: false,
+            error: { code: 'operation_unavailable', message: 'Unused' },
+          }),
+          isSessionExecutionIdle: () => true,
+          readActiveWorkHubRoutingRequest: async () => ({
+            runId: 'current-run',
+            content: { text: '停止工作' },
+            origin: scenario === 'feedback' ? 'feedback' : 'user',
+          }),
+        },
+        undefined,
+        {
+          assign: persistTestAssignmentAction(store, (input) => `turn-${input.actionId}`),
+          retireDelegation: async (source) => {
+            retired.push(source.actionId);
+            return { outcome: 'stop_delivered', targetTurnId: source.targetTurnId };
+          },
+        },
+        {
+          readStopBinding: async () => binding,
+          requestForm: async (input) => {
+            const request = await input.create();
+            assert.equal(request.kind, 'form');
+            assert.equal(input.turnId, 'stop-model-turn');
+            assert.equal(input.runId, 'current-run');
+            const selected = request.message?.includes('「a」') ? 'source-a' : 'source-b';
+            assert.equal(
+              retired.includes(selected),
+              false,
+              'confirmation precedes this target effect',
+            );
+            confirmations++;
+            if (scenario === 'stale') binding = 'different-execution';
+            return {
+              createdAt: 1,
+              answer:
+                scenario === 'declined'
+                  ? { action: 'cancel' }
+                  : { action: 'accept', values: { stop: 'confirm' } },
+            };
+          },
+        },
+      );
+    try {
+      let host = makeHost();
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const targets: string[] = [];
+      for (const name of ['a', 'b']) {
+        const target = await store.create({
+          cwd: root,
+          name,
+          model: 'model',
+          llmConnectionSlug: 'test',
+          permissionMode: 'ask',
+        });
+        targets.push(target.id);
+        const page = await host.handlers['workhub.coordination.candidates']({}, CONTEXT);
+        assert.ok(page.ok);
+        const result = await host.act(
+          {
+            actionId: `source-${name}`,
+            userText: `Work ${name}`,
+            candidateSetId: page.result.candidateSetId,
+            proposal: {
+              disposition: 'delegate_existing',
+              candidateRef: page.result.candidates.find(
+                (candidate) => candidate.sessionId === target.id,
+              )!.candidateRef,
+            },
+          },
+          CONTEXT,
+        );
+        assert.ok(result.ok, JSON.stringify(result));
+      }
+      const stop = (actionId: string, targetSessionId: string) =>
+        host.handlers['workhub.coordination.actFromTurn'](
+          {
+            turnId: 'stop-model-turn',
+            actionId,
+            proposal: { operation: 'stop', expects: { targetSessionId } },
+          },
+          CONTEXT,
+        );
+      if (scenario === 'concurrent') {
+        const results = await Promise.all(targets.map((id, index) => stop(`stop-${index}`, id)));
+        assert.ok(
+          results.every((result) => result.ok),
+          JSON.stringify(results),
+        );
+        assert.equal(
+          confirmations,
+          1,
+          'parallel tool calls cannot both claim the unconfirmed first target',
+        );
+        assert.equal(retired.length, 2);
+      } else {
+        const first = await stop('stop-a', targets[0]!);
+        assert.ok(first.ok, JSON.stringify(first));
+        const replay = await stop('stop-a', targets[0]!);
+        assert.deepEqual(replay, first);
+        assert.equal(retired.length, 1);
+        assert.equal(confirmations, scenario === 'feedback' ? 1 : 0);
+        if (scenario !== 'feedback') {
+          host = makeHost(); // The distinct-target count is durable, not a process-local set.
+          const second = await stop('stop-b', targets[1]!);
+          assert.equal(confirmations, 1);
+          assert.equal(second.ok, scenario === 'user-second', JSON.stringify(second));
+          assert.equal(retired.length, scenario === 'user-second' ? 2 : 1);
+        }
+      }
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 type CoordinationExecutions = Pick<
   RootTurnCoordinator,
   | 'startWorkHubCoordinationMessage'
@@ -2405,6 +2540,7 @@ function coordinator(
   },
   admission: SessionAdmissionGate = new SessionAdmissionGate(),
   sessionActions: Partial<HostWorkHubCoordinationCoordinatorOptions['sessionActions']> = {},
+  options: Pick<HostWorkHubCoordinationCoordinatorOptions, 'requestForm' | 'readStopBinding'> = {},
 ) {
   const assign =
     sessionActions.assign ??
@@ -2439,7 +2575,7 @@ function coordinator(
       readActiveWorkHubRoutingRequest: async (turnId) => {
         const content = activeRequests.get(turnId);
         return content
-          ? { content, runId: 'active-run' }
+          ? { content, runId: 'active-run', origin: 'user' }
           : executions.readActiveWorkHubRoutingRequest(turnId);
       },
     },
@@ -2465,6 +2601,7 @@ function coordinator(
         orchestrationMode: 'default',
       })),
     requestDrain,
+    ...options,
   });
   return {
     handlers: host.handlers,

@@ -106,15 +106,17 @@ archival or workspace movement requires a new selection. The Gate repeats this
 validation under target admission before a fresh assignment.
 
 Coordination admission permits asking and waiting; it does not admit target
-execution. This interaction works with the default coordination model and does
-not enable the optional pre-admission model-routing experiment. An immutable
-Host-bound routing decision cannot be replaced by a choice in the same Turn.
+execution. The coordination model chooses through the normal task tools; there
+is no pre-admission model-routing experiment or immutable intent decision.
 
 **Active-Turn action** names the currently executing coordination Turn. The Host
 checks its live execution, durable admission and coordination tool profile, then
 reads the original request and attachments from that admission. A tool cannot
 supply its own user-originated authority or attachment locators. Model-prepared
 `delegationText` is task content, separate from the original user request.
+The Host also authenticates whether admission came from a user or automatic
+feedback. Historical assignment text carried by feedback is background, not a
+new user instruction; the Host does not classify natural-language intent.
 
 **Action Gate** validates the resulting operation against durable ownership,
 candidate freshness, Session identity, archive/waiting state and existing claims.
@@ -127,6 +129,13 @@ proposal. Each target still executes under its own permission boundary.
 A delegation links the Coordination Session to an ordinary Session and its admitted
 message. Its coordination status is distinct from the target's execution status.
 Action identities and fingerprints bind retries to the same payload and target.
+
+New assignments persist a settings fact containing only the effective persistent
+Session configuration. A fresh continuation inherits the current segment's
+explicit configuration, including later user edits, not today's new-task defaults.
+The source configuration is rechecked under admission before committing the new
+segment. Old assignments without a settings fact remain readable and are not
+backfilled with invented creation settings. One-Turn approvals are not copied.
 
 A replacement first durably claims its source delegation, retires only work owned
 by that delegation, and records the replacement link and supersession. If the new
@@ -146,6 +155,14 @@ unrecovered or unreadable target stays unresolved; it cannot be called terminal.
 A removed target's durable tombstone allows a committed stop to converge after
 restart. Stop and replacement claims exclude each other until a non-owning outcome
 releases that exclusion.
+
+A user-originated coordination Turn can directly stop one distinct task. Automatic
+feedback requires an existing Host confirmation; a second distinct stop target in
+the same Turn also requires confirmation. Durable stop claims enforce the latter
+under the same admission lanes, including concurrent calls and replay. Confirmation
+binds the exact task and execution and is checked again before any effect; bypass
+permission does not bypass it. Direct task-view stop remains explicitly bound to
+that task, without adding a model decision.
 
 Resume is admitted by the target's existing Turn authority and reports
 `resume_started` or `already_running`. It does not create another coordination

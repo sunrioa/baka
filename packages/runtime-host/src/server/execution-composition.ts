@@ -50,6 +50,7 @@ import {
 } from '@maka/core/runtime-invocation';
 import {
   type SessionHeader,
+  snapshotWorkHubTaskSettings,
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
 } from '@maka/core/session';
@@ -2382,10 +2383,38 @@ export async function createExecutionRuntimeHostComposition(
       Awaited<ReturnType<typeof prepareWorkHubMessage>> & { release(): void }
     >();
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
+      readStopBinding: async (source, lease) => {
+        const disposition = lease
+          ? await messages.readMessageExecutionDispositionAdmitted(
+              source.targetSessionId,
+              source.targetMessageId,
+              lease,
+            )
+          : await messages.readMessageExecutionDisposition(
+              source.targetSessionId,
+              source.targetMessageId,
+            );
+        if (disposition.kind !== 'owned_root') return JSON.stringify(disposition);
+        const original = {
+          sessionId: source.targetSessionId,
+          turnId: disposition.turnId,
+          runId: disposition.runId,
+        };
+        const current = workHubEvidence
+          ? await workHubEvidence.taskExecution(source, original)
+          : await coordinator.readLatestRootTurnLineage(original);
+        return JSON.stringify([
+          source.actionId,
+          source.delegationId,
+          source.targetMessageId,
+          current,
+        ]);
+      },
       readWorkContext: createWorkHubContextObserver({
         sessions: stores.sessionStore,
         runtime: stores.runtimeEventStore,
         catalog: runtimePolicyStores.connectionCatalog,
+        readPricing: async () => (await openedUsageStores.pricing.snapshot()).overrides,
       }),
       requestForm: (input) => interactions.requestForm(input),
       targetExecution: workHubTargetExecution,
@@ -2622,59 +2651,61 @@ export async function createExecutionRuntimeHostComposition(
           if (durable) {
             await messages.consumePendingAdmissions([durable.targetSessionId]);
           }
+          const sourceSettings =
+            !durable && input.freshSource
+              ? snapshotWorkHubTaskSettings(
+                  await stores.sessionStore.readHeaderSnapshot(
+                    input.freshSource.assignment.targetSessionId,
+                  ),
+                  'current_segment',
+                )
+              : undefined;
+          const prepareCreate = (
+            request: Parameters<typeof sessionCatalog.prepareWorkHubCreate>[0],
+          ) =>
+            sourceSettings
+              ? sessionCatalog.prepareWorkHubContinuation(request, sourceSettings)
+              : sessionCatalog.prepareWorkHubCreate(request);
           const create =
             !durable && input.create
-              ? await sessionCatalog
-                  .prepareWorkHubCreate(
-                    {
-                      sessionId: input.targetSessionId,
-                      workspace: input.create.workspace,
-                      name: input.create.title,
-                      ...(input.create.defaults?.executorId
-                        ? {
-                            executorId: input.create.defaults.executorId,
-                            ...(input.create.defaults.executorModel
-                              ? { executorModel: input.create.defaults.executorModel }
-                              : {}),
-                          }
-                        : {
-                            modelTarget: input.create.defaults?.model
-                              ? {
-                                  kind: 'explicit' as const,
-                                  connectionId: input.create.defaults.model.llmConnectionId,
-                                  connectionSlug: input.create.defaults.model.llmConnectionSlug,
-                                  model: input.create.defaults.model.model,
-                                }
-                              : ({ kind: 'default' } as const),
-                          }),
-                      ...(input.create.defaults?.permissionMode
-                        ? { permissionMode: input.create.defaults.permissionMode }
-                        : {}),
-                      ...(input.create.defaults?.thinkingLevel
-                        ? { thinkingLevel: input.create.defaults.thinkingLevel }
-                        : {}),
-                      collaborationMode: 'agent',
-                      orchestrationMode: 'default',
-                    },
-                    input.freshSource
-                      ? {
-                          cwd: input.freshSource.workspace.hostCwd,
-                          projectId:
-                            input.freshSource.workspace.target.kind === 'project'
-                              ? input.freshSource.workspace.target.projectId
-                              : null,
-                        }
-                      : undefined,
+              ? await prepareCreate({
+                  sessionId: input.targetSessionId,
+                  workspace: input.create.workspace,
+                  name: input.create.title,
+                  ...(input.create.defaults?.executorId
+                    ? {
+                        executorId: input.create.defaults.executorId,
+                        ...(input.create.defaults.executorModel
+                          ? { executorModel: input.create.defaults.executorModel }
+                          : {}),
+                      }
+                    : {
+                        modelTarget: input.create.defaults?.model
+                          ? {
+                              kind: 'explicit' as const,
+                              connectionId: input.create.defaults.model.llmConnectionId,
+                              connectionSlug: input.create.defaults.model.llmConnectionSlug,
+                              model: input.create.defaults.model.model,
+                            }
+                          : ({ kind: 'default' } as const),
+                      }),
+                  ...(input.create.defaults?.permissionMode
+                    ? { permissionMode: input.create.defaults.permissionMode }
+                    : {}),
+                  ...(input.create.defaults?.thinkingLevel
+                    ? { thinkingLevel: input.create.defaults.thinkingLevel }
+                    : {}),
+                  collaborationMode: 'agent',
+                  orchestrationMode: 'default',
+                }).catch((error: unknown) => {
+                  if (
+                    input.freshSource &&
+                    (error instanceof SessionOperationFailure ||
+                      error instanceof WorkspaceResolutionError)
                   )
-                  .catch((error: unknown) => {
-                    if (
-                      input.freshSource &&
-                      (error instanceof SessionOperationFailure ||
-                        error instanceof WorkspaceResolutionError)
-                    )
-                      throw new WorkHubActionEffectFailure('operation_unavailable', error.message);
-                    throw error;
-                  })
+                    throw new WorkHubActionEffectFailure('operation_unavailable', error.message);
+                  throw error;
+                })
               : undefined;
           const { suffix, messageId, targetAttachments, content, delegationText } =
             replacementCapacity.get(input.actionId) ?? (await prepareWorkHubMessage(input));
@@ -2689,6 +2720,17 @@ export async function createExecutionRuntimeHostComposition(
               async (lease) => {
                 await input.validateFreshTarget?.();
                 if (input.freshSource) {
+                  const currentSettings = snapshotWorkHubTaskSettings(
+                    await stores.sessionStore.readHeaderSnapshot(
+                      input.freshSource.assignment.targetSessionId,
+                    ),
+                    'current_segment',
+                  );
+                  if (JSON.stringify(currentSettings) !== JSON.stringify(sourceSettings))
+                    throw new WorkHubActionEffectFailure(
+                      'operation_conflict',
+                      'Source settings changed during fresh continuation; retry with the current segment',
+                    );
                   if (!workHubEvidence)
                     throw new WorkHubActionEffectFailure(
                       'operation_unavailable',
@@ -2739,6 +2781,11 @@ export async function createExecutionRuntimeHostComposition(
                   }
                 }
                 const delegationId = `whd_${suffix}`;
+                if (create && (!create.input.model || !create.input.permissionMode))
+                  throw new WorkHubActionEffectFailure(
+                    'operation_unavailable',
+                    'Created task has no effective model or permission configuration',
+                  );
                 const supersession =
                   input.replacesActionId && input.replacesDelegationId
                     ? {
@@ -2774,6 +2821,21 @@ export async function createExecutionRuntimeHostComposition(
                     returnResults: true,
                     actionId: input.actionId,
                     ...(input.work ? { work: input.work } : {}),
+                    ...(input.inputOrigin ? { inputOrigin: input.inputOrigin } : {}),
+                    settings:
+                      sourceSettings ??
+                      snapshotWorkHubTaskSettings(
+                        create
+                          ? {
+                              ...create.input,
+                              id: input.targetSessionId,
+                              model: create.input.model!,
+                              permissionMode: create.input.permissionMode!,
+                              backend: create.input.executorId ? 'plugin-executor' : 'ai-sdk',
+                            }
+                          : await stores.sessionStore.readHeaderSnapshot(input.targetSessionId),
+                        create ? 'creation' : 'current_segment',
+                      ),
                     actionFingerprint: input.actionFingerprint,
                     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
                     targetSessionId: input.targetSessionId,
@@ -2786,7 +2848,16 @@ export async function createExecutionRuntimeHostComposition(
                     ...(input.attachments ? { attachments: input.attachments } : {}),
                     ...(targetAttachments ? { targetAttachments } : {}),
                     ...(delegationText === undefined ? {} : { delegationText }),
-                    ...(input.create ? { create: input.create } : {}),
+                    ...(input.create
+                      ? {
+                          create: input.freshSource
+                            ? {
+                                title: input.create.title,
+                                workspace: input.create.workspace,
+                              }
+                            : input.create,
+                        }
+                      : {}),
                     ...(input.replacesActionId && input.replacesDelegationId
                       ? {
                           replacesActionId: input.replacesActionId,

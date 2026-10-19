@@ -2818,6 +2818,7 @@ test('production WorkHub continues cold work in a fresh model route without repl
       if (
         !coordinator &&
         input.model === 'new-model' &&
+        users.includes('FRESH_CONTINUE') &&
         !input.messages.some(
           (message) =>
             message.role === 'tool' &&
@@ -2847,7 +2848,7 @@ test('production WorkHub continues cold work in a fresh model route without repl
         response.write(chunk({}, 'tool_calls'));
       } else {
         let text = 'Result noted.';
-        if (!coordinator && input.model === 'new-model')
+        if (!coordinator && input.model === 'new-model' && users.includes('FRESH_CONTINUE'))
           text = 'Selected historical evidence was read without restarting its source.';
         else if (!coordinator && users.includes('INDEPENDENT_C'))
           text = 'C finished independently.';
@@ -3003,18 +3004,21 @@ test('production WorkHub continues cold work in a fresh model route without repl
         model: { llmConnectionId: newId, llmConnectionSlug: 'fresh', model: 'new-model' },
         permissionMode: 'ask' as const,
       };
+      const ignoredDefaults = {
+        ...defaults,
+        model: { ...defaults.model, model: 'missing-model' },
+        permissionMode: 'bypass' as const,
+      };
       const invalidDefaults = await act('invalid-defaults', freshProposal, 'FRESH_CONTINUE', {
         newWorkDefaults: { ...defaults, model: { ...defaults.model, model: 'missing-model' } },
       });
       assert.ok(
-        !invalidDefaults.ok &&
-          invalidDefaults.error.code === 'operation_unavailable' &&
-          /model|enabled/i.test(invalidDefaults.error.message),
+        !invalidDefaults.ok && invalidDefaults.error.code === 'session_busy',
         JSON.stringify(invalidDefaults),
       );
       assert.equal(await stores.sessionStore.readWorkHubAssignment('invalid-defaults'), undefined);
       const blocked = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-        newWorkDefaults: defaults,
+        newWorkDefaults: ignoredDefaults,
       });
       assert.ok(!blocked.ok && blocked.error.code === 'session_busy', JSON.stringify(blocked));
       assert.equal(await stores.sessionStore.readWorkHubAssignment('fresh-a'), undefined);
@@ -3029,6 +3033,23 @@ test('production WorkHub continues cold work in a fresh model route without repl
       const reuse = await stores.sessionStore.readWorkHubAssignment('reuse-a');
       assert.ok(reuse);
       await wait(() => done(a.targetSessionId, reuse.targetTurnId));
+      await wait(async () => {
+        if (
+          !requests.some((request) => !request.coordinator && request.body.includes('REUSE_CHECK'))
+        )
+          return false;
+        const catalog = await composition.handlers['session.catalog.query'](
+          { kind: 'get', sessionId: a.targetSessionId },
+          context,
+        );
+        return (
+          catalog.ok &&
+          catalog.result.kind === 'session' &&
+          catalog.result.session !== null &&
+          !('kind' in catalog.result.session) &&
+          catalog.result.session.liveRunState?.runningTurnIds.length === 0
+        );
+      });
       const oldHeader = await stores.sessionStore.readHeaderSnapshot(a.targetSessionId);
       const oldWorks = await composition.handlers['workhub.coordination.works']({}, context);
       assert.ok(oldWorks.ok);
@@ -3042,6 +3063,31 @@ test('production WorkHub continues cold work in a fresh model route without repl
       assert.equal(oldObservation.lastRequest.matchesCurrentRoute, true);
       const aRuns = await stores.runtimeEventStore.listSessionInvocations(a.targetSessionId);
       assert.equal(aRuns.length, 2);
+      // An explicit user edit to the current idle segment wins over both its
+      // creation settings and any current WorkHub new-task defaults.
+      const sourceConfiguration = await stores.sessionStore.readHeaderRecordSnapshot(
+        a.targetSessionId,
+      );
+      const changedSource = await composition.handlers['session.configuration.update'](
+        {
+          sessionId: a.targetSessionId,
+          expectedRevision: sourceConfiguration.revision,
+          patch: {
+            modelTarget: {
+              kind: 'explicit',
+              connectionId: newId,
+              connectionSlug: 'fresh',
+              model: 'new-model',
+            },
+            permissionMode: 'ask',
+          },
+        },
+        context,
+      );
+      assert.ok(
+        changedSource.ok && changedSource.result.kind === 'committed',
+        JSON.stringify(changedSource),
+      );
       const candidates = await composition.handlers['workhub.coordination.candidates']({}, context);
       assert.ok(candidates.ok);
       const candidate = candidates.result.candidates.find(
@@ -3065,13 +3111,18 @@ test('production WorkHub continues cold work in a fresh model route without repl
         ),
       );
       const fresh = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-        newWorkDefaults: defaults,
+        newWorkDefaults: ignoredDefaults,
       });
       assert.ok(fresh.ok, JSON.stringify(fresh));
       assert.equal(fresh.result.disposition, 'create_new');
       assert.equal(fresh.result.workId, 'source-a');
       const current = await stores.sessionStore.readWorkHubAssignment('fresh-a');
       assert.ok(current);
+      assert.equal(current.settings?.basis, 'current_segment');
+      assert.equal(current.settings?.sessionId, a.targetSessionId);
+      assert.equal(current.settings?.model, 'new-model');
+      assert.equal(current.settings?.permissionMode, 'ask');
+      assert.equal(a.settings?.permissionMode, 'bypass');
       assert.notEqual(current.targetSessionId, a.targetSessionId);
       assert.deepEqual(
         current.work && {
@@ -3094,12 +3145,14 @@ test('production WorkHub continues cold work in a fresh model route without repl
         'ask',
       );
       assert.equal(
-        requests.filter((request) => request.model === 'new-model').length,
+        requests.filter(
+          (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
+        ).length,
         0,
         'one worker slot keeps fresh A behind unrelated B',
       );
       const replay = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-        newWorkDefaults: defaults,
+        newWorkDefaults: ignoredDefaults,
       });
       assert.deepEqual(replay, fresh);
       const stale = await composition.handlers['workhub.tasks.send'](
@@ -3132,7 +3185,9 @@ test('production WorkHub continues cold work in a fresh model route without repl
         'the admitted root waits for a worker slot and accepts same-work steering',
       );
       assert.equal(
-        requests.filter((request) => request.model === 'new-model').length,
+        requests.filter(
+          (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
+        ).length,
         0,
         'accepting a correction does not bypass the worker queue',
       );
@@ -3159,7 +3214,9 @@ test('production WorkHub continues cold work in a fresh model route without repl
       releaseB.resolve();
       await wait(() => done(current.targetSessionId, current.targetTurnId));
       await wait(() => done(c.targetSessionId, c.targetTurnId));
-      const freshRequests = requests.filter((request) => request.model === 'new-model');
+      const freshRequests = requests.filter(
+        (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
+      );
       assert.equal(freshRequests.length, 3);
       assert.ok(
         freshRequests.every(
@@ -3182,7 +3239,12 @@ test('production WorkHub continues cold work in a fresh model route without repl
           ?.body.includes('COLD_FAR_SENTINEL'),
       );
       assert.equal(
-        oldRequests.filter((request) => request.body.includes('OLD_B_HOLD')).length,
+        requests.filter(
+          (request) =>
+            !request.coordinator &&
+            request.body.includes('OLD_B_HOLD') &&
+            !request.body.includes('FRESH_CONTINUE'),
+        ).length,
         1,
         'stale correction never reaches B',
       );
@@ -3229,8 +3291,8 @@ test('production WorkHub continues cold work in a fresh model route without repl
       );
       assert.deepEqual(afterSourceEvents, sourceEvents);
       const unchanged = await stores.sessionStore.readHeaderSnapshot(a.targetSessionId);
-      assert.equal(unchanged.model, oldHeader.model);
-      assert.equal(unchanged.permissionMode, oldHeader.permissionMode);
+      assert.equal(unchanged.model, 'new-model');
+      assert.equal(unchanged.permissionMode, 'ask');
       assert.equal(unchanged.cwd, oldHeader.cwd);
       const conflict = await act('stale-fresh', freshProposal, 'FRESH_CONTINUE', {
         newWorkDefaults: defaults,

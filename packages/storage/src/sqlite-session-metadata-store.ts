@@ -3447,6 +3447,39 @@ export class SqliteSessionMetadataStore {
     return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, true);
   }
 
+  async hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
+    this.assertOpen();
+    assertSafeSessionId(turnId);
+    assertSafeSessionId(workId);
+    return this.readTransaction(() => {
+      const rows = this.db
+        .prepare(`
+        SELECT message.sequence, message.record_json, payload.record_bytes, payload.sha256
+        FROM session_messages AS message
+        LEFT JOIN session_message_payloads AS payload
+          ON payload.session_id = message.session_id AND payload.sequence = message.sequence
+        WHERE message.session_id = ? AND message.message_type = 'workhub_coordination'
+          AND message.message_id GLOB 'whq_*' AND length(message.message_id) = 52
+          AND (json_extract(message.record_json, '$.turnId') = ? OR json_type(message.record_json, '$.turnId') IS NULL)
+      `)
+        .iterate(
+          WORKHUB_COORDINATION_SESSION_ID,
+          turnId,
+        ) as Iterable<StoredSessionMessagePayloadRow>;
+      for (const row of rows) {
+        const fact = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+        if (
+          fact.type === 'workhub_coordination' &&
+          fact.kind === 'delegation_stop_requested' &&
+          fact.turnId === turnId &&
+          (fact.workId ?? fact.targetSessionId) !== workId
+        )
+          return true;
+      }
+      return false;
+    });
+  }
+
   async readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined> {

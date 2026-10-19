@@ -18,6 +18,7 @@
  */
 
 import type { ThinkingLevel } from '@maka/core/model-thinking';
+import { z } from 'zod';
 import type { AttachmentRef } from '@maka/core/events';
 import { isWorkHubActionResult, type WorkHubActionResult } from '@maka/core/workhub-action-result';
 import { decodeMessageContent } from './turn.js';
@@ -185,6 +186,7 @@ export interface WorkHubContextObservation {
   readonly currentConnectionId: string | null;
   readonly currentConnectionSlug: string;
   readonly configuredInputLimit: number | null;
+  readonly estimates?: WorkHubContextEstimates;
   readonly lastRequest:
     | {
         readonly status: 'unknown';
@@ -206,10 +208,57 @@ export interface WorkHubContextObservation {
         readonly connectionSlug: string;
         readonly inputTokens: number;
         readonly outputTokens?: number;
+        readonly requestedAt?: number;
+        /** Normalized fields for this physical request; absent on old/unsupported records. */
+        readonly cacheReadInputTokens?: number;
+        readonly cacheWriteInputTokens?: number;
+        readonly cacheMissInputTokens?: number;
         /** null when the current connection identity cannot be resolved. */
         readonly matchesCurrentRoute: boolean | null;
       };
 }
+
+const nullableCount = z.number().int().nonnegative().nullable();
+const contextEstimatesSchema = z
+  .object({
+    compaction: z
+      .object({
+        status: z.enum(['estimated', 'unknown']),
+        reason: z.enum([
+          'baseline_only',
+          'route_changed',
+          'threshold_unconfigured',
+          'usage_unknown',
+        ]),
+        baselineTokens: nullableCount,
+        replyReserveTokens: nullableCount,
+        configuredThreshold: nullableCount,
+        baselineAtOrOverWindow: z.boolean().nullable(),
+        nextRequest: z.literal('unknown'),
+      })
+      .strict(),
+    cache: z
+      .object({ status: z.literal('unknown'), reason: z.literal('provider_state_not_observable') })
+      .strict(),
+    costs: z
+      .object({
+        pricingSource: z.enum(['configured_connection_override', 'unknown']),
+        reuseInputBaseline: z
+          .object({
+            status: z.enum(['estimated', 'unknown']),
+            inputTokens: nullableCount,
+            uncachedUsd: z.number().finite().nonnegative().nullable(),
+            allCachedUsd: z.number().finite().nonnegative().nullable(),
+            assumption: z.literal('last_request_plus_output_excluding_new_input_and_future_output'),
+          })
+          .strict(),
+        compactionTotal: z.literal('unknown'),
+        freshWithSelectiveReadsTotal: z.literal('unknown'),
+      })
+      .strict(),
+  })
+  .strict();
+export type WorkHubContextEstimates = z.infer<typeof contextEstimatesSchema>;
 
 /** Source-backed objective identity; Session activity is not creation provenance. */
 export interface WorkHubWorkSummary {
@@ -921,13 +970,18 @@ function decodeWorkHubCoordinationCreateContext(value: unknown): WorkHubCoordina
 }
 
 function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservation {
-  const context = requireExactRecord(value, 'WorkHub context observation', [
-    'currentModelId',
-    'currentConnectionId',
-    'currentConnectionSlug',
-    'configuredInputLimit',
-    'lastRequest',
-  ]);
+  const context = requireShapedRecord(
+    value,
+    'WorkHub context observation',
+    [
+      'currentModelId',
+      'currentConnectionId',
+      'currentConnectionSlug',
+      'configuredInputLimit',
+      'lastRequest',
+    ],
+    ['estimates'],
+  );
   const raw = requireRecord(context.lastRequest, 'WorkHub last request');
   let lastRequest: WorkHubContextObservation['lastRequest'];
   if (raw.status === 'unknown') {
@@ -958,7 +1012,13 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
         'inputTokens',
         'matchesCurrentRoute',
       ],
-      ['outputTokens'],
+      [
+        'outputTokens',
+        'requestedAt',
+        'cacheReadInputTokens',
+        'cacheWriteInputTokens',
+        'cacheMissInputTokens',
+      ],
     );
     if (
       observed.status !== 'observed' ||
@@ -980,6 +1040,11 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
         256,
       ),
       inputTokens,
+      ...Object.fromEntries(
+        ['requestedAt', 'cacheReadInputTokens', 'cacheWriteInputTokens', 'cacheMissInputTokens']
+          .filter((key) => observed[key] !== undefined)
+          .map((key) => [key, requireCount(observed[key], `WorkHub request ${key}`)]),
+      ),
       ...(observed.outputTokens === undefined
         ? {}
         : { outputTokens: requireCount(observed.outputTokens, 'WorkHub request output tokens') }),
@@ -991,6 +1056,12 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
       ? null
       : requireCount(context.configuredInputLimit, 'WorkHub configured input limit');
   if (limit === 0) throw invalidProtocolFrame('Invalid WorkHub configured input limit');
+  const estimates =
+    context.estimates === undefined
+      ? undefined
+      : contextEstimatesSchema.safeParse(context.estimates);
+  if (estimates && !estimates.success)
+    throw invalidProtocolFrame('Invalid WorkHub context estimates');
   return {
     currentModelId: requireUtf8String(context.currentModelId, 'WorkHub current model', 4096),
     currentConnectionId:
@@ -1004,6 +1075,7 @@ function decodeWorkHubContextObservation(value: unknown): WorkHubContextObservat
     ),
     configuredInputLimit: limit,
     lastRequest,
+    ...(estimates?.success ? { estimates: estimates.data } : {}),
   };
 }
 

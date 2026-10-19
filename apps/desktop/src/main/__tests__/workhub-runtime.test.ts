@@ -65,12 +65,13 @@ test('empty new-work preferences dispatch the visible coordination model, not a 
   f.deps.createDefaults = () => readWorkHubCreationDefaults(creationClient);
   await f.runtime.actTasks(scope, 'turn', 'fresh-without-explicit-selection', workHubTasksSchema.parse({ operation: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh', text: 'Continue settled work.' }));
   const sent = decodeWorkHubCoordinationActFromTurnInput(f.requests[0]);
-  assert.deepEqual(sent.newWorkDefaults?.model, visible);
-  assert.notDeepEqual(sent.newWorkDefaults?.model, globalDefault);
-  assert.equal(sent.newWorkDefaults?.permissionMode, 'ask', 'never inherit the coordination Session bypass');
-  assert.equal('cwd' in (sent.newWorkDefaults ?? {}), false);
+  assert.equal(sent.newWorkDefaults, undefined, 'fresh inherits the current task segment, not creation defaults');
   await f.runtime.actTasks(scope, 'turn', 'new-without-explicit-selection', workHubTasksSchema.parse({ operation: 'create_new', title: 'Independent', text: 'An independent task.' }));
-  assert.deepEqual(decodeWorkHubCoordinationActFromTurnInput(f.requests[1]).newWorkDefaults?.model, visible);
+  const created = decodeWorkHubCoordinationActFromTurnInput(f.requests[1]);
+  assert.deepEqual(created.newWorkDefaults?.model, visible);
+  assert.notDeepEqual(created.newWorkDefaults?.model, globalDefault);
+  assert.equal(created.newWorkDefaults?.permissionMode, 'ask', 'never inherit the coordination Session bypass');
+  assert.equal('cwd' in (created.newWorkDefaults ?? {}), false);
 });
 
 test('explicit creation defaults stay Host-scoped and an unavailable displayed fallback never becomes another model', async () => {
@@ -118,10 +119,10 @@ test('work discovery and continuation preserve exact objective references withou
     sourceActionId: 'assignment-a', text: 'Continue', permissionMode: 'bypass' }));
 });
 
-test('fresh work continuation uses visible creation defaults without a caller workspace or target rediscovery', async () => {
+test('fresh work continuation leaves effective settings and workspace inheritance to the Host', async () => {
   const f = fixture();
   const defaults = { permissionMode: 'ask' as const, model: { llmConnectionId: 'new-connection', llmConnectionSlug: 'new', model: 'new-model' } };
-  f.deps.createDefaults = async () => defaults;
+  f.deps.createDefaults = async () => { throw new Error('Fresh must not read new-task defaults'); };
   f.client.listProjects = async () => { throw new Error('The Host owns the source workspace'); };
   f.client.listWorkHubCoordinationCandidates = async () => { throw new Error('The work source is already selected'); };
   f.client.actWorkHubCoordinationFromTurn = async (input) => {
@@ -130,7 +131,7 @@ test('fresh work continuation uses visible creation defaults without a caller wo
   };
   const input = { operation: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh', text: 'Continue the objective' };
   await f.runtime.actTasks(scope, 'turn', 'fresh-action', workHubTasksSchema.parse(input));
-  assert.deepEqual(f.requests, [{ turnId: 'turn', actionId: 'fresh-action', proposal: { disposition: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh' }, delegationText: input.text, newWorkDefaults: defaults }]);
+  assert.deepEqual(f.requests, [{ turnId: 'turn', actionId: 'fresh-action', proposal: { disposition: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh' }, delegationText: input.text }]);
   assert.deepEqual(f.changes, [[scope, 'created', 'fresh']]);
   for (const extra of [{ permissionMode: 'bypass' }, { newWorkDefaults: defaults }, { targetSessionId: 'other' }, { projectRef: 'other' }])
     assert.equal(workHubTasksSchema.safeParse({ ...input, ...extra }).success, false);

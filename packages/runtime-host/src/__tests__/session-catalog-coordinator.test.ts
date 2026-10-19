@@ -39,6 +39,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
   type SessionHeader,
+  snapshotWorkHubTaskSettings,
 } from '@maka/core/session';
 import {
   SessionConfigurationTransitionError,
@@ -1846,6 +1847,87 @@ test('fresh WorkHub containers retain the actual source worktree and registered 
       /exist|directory|resolve/i,
     );
     assert.equal(fixture.drainRequests(), 0, 'failed preparation does not start or migrate work');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('fresh WorkHub segments inherit effective persistent settings, not defaults or turn approvals', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-settings-')));
+  try {
+    const resolved: unknown[] = [];
+    const fixture = createFixture({
+      connection: {
+        enabledModelIds: ['model-1', 'edited-model'],
+        models: [{ id: 'model-1' }, { id: 'edited-model' }],
+        onResolve: (ref) => resolved.push(ref),
+      },
+    });
+    const source = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        model: 'edited-model',
+        permissionMode: 'ask',
+        toolMode: 'code_mode',
+        thinkingLevel: undefined,
+      },
+      'current_segment',
+    );
+    const request = {
+      sessionId: 'next-segment',
+      workspace: { kind: 'host_path' as const, path: root },
+      name: 'Same work',
+    };
+    const prepared = await fixture.coordinator.prepareWorkHubContinuation(request, source);
+    assert.equal(prepared.input.model, 'edited-model');
+    assert.equal(prepared.input.llmConnectionId, source.llmConnectionId);
+    assert.equal(prepared.input.permissionMode, 'ask');
+    assert.equal(prepared.input.toolMode, 'code_mode');
+    assert.equal(
+      prepared.input.thinkingLevel,
+      undefined,
+      'an absent variant stays provider-default',
+    );
+    assert.equal(prepared.input.cwd, root);
+    assert.ok(resolved.length > 0, 'inherited model still passes current execution authorization');
+    assert.equal('rememberForTurn' in prepared.input, false);
+    assert.equal('sandboxGrants' in prepared.input, false);
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, { ...source, llmConnectionId: null }),
+      /connection is unavailable/,
+    );
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        model: 'unavailable-model',
+      }),
+      /enabled|unavailable/,
+    );
+    const seen: unknown[] = [];
+    const executor = createFixture({
+      assertExecutorAvailable: async (_id, executorId, config) => {
+        seen.push([executorId, config]);
+        return config;
+      },
+    });
+    const executorSource = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'edited-executor', mode: 'ask' },
+        permissionMode: 'ask',
+        toolMode: 'direct',
+      },
+      'current_segment',
+    );
+    const external = await executor.coordinator.prepareWorkHubContinuation(request, executorSource);
+    assert.deepEqual(seen, [['remote', { model: 'edited-executor', mode: 'ask' }]]);
+    assert.equal(external.input.executorId, 'remote');
+    assert.deepEqual(external.input.executorConfig, executorSource.executorConfig);
+    assert.equal(external.input.permissionMode, 'ask');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

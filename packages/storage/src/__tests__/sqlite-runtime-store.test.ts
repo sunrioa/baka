@@ -77,7 +77,14 @@ describe('SqliteRuntimeStore', () => {
           tokenUsage: {
             input: 50000,
             output: 1000,
-            lastRequestAnchor: { inputTokens: 600, outputTokens: 20 },
+            lastRequestAnchor: {
+              inputTokens: 600,
+              outputTokens: 20,
+              requestedAt: 8,
+              cacheReadInputTokens: 500,
+              cacheWriteInputTokens: 25,
+              cacheMissInputTokens: 75,
+            },
           },
         },
       };
@@ -112,6 +119,10 @@ describe('SqliteRuntimeStore', () => {
         connectionSlug: 'fake',
         inputTokens: 600,
         outputTokens: 20,
+        requestedAt: 8,
+        cacheReadInputTokens: 500,
+        cacheWriteInputTokens: 25,
+        cacheMissInputTokens: 75,
       });
       // Session ordinal, not timestamp sorting, owns recency.
       await store.appendRuntimeEvent(root.sessionId, root.runId, {

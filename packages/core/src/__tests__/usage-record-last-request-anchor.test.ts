@@ -32,6 +32,23 @@ test('a last-request anchor accepts the new usage shape and retired payload key'
   assert.equal(isLastRequestAnchor({ inputTokens: 0, payloadChars: 4_000 }), false);
   assert.equal(isLastRequestAnchor({ inputTokens: 120, outputTokens: -1 }), false);
   assert.equal(isLastRequestAnchor({ inputTokens: 120, foo: 1 }), false);
+  const observed = {
+    inputTokens: 120,
+    outputTokens: 20,
+    requestedAt: 10,
+    cacheReadInputTokens: 100,
+    cacheWriteInputTokens: 0,
+    cacheMissInputTokens: 20,
+  };
+  assert.equal(isLastRequestAnchor(observed), true);
+  for (const key of [
+    'requestedAt',
+    'cacheReadInputTokens',
+    'cacheWriteInputTokens',
+    'cacheMissInputTokens',
+  ])
+    for (const invalid of [-1, NaN, 1.5, 'unknown'])
+      assert.equal(isLastRequestAnchor({ ...observed, [key]: invalid }), false);
 });
 
 test('token-usage fields carry the anchor and reject a broken one', () => {

@@ -1016,6 +1016,8 @@ export class AiSdkTurn {
     // Output tokens of the same step: with the input they are the baseline the
     // next request is judged from (everything the model produced is re-sent).
     let lastStepOutputTokens: number | undefined;
+    let lastStepUsage: NormalizedUsage | undefined;
+    let lastStepRequestedAt: number | undefined;
     let streamStatus: LlmCallRecord['status'] = 'success';
     let streamErrorClass: string | undefined;
     let runtimeSteps = 0;
@@ -1631,6 +1633,7 @@ export class AiSdkTurn {
             // rebuilt in place by overflow recovery, and the boundary it folded
             // under must travel with that rebuild, not with the step.
             const historyCompactBoundary = requestHistoryCompactBoundary();
+            lastStepRequestedAt = this.deps.now();
             result = await this.deps.modelAdapter.startStream({
               model,
               messages: dispatchMessages,
@@ -1944,6 +1947,7 @@ export class AiSdkTurn {
               }
               lastStepInputTokens = stepUsage?.inputTokens;
               lastStepOutputTokens = stepUsage?.outputTokens;
+              lastStepUsage = stepUsage;
               // A `finishReason: length` is deliberately not a trigger. The
               // reply may have been cut because the provider ran out of
               // window room, or because the provider's own output cap is
@@ -2416,6 +2420,16 @@ export class AiSdkTurn {
                 ? {
                     lastRequestAnchor: {
                       inputTokens: anchorInputTokens,
+                      ...(lastStepRequestedAt === undefined
+                        ? {}
+                        : { requestedAt: lastStepRequestedAt }),
+                      ...(lastStepUsage
+                        ? {
+                            cacheReadInputTokens: lastStepUsage.cacheHitInputTokens,
+                            cacheWriteInputTokens: lastStepUsage.cacheWriteInputTokens,
+                            cacheMissInputTokens: lastStepUsage.cacheMissInputTokens,
+                          }
+                        : {}),
                       ...(anchorOutputTokens !== undefined
                         ? { outputTokens: anchorOutputTokens }
                         : {}),

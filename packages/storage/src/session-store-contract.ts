@@ -565,6 +565,8 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
     delegationId: string,
     actionId?: string,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined>;
+  /** Whether this coordination Turn has already claimed a different stop target. */
+  hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean>;
   readWorkHubStopResolution(
     delegationId: string,
     actionId?: string,

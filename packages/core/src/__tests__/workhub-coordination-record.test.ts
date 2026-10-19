@@ -19,7 +19,11 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { decodeCanonicalMessage } from '../session.js';
+import {
+  decodeCanonicalMessage,
+  snapshotWorkHubTaskSettings,
+  isWorkHubTaskSettingsSnapshot,
+} from '../session.js';
 
 const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
 
@@ -86,6 +90,53 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
+    const settings = snapshotWorkHubTaskSettings(
+      {
+        id: 'payments',
+        cwd: '/work',
+        backend: 'ai-sdk',
+        model: 'user-selected',
+        llmConnectionId: 'connection',
+        llmConnectionSlug: 'proxy',
+        permissionMode: 'ask',
+        toolMode: 'code_mode',
+        thinkingLevel: 'high',
+      },
+      'current_segment',
+    );
+    assert.equal(isWorkHubTaskSettingsSnapshot(settings), true);
+    assert.deepEqual(decodeCanonicalMessage({ ...assigned, settings }), { ...assigned, settings });
+    for (const extra of [
+      { rememberForTurn: true },
+      { sandboxGrants: ['/'] },
+      { toolMode: 'invalid' },
+      { permissionMode: undefined },
+      { executorId: 'remote' },
+    ]) {
+      assert.throws(() =>
+        decodeCanonicalMessage({ ...assigned, settings: { ...settings, ...extra } }),
+      );
+    }
+    const executorConfig = { model: 'executor-model', mode: 'ask' };
+    const executorSettings = snapshotWorkHubTaskSettings(
+      {
+        ...settings,
+        id: 'executor',
+        llmConnectionId: 'connection',
+        thinkingLevel: 'high',
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig,
+      },
+      'current_segment',
+    );
+    executorConfig.mode = 'auto';
+    assert.equal(
+      executorSettings.executorConfig?.mode,
+      'ask',
+      'snapshot is independent of later user edits',
+    );
+    assert.equal(isWorkHubTaskSettingsSnapshot(executorSettings), true);
     const delegated = { ...assigned, delegationText: 'Inspect the payment retry state' };
     assert.deepEqual(decodeCanonicalMessage(delegated), delegated);
     const original = {
