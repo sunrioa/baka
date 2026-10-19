@@ -181,6 +181,11 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
     source: WorkHubDelegationAssignedMessage,
     lease?: SessionAdmissionLease,
   ) => Promise<string>;
+  readonly isStopBindingCurrent?: (
+    source: WorkHubDelegationAssignedMessage,
+    expected: string,
+    lease: SessionAdmissionLease,
+  ) => Promise<boolean>;
 }
 
 /** Resolves the one durable Coordination Session owned by this Runtime Host. */
@@ -215,6 +220,7 @@ export class HostWorkHubCoordinationCoordinator {
   readonly #workIndex: ReturnType<typeof createWorkHubWorkIndex>;
   readonly #readDelegationRetirement: HostWorkHubCoordinationCoordinatorOptions['sessionActions']['readDelegationRetirement'];
   readonly #readStopBinding: HostWorkHubCoordinationCoordinatorOptions['readStopBinding'];
+  readonly #isStopBindingCurrent: HostWorkHubCoordinationCoordinatorOptions['isStopBindingCurrent'];
 
   constructor(options: HostWorkHubCoordinationCoordinatorOptions) {
     this.#requestForm = options.requestForm;
@@ -225,6 +231,7 @@ export class HostWorkHubCoordinationCoordinator {
     this.#stores = options.stores;
     this.#readDelegationRetirement = options.sessionActions.readDelegationRetirement;
     this.#readStopBinding = options.readStopBinding;
+    this.#isStopBindingCurrent = options.isStopBindingCurrent;
     this.#admission = options.admission;
     this.#continuity = options.continuity;
     this.#executions = options.executions;
@@ -440,8 +447,11 @@ export class HostWorkHubCoordinationCoordinator {
         beforeAppend: async (lease) => {
           if (
             confirmed &&
-            (!this.#readStopBinding ||
-              (await this.#readStopBinding(source, lease)) !== confirmedBinding)
+            (confirmedBinding === undefined ||
+              !this.#readStopBinding ||
+              !(this.#isStopBindingCurrent
+                ? await this.#isStopBindingCurrent(source, confirmedBinding, lease)
+                : (await this.#readStopBinding(source, lease)) === confirmedBinding))
           )
             throw new WorkHubActionGateFailure(
               'action_conflict',

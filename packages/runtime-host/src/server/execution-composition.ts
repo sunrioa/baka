@@ -21,6 +21,11 @@ import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubContextObserver } from './workhub-context-observation.js';
 import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
 import {
+  workHubPendingStopBinding,
+  workHubStopBindingMatches,
+  type WorkHubStopTarget,
+} from './workhub-stop-binding.js';
+import {
   createWorkHubEvidenceRuntime,
   WorkHubFreshSourceUnavailableError,
 } from './workhub-evidence-runtime.js';
@@ -2424,6 +2429,8 @@ export async function createExecutionRuntimeHostComposition(
     };
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
       readStopBinding: async (source, lease) => (await readStopTarget(source, lease)).binding,
+      isStopBindingCurrent: async (source, expected, lease) =>
+        workHubStopBindingMatches(source, expected, await readStopTarget(source, lease)),
       readWorkContext: createWorkHubContextObserver({
         sessions: stores.sessionStore,
         runtime: stores.runtimeEventStore,
@@ -3657,27 +3664,7 @@ export async function createExecutionRuntimeHostComposition(
   }
 }
 
-interface WorkHubStopTarget {
-  readonly binding: string;
-  readonly execution?: {
-    readonly sessionId: string;
-    readonly turnId: string;
-    readonly runId: string;
-  };
-  readonly initialExecution?: WorkHubStopTarget['execution'];
-}
-
 class WorkHubStopTargetChangedError extends Error {}
-
-function workHubPendingStopBinding(source: WorkHubDelegationAssignedMessage): string {
-  return JSON.stringify([
-    'pending_message',
-    source.actionId,
-    source.delegationId,
-    source.targetSessionId,
-    source.targetMessageId,
-  ]);
-}
 
 /** Replays the committed stop's exact execution, never the delegation's later continuation. */
 export async function retireWorkHubDelegation(
@@ -3703,20 +3690,7 @@ export async function retireWorkHubDelegation(
         ? undefined
         : async (lease) => {
             const target = await deps.readStopTarget(assignment, lease);
-            // Promotion of this exact pending Message into its first, exclusively
-            // owned root does not change the stop target. A later continuation
-            // is not that root, even though it descends from the same Message.
-            const pendingClaim =
-              retirement.executionBinding === workHubPendingStopBinding(assignment) ||
-              retirement.executionBinding === '{"kind":"pending"}';
-            const promotedOriginal =
-              pendingClaim &&
-              target.execution !== undefined &&
-              target.initialExecution !== undefined &&
-              target.execution.sessionId === target.initialExecution.sessionId &&
-              target.execution.turnId === target.initialExecution.turnId &&
-              target.execution.runId === target.initialExecution.runId;
-            if (target.binding !== retirement.executionBinding && !promotedOriginal)
+            if (!workHubStopBindingMatches(assignment, retirement.executionBinding!, target))
               throw new WorkHubStopTargetChangedError();
             authorized = target.execution;
           },

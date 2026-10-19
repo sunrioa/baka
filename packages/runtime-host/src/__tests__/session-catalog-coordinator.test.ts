@@ -1948,6 +1948,34 @@ test('fresh WorkHub segments inherit effective persistent settings, not defaults
     assert.equal(external.input.executorId, 'remote');
     assert.deepEqual(external.input.executorConfig, executorSource.executorConfig);
     assert.equal(external.input.permissionMode, 'ask');
+    for (const config of [undefined, { mode: 'ask' }]) {
+      seen.length = 0;
+      const legacyExecutor = {
+        ...executorSource,
+        model: 'legacy-chosen-model',
+        executorConfig: config,
+      };
+      const legacyExternal = await executor.coordinator.prepareWorkHubContinuation(
+        request,
+        legacyExecutor,
+      );
+      assert.equal(legacyExternal.input.model, 'legacy-chosen-model');
+      assert.deepEqual(legacyExternal.input.executorConfig, {
+        ...config,
+        model: 'legacy-chosen-model',
+      });
+      assert.deepEqual(seen, [['remote', { ...config, model: 'legacy-chosen-model' }]]);
+      assert.equal(legacyExternal.input.permissionMode, 'ask');
+      assert.deepEqual(legacyExecutor.executorConfig, config, 'legacy settings are not rewritten');
+      seen.length = 0;
+      const defaultExternal = await executor.coordinator.prepareWorkHubContinuation(request, {
+        ...legacyExecutor,
+        model: 'remote',
+      });
+      assert.equal(defaultExternal.input.model, 'remote');
+      assert.deepEqual(seen, [['remote', config]], 'do not invent an explicit executor model');
+      assert.equal(defaultExternal.input.executorConfig?.model, undefined);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

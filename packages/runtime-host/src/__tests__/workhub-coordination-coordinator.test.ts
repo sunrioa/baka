@@ -44,6 +44,11 @@ import type { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import type { WorkHubCoordinationActFromTurnInput } from '../protocol/workhub-coordination.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import {
+  workHubPendingStopBinding,
+  workHubStopBindingMatches,
+  type WorkHubStopTarget,
+} from '../server/workhub-stop-binding.js';
+import {
   SessionOperationFailure,
   WorkHubDefaultModelRequiredError,
 } from '../server/session-catalog-coordinator.js';
@@ -2348,6 +2353,9 @@ for (const scenario of [
   'stale',
   'concurrent',
   'withdrawn-followup',
+  'pending-first',
+  'pending-resumed',
+  'pending-unproven',
 ] as const)
   test(`stop confirmation binds origin, distinct targets and exact execution (${scenario})`, async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-stop-confirmation-'));
@@ -2355,6 +2363,21 @@ for (const scenario of [
     let confirmations = 0;
     let binding = 'execution-before';
     const retired: string[] = [];
+    const pendingScenario = scenario.startsWith('pending-');
+    let promoted = false;
+    const stopTarget = (source: WorkHubDelegationAssignedMessage): WorkHubStopTarget => {
+      if (!pendingScenario) return { binding };
+      if (!promoted) return { binding: workHubPendingStopBinding(source) };
+      const initial = { sessionId: source.targetSessionId, turnId: 'first', runId: 'first-run' };
+      return {
+        binding: 'execution-after-promotion',
+        execution:
+          scenario === 'pending-resumed'
+            ? { ...initial, turnId: 'resumed', runId: 'resumed-run' }
+            : initial,
+        ...(scenario === 'pending-unproven' ? {} : { initialExecution: initial }),
+      };
+    };
     const makeHost = () =>
       coordinator(
         root,
@@ -2371,7 +2394,7 @@ for (const scenario of [
           readActiveWorkHubRoutingRequest: async () => ({
             runId: 'current-run',
             content: { text: '停止工作' },
-            origin: scenario === 'feedback' ? 'feedback' : 'user',
+            origin: scenario === 'feedback' || pendingScenario ? 'feedback' : 'user',
           }),
         },
         undefined,
@@ -2382,7 +2405,7 @@ for (const scenario of [
           retireDelegation: async (source, claim) => {
             assert.equal(
               claim.executionBinding,
-              'execution-before',
+              pendingScenario ? 'execution-after-promotion' : 'execution-before',
               'durable binding reaches the effect',
             );
             retired.push(source.actionId);
@@ -2390,7 +2413,9 @@ for (const scenario of [
           },
         },
         {
-          readStopBinding: async () => binding,
+          readStopBinding: async (source) => stopTarget(source).binding,
+          isStopBindingCurrent: async (source, expected) =>
+            workHubStopBindingMatches(source, expected, stopTarget(source)),
           requestForm: async (input) => {
             const request = await input.create();
             assert.equal(request.kind, 'form');
@@ -2404,6 +2429,7 @@ for (const scenario of [
             );
             confirmations++;
             if (scenario === 'stale') binding = 'different-execution';
+            promoted = true;
             return {
               createdAt: 1,
               answer:
@@ -2479,7 +2505,17 @@ for (const scenario of [
           },
           CONTEXT,
         );
-      if (scenario === 'concurrent') {
+      if (pendingScenario) {
+        const result = await stop('stop-a', targets[0]!);
+        assert.equal(result.ok, scenario === 'pending-first', JSON.stringify(result));
+        assert.equal(confirmations, 1, 'feedback always requires the original confirmation');
+        assert.deepEqual(retired, scenario === 'pending-first' ? ['source-a'] : []);
+        if (result.ok) {
+          const replay = await stop('stop-a', targets[0]!);
+          assert.deepEqual(replay, result);
+          assert.equal(confirmations, 1, 'a committed confirmation is not asked again');
+        }
+      } else if (scenario === 'concurrent') {
         const results = await Promise.all(targets.map((id, index) => stop(`stop-${index}`, id)));
         assert.ok(
           results.every((result) => result.ok),
@@ -2579,7 +2615,10 @@ function coordinator(
   },
   admission: SessionAdmissionGate = new SessionAdmissionGate(),
   sessionActions: Partial<HostWorkHubCoordinationCoordinatorOptions['sessionActions']> = {},
-  options: Pick<HostWorkHubCoordinationCoordinatorOptions, 'requestForm' | 'readStopBinding'> = {},
+  options: Pick<
+    HostWorkHubCoordinationCoordinatorOptions,
+    'requestForm' | 'readStopBinding' | 'isStopBindingCurrent'
+  > = {},
 ) {
   const assign =
     sessionActions.assign ??

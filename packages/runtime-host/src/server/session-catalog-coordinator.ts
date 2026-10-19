@@ -519,6 +519,11 @@ export class HostSessionCatalogCoordinator {
           ? {
               executorId: source.executorId!,
               ...(source.executorConfig ? { executorConfig: source.executorConfig } : {}),
+              // Older executor Sessions saved their chosen model in header.model
+              // without executorConfig.model. The executor id itself means default.
+              ...(source.executorConfig?.model || source.model === source.executorId
+                ? {}
+                : { executorModel: source.model }),
             }
           : {
               modelTarget: {

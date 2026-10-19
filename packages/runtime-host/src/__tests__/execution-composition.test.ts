@@ -888,7 +888,7 @@ for (const scenario of [
   });
 
 for (const legacy of [false, true])
-  for (const phase of ['initial', 'resumed', 'unproven'] as const)
+  for (const phase of ['pending', 'initial', 'resumed', 'unproven'] as const)
     test(`pending WorkHub stop follows only the first Message execution (${phase}, legacy=${legacy})`, async () => {
       const assignment: Parameters<typeof retireWorkHubDelegation>[0] = {
         type: 'workhub_coordination',
@@ -933,11 +933,22 @@ for (const legacy of [false, true])
             cancelMessageIfPending: async (sessionId, _messageId, _claimId, validate) =>
               admission.run(sessionId, async (lease) => {
                 await validate?.(lease);
+                if (phase === 'pending') return { kind: 'cancelled_pending' };
                 return { kind: 'owned_root', turnId: initial.turnId, runId: initial.runId };
               }),
           },
           readStopTarget: async (_source, lease) => {
             if (lease) await admission.runAdmitted('target', lease, async () => undefined);
+            if (phase === 'pending')
+              return {
+                binding: JSON.stringify([
+                  'pending_message',
+                  assignment.actionId,
+                  assignment.delegationId,
+                  assignment.targetSessionId,
+                  assignment.targetMessageId,
+                ]),
+              };
             return {
               binding: 'current-execution',
               execution: active,
@@ -960,7 +971,14 @@ for (const legacy of [false, true])
         },
       );
       assert.equal(stops, phase === 'initial' ? 1 : 0);
-      assert.equal(result.outcome, phase === 'initial' ? 'stop_delivered' : 'not_owned');
+      assert.equal(
+        result.outcome,
+        phase === 'pending'
+          ? 'cancelled_pending'
+          : phase === 'initial'
+            ? 'stop_delivered'
+            : 'not_owned',
+      );
     });
 
 test('WorkHub never reports a still-running root as already terminal', async () => {
