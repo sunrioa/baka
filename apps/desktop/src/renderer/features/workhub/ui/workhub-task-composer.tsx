@@ -49,7 +49,7 @@ export function WorkHubTaskComposer({ services, owner, workId, name, view, compo
     {state.recoveryUnsafe && state.error !== 'storage' && <p role="alert">{t.error.storage}</p>}
     {state.attempt && <details className="workHubTaskInputDetails">
       <summary><span>{t.lastInput}</span>{state.receipt && <span className="workHubTaskReceipt" role="status" data-input-id={state.receipt.inputId} data-input-delivery={state.receipt.delivery}>{t.delivery[state.receipt.delivery]}</span>}<ChevronDown size={14} aria-hidden="true" /></summary>
-      <div><h4>{t.original}</h4><p>{state.attempt.input.text}</p><p className="workHubTaskHint">{t.deliveryHint}</p><code>{state.attempt.input.generationId} / {state.attempt.input.sourceActionId}</code></div>
+      <div><h4>{t.original}</h4><p>{state.attempt.input.text}</p><p className="workHubTaskHint">{t.deliveryHint}</p><code>{[state.attempt.input.generationId, state.receipt?.sourceActionId ?? ('sourceActionId' in state.attempt.input ? state.attempt.input.sourceActionId : undefined)].filter(Boolean).join(' / ')}</code></div>
     </details>}
     {unknown && <div className="workHubTaskInputRecovery">
       <p>{t.pending}</p>

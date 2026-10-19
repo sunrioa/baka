@@ -2319,7 +2319,7 @@ export class SqliteSessionMetadataStore {
         !(
           resolution?.type === 'workhub_coordination' &&
           resolution.kind === 'delegation_stop_resolved' &&
-          resolution.outcome === 'not_owned'
+          (resolution.outcome === 'not_owned' || input.mode === 'continuation')
         ))
     )
       throw new SessionMetadataConflictError('The selected work is being retired');

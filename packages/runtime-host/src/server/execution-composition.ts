@@ -20,6 +20,7 @@
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubContextObserver } from './workhub-context-observation.js';
 import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import { createWorkHubTaskIndexProjection } from './workhub-task-index-projection.js';
 import { createWorkHubTaskDiscoveryRuntime } from './workhub-task-discovery-runtime.js';
 import {
@@ -2817,6 +2818,32 @@ export async function createExecutionRuntimeHostComposition(
                         replacementDelegationId: delegationId,
                       }
                     : undefined;
+                let taskInput: WorkHubTaskInputMessage | undefined;
+                if (input.taskInput) {
+                  const source = await stores.sessionStore.readWorkHubAssignment(
+                    input.taskInput.sourceActionId,
+                  );
+                  if (!source)
+                    throw new WorkHubActionGateFailure(
+                      'action_conflict',
+                      'Task input source is unavailable',
+                    );
+                  taskInput = {
+                    type: 'workhub_coordination',
+                    kind: 'task_input',
+                    schemaVersion: 1,
+                    id: `whti_${createHash('sha256').update(input.taskInput.inputId).digest('hex').slice(0, 48)}`,
+                    // This fact binds the original source; the new assignment
+                    // separately records the actual current coordinator Turn.
+                    turnId: source.coordinationTurnId,
+                    ts: assignedAt,
+                    ...input.taskInput,
+                    targetSessionId: input.targetSessionId,
+                    targetMessageId: messageId,
+                    targetContentDigest: messageContentDigest(content),
+                    mode: 'continuation',
+                  };
+                }
                 const result = await stores.sessionStore.assignWorkHubMessage({
                   assignment: {
                     type: 'workhub_coordination',
@@ -2884,23 +2911,7 @@ export async function createExecutionRuntimeHostComposition(
                       : {}),
                   },
                   admission,
-                  ...(input.taskInput
-                    ? {
-                        taskInput: {
-                          type: 'workhub_coordination' as const,
-                          kind: 'task_input' as const,
-                          schemaVersion: 1 as const,
-                          id: `whti_${createHash('sha256').update(input.taskInput.inputId).digest('hex').slice(0, 48)}`,
-                          turnId: input.coordinationTurnId ?? input.actionId,
-                          ts: assignedAt,
-                          ...input.taskInput,
-                          targetSessionId: input.targetSessionId,
-                          targetMessageId: messageId,
-                          targetContentDigest: messageContentDigest(content),
-                          mode: 'continuation' as const,
-                        },
-                      }
-                    : {}),
+                  ...(taskInput ? { taskInput } : {}),
                   ...(create ? { create } : {}),
                   ...(supersession ? { supersession } : {}),
                 });

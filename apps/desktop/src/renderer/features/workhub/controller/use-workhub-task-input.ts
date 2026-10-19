@@ -52,7 +52,7 @@ export function useWorkHubTaskInput(services: TaskInputServices, owner: string, 
       // cancel/forget it when the user inspects another task or StrictMode remounts.
     };
   }, [services, model]);
-  const targetId = view.assignment?.targetSessionId;
+  const targetId = workHubTaskInputSource(view)?.targetSessionId;
   useEffect(() => {
     if (!targetId) return;
     let closed = false, version = 0;
@@ -78,7 +78,7 @@ export function useWorkHubTaskInput(services: TaskInputServices, owner: string, 
   const [stop, setStop] = useState<{ model: typeof model; pending: boolean; failed?: boolean }>();
   const stopping = useRef(false);
   const shown = view.executions.find(execution => execution.turnId === view.execution?.turnId && execution.runId === view.execution?.runId);
-  const canStop = native && source.state === 'owned' && !!shown && ['created', 'admitted', 'running', 'waiting_for_user'].includes(shown.status);
+  const canStop = native && source.state === 'owned' && source.actionId === view.assignment?.actionId && !!shown && shown.sessionId === source.targetSessionId && ['created', 'admitted', 'running', 'waiting_for_user'].includes(shown.status);
   return { model, state, session, source, ready, persistence, canStop, stopPending: stop?.model === model && stop.pending, stopFailed: stop?.model === model && stop.failed,
     send: (text: string) => ready && source ? model.send(source, text) : Promise.resolve(false),
     async stop() {
@@ -87,7 +87,7 @@ export function useWorkHubTaskInput(services: TaskInputServices, owner: string, 
       const a = workHubTaskInputSource(current);
       const execution = current.executions.find(item => item.turnId === current.execution?.turnId && item.runId === current.execution?.runId);
       const task = targetRef.current;
-      if (!a || a.state !== 'owned' || !execution || !['created', 'admitted', 'running', 'waiting_for_user'].includes(execution.status) ||
+      if (!a || a.state !== 'owned' || a.actionId !== current.assignment?.actionId || !execution || execution.sessionId !== a.targetSessionId || !['created', 'admitted', 'running', 'waiting_for_user'].includes(execution.status) ||
           task?.services !== services || !task.ready || task.id !== a.targetSessionId || task.session?.backend === 'plugin-executor' || !task.session || task.session.isArchived) return;
       // The live model may advance before React commits the new button. A Stop
       // belongs to its rendered source and execution, never that unseen successor.

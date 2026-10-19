@@ -981,7 +981,11 @@ export function createWorkHubEvidenceRuntime(options: {
       const workId = source.work?.id ?? source.actionId;
       const generationId = source.work?.generationId ?? source.actionId;
       const current = (
-        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([source.targetSessionId])
+        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+          [source.targetSessionId],
+          undefined,
+          true,
+        )
       ).filter(
         (a) =>
           (a.work?.id ?? a.actionId) === workId &&
@@ -996,6 +1000,14 @@ export function createWorkHubEvidenceRuntime(options: {
       // Metadata/owned execution queries only, never the cold Session transcript.
       // Every assignment in this generation matters, not just an old named Action.
       for (const assignment of current) {
+        const disposition = await messages.readMessageExecutionDispositionAdmitted(
+          assignment.targetSessionId,
+          assignment.targetMessageId,
+          lease,
+        );
+        // A withdrawn queue admission is settled, not an execution to resume.
+        // The fresh admission still checks every sibling and all live resources.
+        if (disposition.kind === 'cancelled') continue;
         const tip = await owned(assignment, lease);
         if (!tip || tip.request)
           blocked('The source work is queued, unproven or waiting for evidence');

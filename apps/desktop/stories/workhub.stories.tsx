@@ -196,10 +196,11 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     },
     sendTaskInput: async (id, input) => {
       writes.taskInput(id, input);
-      const source = tasks.find(task => task.actionId === input.sourceActionId && task.delegationId === input.sourceDelegationId);
+      const source = tasks.find(task => task.actionId === input.workId && input.generationId === input.workId &&
+        (!('sourceActionId' in input) || (task.actionId === input.sourceActionId && task.delegationId === input.sourceDelegationId)));
       if (!source) return { kind: 'rejected', code: 'not_found', message: 'Original task unavailable' };
       const { text: _text, ...identity } = input;
-      const receipt: WorkHubTaskInputResult = { ...identity, targetSessionId: source.targetSessionId, targetMessageId: 'direct-input-message', acceptedAt: 9, mode: 'steering', delivery: 'queued' };
+      const receipt: WorkHubTaskInputResult = { ...identity, sourceActionId: source.actionId, sourceDelegationId: source.delegationId, targetSessionId: source.targetSessionId, targetMessageId: 'direct-input-message', acceptedAt: 9, mode: 'steering', delivery: 'queued' };
       inputReceipts.set(input.inputId, receipt); updateSessions();
       return { kind: 'accepted', receipt };
     },
@@ -556,8 +557,10 @@ export const TaskExecutionView: Story = {
     expect(within(currentComposer).getByRole('button', { name: '发送' })).toBeVisible();
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(writes.taskInput).toHaveBeenCalledWith(sessionId, expect.objectContaining({
-      workId: 'overview-running', generationId: 'overview-running', sourceActionId: 'overview-running', sourceDelegationId: 'overview-running-delegation', text: '只核对协议，不更改权限。',
+      workId: 'overview-running', generationId: 'overview-running', text: '只核对协议，不更改权限。',
     })));
+    expect(writes.taskInput.mock.calls.at(-1)?.[1]).not.toHaveProperty('sourceActionId');
+    expect(writes.taskInput.mock.calls.at(-1)?.[1]).not.toHaveProperty('sourceDelegationId');
     await waitFor(() => expect(currentComposer.querySelector('[data-input-delivery="queued"]')).toBeVisible());
     expect(editor).toHaveFocus(); expect(editor).toHaveTextContent('');
     expect(currentComposer.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
