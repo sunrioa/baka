@@ -100,6 +100,7 @@ export function createWorkHubTaskIndexProjection(options: {
 }) {
   const { stores, index } = options;
   let initialized = false;
+  let observing = false;
   let closing = false;
   let tail = Promise.resolve();
   const notifications = new Set<Promise<void>>();
@@ -282,6 +283,7 @@ export function createWorkHubTaskIndexProjection(options: {
   }
 
   async function sync() {
+    observing = true;
     await syncFacts();
     if (!initialized) {
       await scanManualCatalog();
@@ -315,15 +317,19 @@ export function createWorkHubTaskIndexProjection(options: {
         await sync();
       }),
     notify(sessionId: string) {
-      if (closing) return Promise.resolve();
-      const task = (async () => {
+      // Before the first lookup, canonical facts and the catalog are sufficient
+      // for backfill. Ordinary chats must not maintain an unused search index.
+      if (closing || !observing) return Promise.resolve();
+      // Share the existing projection lane with queries. A stale manual read
+      // must not reinsert a Session after a newer archive/delete notification.
+      const task = serialized(async () => {
         try {
           await index.markDirty(sessionId);
           await manual(sessionId);
         } catch (error) {
           options.onError(error);
         } // advisory failure cannot cancel a committed task
-      })();
+      });
       notifications.add(task);
       void task.then(
         () => notifications.delete(task),

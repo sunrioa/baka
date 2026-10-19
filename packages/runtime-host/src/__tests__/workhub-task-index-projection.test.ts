@@ -23,6 +23,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setImmediate as nextLoop } from 'node:timers/promises';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
@@ -277,4 +278,108 @@ test('find protocol bounds pages, keeps manual availability distinct and makes u
   const unavailable = await runtime.handlers['workhub.tasks.find']({});
   assert.equal(unavailable.ok, false);
   if (!unavailable.ok) assert.equal(unavailable.error.code, 'operation_unavailable');
+});
+
+test('unused task discovery does not maintain an index for ordinary Session events', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-index-lazy-'));
+  const store = createSessionStore(root);
+  const runtime = projection(store, new Map());
+  try {
+    const manual = await store.create({
+      cwd: root,
+      name: 'Manual',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    await runtime.notify(manual.id);
+    assert.deepEqual(
+      (await store.workHubTaskIndex!.query({})).items,
+      [],
+      'no observer is active before the first lookup',
+    );
+    assert.equal(
+      (await runtime.query({})).items[0]?.id,
+      manual.id,
+      'first lookup backfills the latest catalog',
+    );
+  } finally {
+    await runtime.close();
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an older manual refresh cannot reinsert an archived Session after its newer notification', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-index-manual-race-'));
+  const store = createSessionStore(root);
+  let release = () => {};
+  let enter = () => {};
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let pause = false,
+    reads = 0;
+  const runtime = createWorkHubTaskIndexProjection({
+    stores: {
+      readWorkHubTaskFactsPage: (request) => store.readWorkHubTaskFactsPage(request),
+      readWorkHubAssignment: (id) => store.readWorkHubAssignment(id),
+      readHeaderSnapshot: (id) => store.readHeaderSnapshot(id),
+      listCatalogPage: (...args) => store.listCatalogPage(...args),
+      readCatalogRecord: async (id) => {
+        const record = await store.readCatalogRecord(id);
+        reads++;
+        if (pause) {
+          pause = false;
+          enter();
+          await barrier;
+        }
+        return record;
+      },
+    },
+    index: store.workHubTaskIndex!,
+    project: async () => undefined,
+    activity: async () => undefined,
+    onError: (error) => {
+      throw error;
+    },
+  });
+  try {
+    const manual = await store.create({
+      cwd: root,
+      name: 'Manual',
+      model: 'model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    await runtime.query({});
+    pause = true;
+    const older = runtime.notify(manual.id);
+    await entered;
+    const before = reads;
+    const current = await store.readCatalogRecord(manual.id);
+    await store.setSessionsArchivedVersioned(
+      [{ sessionId: manual.id, expectedVersion: current.revision }],
+      true,
+    );
+    const newer = runtime.notify(manual.id);
+    await nextLoop();
+    assert.equal(reads, before, 'newer refresh waits on the existing projection lane');
+    release();
+    await Promise.all([older, newer]);
+    assert.deepEqual(
+      (await runtime.query({})).items,
+      [],
+      'archived Session stays absent after the stale read completes',
+    );
+    assert.equal(await store.workHubTaskIndex!.read('session', manual.id), undefined);
+  } finally {
+    release();
+    await runtime.close();
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
 });

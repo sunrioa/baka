@@ -2434,16 +2434,17 @@ export async function createExecutionRuntimeHostComposition(
         initialExecution: original,
       };
     };
+    const observeWorkHubContext = createWorkHubContextObserver({
+      sessions: stores.sessionStore,
+      runtime: stores.runtimeEventStore,
+      catalog: runtimePolicyStores.connectionCatalog,
+      readPricing: async () => (await openedUsageStores.pricing.snapshot()).overrides,
+    });
     workHubCoordination = new HostWorkHubCoordinationCoordinator({
       readStopBinding: async (source, lease) => (await readStopTarget(source, lease)).binding,
       isStopBindingCurrent: async (source, expected, lease) =>
         workHubStopBindingMatches(source, expected, await readStopTarget(source, lease)),
-      readWorkContext: createWorkHubContextObserver({
-        sessions: stores.sessionStore,
-        runtime: stores.runtimeEventStore,
-        catalog: runtimePolicyStores.connectionCatalog,
-        readPricing: async () => (await openedUsageStores.pricing.snapshot()).overrides,
-      }),
+      readWorkContext: observeWorkHubContext,
       requestForm: (input) => interactions.requestForm(input),
       targetExecution: workHubTargetExecution,
       configureModel: (input) => sessionCatalog.configureWorkHubModel(input),
@@ -3030,11 +3031,7 @@ export async function createExecutionRuntimeHostComposition(
     }
     const workHubTaskDiscovery = createWorkHubTaskDiscoveryRuntime({
       projection: workHubTaskIndex,
-      readContext: createWorkHubContextObserver({
-        sessions: stores.sessionStore,
-        runtime: stores.runtimeEventStore,
-        catalog: runtimePolicyStores.connectionCatalog,
-      }),
+      readContext: observeWorkHubContext,
       onError: (error) =>
         console.error(
           `[runtime-host] WorkHub discovery failed: ${boundedFailureDiagnostic(error)}`,

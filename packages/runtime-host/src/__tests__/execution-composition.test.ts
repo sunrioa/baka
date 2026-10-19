@@ -1383,6 +1383,57 @@ test('composition drain preserves usage admission until active Runtime work sett
   });
 });
 
+test('WorkHub find reads configured connection pricing through the production composition', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    try {
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const session = await stores.sessionStore.create({
+        cwd: root,
+        name: 'Pricing discovery target',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const usage = await openInteractiveUsageStoresForWrite(owner.lease);
+      const snapshot = await usage.pricing.snapshot();
+      await usage.pricing.upsert(snapshot.revision, {
+        modelKey: 'fake:fake-model',
+        inputUsdPer1M: 2,
+        outputUsdPer1M: 3,
+        cacheReadUsdPer1M: 0.2,
+      });
+      const result = await composition.handlers['workhub.tasks.find'](
+        { query: session.name },
+        {
+          hostEpoch: 'execution-composition-test',
+          connectionId: 'pricing-discovery',
+          principal: 'local_os_user',
+          acquireResidency: () => ({ release() {} }),
+        },
+      );
+      assert.ok(result.ok, JSON.stringify(result));
+      const hit = result.result.items.find((item) => item.id === session.id);
+      assert.ok(hit);
+      assert.equal(hit.context?.estimates?.costs.pricingSource, 'configured_connection_override');
+      assert.equal(
+        hit.context?.estimates?.costs.reuseInputBaseline.status,
+        'unknown',
+        'price is known but no measured model request exists',
+      );
+      assert.equal(hit.context?.estimates?.costs.reuseInputBaseline.uncachedUsd, null);
+      assert.equal(
+        (await stores.sessionStore.readHeaderSnapshot(session.id)).permissionMode,
+        'ask',
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('hosted execution settles while its tracked environment resource remains verifiable', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);

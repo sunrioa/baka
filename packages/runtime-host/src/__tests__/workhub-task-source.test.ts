@@ -50,6 +50,8 @@ function fixture() {
     members: 1,
     input: undefined as WorkHubTaskInputMessage | undefined,
     proofMatches: true,
+    boundary: false,
+    edgeMatches: true,
   };
   const options: Options = {
     stores: {
@@ -61,30 +63,66 @@ function fixture() {
         readWorkHubTaskInputByMessage: async () => f.input,
       },
       agentRunStore: {
-        readRootTurnAdmission: async () =>
+        readRootTurnAdmission: async (_sessionId, turnId) =>
           ({
             schemaVersion: 1,
             userMessageId: null,
-            execution: { kind: 'external_message' },
+            execution:
+              f.boundary && turnId === active.turnId
+                ? {
+                    kind: 'safe_boundary_continuation',
+                    sourceInvocationId: 'previous-invocation',
+                    sourceTurnId: 'previous-turn',
+                    sourceRunId: 'previous-run',
+                    sourceRuntimeEventHighWater: 1,
+                    claimId: 'claim',
+                    boundaryDigest: `sha256:${'a'.repeat(64)}`,
+                    providerReplayDigest: `sha256:${'b'.repeat(64)}`,
+                    safetyDigest: `sha256:${'c'.repeat(64)}`,
+                    targetInvocationId: 'new-invocation',
+                  }
+                : { kind: 'external_message' },
             previousRootTurnId: null,
             normalizedInput: null,
             admittedAt: 1,
             sessionId: 'target',
-            turnId: active.turnId,
-            runId: original.runId,
-            sourceMessages: Array.from({ length: f.members }, (_, n) => ({
-              messageId: `message-${n}`,
-              content: normalizeMessageContent({ text: 'Original' }),
-              placement: 'current_turn',
-              disposition: 'turn_started',
-            })),
+            turnId,
+            runId:
+              turnId === 'previous-turn'
+                ? 'previous-run'
+                : f.boundary
+                  ? active.runId
+                  : original.runId,
+            sourceMessages: Array.from(
+              { length: f.boundary && turnId === active.turnId ? 0 : f.members },
+              (_, n) => ({
+                messageId: `message-${n}`,
+                content: normalizeMessageContent({ text: 'Original' }),
+                placement: 'current_turn',
+                disposition: 'turn_started',
+              }),
+            ),
           }) satisfies RootTurnAdmission,
+        readRootTurnContinuationAdmission: async (_sessionId, sourceTurnId, sourceRunId) => {
+          assert.equal(sourceTurnId, 'previous-turn');
+          assert.equal(sourceRunId, 'previous-run');
+          const admission = await options.stores.agentRunStore.readRootTurnAdmission(
+            'target',
+            active.turnId,
+          );
+          return f.edgeMatches ? admission : undefined;
+        },
       },
     },
     messages: {
       readMessageExecutionDisposition: async (_sessionId, messageId) =>
         messageId === f.running.targetMessageId
-          ? { kind: 'owned_root', ...original }
+          ? {
+              kind: 'owned_root',
+              ...(f.boundary
+                ? { sessionId: 'target', turnId: 'previous-turn', runId: 'previous-run' }
+                : original),
+            }
           : { kind: 'cancelled' },
     },
     executions: {
@@ -92,7 +130,15 @@ function fixture() {
       readLatestRootTurnLineage: async () => (f.proofMatches ? active : original),
     },
     evidence: {
-      taskExecution: async () => ({ ...(f.proofMatches ? active : original), round: 0 }),
+      taskExecution: async (_source, owned) => {
+        if (f.boundary)
+          assert.deepEqual(owned, {
+            sessionId: 'target',
+            turnId: 'previous-turn',
+            runId: 'previous-run',
+          });
+        return { ...(f.proofMatches ? active : original), round: 0 };
+      },
     },
   };
   return { f, options };
@@ -131,4 +177,23 @@ test('task source resolves accepted native-input Message provenance only within 
   assert.equal(await readCurrentWorkHubTaskSource(options, 'work'), f.latest);
   f.input = { ...f.input, sourceDelegationId: 'delegation-running', generationId: 'old' };
   assert.equal(await readCurrentWorkHubTaskSource(options, 'work'), f.latest);
+});
+
+test('task source follows a proved safe-boundary continuation back to the actual same-generation input', async () => {
+  const { f, options } = fixture();
+  f.boundary = true;
+  assert.equal(await readCurrentWorkHubTaskSource(options, 'work'), f.running);
+  f.edgeMatches = false;
+  assert.equal(
+    await readCurrentWorkHubTaskSource(options, 'work'),
+    f.latest,
+    'an unproved continuation edge cannot choose the older source',
+  );
+  f.edgeMatches = true;
+  f.proofMatches = false;
+  assert.equal(
+    await readCurrentWorkHubTaskSource(options, 'work'),
+    f.latest,
+    'the located Message must still own the exact active lineage',
+  );
 });
