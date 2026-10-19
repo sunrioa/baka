@@ -123,6 +123,7 @@ import {
   type WorkHubCoordinationActFromTurnInput,
 } from '../protocol/index.js';
 import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
+import { WORKHUB_TASK_INPUT_OPERATION_SPECS } from '../protocol/workhub-task-input.js';
 import { HostWorkHubResultCoordinator } from '../server/workhub-result-coordinator.js';
 import {
   workHubEvidenceRequestId,
@@ -7611,6 +7612,129 @@ for (const { entry, finalBoundary } of (['native', 'task-aware', 'model'] as con
       }
     });
   });
+
+test('a pre-commit legacy task input claim survives protocol decoding and Host restart without changing its fingerprint', async (t) => {
+  let executions: RootTurnCoordinator | undefined;
+  const readRoot = RootTurnCoordinator.prototype.readRootState;
+  t.mock.method(
+    RootTurnCoordinator.prototype,
+    'readRootState',
+    function (this: RootTurnCoordinator, sessionId: string) {
+      executions = this;
+      return readRoot.call(this, sessionId);
+    },
+  );
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    let { composition, manager } = await createCapturedExecutionComposition(owner);
+    let database: DatabaseSync | undefined;
+    const context: ConnectionContext = {
+      hostEpoch: 'test',
+      connectionId: 'legacy-input-recovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const target = await manager.createSession({
+        cwd: root,
+        name: 'Legacy input',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      await delegateWorkHubTarget(composition, context, target.id, 'legacy-source-work', 'Seed');
+      assert.ok(executions);
+      await waitFor(async () => executions!.readRootState(target.id).kind === 'idle');
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const a = await stores.sessionStore.readWorkHubAssignment('legacy-source-work');
+      assert.ok(a?.work);
+      // Exact released protocol order, before the new four-field send existed.
+      const original = {
+        workId: a.work.id,
+        generationId: a.work.generationId,
+        sourceActionId: a.actionId,
+        sourceDelegationId: a.delegationId,
+        inputId: 'legacy-precommit-input',
+        text: 'Done',
+      };
+      const hash = createHash('sha256').update(original.inputId).digest('hex').slice(0, 48);
+      const internalActionId = `whtinput_${hash}`;
+      database = new DatabaseSync(join(root, 'runtime.sqlite'));
+      database.exec(`CREATE TRIGGER legacy_input_precommit_failure BEFORE INSERT ON session_messages
+        WHEN NEW.message_id = 'whti_${hash}'
+        BEGIN SELECT RAISE(ABORT, 'legacy_input_precommit_failure'); END;`);
+      const failed = await composition.handlers['workhub.tasks.send'](original, context);
+      assert.ok(
+        !failed.ok,
+        'the fixture must stop after the action claim, before the atomic input/assignment commit',
+      );
+      assert.equal(await stores.sessionStore.readWorkHubTaskInput(original.inputId), undefined);
+      assert.equal(await stores.sessionStore.readWorkHubAssignment(internalActionId), undefined);
+      const claim = await stores.sessionStore.readWorkHubActionClaim(internalActionId);
+      assert.ok(claim);
+      database.exec('DROP TRIGGER legacy_input_precommit_failure');
+      database.close();
+      database = undefined;
+      await composition.close();
+      ({ composition, manager } = await createCapturedExecutionComposition(owner));
+      const resumedStores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      assert.deepEqual(
+        await resumedStores.sessionStore.readWorkHubActionClaim(internalActionId),
+        claim,
+      );
+      const decoded = WORKHUB_TASK_INPUT_OPERATION_SPECS['workhub.tasks.send'].decodeInput({
+        inputId: original.inputId,
+        text: original.text,
+        generationId: original.generationId,
+        sourceDelegationId: original.sourceDelegationId,
+        workId: original.workId,
+        sourceActionId: original.sourceActionId,
+      });
+      const accepted = await composition.handlers['workhub.tasks.send'](decoded, context);
+      assert.ok(accepted.ok, JSON.stringify(accepted));
+      assert.equal(accepted.result.mode, 'continuation');
+      assert.deepEqual(
+        await resumedStores.sessionStore.readWorkHubActionClaim(internalActionId),
+        claim,
+        'the pre-upgrade claim is not replaced or rehashed',
+      );
+      assert.equal(
+        (await resumedStores.sessionStore.readLatestWorkHubAssignment(a.work.id))?.actionId,
+        internalActionId,
+      );
+      const replay = await composition.handlers['workhub.tasks.send'](decoded, context);
+      assert.ok(replay.ok, JSON.stringify(replay));
+      for (const key of [
+        'inputId',
+        'workId',
+        'generationId',
+        'sourceActionId',
+        'sourceDelegationId',
+        'acceptedAt',
+        'mode',
+        'targetSessionId',
+        'targetMessageId',
+      ] as const)
+        assert.equal(
+          replay.result[key],
+          accepted.result[key],
+          'immutable acceptance does not change as delivery advances',
+        );
+      await waitFor(async () => manager.runningTurnIds(target.id).length === 0);
+      const runs = await resumedStores.runtimeEventStore.listSessionInvocations(target.id);
+      assert.equal(runs.length, 2, 'only the original Seed and one recovered input execute');
+      assert.equal(
+        (await resumedStores.sessionStore.readHeaderSnapshot(target.id)).permissionMode,
+        'ask',
+      );
+    } finally {
+      database?.close();
+      await composition.close();
+    }
+  });
+});
 
 for (const entry of ['pane', 'model', 'fresh'] as const)
   test(`task-centric ${entry} input continues settled stopped work without resuming old tools or replaying a stop on the successor`, async (t) => {

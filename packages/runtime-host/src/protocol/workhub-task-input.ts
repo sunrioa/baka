@@ -164,7 +164,9 @@ export const WORKHUB_TASK_INPUT_OPERATION_SPECS = {
       };
       const exact =
         Object.hasOwn(item, 'sourceActionId') || Object.hasOwn(item, 'sourceDelegationId');
-      return exact ? { ...base, ...source(item) } : base;
+      // Released six-field action claims include this exact insertion order
+      // in their JSON fingerprint. Do not rebuild them in the modern order.
+      return exact ? { ...source(item), inputId: base.inputId, text: base.text } : base;
     },
     decodeOutput: decodeResult,
     assertOutputForInput(input, output) {

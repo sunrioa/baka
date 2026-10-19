@@ -44,6 +44,18 @@ test('task sends accept only the closed modern or complete saved-legacy shape', 
   assert.ok(assertSend);
   assert.deepEqual(send.decodeInput(modern), modern);
   assert.deepEqual(send.decodeInput(legacy), legacy);
+  assert.equal(
+    JSON.stringify(send.decodeInput(legacy)),
+    JSON.stringify({
+      workId: legacy.workId,
+      generationId: legacy.generationId,
+      sourceActionId: legacy.sourceActionId,
+      sourceDelegationId: legacy.sourceDelegationId,
+      inputId: legacy.inputId,
+      text: legacy.text,
+    }),
+    'saved claims hash the released decoder field order, not only field values',
+  );
   for (const invalid of [
     { ...modern, sourceActionId: 'partial' },
     { ...modern, sourceDelegationId: 'partial' },
