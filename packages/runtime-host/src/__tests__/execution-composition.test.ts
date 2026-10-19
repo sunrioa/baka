@@ -7854,7 +7854,7 @@ test('native input lineage accepts its own execution history cursor across the 1
   });
 });
 
-test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async () => {
+test('native task continuation stays on the exact same-name Session and FIFO, and reconstructs task facts after restart', async (t) => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
@@ -7862,6 +7862,22 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
     const notificationStarted = deferred<void>();
     const finishNotifications = deferred<void>();
     const notifications: string[] = [];
+    const deliveries: Array<{ at: number; actionId: string; result: string }> = [];
+    let resultRoot: RootTurnCoordinator | undefined;
+    const deliver = RootTurnCoordinator.prototype.startWorkHubResult;
+    t.mock.method(
+      RootTurnCoordinator.prototype,
+      'startWorkHubResult',
+      async function (
+        this: RootTurnCoordinator,
+        ...args: Parameters<RootTurnCoordinator['startWorkHubResult']>
+      ) {
+        resultRoot = this;
+        const result = await deliver.apply(this, args);
+        deliveries.push({ at: Date.now(), actionId: args[0].actionId, result });
+        return result;
+      },
+    );
     const sends: Array<{ sessionId: string; text: string }> = [];
     let { composition, manager } = await createCapturedExecutionComposition(owner, {
       coordinationBackendFactory: (context) =>
@@ -8021,12 +8037,22 @@ test('native task continuation stays on the exact same-name Session and FIFO, an
       assert.equal(busy.error.code, 'session_busy');
       assert.equal((await query()).tasks.length, 2, 'busy coordination never appends a new task');
       finishNotifications.resolve();
-      await waitFor(async () => {
-        return (
-          notifications.length === 2 &&
-          manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID).length === 0
-        );
-      });
+      try {
+        await waitFor(async () => {
+          return (
+            notifications.length === 2 &&
+            manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID).length === 0
+          );
+        });
+      } catch (error) {
+        console.error('WorkHub result wait diagnostic', {
+          notifications,
+          runningTurns: manager.runningTurnIds(WORKHUB_COORDINATION_SESSION_ID),
+          root: resultRoot?.readRootState(WORKHUB_COORDINATION_SESSION_ID),
+          deliveries: deliveries.slice(-24),
+        });
+        throw error;
+      }
       const afterEnd = await composition.handlers['workhub.coordination.continue'](
         afterEndInput,
         context,
