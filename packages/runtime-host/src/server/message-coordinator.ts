@@ -1197,7 +1197,18 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         ((admission.turnId === input.turnId && admission.runId === input.runId) ||
           stoppedInFlight.has(admission.messageId))
       ) {
-        unconsumedStopped.push(admission.messageId);
+        // A successor may already own this Message even though its mutable
+        // queue row still names the predecessor (the admission/handoff crash
+        // gap). Its immutable Root source receipt also proves consumption.
+        const source = await this.#durableProof.readRootTurnSourceMessageReceipt(
+          input.sessionId,
+          admission.messageId,
+        );
+        if (
+          source?.admission.sessionId !== input.sessionId ||
+          source.sourceMessage.messageId !== admission.messageId
+        )
+          unconsumedStopped.push(admission.messageId);
       }
       if (
         proof?.event.turnId === input.turnId &&
@@ -1337,8 +1348,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           admission.messageId,
         );
         if (
-          source?.admission.turnId === admission.turnId &&
-          source.admission.runId === admission.runId &&
+          source?.admission.sessionId === sessionId &&
           source.sourceMessage.messageId === admission.messageId
         ) {
           return {
@@ -1381,7 +1391,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
                 runId: admission.runId,
                 messageIds: [],
               }
-            : { kind: 'pending' as const, admission };
+            : { kind: 'pending' as const };
       }),
     );
     await Promise.all(
@@ -1396,9 +1406,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           }),
         ),
     );
-    const pending = dispositions.flatMap((disposition) =>
-      disposition.kind === 'pending' ? [disposition.admission] : [],
-    );
+    // One terminal materialization can settle several rows, including a
+    // promoted Steering entry classified as pending above. Recover only the
+    // still-pending durable rows, never the pre-materialization snapshot.
+    const pending = await this.#admissions.listMessageAdmissions(sessionId);
     if (pending.length === 0) return;
     if (rootState.kind !== 'active') {
       if (rootState.kind !== 'idle') return;

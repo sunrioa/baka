@@ -4184,7 +4184,15 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
-for (const scope of ['preserve', 'full', 'upgrade', 'late_nack', 'late_ack'] as const)
+for (const scope of [
+  'preserve',
+  'full',
+  'upgrade',
+  'late_nack',
+  'late_ack',
+  'mixed_recovery',
+  'successor_proof',
+] as const)
   test('exact Root stop preserves later accepted work only when requested (' + scope + ')', {
     timeout: 20_000,
   }, async () => {
@@ -4309,7 +4317,7 @@ for (const scope of ['preserve', 'full', 'upgrade', 'late_nack', 'late_ack'] as 
         runId: started.result.turn.runId,
       };
       const stop =
-        scope === 'full'
+        scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof'
           ? fixture.coordinator.stopRoot(identity)
           : fixture.coordinator.stopRootPreservingFollowups(identity);
       stopping.push(stop);
@@ -4399,7 +4407,7 @@ for (const scope of ['preserve', 'full', 'upgrade', 'late_nack', 'late_ack'] as 
           0,
         );
       }
-      if (scope === 'full') {
+      if (scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof') {
         // Simulate the durable residue from a crash after the terminal event
         // but before Message materialization. Runtime/Root proof and SQLite are
         // real; inserting this pending fixture is not a whole-Host crash test.
@@ -4409,19 +4417,96 @@ for (const scope of ['preserve', 'full', 'upgrade', 'late_nack', 'late_ack'] as 
           ...acceptedCorrection,
           messageId,
         });
+        if (scope === 'mixed_recovery') {
+          await fixture.stores.sessionStore.commitMessageAdmission({
+            ...acceptedCorrection,
+            messageId: 'a-promoted-at-crash',
+            submittedPlacement: 'next_turn',
+          });
+          for (const text of ['b', 'c'])
+            await fixture.stores.sessionStore.commitMessageAdmission({
+              ...acceptedCorrection,
+              messageId: 'recovered-' + text,
+              content: { text },
+              submittedContentDigest: messageContentDigest({ text }),
+              submittedPlacement: 'next_turn',
+              placement: 'next_turn',
+              disposition: 'followup',
+            });
+        }
+        if (scope === 'successor_proof') {
+          // Older execution could already have folded this native correction
+          // into a successor before the upgrade. Commit the real Root receipt
+          // but leave the mutable queue row, as at that documented crash gap.
+          const successor = await fixture.stores.agentRunStore.admitRootTurn({
+            sessionId: fixture.sessionId,
+            turnId: 'consumed-successor-root',
+            proposedRunId: 'consumed-successor-run',
+            proposedUserMessageId: messageId,
+            previousRootTurnId: identity.turnId,
+            execution: { kind: 'external_message' },
+            normalizedInput: acceptedCorrection.content,
+            sourceMessages: [
+              {
+                messageId,
+                content: acceptedCorrection.content,
+                submittedContentDigest: acceptedCorrection.submittedContentDigest,
+                submittedPlacement: acceptedCorrection.submittedPlacement,
+                placement: acceptedCorrection.placement,
+                disposition: acceptedCorrection.disposition,
+                skillInvocation: acceptedCorrection.skillInvocation,
+              },
+            ],
+            admittedAt: acceptedCorrection.admittedAt + 1,
+          });
+          assert.equal(successor.kind, 'admitted');
+          await fixture.messages.materializeMessageHandoffsForRun({ ...identity, messageIds: [] });
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+            'a committed successor source is consumption proof, not a cancellable A residue',
+          );
+        }
         await fixture.messages.recoverPendingAfterHostRestart([fixture.sessionId]);
+        if (scope === 'mixed_recovery') {
+          await entered.b.promise;
+          release.b.resolve();
+          await entered.c.promise;
+          release.c.resolve();
+          await fixture.coordinator.whenIdle(fixture.sessionId);
+          assert.deepEqual(seen, ['a', 'b', 'c'], 'recovery keeps unrelated B/C FIFO');
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'a-promoted-at-crash',
+            ),
+            true,
+          );
+          for (const text of ['b', 'c'])
+            assert.equal(
+              await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+                fixture.sessionId,
+                'recovered-' + text,
+              ),
+              false,
+            );
+        }
         assert.equal(
           await fixture.stores.sessionStore.hasCancelledMessageAdmission(
             fixture.sessionId,
             messageId,
           ),
-          true,
+          scope !== 'successor_proof',
         );
         assert.deepEqual(
           await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId),
           [],
         );
-        assert.deepEqual(seen, ['a'], 'recovery does not replay a cancelled Root correction');
+        if (scope !== 'mixed_recovery')
+          assert.deepEqual(seen, ['a'], 'recovery does not replay a cancelled Root correction');
       }
       assert.equal(stopCount, 1);
       assert.equal(fixture.drainRequested(), false);
