@@ -3590,7 +3590,15 @@ export class SqliteSessionMetadataStore {
             ON payload.session_id = message.session_id AND payload.sequence = message.sequence
           WHERE message.session_id = ? AND message.sequence ${backward ? '<' : '>'} ?
             ${filter === true ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
-            ${filter === 'task_facts' ? "AND message.message_type='workhub_coordination' AND ((message.message_id GLOB 'wha_*' AND length(message.message_id)=52) OR (message.message_id GLOB 'whti_*' AND length(message.message_id)=53))" : ''}
+            ${
+              filter === 'task_facts'
+                ? `AND message.message_type='workhub_coordination' AND (
+                  (length(message.message_id)=52 AND substr(message.message_id,1,4)
+                    IN ('wha_', 'whp_', 'whx_', 'whb_', 'whq_', 'whz_'))
+                  OR (length(message.message_id)=53 AND substr(message.message_id,1,5)
+                    IN ('whti_', 'whzt_')))`
+                : ''
+            }
             ${
               peer
                 ? `AND message.message_type = 'workhub_peer_inbox' AND message.message_id GLOB 'whpi_*' AND length(message.message_id) = 53

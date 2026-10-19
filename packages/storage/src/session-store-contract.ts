@@ -482,6 +482,7 @@ export interface CoordinationTranscriptIndexState {
 export interface SessionAuthorityStore extends SessionStore, MessageAdmissionStore {
   /** Rebuildable task lookup, never a substitute for canonical assignment ownership. */
   readonly workHubTaskIndex?: WorkHubTaskIndexStore;
+  /** Canonical assignment, input and retirement facts for the rebuildable task projection. */
   readWorkHubTaskFactsPage(request: SessionMessageScanRequest): Promise<SessionMessageScanPage>;
   readCoordinationTranscriptIndexState(): Promise<CoordinationTranscriptIndexState>;
   appendCoordinationTranscriptIndex(

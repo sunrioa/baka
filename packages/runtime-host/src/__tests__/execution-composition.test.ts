@@ -1594,6 +1594,101 @@ test('WorkHub find removes a directly deleted manual Session without requiring r
   });
 });
 
+test('WorkHub find refreshes an already-terminal stop recorded only in the coordination ledger', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const { composition, manager } = await createCapturedExecutionComposition(owner);
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'retirement-discovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const target = await manager.createSession({
+        cwd: root,
+        name: 'Terminal discovery target',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const resolved = await composition.handlers['workhub.coordination.resolve']({}, context);
+      assert.ok(resolved.ok, JSON.stringify(resolved));
+      await delegateWorkHubTarget(
+        composition,
+        context,
+        target.id,
+        'discovery-terminal-task',
+        'Return the completed task output.',
+      );
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const source = await stores.sessionStore.readWorkHubAssignment('discovery-terminal-task');
+      assert.ok(source);
+      await waitFor(async () => {
+        const result = await composition.handlers['workhub.tasks.read'](
+          { actionId: source.actionId, delegationId: source.delegationId },
+          context,
+        );
+        return result.ok && result.result.task.status === 'pending_acceptance';
+      });
+      await waitFor(async () => manager.runningTurnIds(target.id).length === 0);
+      const first = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(first.ok, JSON.stringify(first));
+      assert.equal(first.result.items.find((item) => item.id === source.actionId)?.state, 'ended');
+      // Flush the initial terminal/catalog notifications before exercising a
+      // later ledger-only change; a previously dirty task would mask the bug.
+      const warmed = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(warmed.ok, JSON.stringify(warmed));
+      assert.equal(warmed.result.items.find((item) => item.id === source.actionId)?.state, 'ended');
+      assert.equal(
+        (await stores.sessionStore.workHubTaskIndex!.read('task', source.actionId))?.dirtyRevision,
+        0,
+        'the task is cleanly cached before the ledger-only stop',
+      );
+      const before = await stores.runtimeEventStore.listSessionInvocations(target.id);
+      const stopped = await actWorkHub(
+        composition,
+        {
+          actionId: 'discovery-stop-terminal',
+          userText: 'Stop that completed task.',
+          proposal: { operation: 'stop', expects: { targetSessionId: target.id } },
+        },
+        context,
+      );
+      assert.ok(stopped.ok, JSON.stringify(stopped));
+      assert.equal(stopped.result.disposition, 'stop_work');
+      if (stopped.result.disposition !== 'stop_work') throw new Error('Expected task stop');
+      assert.equal(stopped.result.outcome, 'already_terminal');
+      assert.equal(
+        (await stores.sessionStore.workHubTaskIndex!.read('task', source.actionId))?.dirtyRevision,
+        0,
+        'no target notification invalidates the cached task',
+      );
+      assert.deepEqual(
+        await stores.runtimeEventStore.listSessionInvocations(target.id),
+        before,
+        'stopping the ended task creates no target Run or runtime event',
+      );
+      const after = await composition.handlers['workhub.tasks.find']({}, context);
+      assert.ok(after.ok, JSON.stringify(after));
+      assert.equal(
+        after.result.items.find((item) => item.id === source.actionId)?.state,
+        'stopped',
+      );
+      const detail = await composition.handlers['workhub.tasks.read'](
+        { actionId: source.actionId, delegationId: source.delegationId },
+        context,
+      );
+      assert.ok(detail.ok, JSON.stringify(detail));
+      assert.equal(detail.result.task.status, 'stopped');
+      assert.equal((await stores.sessionStore.readHeaderSnapshot(target.id)).permissionMode, 'ask');
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('hosted execution settles while its tracked environment resource remains verifiable', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);

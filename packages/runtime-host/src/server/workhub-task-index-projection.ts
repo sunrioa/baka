@@ -226,7 +226,34 @@ export function createWorkHubTaskIndexProjection(options: {
             },
             sequence,
           );
-        } else throw new Error('Unexpected task index fact');
+        } else {
+          let sourceActionId: string;
+          switch (message.kind) {
+            case 'delegation_replacement_requested':
+              sourceActionId = message.replacesActionId;
+              break;
+            case 'delegation_superseded':
+              sourceActionId = message.supersededActionId;
+              break;
+            case 'delegation_replacement_aborted':
+              sourceActionId = message.abortedActionId;
+              break;
+            case 'delegation_stop_requested':
+            case 'delegation_stop_resolved':
+              sourceActionId = message.stopsActionId;
+              break;
+            default:
+              throw new Error('Unexpected task index fact');
+          }
+          // Retirement can settle an already-terminal task without producing
+          // another target event. Consume its canonical fact, not just the
+          // coordinator Session's notification, to invalidate that task.
+          const source = await stores.readWorkHubAssignment(sourceActionId);
+          const old = source && (await index.read('task', source.work?.id ?? source.actionId));
+          if (old)
+            await index.put({ ...old, activityAt: Math.max(old.activityAt, message.ts) }, sequence);
+          else await index.advance(sequence);
+        }
         through = sequence;
       }
     }

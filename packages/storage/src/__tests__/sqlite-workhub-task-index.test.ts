@@ -25,7 +25,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
-import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type StoredMessage } from '@maka/core/session';
 import { createSessionStore } from '../session-store.js';
 import { assignmentRequest, createCoordinationSession } from './fixtures/workhub-assignment.js';
 import {
@@ -369,6 +369,86 @@ test('the production store migrates, scans sequence-zero facts and keeps project
     });
     assert.equal(next.records.length, 1, 'large non-task output does not consume the page');
     assert.deepEqual(next.records[0]?.message, fact);
+    const a = request.assignment;
+    const common = {
+      type: 'workhub_coordination' as const,
+      actionId: 'retirement-action',
+      actionFingerprint: a.actionFingerprint,
+      coordinationTurnId: 'retirement-turn',
+      turnId: 'retirement-turn',
+      ts: 40,
+    };
+    const suffix = createHash('sha256').update(a.delegationId).digest('hex').slice(0, 48);
+    const resolved = {
+      ...common,
+      kind: 'delegation_stop_resolved' as const,
+      schemaVersion: 3 as const,
+      stopsActionId: a.actionId,
+      stopsDelegationId: a.delegationId,
+      targetSessionId: session.id,
+      outcome: 'already_terminal' as const,
+    };
+    const retirements: StoredMessage[] = [
+      {
+        ...common,
+        id: `whp_${suffix}`,
+        kind: 'delegation_replacement_requested',
+        schemaVersion: 2,
+        targetSessionId: session.id,
+        disposition: 'delegate_existing',
+        userText: 'Replacement request',
+        replacesActionId: a.actionId,
+        replacesDelegationId: a.delegationId,
+        replacedTargetSessionId: session.id,
+        replacedTargetMessageId: a.targetMessageId,
+        targetSessionName: session.name,
+      },
+      {
+        ...common,
+        id: `whx_${suffix}`,
+        kind: 'delegation_superseded',
+        schemaVersion: 2,
+        supersededActionId: a.actionId,
+        supersededDelegationId: a.delegationId,
+        replacementDelegationId: 'replacement-delegation',
+      },
+      {
+        ...common,
+        id: `whb_${suffix}`,
+        kind: 'delegation_replacement_aborted',
+        schemaVersion: 2,
+        abortedActionId: a.actionId,
+        abortedDelegationId: a.delegationId,
+        targetSessionId: session.id,
+        reason: 'target_unavailable',
+      },
+      {
+        ...common,
+        id: `whq_${suffix}`,
+        kind: 'delegation_stop_requested',
+        schemaVersion: 3,
+        stopsActionId: a.actionId,
+        stopsDelegationId: a.delegationId,
+        targetSessionId: session.id,
+        targetMessageId: a.targetMessageId,
+        targetSessionName: session.name,
+        userText: 'Stop request',
+      },
+      { ...resolved, id: `whz_${suffix}` },
+      { ...resolved, id: `whzt_${suffix}` },
+    ];
+    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, retirements);
+    assert.deepEqual(
+      (
+        await store.readWorkHubTaskFactsPage({
+          afterSequence: next.records[0]!.sequence,
+          maxMessages: 64,
+          maxStoredBytes: 64 * 1024,
+        })
+      ).records.map((record) => record.message),
+      retirements,
+      'every retirement record family participates in incremental invalidation',
+    );
     assert.equal(
       (await store.readWorkHubAssignmentByMessage(request.assignment.targetMessageId))?.actionId,
       'index-original',
