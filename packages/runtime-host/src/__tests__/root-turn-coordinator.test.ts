@@ -115,7 +115,6 @@ import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import {
   continuationSafetyDigest,
   RootTurnCoordinator,
-  type HostWorkHubRoutingDecisionPreparation,
   type TurnStartOutcome,
 } from '../server/root-turn-coordinator.js';
 import {
@@ -4192,7 +4191,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
     const sent: BackendSendInput[] = [];
     const successorReady = [deferred<void>(), deferred<void>()];
     const successorRelease = [deferred<void>(), deferred<void>()];
-    const preparedRouting: Array<{ turnId: string; text: string }> = [];
     const capabilities = new HostClientCapabilityCoordinator({
       ...clientCapabilityCoordinatorTestAdmission(),
       activation: new RuntimePolicyActivationGate(),
@@ -4203,14 +4201,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
     });
     const fixture = await createFailureFixture({
       clientCapabilities: capabilities,
-      ...(toolProfile === 'workhub-coordination-v2'
-        ? {
-            prepareWorkHubRoutingDecision: async (input: HostWorkHubRoutingDecisionPreparation) => {
-              preparedRouting.push({ turnId: input.turnId, text: input.content.text });
-              return { kind: 'routing' as const, disposition: 'answer_here' as const };
-            },
-          }
-        : {}),
       registerBackend: (backends) => {
         backends.register(
           'ai-sdk',
@@ -4318,7 +4308,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
               content,
               runId: started.result.runId,
               sourceMessageId: admission.userMessageId,
-              decision: { kind: 'routing', disposition: 'answer_here' },
             }
           : undefined,
       );
@@ -4352,7 +4341,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
             content: { text: 'workhub-followup' },
             runId: sent[1]!.runId,
             sourceMessageId: 'workhub-followup',
-            decision: { kind: 'routing', disposition: 'answer_here' },
           },
         );
         assert.deepEqual(
@@ -4372,11 +4360,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
         assert.deepEqual(await fixture.coordinator.readActiveWorkHubRequest(sent[2]!.turnId), {
           text: 'workhub-followup-second',
         });
-        assert.deepEqual(preparedRouting, [
-          { turnId, text: content.text },
-          { turnId: sent[1]!.turnId, text: 'workhub-followup' },
-          { turnId: sent[2]!.turnId, text: 'workhub-followup-second' },
-        ]);
         successorRelease[1]!.resolve();
         await fixture.coordinator.whenIdle(WORKHUB_COORDINATION_SESSION_ID);
         assert.deepEqual(consumed, ['workhub-steering']);
@@ -6721,9 +6704,6 @@ async function createFailureFixture(options: {
     admission: RootTurnAdmission,
     state: 'pending_fire_required' | 'run_recorded',
   ): Promise<void>;
-  prepareWorkHubRoutingDecision?(
-    input: HostWorkHubRoutingDecisionPreparation,
-  ): Promise<import('@maka/core/workhub-routing').WorkHubRoutingDecision | undefined>;
 }) {
   const base = await mkdtemp(join(tmpdir(), 'maka-root-turn-message-failure-'));
   const capability = await resolveStorageRoot({
@@ -6931,7 +6911,6 @@ async function createFailureFixture(options: {
       options.agentGraphEpochs,
       undefined,
       options.directoryHostId,
-      options.prepareWorkHubRoutingDecision,
     );
   coordinator = createCoordinator(rootAdmissionOwner);
   const contextOperations = new HostContextCoordinator({
@@ -8123,15 +8102,10 @@ async function waitForContinuityFrame(
   );
 }
 
-test('WorkHub action admission skips routing and undefined decisions preserve unbound admission', async () => {
+test('WorkHub action and conversational admissions have no pre-routing binding', async () => {
   for (const action of [true, false]) {
-    let calls = 0;
     const fixture = await createFailureFixture({
       withInteractions: true,
-      prepareWorkHubRoutingDecision: async () => {
-        calls++;
-        return action ? { kind: 'routing', disposition: 'clarify' } : undefined;
-      },
       registerBackend: (backends) =>
         backends.register('ai-sdk', (context) => new FakeBackend(context)),
     });
@@ -8181,7 +8155,6 @@ test('WorkHub action admission skips routing and undefined decisions preserve un
       );
       assert.ok(admission);
       assert.equal('routingDecision' in admission.execution, false);
-      assert.equal(calls, action ? 0 : 1);
       assert.equal(fixture.drainRequested(), false);
     } finally {
       await fixture.coordinator.close();

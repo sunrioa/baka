@@ -236,7 +236,7 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
     })
     .strict()
     .describe(
-      "Correct an existing delegation: replacesActionId must identify the exact prior delegation being corrected. Discover fresh candidate references when choosing an existing replacement. The Host checks the original user request for correction authorization. Admission of the replacement does not mean it has completed.",
+      "Correct an existing delegation: replacesActionId must identify the exact prior delegation being corrected. Discover fresh candidate references when choosing an existing replacement. You choose whether correction is appropriate; the Host checks execution ownership, identity and admission, not natural-language intent. Admission of the replacement does not mean it has completed.",
     ),
   z
     .object({
@@ -245,7 +245,7 @@ export const workHubTasksSchema = z.discriminatedUnion("operation", [
     })
     .strict()
     .describe(
-      "Stop the delegated work identified by the exact targetSessionId from discovery or a prior delegation result. The Host revalidates ownership and explicit stop intent from the original user request; tool arguments cannot grant authorization.",
+      "Stop the delegated work identified by the exact targetSessionId from discovery or a prior delegation result. The Host revalidates execution ownership and identity; it does not infer stop intent from natural-language text. Respect the user request and do not invent authorization.",
     ),
   z
     .object({

@@ -29,7 +29,6 @@ import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
-import { createJevRoutingModel } from './jev-routing-model.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { attachmentKindFromMimeType, MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
@@ -174,14 +173,12 @@ import {
 } from './interactive-run-composer.js';
 
 import {
-  readDuringBackendCreation,
   createHostGoalEvaluator,
   createHostDailyReviewModel,
   createHostMemoryExtractionModel,
   createHostPluginModel,
   createHostSessionEffectModel,
   createHostPromptSuggestionModel,
-  type HostWorkHubRoutingModel,
   type HostSessionEffectModel,
 } from './execution-model-authority.js';
 import { HostExecutionInspectCoordinator } from './execution-inspect-coordinator.js';
@@ -210,10 +207,7 @@ import { HostWorkHubTargetExecutionAuthority } from './workhub-target-execution-
 import { HostInteractiveTurnCoordinator } from './interactive-turn-coordinator.js';
 import { SessionTurnAccessRequestCoordinator } from './session-turn-access-request-coordinator.js';
 import { ensureBootstrapRuntimePolicy } from './bootstrap-runtime-policy.js';
-import {
-  bindWorkHubRoutingDecisionPrompt,
-  hostedExecutionRunProfile,
-} from './hosted-execution-tool-profile.js';
+import { hostedExecutionRunProfile } from './hosted-execution-tool-profile.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
 import { HostMemoryExtractionCoordinator } from './memory-extraction-coordinator.js';
 import { MemoryExtractionSessionLane } from './memory-extraction-session-lane.js';
@@ -330,7 +324,6 @@ export interface CreateExecutionRuntimeHostCompositionOptions {
 export interface ExecutionRuntimeHostCompositionDependencies {
   readonly executionPersistenceProvider?: ExecutionPersistenceProvider;
   readonly primaryBackendFactory?: BackendFactory;
-  readonly workHubRoutingModel?: HostWorkHubRoutingModel;
   readonly generateSessionTitle?: HostSessionEffectModel['generateTitle'];
   readonly oauthAuthorization?: Pick<
     HostOAuthCoordinatorInput,
@@ -1221,19 +1214,6 @@ export async function createExecutionRuntimeHostComposition(
         parentAgentTools: childAgentTools.parentTools,
         childTools: childAgentTools.childTools,
         worktreePatchWriteBackAvailable: true,
-        resolveProfileSystemPrompt: async (promptContext, basePrompt) => {
-          if (promptContext.sessionId !== WORKHUB_COORDINATION_SESSION_ID) return basePrompt;
-          const admission = await stores.agentRunStore.readRootTurnAdmission(
-            promptContext.sessionId,
-            promptContext.turnId,
-          );
-          return bindWorkHubRoutingDecisionPrompt(
-            basePrompt,
-            admission?.execution.kind === 'workhub_coordination'
-              ? admission.execution.routingDecision
-              : undefined,
-          );
-        },
       }),
       ...(hostedExecutionRunProfile(backendContext.header.toolProfile)?.memoryExtraction === false
         ? {}
@@ -1862,37 +1842,6 @@ export async function createExecutionRuntimeHostComposition(
       },
       (input) => sessionEffectCoordinator.nameSessionFromRootMessage(input),
       context.owner.capability.rootId,
-      async (input) => {
-        // Explicit injection remains an experiment seam. Injected models own
-        // policy/egress checks and cancellation; this bypasses the production
-        // Jev preparation deadline (including its transcript-read protection).
-        if (dependencies.workHubRoutingModel)
-          return workHubCoordination.prepareRoutingDecision(input);
-        // One admission budget covers policy/transcript reads, both Jev asks,
-        // candidate resolution and transport cleanup; it is not per request.
-        const signal = AbortSignal.any([
-          ...(input.inputClosedSignal ? [input.inputClosedSignal] : []),
-          AbortSignal.timeout(8_000),
-        ]);
-        try {
-          const { policy } = await readDuringBackendCreation(
-            () => runtimePolicyStores.runtimePolicy.getSnapshot(),
-            signal,
-          );
-          if (!policy.jev?.enabled || policy.privacy.incognitoActive) return undefined;
-          return await readDuringBackendCreation(
-            () =>
-              workHubCoordination.prepareRoutingDecision({ ...input, inputClosedSignal: signal }),
-            signal,
-          );
-        } catch {
-          if (!input.inputClosedSignal?.aborted) {
-            const failure = signal.aborted ? 'timeout' : 'preparation_unavailable';
-            console.warn(`[runtime-host] Jev routing fallback: ${failure}`);
-          }
-          return undefined;
-        }
-      },
       workHubExecutionSlots,
     );
     const coordinator = rootCoordinator;
@@ -2438,8 +2387,6 @@ export async function createExecutionRuntimeHostComposition(
         runtime: stores.runtimeEventStore,
         catalog: runtimePolicyStores.connectionCatalog,
       }),
-      routingModel:
-        dependencies.workHubRoutingModel ?? createJevRoutingModel({ stores: runtimePolicyStores }),
       requestForm: (input) => interactions.requestForm(input),
       targetExecution: workHubTargetExecution,
       configureModel: (input) => sessionCatalog.configureWorkHubModel(input),

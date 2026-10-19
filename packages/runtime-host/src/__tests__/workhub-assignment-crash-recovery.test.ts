@@ -27,7 +27,6 @@ import { test } from 'node:test';
 import { withTimeout } from '@maka/core/test-only/async-primitives';
 import { FAKE_HOLD_OPEN_PROMPT } from '@maka/runtime/test-only/fake-backend';
 import type { AttachmentRef } from '@maka/core/events';
-import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
   type WorkHubDelegationAssignedMessage,
@@ -57,7 +56,6 @@ import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.
 
 type Notice =
   | { type: 'ready'; hostEpoch: string }
-  | { type: 'routing_decision_ready'; turnId: string }
   | { type: 'assignment_failed' }
   | {
       type: 'assignment_committed';
@@ -705,8 +703,8 @@ async function connectFixtureClient(
 }
 
 // Each proposal is authorized by an actual admitted coordination Turn. Only
-// model output is deterministic: the routing decision enters the trusted model
-// seam, and the primary fake model stays open. Client capability binding, Host
+// model output is deterministic: the primary fake model stays open, without
+// a pre-routing model or injected decision. Client capability binding, Host
 // admission and action validation remain production code, including on replay.
 async function actWorkHub(
   client: RuntimeHostConnection,
@@ -716,18 +714,6 @@ async function actWorkHub(
   const turnId = randomUUID();
   const host = clientHosts.get(client);
   assert.ok(host);
-  const decision: WorkHubRoutingDecision =
-    'operation' in action.proposal
-      ? { kind: 'linked', operation: action.proposal.operation }
-      : action.proposal.disposition === 'create_new'
-        ? { kind: 'routing', disposition: 'create_new' }
-        : {
-            kind: 'routing',
-            disposition: 'delegate_existing',
-            candidateSetId: action.candidateSetId!,
-            candidateRef: action.proposal.candidateRef,
-          };
-  await host.setRoutingDecision(turnId, decision);
   // This fixture holds the fake model open. A completed delegated target can
   // immediately wake a result Turn, which would otherwise occupy WorkHub while
   // this test submits its next independent coordination request.
@@ -887,11 +873,6 @@ class HostProcess {
       this.notices.push(notice);
       for (const listener of this.listeners) listener();
     });
-  }
-
-  async setRoutingDecision(turnId: string, decision: WorkHubRoutingDecision): Promise<void> {
-    this.child.send({ type: 'routing_decision', turnId, decision });
-    await this.wait('routing_decision_ready', (notice) => notice.turnId === turnId);
   }
 
   async wait<T extends Notice['type']>(

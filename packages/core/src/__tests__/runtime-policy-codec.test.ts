@@ -688,24 +688,24 @@ test('per-model ApplyPatch overrides survive persistence and reject non-booleans
   );
 });
 
-test('Jev is an optional strict policy field and has a dedicated credential scope', () => {
+test('legacy Jev policy is discarded while its credential remains readable', () => {
   const legacy = createDefaultRuntimePolicy();
   assert.deepEqual(decodeCanonicalRuntimePolicy(legacy), legacy);
   const enabled = { ...legacy, jev: { enabled: true } };
-  assert.deepEqual(decodeCanonicalRuntimePolicy(enabled), enabled);
+  assert.deepEqual(decodeCanonicalRuntimePolicy(enabled), legacy);
+  assert.deepEqual(
+    decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: 'true', apiKey: 'old-secret' } }),
+    legacy,
+  );
+  assert.equal(JSON.stringify(decodeCanonicalRuntimePolicy(enabled)).includes('jev'), false);
   assert.throws(
-    () => decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: 'true' } }),
+    () =>
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 0,
+        operation: { kind: 'set_jev', value: { enabled: true } },
+      }),
     RuntimePolicyDomainDecodeError,
   );
-  assert.throws(
-    () => decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: true, apiKey: 'secret' } }),
-    RuntimePolicyDomainDecodeError,
-  );
-  const mutation = normalizeRuntimePolicyMutation({
-    expectedRevision: 0,
-    operation: { kind: 'set_jev', value: { enabled: false } },
-  });
-  assert.deepEqual(mutation.operation, { kind: 'set_jev', value: { enabled: false } });
   const credential = normalizeSetCredentialInput({
     locator: { scope: 'jev', kind: 'api_key' },
     expected: null,

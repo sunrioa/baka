@@ -281,7 +281,7 @@ export function createWorkHubControl(deps: WorkHubControlDeps) {
     const tasks: MakaTool = {
       name: "tasks",
       description:
-        "Discover or coordinate Host tasks through the WorkHub action gate. Delegate actual work with text; original user intent and destructive authorization are checked by the Host. Use candidates before choosing an existing task. Never invent a candidate or delegation identity.",
+        "Discover or coordinate Host tasks through the WorkHub action gate. Delegate actual work with text; the model chooses the requested action and the Host checks target ownership, execution identity and admission, not natural-language intent. Use candidates before choosing an existing task. Never invent a candidate or delegation identity.",
       parameters: tasksParameters,
       impl: async (input, ctx) => {
         if (busy)

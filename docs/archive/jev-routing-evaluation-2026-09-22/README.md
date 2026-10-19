@@ -80,7 +80,15 @@ DPSK below means the 2048-token diagnostic, not the failing original budget. `fa
 - Jev was faster in these measurements. Cache state, provider/server load, different interfaces, reasoning budgets, and one-pass sampling prevent a general speed claim.
 - The split adapter's small output budgets need separate evaluation for reasoning models. No change to the user's model configuration or main WorkHub behavior is included in this evidence update.
 
-## Reproduce and evidence
+## Reproduce and evidence (historical implementation only)
+
+The Jev / split pre-routing implementation and its replay script were retired by
+the task-centric refactor. To reproduce these historical measurements, check out
+`1c814c261` in a separate checkout and use its `scripts/compare-jev-routing.mjs`.
+Do not run that old adapter against current WorkHub and present it as a production
+coordination evaluation. The twelve original inputs remain in the JSON evidence;
+their task-centric replacements are tracked in
+[the current evaluation catalog](../../workhub-task-centric-evaluation.zh-CN.md).
 
 Build the workspace first. Provide `JEV_API_KEY` and `DEEPSEEK_API_KEY` through your local process environment; never put values in source or committed command files.
 
@@ -94,4 +102,4 @@ The replay uses a synthetic connection with the same model and the provider's de
 - [Initial exact-adapter measurements and all inputs](results/default.json)
 - [Explicit thinking-off probe](results/thinking-off-probe.json)
 - [2048-token diagnostic measurements](results/budget-2048.json)
-- [Replay harness](../../../scripts/compare-jev-routing.mjs)
+- [Historical replay harness](https://github.com/sunrioa/baka/blob/1c814c261/scripts/compare-jev-routing.mjs)

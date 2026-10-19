@@ -31,7 +31,6 @@ import { createWorkHubInspectionTool } from '../server/workhub-inspection-tool.j
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { transcriptReader } from './fixtures/session-transcript-reader.js';
 import {
-  bindWorkHubRoutingDecisionPrompt,
   hostedExecutionRunProfile,
   projectHostedExecutionTools,
 } from '../server/hosted-execution-tool-profile.js';
@@ -141,6 +140,17 @@ test('the WorkHub coordination profile has conversational authority but zero too
     impl: async () => 'not reachable',
   };
   assert.deepEqual(projectHostedExecutionTools([productTool], 'workhub-coordination-v1'), []);
+});
+
+test('WorkHub selects tasks directly without a retired pre-routing decision', () => {
+  const profile = hostedExecutionRunProfile('workhub-coordination-v2');
+  assert.ok(profile);
+  assert.match(profile.systemPrompt, /no auxiliary intent\/recall model/u);
+  assert.match(profile.systemPrompt, /not natural-language intent/u);
+  assert.doesNotMatch(
+    profile.systemPrompt,
+    /If the Host binds a routing decision|Intent never selects/u,
+  );
 });
 
 test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct and Code Mode', async () => {
@@ -258,8 +268,11 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   );
   assert.equal(hostedExecutionRunProfile('workhub-coordination-v2')?.memoryExtraction, false);
   const prompt = hostedExecutionRunProfile('workhub-coordination-v2')?.systemPrompt ?? '';
-  assert.match(prompt, /Intent never selects a target/u);
-  assert.match(prompt, /call the tasks candidates operation before choosing/u);
+  assert.match(prompt, /discover candidates and use only returned identities/u);
+  assert.match(
+    prompt,
+    /Before selecting an existing Session for independent work, discover candidates/u,
+  );
   assert.match(prompt, /clearly independent execution goal/u);
   assert.match(prompt, /without requiring the user to say create a Session/u);
   assert.match(prompt, /continuation lookup requires clarification; it never implies create_new/u);
@@ -410,16 +423,4 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
       ],
     },
   });
-});
-
-test('WorkHub routing prompt binds the exact recalled candidate without granting authority', () => {
-  const prompt = bindWorkHubRoutingDecisionPrompt('base', {
-    kind: 'routing',
-    disposition: 'delegate_existing',
-    candidateSetId: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-    candidateRef: 'whc_candidate_a',
-  });
-  assert.match(prompt, /candidateSetId sha256:0123456789abcdef/u);
-  assert.match(prompt, /candidateRef whc_candidate_a/u);
-  assert.match(prompt, /grants no authority/u);
 });

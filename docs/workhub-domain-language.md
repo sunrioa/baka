@@ -31,6 +31,11 @@ owners:
 
 # WorkHub domain language
 
+The optional Jev / Intent / Recall pre-router has been removed. Coordination is
+performed by the main WorkHub model with tools; old routing advice is ignored on
+read. The [task-centric ADR](architecture/workhub-task-centric-adr.zh-CN.md) governs
+the incremental rollout; later-step features described there are not yet shipped.
+
 WorkHub is one persistent conversation per Runtime Host. Its coordination model
 answers questions, clarifies requests, coordinates ordinary tasks, and operates
 Maka through restricted Desktop capabilities. Docked and floating presentations
@@ -222,8 +227,7 @@ WorkHub does not scan or rewrite that content for secrets.
 | Task tool bridge | [workhub-runtime.ts](../apps/desktop/src/main/workhub-runtime.ts) |
 | Active-Turn protocol | [workhub-coordination.ts](../packages/runtime-host/src/protocol/workhub-coordination.ts) |
 | Coordination Session and active request | [workhub-coordination-coordinator.ts](../packages/runtime-host/src/server/workhub-coordination-coordinator.ts) |
-| Shared Intent, Recall, and Policy contracts | [workhub-routing.ts](../packages/core/src/workhub-routing.ts) |
-| Optional user-selected routing model adapter | [execution-model-authority.ts](../packages/runtime-host/src/server/execution-model-authority.ts) |
+| Task-centric implementation rules and rollout | [workhub-task-centric-adr.zh-CN.md](architecture/workhub-task-centric-adr.zh-CN.md) |
 | Delegation admission and recovery | [workhub-coordination-action-gate.ts](../packages/runtime-host/src/server/workhub-coordination-action-gate.ts) |
 | Transcript services | [create-workhub-services.ts](../apps/desktop/src/renderer/platform/desktop/create-workhub-services.ts) |
 | Native window presentation | [workhub-presentation.ts](../apps/desktop/src/main/workhub-presentation.ts) |

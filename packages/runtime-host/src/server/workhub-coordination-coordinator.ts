@@ -40,7 +40,6 @@ import {
   type WorkHubDelegationStopRequestedMessage,
   type WorkHubDelegationStopResolvedMessage,
 } from '@maka/core/session';
-import type { WorkHubRoutingDecision } from '@maka/core/workhub-routing';
 import type { ExecutionSessionWriter, SessionHeaderSnapshot } from '@maka/storage/execution-stores';
 import type {
   OperationOutcome,
@@ -62,11 +61,7 @@ import type {
   ConnectionContext,
   WorkHubCoordinationOperationHandlerMap,
 } from './operation-dispatcher.js';
-import type {
-  HostWorkHubRoutingDecisionPreparation,
-  RootTurnCoordinator,
-} from './root-turn-coordinator.js';
-import type { HostWorkHubRoutingModel } from './execution-model-authority.js';
+import type { RootTurnCoordinator } from './root-turn-coordinator.js';
 import { SessionAdmissionGate, type SessionAdmissionLease } from './session-admission-gate.js';
 import {
   SessionOperationFailure,
@@ -105,9 +100,6 @@ const JSON_ESCAPE_MAX_BYTES_PER_INPUT_BYTE = 6;
 const COORDINATION_SUMMARY_READ_MAX_BYTES =
   JSON_ESCAPE_MAX_BYTES_PER_INPUT_BYTE * (WORKHUB_COORDINATION_TEXT_MAX_BYTES + 8 * 1024) +
   16 * 1024;
-const WORKHUB_ROUTING_TIMEOUT_MS = 15_000;
-export const WORKHUB_ROUTING_HISTORY_MAX_MESSAGES = 32;
-export const WORKHUB_ROUTING_HISTORY_MAX_STORED_BYTES = 64 * 1024;
 
 type CoordinationStores = Pick<
   ExecutionSessionWriter,
@@ -181,7 +173,6 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
   readonly configureModel: (
     input: WorkHubCoordinationConfigureModelInput,
   ) => Promise<OperationOutcome<'workhub.coordination.configureModel'>>;
-  readonly routingModel?: HostWorkHubRoutingModel;
   readonly requestForm?: HostInteractionCoordinator['requestForm'];
   readonly targetExecution?: WorkHubTargetExecutionAuthority;
   readonly readWorkContext?: (sessionId: string) => Promise<WorkHubContextObservation>;
@@ -216,14 +207,12 @@ export class HostWorkHubCoordinationCoordinator {
   readonly #resolveCreateTarget: () => Promise<CoordinationCreateTarget>;
   readonly #requestDrain: () => void;
   readonly #actionGate: WorkHubCoordinationActionGate;
-  readonly #routingModel: HostWorkHubRoutingModel | undefined;
   readonly #workIndex: ReturnType<typeof createWorkHubWorkIndex>;
   readonly #readDelegationRetirement: HostWorkHubCoordinationCoordinatorOptions['sessionActions']['readDelegationRetirement'];
 
   constructor(options: HostWorkHubCoordinationCoordinatorOptions) {
     this.#requestForm = options.requestForm;
     this.#configureModel = options.configureModel;
-    this.#routingModel = options.routingModel;
     this.#transitionConfiguration = options.transitionConfiguration;
     this.#coordinationCwd = join(options.stateRoot, COORDINATION_CWD_DIRECTORY);
     this.#taskCwdRoot = join(options.stateRoot, 'workhub-tasks');
@@ -666,12 +655,12 @@ export class HostWorkHubCoordinationCoordinator {
   ): Promise<OperationOutcome<'workhub.coordination.selectAndDelegate'>> {
     try {
       const authority = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
-      if (!authority || authority.decision || !this.#requestForm) {
+      if (!authority || !this.#requestForm) {
         return {
           ok: false,
           error: {
             code: 'operation_conflict',
-            message: 'Target selection requires an active, unbound Coordination Turn',
+            message: 'Target selection requires an active Coordination Turn',
           },
         };
       }
@@ -909,15 +898,6 @@ export class HostWorkHubCoordinationCoordinator {
     }
     const { turnId: _turnId, create, ...fields } = input;
     const action = { ...fields, proposal };
-    if (request.decision && !routingDecisionAllowsProposal(request.decision, action)) {
-      return {
-        ok: false,
-        error: {
-          code: 'operation_conflict',
-          message: 'WorkHub action does not match the routing decision bound to this Turn',
-        },
-      };
-    }
     const carriesAttachments =
       'disposition' in action.proposal ||
       ('operation' in action.proposal && action.proposal.operation === 'correct');
@@ -1269,67 +1249,6 @@ export class HostWorkHubCoordinationCoordinator {
     return outcome.ok ? { ok: true, result: { turnId: input.turnId } } : outcome;
   }
 
-  async prepareRoutingDecision(
-    input: HostWorkHubRoutingDecisionPreparation,
-  ): Promise<WorkHubRoutingDecision | undefined> {
-    try {
-      if (!this.#routingModel) throw new Error('WorkHub routing model is unavailable');
-      const page = await this.#stores.readMessagesAfter(WORKHUB_COORDINATION_SESSION_ID, {
-        beforeSequence: Number.MAX_SAFE_INTEGER,
-        maxMessages: WORKHUB_ROUTING_HISTORY_MAX_MESSAGES,
-        maxStoredBytes: WORKHUB_ROUTING_HISTORY_MAX_STORED_BYTES,
-      });
-      const transcript = [...page.records]
-        .reverse()
-        .flatMap(({ message }) =>
-          message.type === 'user' || message.type === 'assistant'
-            ? [{ role: message.type, text: message.text } as const]
-            : [],
-        )
-        .slice(-8);
-      return await this.#routingModel.decide({
-        turnId: input.turnId,
-        header: input.header,
-        userText: input.content.text,
-        transcript,
-        resolveCandidates: async () => {
-          const outcome = await this.#candidates();
-          if (!outcome.ok) throw new Error(outcome.error.message);
-          const now = Date.now();
-          return {
-            candidateSetId: outcome.result.candidateSetId,
-            candidates: outcome.result.candidates.map((candidate) => ({
-              candidateRef: candidate.candidateRef,
-              sessionName: candidate.sessionName,
-              workspaceName: basename(candidate.workspace.hostCwd),
-              state: candidate.state,
-              recency:
-                now - candidate.updatedAt < 24 * 60 * 60 * 1_000
-                  ? ('today' as const)
-                  : now - candidate.updatedAt < 7 * 24 * 60 * 60 * 1_000
-                    ? ('this_week' as const)
-                    : ('older' as const),
-            })),
-          };
-        },
-        abortSignal: input.inputClosedSignal
-          ? AbortSignal.any([
-              input.inputClosedSignal,
-              AbortSignal.timeout(WORKHUB_ROUTING_TIMEOUT_MS),
-            ])
-          : AbortSignal.timeout(WORKHUB_ROUTING_TIMEOUT_MS),
-      });
-    } catch {
-      // Invalid output, unavailable candidates, or provider failure cannot
-      // silently become creation or bind an arbitrary existing Session.
-      // Preparation failures (for example transcript reads) and injected-model
-      // throws bind this admission to clarify, preventing actions for this turn.
-      // This differs intentionally from Jev's internal provider/candidate errors:
-      // that opt-in adapter returns undefined to preserve the legacy unbound path.
-      return { kind: 'routing', disposition: 'clarify' };
-    }
-  }
-
   /** Reads a historical v1 summary to preserve its durable Turn identity. */
   async #readSummaryMessages(turnId: string): Promise<readonly StoredMessage[]> {
     const throughSequence = await this.#stores.readTranscriptHighWaterSnapshot(
@@ -1460,27 +1379,6 @@ function validCoordinationHeader(header: SessionHeader): boolean {
 
 function digest(value: unknown): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
-}
-
-function routingDecisionAllowsProposal(
-  decision: WorkHubRoutingDecision,
-  action: Omit<WorkHubCoordinationActFromTurnInput, 'turnId'>,
-): boolean {
-  if (decision.kind === 'linked') {
-    return 'operation' in action.proposal && action.proposal.operation === decision.operation;
-  }
-  if (decision.disposition === 'delegate_existing') {
-    return (
-      'disposition' in action.proposal &&
-      action.proposal.disposition === 'delegate_existing' &&
-      action.proposal.candidateRef === decision.candidateRef &&
-      action.candidateSetId === decision.candidateSetId
-    );
-  }
-  if (decision.disposition === 'create_new') {
-    return 'disposition' in action.proposal && action.proposal.disposition === 'create_new';
-  }
-  return false;
 }
 
 function workHubDestructiveClaimIdentitySuffix(delegationId: string): string {

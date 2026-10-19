@@ -68,7 +68,6 @@ export function hasRuntimeHostSettingsPatch(
   patch: UpdateAppSettingsInput,
 ): boolean {
   return Boolean(
-    patch.jev ||
     patch.externalAgents ||
     patch.shell ||
       patch.network ||
