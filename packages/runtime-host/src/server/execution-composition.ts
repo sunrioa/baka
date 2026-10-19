@@ -2634,7 +2634,10 @@ export async function createExecutionRuntimeHostComposition(
               sourceRuntimeEventHighWater: plan.result.sourceRuntimeEventHighWater,
             },
             context,
-            assertTargetExecutionReady,
+            async (lease) => {
+              await validateFreshTarget(lease);
+              await assertTargetExecutionReady?.();
+            },
           );
           if (!started.ok) {
             throw new WorkHubActionEffectFailure(started.error.code, started.error.message);

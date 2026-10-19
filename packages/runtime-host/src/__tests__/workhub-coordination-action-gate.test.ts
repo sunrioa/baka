@@ -46,6 +46,10 @@ import {
   type WorkHubRetirementResult,
 } from '../server/workhub-coordination-action-gate.js';
 import type { ConnectionContext } from '../server/operation-dispatcher.js';
+import {
+  SessionAdmissionGate,
+  type SessionAdmissionLease,
+} from '../server/session-admission-gate.js';
 import type { WorkHubTargetExecutionAuthority } from '../server/workhub-target-execution-authority.js';
 
 const CONTEXT: ConnectionContext = {
@@ -722,7 +726,7 @@ describe('WorkHub Coordination Action Gate', () => {
     assert.equal(several.resumeCalls.length, 0);
   });
 
-  test('resume ignores a retired link when one delegation still holds work', async () => {
+  test('resume ignores retired links before planning and inside the final admission lease', async () => {
     const effects = fakeEffects([session('payments', { name: 'Payments' })]);
     delegatedTo(effects, 'payments');
     const retired = effects.assignmentRecords.get('source-action')!;
@@ -741,6 +745,39 @@ describe('WorkHub Coordination Action Gate', () => {
       ),
     );
     effects.retirements.push(retired);
+    const admission = new SessionAdmissionGate();
+    const retirementsRead = { beforeAdmission: 0, admitted: 0 };
+    const readRetirement = effects.readDelegationRetirement;
+    effects.readDelegationRetirement = async (
+      assignment: WorkHubDelegationAssignedMessage,
+      lease?: SessionAdmissionLease,
+    ) => {
+      if (lease) {
+        return admission.runAdmitted(assignment.targetSessionId, lease, () => {
+          retirementsRead.admitted++;
+          return readRetirement.call(effects, assignment);
+        });
+      }
+      return admission.run(assignment.targetSessionId, () => {
+        retirementsRead.beforeAdmission++;
+        return readRetirement.call(effects, assignment);
+      });
+    };
+    effects.resume = async (input) => {
+      // Production validates before planning, then repeats the same check in
+      // Root admission. A missing lease must fail rather than reentering it.
+      await input.validateFreshTarget();
+      return admission.run(input.source.targetSessionId, async (lease) => {
+        await input.validateFreshTarget(lease);
+        effects.resumeCalls.push(input);
+        return {
+          disposition: 'resume_work' as const,
+          outcome: 'resume_started' as const,
+          targetSessionId: input.source.targetSessionId,
+          targetTurnId: 'resumed-turn',
+        };
+      });
+    };
 
     const result = await new WorkHubCoordinationActionGate(effects).act(
       {
@@ -755,6 +792,7 @@ describe('WorkHub Coordination Action Gate', () => {
     const call = effects.resumeCalls[0];
     assert.ok(call);
     assert.equal(call.source.actionId, 'second-action');
+    assert.deepEqual(retirementsRead, { beforeAdmission: 2, admitted: 2 });
   });
 
   test('resume retries cannot move an explicitly named assignment to another delegation', async () => {

@@ -214,7 +214,7 @@ export interface WorkHubDelegationRetirementClaim {
 
 export interface WorkHubDelegationResumeInput {
   /** Only fresh admission revalidates the target; replay acknowledges its existing Turn. */
-  readonly validateFreshTarget: () => Promise<void>;
+  readonly validateFreshTarget: (admission?: SessionAdmissionLease) => Promise<void>;
   readonly prepareTargetExecution?: () => Promise<void>;
   readonly assertTargetExecutionReady?: () => Promise<void>;
   readonly actionId: string;
@@ -505,7 +505,7 @@ export class WorkHubCoordinationActionGate {
           'WorkHub resume target delegation changed',
         );
       }
-      const validateFreshTarget = async () => {
+      const validateFreshTarget = async (admission?: SessionAdmissionLease) => {
         if (await this.#hasPendingStop(source.delegationId))
           throw new WorkHubActionGateFailure(
             'action_conflict',
@@ -521,7 +521,7 @@ export class WorkHubCoordinationActionGate {
             'WorkHub resume target is unavailable',
           );
         this.#assertTarget(target, 'resume');
-        const current = await this.#soleWorkingDelegation(target.sessionId, 'resume');
+        const current = await this.#soleWorkingDelegation(target.sessionId, 'resume', admission);
         if (current.actionId !== source.actionId) {
           throw new WorkHubActionGateFailure(
             'action_conflict',
@@ -857,6 +857,7 @@ export class WorkHubCoordinationActionGate {
   async #soleWorkingDelegation(
     targetSessionId: string,
     operation: 'resume' | 'stop',
+    admission?: SessionAdmissionLease,
   ): Promise<WorkHubDelegationAssignedMessage> {
     const onTarget = await this.#effects.listActiveAssignments(targetSessionId, true);
     if (onTarget.length === 0) {
@@ -878,7 +879,7 @@ export class WorkHubCoordinationActionGate {
     if (onTarget.length > 1) {
       const holdingWork: WorkHubDelegationAssignedMessage[] = [];
       for (const assignment of onTarget) {
-        if ((await this.#effects.readDelegationRetirement(assignment)) !== 'retired') {
+        if ((await this.#effects.readDelegationRetirement(assignment, admission)) !== 'retired') {
           holdingWork.push(assignment);
         }
       }

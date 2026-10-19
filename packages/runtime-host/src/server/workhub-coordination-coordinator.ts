@@ -167,7 +167,7 @@ type CoordinationSessionActions = Pick<
     assignment: WorkHubDelegationAssignedMessage,
     context: ConnectionContext,
     actionId: string,
-    validateFreshTarget: () => Promise<void>,
+    validateFreshTarget: (admission?: SessionAdmissionLease) => Promise<void>,
     prepareTargetExecution?: () => Promise<void>,
     assertTargetExecutionReady?: () => Promise<void>,
   ): Promise<WorkHubResumeResult>;
