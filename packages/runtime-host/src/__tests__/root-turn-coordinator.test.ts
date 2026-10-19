@@ -4361,8 +4361,9 @@ test('active WorkHub authority authenticates user/feedback origin and refuses ot
         await fixture.coordinator.readActiveWorkHubRequest(turnId),
         toolProfile === 'workhub-coordination-v2' ? content : undefined,
       );
+      const authority = await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId);
       assert.deepEqual(
-        await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+        authority,
         toolProfile === 'workhub-coordination-v2'
           ? {
               content,
@@ -4371,6 +4372,23 @@ test('active WorkHub authority authenticates user/feedback origin and refuses ot
               origin: origin ? 'feedback' : 'user',
             }
           : undefined,
+      );
+      await fixture.sessionAdmission.runMany(
+        [WORKHUB_COORDINATION_SESSION_ID, fixture.sessionId],
+        async () => {
+          assert.deepEqual(
+            await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+            authority,
+            'dispatch validates under the original Coordination/target lease without re-entering admission',
+          );
+        },
+      );
+      await assert.rejects(
+        fixture.sessionAdmission.run(fixture.sessionId, () =>
+          fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+        ),
+        /lease does not match the Session/,
+        'a lease for an unrelated Session cannot acquire WorkHub authority',
       );
       assert.equal(await fixture.coordinator.readActiveWorkHubRequest('other-turn'), undefined);
       const submitted = await submit('workhub-steering');
@@ -4422,6 +4440,28 @@ test('active WorkHub authority authenticates user/feedback origin and refuses ot
         assert.deepEqual(await fixture.coordinator.readActiveWorkHubRequest(sent[2]!.turnId), {
           text: 'workhub-followup-second',
         });
+        if (feedback) {
+          const last = sent[2]!;
+          assert.ok(last.runId);
+          const stopping = fixture.coordinator.stopRoot({
+            sessionId: WORKHUB_COORDINATION_SESSION_ID,
+            turnId: last.turnId,
+            runId: last.runId,
+          });
+          await waitUntil(() => backend!.stopCount > 0);
+          assert.equal(
+            fixture.coordinator.readRootState(WORKHUB_COORDINATION_SESSION_ID).kind,
+            'active',
+            'the backend is deliberately still waiting for release',
+          );
+          assert.equal(
+            await fixture.coordinator.readActiveWorkHubRoutingRequest(sent[2]!.turnId),
+            undefined,
+            'a stopped coordinator cannot dispatch while its old owner finishes cleanup',
+          );
+          successorRelease[1]!.resolve();
+          await stopping;
+        }
         successorRelease[1]!.resolve();
         await fixture.coordinator.whenIdle(WORKHUB_COORDINATION_SESSION_ID);
         assert.deepEqual(consumed, ['workhub-steering']);

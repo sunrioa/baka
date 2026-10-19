@@ -70,6 +70,9 @@ export interface WorkHubAdmittedAction
   >;
   readonly sourceMessageId?: string;
   readonly inputOrigin?: 'user' | 'feedback';
+  /** Independent task identity, supplied only by the task-centric Host adapter. */
+  readonly taskStart?: { readonly turnId: string; readonly title: string };
+  readonly validateAuthority?: () => Promise<void>;
   /** Host-resolved work selection; never a second semantic target selection. */
   readonly continuation?: {
     readonly workId: string;
@@ -84,7 +87,7 @@ export interface WorkHubAdmittedAction
   readonly attachments?: AttachmentRef[];
   /** Active Coordination Run that owns any repair Form opened before admission. */
   readonly coordinationRunId?: string;
-  /** Only supplied by the Host after accepting an exact durable form option. Never a wire proposal. */
+  /** Host-resolved task/Session identity or an exact durable Form option; never copied from a wire proposal. */
   readonly selectedTarget?: {
     readonly sessionId: string;
     readonly workspaceDigest: string;
@@ -327,8 +330,8 @@ interface ActionReplay {
  * The sole admission module between a WorkHub strategy proposal and Session effects.
  *
  * Candidate discovery and fresh-state validation deliberately live behind the
- * same interface as execution. A caller cannot turn a model-selected Session id
- * into a write because proposals carry only an opaque candidateRef.
+ * same interface as execution. Legacy opaque refs and task-centric exact
+ * targets both require current native eligibility and admission-time checks.
  */
 export class WorkHubCoordinationActionGate {
   readonly #effects: WorkHubActionGateEffects;
@@ -666,7 +669,7 @@ export class WorkHubCoordinationActionGate {
         'WorkHub Session candidates changed; refresh before delegating',
       );
     }
-    const offered = input.selectedTarget?.sourceTask
+    const offered = input.selectedTarget
       ? [await this.nativeTaskCandidate(input.selectedTarget.sessionId)]
       : candidates.candidates;
     const target = offered.find(
@@ -685,6 +688,7 @@ export class WorkHubCoordinationActionGate {
     }
     this.#assertTarget(target);
     const validateSource = async () => {
+      await input.validateAuthority?.();
       await this.#continuedSource(input, target.sessionId);
     };
     await validateSource();
@@ -715,9 +719,7 @@ export class WorkHubCoordinationActionGate {
           ? {
               validateFreshTarget: async () => {
                 await validateSource();
-                const offered = input.selectedTarget!.sourceTask
-                  ? [await this.nativeTaskCandidate(input.selectedTarget!.sessionId)]
-                  : (await this.candidates()).candidates;
+                const offered = [await this.nativeTaskCandidate(input.selectedTarget!.sessionId)];
                 const fresh = offered.find(
                   (candidate) =>
                     candidate?.sessionId === input.selectedTarget!.sessionId &&
@@ -1351,6 +1353,8 @@ function delegationAssignment(
     },
     coordinationTurnId: input.coordinationTurnId ?? input.actionId,
     actionFingerprint,
+    ...(input.taskStart === undefined ? {} : { taskTitle: input.taskStart.title }),
+    ...(input.validateAuthority ? { validateFreshTarget: input.validateAuthority } : {}),
     targetSessionId,
     targetSessionName,
     disposition: input.proposal.disposition,
@@ -1412,10 +1416,11 @@ function digest(value: unknown): `sha256:${string}` {
 function actionFingerprint(input: WorkHubAdmittedAction): `sha256:${string}` {
   const common = {
     ...(input.taskInput ? { taskInput: input.taskInput } : {}),
+    ...(input.taskStart === undefined ? {} : { taskStart: input.taskStart }),
     ...(input.continuation
       ? { continuation: input.continuation }
       : input.selectedTarget
-        ? { selectedTarget: input.selectedTarget }
+        ? { selectedTarget: taskStartReplayTarget(input) }
         : {}),
     userText: input.userText,
     ...(input.attachments ? { attachments: input.attachments } : {}),
@@ -1460,6 +1465,7 @@ function actionRequestFingerprint(input: WorkHubAdmittedAction): `sha256:${strin
     sourceMessageId: _sourceMessageId,
     inputOrigin: _inputOrigin,
     validateTaskInput: _validateTaskInput,
+    validateAuthority: _validateAuthority,
     ...proposal
   } = input;
   if (input.continuation) {
@@ -1468,7 +1474,18 @@ function actionRequestFingerprint(input: WorkHubAdmittedAction): `sha256:${strin
     const { selectedTarget: _selectedTarget, ...bound } = proposal;
     return digest(bound);
   }
+  if (input.taskStart !== undefined && input.selectedTarget)
+    return digest({ ...proposal, selectedTarget: taskStartReplayTarget(input) });
   return digest(proposal);
+}
+
+function taskStartReplayTarget(input: WorkHubAdmittedAction) {
+  // A modern start fixes the Session identity. Its current workspace is still
+  // revalidated before admission, but moving/renaming it after a committed
+  // assignment must not turn a lost-response replay into another task.
+  return input.taskStart !== undefined && !input.continuation && !input.selectedTarget?.sourceTask
+    ? { sessionId: input.selectedTarget!.sessionId }
+    : input.selectedTarget;
 }
 
 function replacementActionFingerprint(
@@ -1569,6 +1586,7 @@ function assignmentInputFromRecord(
   return {
     actionId: assignment.actionId,
     ...(assignment.work ? { work: assignment.work } : {}),
+    ...(assignment.taskTitle === undefined ? {} : { taskTitle: assignment.taskTitle }),
     ...(assignment.inputOrigin ? { inputOrigin: assignment.inputOrigin } : {}),
     coordinationTurnId: assignment.coordinationTurnId,
     actionFingerprint: assignment.actionFingerprint,

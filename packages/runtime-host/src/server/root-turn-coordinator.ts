@@ -2093,15 +2093,20 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     | undefined
   > {
     const sessionId = WORKHUB_COORDINATION_SESSION_ID;
-    return this.sessionAdmission.run(sessionId, async () => {
+    // Read-only leaf work may validate dispatch while its existing admission
+    // holds this Session. It must not acquire a second lane or open a new run.
+    return this.sessionAdmission.runOrJoin(sessionId, async () => {
       const active = this.#executions.get(sessionId);
-      if (!active || active.turnId !== turnId) return undefined;
+      if (!active || active.turnId !== turnId || active.stopRequested || active.observedCompletion)
+        return undefined;
       const [admission, header] = await Promise.all([
         this.stores.agentRunStore.readRootTurnAdmission(sessionId, turnId),
         this.stores.sessionStore.readHeaderSnapshot(sessionId),
       ]);
       if (
         this.#executions.get(sessionId) !== active ||
+        active.stopRequested ||
+        active.observedCompletion ||
         admission?.runId !== active.runId ||
         admission.execution.kind !== 'workhub_coordination' ||
         header.toolProfile !== 'workhub-coordination-v2'

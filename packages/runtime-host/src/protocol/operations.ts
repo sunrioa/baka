@@ -74,6 +74,7 @@ import { WORKHUB_INTERACTION_OPERATION_SPECS } from './workhub-interactions.js';
 import { WORKHUB_TASK_OPERATION_SPECS } from './workhub-tasks.js';
 import { WORKHUB_TASK_INPUT_OPERATION_SPECS } from './workhub-task-input.js';
 import { WORKHUB_TASK_DISCOVERY_OPERATION_SPECS } from './workhub-task-discovery.js';
+import { WORKHUB_TASK_ACTION_OPERATION_SPECS } from './workhub-task-actions.js';
 
 export type {
   HostDiagnosticsInput,
@@ -253,6 +254,7 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
     ...WORKHUB_TASK_OPERATION_SPECS,
     ...WORKHUB_TASK_INPUT_OPERATION_SPECS,
     ...WORKHUB_TASK_DISCOVERY_OPERATION_SPECS,
+    ...WORKHUB_TASK_ACTION_OPERATION_SPECS,
   },
   PLUGIN_PLATFORM_OPERATION_SPECS,
 );

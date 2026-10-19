@@ -18,6 +18,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import type {
   WorkHubTaskInputRequest,
   WorkHubTaskInputProvenance,
@@ -61,7 +62,13 @@ import {
 } from '../protocol/workhub-coordination.js';
 import { createWorkHubWorkIndex, WorkHubWorkCursorError } from './workhub-work-index.js';
 import type {
+  WorkHubTaskStartInput,
+  WorkHubTaskAskInput,
+  WorkHubTaskChoice,
+} from '../protocol/workhub-task-actions.js';
+import type {
   ConnectionContext,
+  OperationHandlerMap,
   WorkHubCoordinationOperationHandlerMap,
 } from './operation-dispatcher.js';
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
@@ -194,7 +201,10 @@ export interface HostWorkHubCoordinationCoordinatorOptions {
 /** Resolves the one durable Coordination Session owned by this Runtime Host. */
 export class HostWorkHubCoordinationCoordinator {
   readonly #requestForm: HostWorkHubCoordinationCoordinatorOptions['requestForm'];
-  readonly handlers: WorkHubCoordinationOperationHandlerMap = {
+  readonly handlers: WorkHubCoordinationOperationHandlerMap &
+    Pick<OperationHandlerMap, 'workhub.tasks.start' | 'workhub.tasks.ask'> = {
+    'workhub.tasks.start': (input, context) => this.#startTask(input, context),
+    'workhub.tasks.ask': (input) => this.#askTask(input),
     'workhub.coordination.works': (input) => this.#works(input),
     'workhub.coordination.continue': (input, context) => this.#continueTask(input, context),
     'workhub.coordination.selectAndDelegate': (input, context) =>
@@ -224,6 +234,7 @@ export class HostWorkHubCoordinationCoordinator {
   readonly #readDelegationRetirement: HostWorkHubCoordinationCoordinatorOptions['sessionActions']['readDelegationRetirement'];
   readonly #readStopBinding: HostWorkHubCoordinationCoordinatorOptions['readStopBinding'];
   readonly #isStopBindingCurrent: HostWorkHubCoordinationCoordinatorOptions['isStopBindingCurrent'];
+  readonly #readWorkContext: HostWorkHubCoordinationCoordinatorOptions['readWorkContext'];
 
   constructor(options: HostWorkHubCoordinationCoordinatorOptions) {
     this.#requestForm = options.requestForm;
@@ -235,6 +246,7 @@ export class HostWorkHubCoordinationCoordinator {
     this.#readDelegationRetirement = options.sessionActions.readDelegationRetirement;
     this.#readStopBinding = options.readStopBinding;
     this.#isStopBindingCurrent = options.isStopBindingCurrent;
+    this.#readWorkContext = options.readWorkContext;
     this.#admission = options.admission;
     this.#continuity = options.continuity;
     this.#executions = options.executions;
@@ -935,10 +947,253 @@ export class HostWorkHubCoordinationCoordinator {
     }
   }
 
+  async #startTask(
+    input: WorkHubTaskStartInput,
+    context: ConnectionContext,
+  ): Promise<OperationOutcome<'workhub.tasks.start'>> {
+    try {
+      let target: WorkHubAdmittedAction['selectedTarget'];
+      if (input.sessionRef) {
+        const candidate = await this.#actionGate.nativeTaskCandidate(input.sessionRef);
+        if (!candidate && !(await this.#stores.readWorkHubAssignment(input.actionId)))
+          throw new WorkHubActionGateFailure(
+            'candidate_unavailable',
+            'The selected Session is unavailable',
+          );
+        target = {
+          sessionId: input.sessionRef,
+          workspaceDigest: candidate
+            ? digest(candidate.workspace)
+            : digest({ replay: input.actionId }),
+        };
+      }
+      const outcome = await this.#actFromTurn(
+        {
+          turnId: input.turnId,
+          actionId: input.actionId,
+          proposal: input.sessionRef
+            ? { disposition: 'delegate_existing', candidateRef: input.sessionRef }
+            : { disposition: 'create_new', title: Array.from(input.title).slice(0, 64).join('') },
+          delegationText: input.text,
+          ...(!input.sessionRef
+            ? { create: input.create, newWorkDefaults: input.newWorkDefaults }
+            : {}),
+        },
+        context,
+        target,
+        input.title,
+      );
+      if (!outcome.ok)
+        return {
+          ok: false,
+          error: {
+            ...outcome.error,
+            code:
+              outcome.error.code === 'candidate_set_stale'
+                ? 'operation_conflict'
+                : outcome.error.code,
+          },
+        };
+      if (
+        (outcome.result.disposition !== 'create_new' &&
+          outcome.result.disposition !== 'delegate_existing') ||
+        outcome.result.workId !== input.actionId
+      )
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'Task start did not admit independent work',
+        );
+      return { ok: true, result: outcome.result };
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code:
+            error instanceof WorkHubActionGateFailure ? 'operation_conflict' : 'persistence_failed',
+          message: error instanceof Error ? error.message : 'Task start is unavailable',
+        },
+      };
+    }
+  }
+
+  async #taskChoice(target: WorkHubTaskChoice) {
+    const source =
+      target.kind === 'task'
+        ? await this.#stores.readLatestWorkHubAssignment(target.id)
+        : undefined;
+    if (target.kind === 'task' && (!source || (source.work?.id ?? source.actionId) !== target.id))
+      throw new WorkHubActionGateFailure(
+        'candidate_unavailable',
+        'The offered task is unavailable',
+      );
+    const candidate = await this.#actionGate.nativeTaskCandidate(
+      source?.targetSessionId ?? target.id,
+    );
+    if (!candidate)
+      throw new WorkHubActionGateFailure(
+        'candidate_unavailable',
+        'The offered task or Session is unavailable',
+      );
+    const generationId = source ? (source.work?.generationId ?? source.actionId) : undefined;
+    return {
+      candidate,
+      generationId,
+      title: source?.taskTitle ?? candidate.sessionName,
+      value: JSON.stringify([target.kind, target.id, generationId ?? digest(candidate.workspace)]),
+    };
+  }
+
+  async #askTask(input: WorkHubTaskAskInput): Promise<OperationOutcome<'workhub.tasks.ask'>> {
+    try {
+      const authority = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
+      if (!authority || !this.#requestForm)
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'Task selection requires an active Coordination Turn',
+        );
+      // Reuse the existing global claim and Form authority. Selection never
+      // assigns a Message, changes settings or authorizes another operation.
+      await this.#admission.run(WORKHUB_COORDINATION_SESSION_ID, async () => {
+        const current = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
+        if (!isDeepStrictEqual(current, authority))
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'The selecting Run is no longer active',
+          );
+        const claim = await this.#stores.claimWorkHubAction({
+          actionId: input.actionId,
+          operation: 'clarify',
+          actionFingerprint: digest({
+            input,
+            content: authority.content,
+            origin: authority.origin,
+          }),
+          subject: input.turnId,
+        });
+        if (claim === 'conflict')
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'This action identity belongs to another operation',
+          );
+      });
+      const choice = await this.#requestForm({
+        sessionId: WORKHUB_COORDINATION_SESSION_ID,
+        turnId: input.turnId,
+        runId: authority.runId,
+        requestId: createHash('sha256').update(JSON.stringify({ input, authority })).digest('hex'),
+        create: async () => ({
+          kind: 'form',
+          toolUseId: input.actionId,
+          message: input.question,
+          requester: { name: 'WorkHub' },
+          fields: [
+            {
+              kind: 'single_select',
+              name: 'target',
+              label: '选择任务 / Choose work',
+              required: true,
+              options: [
+                ...(await Promise.all(
+                  input.choices.map(async (target, index) => {
+                    const offered = await this.#taskChoice(target);
+                    return {
+                      value: offered.value,
+                      label: truncateUtf8(
+                        `${index + 1}. ${offered.title} — ${basename(offered.candidate.workspace.hostCwd)}`,
+                        190,
+                      ),
+                    };
+                  }),
+                )),
+                { value: 'new_task', label: '新建任务 / New task' },
+              ],
+            },
+          ],
+        }),
+      });
+      const current = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
+      if (!isDeepStrictEqual(current, authority))
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'The selecting Run is no longer active',
+        );
+      if (choice.answer.action !== 'accept') return { ok: true, result: { kind: 'cancelled' } };
+      const value = choice.answer.values.target;
+      if (value === 'new_task') return { ok: true, result: { kind: 'new_task' } };
+      let binding: unknown;
+      try {
+        binding = typeof value === 'string' ? JSON.parse(value) : undefined;
+      } catch {
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'Task selection has no offered target',
+        );
+      }
+      if (
+        !Array.isArray(binding) ||
+        binding.length !== 3 ||
+        !binding.every((part) => typeof part === 'string')
+      )
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'Task selection has no offered target',
+        );
+      const target = input.choices.find(
+        (item) => item.kind === binding[0] && item.id === binding[1],
+      );
+      if (!target)
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'Task selection is outside its offer',
+        );
+      const selected = await this.#taskChoice(target);
+      if (selected.value !== value)
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'The selected task generation or workspace changed; ask again',
+        );
+      const observation = await this.#readWorkContext?.(selected.candidate.sessionId);
+      if (
+        (await this.#taskChoice(target)).value !== value ||
+        !isDeepStrictEqual(
+          await this.#executions.readActiveWorkHubRoutingRequest(input.turnId),
+          authority,
+        )
+      )
+        throw new WorkHubActionGateFailure(
+          'action_conflict',
+          'The selected task or selecting Run changed',
+        );
+      return {
+        ok: true,
+        result: {
+          kind: 'selected',
+          target,
+          ...(selected.generationId ? { generationId: selected.generationId } : {}),
+          ...(observation ? { context: observation } : {}),
+        },
+      };
+    } catch (error) {
+      if (error instanceof RuntimeInteractionFailStopError) throw error;
+      return {
+        ok: false,
+        error: {
+          code:
+            error instanceof WorkHubActionGateFailure ||
+            error instanceof RuntimeInteractionAdmissionRejectedError
+              ? 'operation_conflict'
+              : 'persistence_failed',
+          message: error instanceof Error ? error.message : 'Task selection is unavailable',
+        },
+      };
+    }
+  }
+
   async #actFromTurn(
     input: WorkHubCoordinationActFromTurnInput,
     context: ConnectionContext,
     selectedTarget?: WorkHubAdmittedAction['selectedTarget'],
+    taskTitle?: string,
   ): Promise<OperationOutcome<'workhub.coordination.actFromTurn'>> {
     let request;
     try {
@@ -1045,6 +1300,23 @@ export class HostWorkHubCoordinationCoordinator {
             ...(request.sourceMessageId ? { sourceMessageId: request.sourceMessageId } : {}),
             ...(resolvedCreate ? { create: resolvedCreate } : {}),
             ...(selectedTarget ? { selectedTarget } : {}),
+            ...(taskTitle === undefined
+              ? {}
+              : {
+                  taskStart: { turnId: input.turnId, title: taskTitle },
+                  validateAuthority: async () => {
+                    if (
+                      !isDeepStrictEqual(
+                        await this.#executions.readActiveWorkHubRoutingRequest(input.turnId),
+                        request,
+                      )
+                    )
+                      throw new WorkHubActionGateFailure(
+                        'action_conflict',
+                        'The dispatching Run is no longer active',
+                      );
+                  },
+                }),
             coordinationRunId: request.runId,
             inputOrigin: request.origin,
             userText: request.content.text,
