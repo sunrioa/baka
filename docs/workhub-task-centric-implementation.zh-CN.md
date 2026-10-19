@@ -30,7 +30,7 @@
 |---|---|---|---|
 | 1 | 删除 Jev / 预路由，兼容旧策略、凭据、准入与用量，修正工具描述 | 已实现，待人工审阅 | [PR #35](https://github.com/sunrioa/baka/pull/35)，未合并 |
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
-| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、原始历史、新建 / 选择、Root 停止及停止集合记录底座已验证；六工具及合并读取入口未发布 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)；停止集合记录底座全部工作区通过，最终完整 Host 2,461 通过 / 12 原有跳过 / 0 失败 |
+| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史、新建 / 选择、Root 停止及停止集合运行时已验证；统一 Read 接入中，六工具整体未发布 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)；停止运行时最终完整 Host 2,519 通过 / 12 原有跳过 / 0 失败 |
 | 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 未开始 | — |
 | 5 | 有界任务说明、历史入口和可选状态块 | 未开始 | — |
 | 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 未开始 | — |
@@ -242,3 +242,14 @@
 - `71eb07de7` 冻结完整 Host 为 2,515 通过 / 12 原有跳过 / 0 失败，439.1 秒。第六次审查发现停止目标已变化的异常虽在外部被捕获，仍会使已登记的准入叶任务失败，导致整组重试无法写入 `not_owned`。真实 Host 测试先实际落盘停止请求、注入一次回执写入失败，再经普通 `turn.resume.start` 创建后继执行；补修前原动作重试确实返回 `commit_outcome_unknown`。
 - 补修只为既有 Message 取消校验增加正常拒绝结果：任务范围或执行绑定变化时返回 `not_owned`，不抛出会污染整组租约的异常、不取消消息；真实读取错误仍失败，已提交的本动作取消凭据仍优先重放。补修后真实 Host 场景写入固定回执，重复重放不增加执行，后继仍运行；实际 Message coordinator / 准入验证原队列不变。相关 6 项测试通过，下一固定提交仍需完整 Host 回归和新独立审查；未改动公共协议、权限、停止算法或队列规则。
 - `c397841e5` 最终冻结完整 Host 为 2,519 通过 / 12 原有跳过 / 0 失败，439.1 秒；全仓 build、typecheck、lint、format、ASF、Desktop / UI knip 和 renderer architecture 165/165 通过。第七次独立只读静态审查核对完整 PR 与最后增量后未发现可确认的新问题，不替代人类批准。其他工作区无源码变化，继续沿用 `8f1ecbfed` 完整回归证据。3g 停止集 Host 基础完成，PR 仍为草稿；下一步接入统一 Read 和其余模型工具，原实例重启及真实 DeepSeek 评测尚未完成，不将本地夹具计作模型用量。
+
+## 阶段 3h：统一读取入口（实施中）
+
+- 原生 `WorkHubRead` 共用现有 Root / invocation / 任务血缘校验；模型不能提交 actor、权限、执行代次或确认字段。读取不派活、不批准权限、不生成交接摘要。
+- 新段按任务分页读原始要求、纠正、可见助手回复和工具调用 / 输出；其他任务仍限于原有结果与证据。协调者的历史视图只给已受理要求，不直接开放任意 worker 原始工具转录。结果目录中的既有 `sourceActionId` 仅用于固定已经可读的结果段，必须仍属于同一 taskId，不是行动授权。
+- 明确指定的普通会话可按既有资格读取用户 / 助手文本，不再受最近 32 项发现上限影响。归档、角色、子代理、旁支会话限制仍检查；不因查看而接入任务。缺失、不可读、执行器不支持或分页快照回退均明确报告，不伪造空历史。
+- SQLite 要求页使用有界扫描、原文分页和固定高水位；不缓存完整任务结果。缺少原始用户文字的旧记录标为旧版已受理文本，来源未知，不冒充用户原话或新授权。用户原文、工具输出和权限仍留在原记录中。
+- 观测字段改为 `baselineAtOrOverThreshold`，准确指向已配置主动压缩目标而非模型窗口；兼容 epoch 为 234。比较算法和配置都不变，没有统一 token 阈值或强制换窗。
+- 实际生产 Host / 本地 HTTP 模型夹具验证了新段通过 `WorkHubRead` 读取原纠正及成功 Bash 输出正文，同时排除无关 B、保留原路由 / 权限 / FIFO，不唤醒旧源执行。初次加严检查误用内部 `body` 字段；核对正式历史页的 `text` 后严格断言通过，未放宽结果要求。这不是供应商调用或计费证据。
+- 相关完整文件 88/88、上述生产 Host 路由 / 历史场景 2/2 通过。全仓 build、typecheck、lint、format、ASF、Desktop / UI knip 和 renderer architecture 165/165 通过。新增快照回退用例在补修前确实未拒绝，补修后明确报错；保留前后日志。
+- 当前仍保留旧工具表面，等其余五个模型入口接入后统一退役；executor 的原生历史工具桥接尚未实现，明确返回不支持，不能据此宣称 executor 换窗读取已完整可用。冻结回归、独立审查及原实例 DeepSeek 复测仍待完成；实际用量采集器已区分未知与报告为零，并为部分覆盖的合计报告覆盖数。

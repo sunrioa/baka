@@ -588,7 +588,11 @@ test('accepted task inputs expose raw requirements and distinguish feedback from
     const record = records.find((row) => row.messageId === accepted.id);
     assert.ok(record, accepted.inputId);
     assert.equal(record.text, accepted.originalUserText ?? accepted.text);
-    assert.equal(record.inputOrigin, accepted.inputOrigin ?? 'user');
+    assert.equal(record.inputOrigin, accepted.inputOrigin ?? 'unknown_legacy');
+    assert.equal(
+      record.textSource,
+      accepted.originalUserText === undefined ? 'accepted_text_legacy' : 'original_user_text',
+    );
     assert.equal(record.acceptance, 'not_consumption_proof');
     assert.equal(record.mode, accepted.mode);
     assert.equal(record.targetMessageId, accepted.targetMessageId);
@@ -600,7 +604,10 @@ test('accepted task inputs expose raw requirements and distinguish feedback from
     /Prepared worker instruction (steer|queued|feedback)/,
   );
   assert.equal(records.find((row) => row.messageId === 'row-followup')?.requestOrigin, 'feedback');
-  assert.equal(records.find((row) => row.messageId === 'row-work')?.requestOrigin, 'unknown');
+  assert.equal(
+    records.find((row) => row.messageId === 'row-work')?.requestOrigin,
+    'unknown_legacy',
+  );
 });
 
 test('accepted input pages preserve escaped raw text, filters and UTF-16 offsets without loss', async () => {

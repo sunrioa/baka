@@ -961,6 +961,16 @@ export function createWorkHubEvidenceRuntime(options: {
   return {
     tool,
     taskExecution,
+    /** Native read uses this same current Root proof, not model-supplied identity. */
+    async authorizeRead(ctx: MakaToolContext) {
+      return admission.runMany([WORKHUB_COORDINATION_SESSION_ID, ctx.sessionId], async (lease) => {
+        const current =
+          ctx.sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? []
+            : await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([ctx.sessionId]);
+        return (await caller(ctx, current, lease))?.assignment;
+      });
+    },
     async assertFreshContainerSource(
       source: WorkHubDelegationAssignedMessage,
       lease: SessionAdmissionLease,

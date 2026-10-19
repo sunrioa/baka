@@ -286,13 +286,6 @@ test('every page enforces current candidate eligibility and rejects other caller
     [{ ...session(), role: 'workhub_coordination' as const }],
     [{ ...session(), labels: ['mode:side_conversation'] }],
     [{ ...session(), subagentParent: { sessionId: 'parent' } }],
-    [
-      session(),
-      ...Array.from({ length: 32 }, (_, i) => ({
-        ...session(`recent-${i}`),
-        lastMessageAt: 100 + i,
-      })),
-    ],
   ]) {
     f.setSessions(sessions as ReturnType<typeof f.sessions>);
     assert.equal((await f.call({ cursor, view: 'latest_reply' })).status, 'unavailable');
@@ -305,6 +298,26 @@ test('every page enforces current candidate eligibility and rejects other caller
   aborted.abort(new Error('cancelled read'));
   await assert.rejects(f.call({}, { ...context, abortSignal: aborted.signal }), /cancelled read/);
   assert.equal(f.requests.length, reads);
+});
+
+test('explicit eligible old Session inspection does not depend on the recent candidate cap', async () => {
+  const f = fixture([assistant('a'.repeat(1000))]);
+  f.setSessions([
+    session(),
+    ...Array.from({ length: 40 }, (_, i) => ({
+      ...session(`recent-${i}`),
+      lastMessageAt: 100 + i,
+    })),
+  ]);
+  const first = await f.read({ view: 'latest_reply', maxTextChars: 256 });
+  assert.ok(first.transcript.nextCursor);
+  const next = await f.read({
+    view: 'latest_reply',
+    maxTextChars: 256,
+    cursor: first.transcript.nextCursor,
+  });
+  assert.equal(next.transcript.messages[0]?.textOffset, 256);
+  assert.equal(next.transcript.messages[0]?.text, 'a'.repeat(256));
 });
 
 test('scope changes during a read suppress the returned source; malformed reads fail explicitly', async () => {

@@ -198,6 +198,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     makeTool('AskUserQuestion'),
     makeTool('WorkHubResult'),
     makeTool('WorkHubEvidence'),
+    makeTool('WorkHubRead'),
     createWorkHubInspectionTool({
       listSessions: async () => [
         {
@@ -237,6 +238,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
       'WorkHubResult',
       'WorkHubInspect',
       'WorkHubEvidence',
+      'WorkHubRead',
     ],
   );
   const read = projected.find(({ name }) => name === 'Read')!;

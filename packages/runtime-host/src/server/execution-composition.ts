@@ -39,6 +39,7 @@ import { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
+import { createWorkHubReadTool } from './workhub-read-tool.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { attachmentKindFromMimeType, MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
@@ -940,6 +941,7 @@ export async function createExecutionRuntimeHostComposition(
     let workHubResults: ReturnType<typeof createWorkHubResultRuntime> | undefined;
     let workHubEvidence: ReturnType<typeof createWorkHubEvidenceRuntime> | undefined;
     let workHubInspection: MakaTool | undefined;
+    let workHubRead: ReturnType<typeof createWorkHubReadTool> | undefined;
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
     let memory: HostMemoryCoordinator | undefined;
     let clientCapabilities: HostClientCapabilityCoordinator | undefined;
@@ -1212,10 +1214,12 @@ export async function createExecutionRuntimeHostComposition(
                 workHubResults.tool,
                 workHubInspection,
                 ...(workHubEvidence ? [workHubEvidence.tool] : []),
+                ...(workHubRead ? [workHubRead] : []),
               ]
             : [
                 ...(await requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId)),
                 ...(workHubEvidence ? [workHubEvidence.tool] : []),
+                ...(workHubRead ? [workHubRead] : []),
               ],
         resolvePluginTools: (sessionId, coreTools) =>
           pluginTools.resolveContributions(sessionId, coreTools),
@@ -1373,10 +1377,15 @@ export async function createExecutionRuntimeHostComposition(
                 workHubResults.tool,
                 workHubInspection,
                 ...(workHubEvidence ? [workHubEvidence.tool] : []),
+                ...(workHubRead ? [workHubRead] : []),
               ])
             : requireGraphCoordinator(graphCoordinator)
                 .toolsForSession(sessionId)
-                .then((tools) => [...tools, ...(workHubEvidence ? [workHubEvidence.tool] : [])]),
+                .then((tools) => [
+                  ...tools,
+                  ...(workHubEvidence ? [workHubEvidence.tool] : []),
+                  ...(workHubRead ? [workHubRead] : []),
+                ]),
           planStore.readState(sessionId),
         ]);
         const { runtimePolicy, surface } = await resolveInteractiveToolSurface({
@@ -3033,6 +3042,35 @@ export async function createExecutionRuntimeHostComposition(
         console.error(
           `[runtime-host] WorkHub result reconciliation failed: ${boundedFailureDiagnostic(error)}`,
         ),
+    });
+    const resultReader = workHubResults;
+    const evidenceReader = workHubEvidence;
+    const inspectionReader = workHubInspection;
+    workHubRead = createWorkHubReadTool({
+      sessions: stores.sessionStore,
+      admission: sessionAdmission,
+      authorize: (ctx) => evidenceReader.authorizeRead(ctx),
+      status: async (source) => {
+        const detail = await resultReader.projectTask(source, true);
+        return detail
+          ? { ...detail, context: await observeWorkHubContext(source.targetSessionId) }
+          : undefined;
+      },
+      result: async (input, ctx) => resultReader.tool.impl({ operation: 'read', ...input }, ctx),
+      evidence: async (input, ctx) =>
+        evidenceReader.tool.impl({ operation: 'read', ...input }, ctx),
+      catalog: async (input, ctx) => evidenceReader.tool.impl({ operation: 'list', ...input }, ctx),
+      history: async ({ kinds, ...input }, ctx) =>
+        evidenceReader.tool.impl(
+          {
+            operation: 'read',
+            view: 'task_history',
+            ...input,
+            ...(kinds ? { kinds: [...kinds] } : {}),
+          },
+          ctx,
+        ),
+      inspect: async (input, ctx) => inspectionReader.impl(input, ctx),
     });
     if (stores.sessionStore.workHubTaskIndex) {
       const results = workHubResults;

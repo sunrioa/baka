@@ -438,6 +438,41 @@ function fixture() {
   };
 }
 
+test('native read authorization uses the current owned Root and has no message effects', async () => {
+  const f = fixture();
+  assert.equal((await f.runtime.authorizeRead(f.caller()))?.actionId, 'a');
+  assert.equal(await f.runtime.authorizeRead(f.caller(WORKHUB_COORDINATION_SESSION_ID)), undefined);
+  for (const ctx of [
+    { ...f.caller(), runId: undefined },
+    { ...f.caller(), invocationId: 'forged' },
+    { ...f.caller(), runId: 'run-b' },
+    { ...f.caller(), turnId: 'another-turn' },
+    f.caller('private'),
+  ])
+    await assert.rejects(f.runtime.authorizeRead(ctx));
+  f.active.delete('a');
+  await assert.rejects(f.runtime.authorizeRead(f.caller()), /outside an active/);
+  f.roots.delete('turn-' + WORKHUB_COORDINATION_SESSION_ID);
+  await assert.rejects(
+    f.runtime.authorizeRead(f.caller(WORKHUB_COORDINATION_SESSION_ID)),
+    /WorkHub authority/,
+  );
+  assert.deepEqual(f.deliveries, []);
+  assert.equal(f.records.size, 0);
+});
+
+test('native read authorization rejects a terminal or archived worker Root', async () => {
+  const completed = fixture();
+  completed.terminal('a');
+  await assert.rejects(
+    completed.runtime.authorizeRead(completed.caller()),
+    /current root invocation/,
+  );
+  const archived = fixture();
+  archived.archived.add('a');
+  await assert.rejects(archived.runtime.authorizeRead(archived.caller()), /outside an active/);
+});
+
 for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy'] as const)
   test(`already-terminal evidence uses its own stop request marker (${scenario})`, async () => {
     const f = fixture();
