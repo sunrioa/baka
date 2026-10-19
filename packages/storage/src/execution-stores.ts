@@ -607,6 +607,8 @@ async function createExecutionStoresForWrite(
         run(() => sessionStore.readWorkHubSupersession(delegationId)),
       readWorkHubStopRequest: (delegationId, actionId) =>
         run(() => sessionStore.readWorkHubStopRequest(delegationId, actionId)),
+      hasOtherWorkHubStopTarget: (turnId, workId) =>
+        run(() => sessionStore.hasOtherWorkHubStopTarget(turnId, workId)),
       readWorkHubStopResolution: (delegationId, actionId) =>
         run(() => sessionStore.readWorkHubStopResolution(delegationId, actionId)),
       claimWorkHubAction: (claim) => run(() => sessionStore.claimWorkHubAction(claim)),

@@ -331,10 +331,16 @@ cannot be read counts as competing, never as finished. Visibility is proved for
 the stopped delegation alone, because nothing retires a delegation whose Session
 was deleted and proving it over the whole active set would let one deleted Session
 block every stop. A stale resolution therefore fails closed, while a rename between
-resolution and admission is correctly irrelevant. Trusted user text still has to
-carry a direct stop imperative, and the `user_stop` confirmation stays outside
-strategy output, so neither model output nor a display name can select what gets
-stopped.
+resolution and admission is correctly irrelevant. The model interprets trusted
+user text; the Host does not inspect stop intent. It authenticates user versus
+automatic-feedback origin. A user-originated Turn may directly stop one distinct
+task; automatic feedback and additional distinct targets require the existing
+Host interaction. Durable claims serialize parallel calls and retain this rule
+across coordinator reconstruction. Confirmation binds the current task and exact
+execution, which are rechecked after the answer; a replacement execution cannot
+inherit it. Bypass permission does not skip confirmation. A known multi-target
+request must first be clarified as a set; the transitional single-target schema
+does not itself infer a set from natural language.
 
 Direct stop persists a distinct `delegation_stop_requested` claim before
 retirement and a `delegation_stop_resolved` observation afterward. The pending

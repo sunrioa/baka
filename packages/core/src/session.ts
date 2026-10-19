@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { ExecutorConfiguration } from './executor-catalog.js';
+import { isExecutorConfiguration, type ExecutorConfiguration } from './executor-catalog.js';
 
 import { isWorkHubActionReceipt, type WorkHubActionReceipt } from './workhub-action-result.js';
 import { isWorkHubTaskInputMessage, type WorkHubTaskInputMessage } from './workhub-task-input.js';
@@ -53,9 +53,9 @@ import {
   type PolicyDecision,
   type ToolCategory,
 } from './permission.js';
-import type { CollaborationMode } from './collaboration.js';
-import type { OrchestrationMode } from './orchestration.js';
-import type { ToolMode } from './tool-mode.js';
+import { isCollaborationMode, type CollaborationMode } from './collaboration.js';
+import { isOrchestrationMode, type OrchestrationMode } from './orchestration.js';
+import { isToolMode, type ToolMode } from './tool-mode.js';
 import {
   defineObjectShape,
   hasExactShape,
@@ -1020,6 +1020,117 @@ export interface WorkHubWorkBinding {
   readonly sourceMessageId?: string;
 }
 
+/** Durable persistent settings only. Turn approvals and sandbox grants never enter this fact. */
+export interface WorkHubTaskSettingsSnapshot {
+  readonly basis: 'creation' | 'current_segment';
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly projectId: string | null;
+  readonly backend: 'ai-sdk' | 'plugin-executor';
+  readonly model: string;
+  readonly llmConnectionId: string | null;
+  readonly llmConnectionSlug: string;
+  readonly executorId?: string;
+  readonly executorConfig?: ExecutorConfiguration;
+  readonly thinkingLevel: ThinkingLevel | null;
+  readonly permissionMode: PermissionMode;
+  readonly toolMode: ToolMode;
+  readonly collaborationMode: CollaborationMode;
+  readonly orchestrationMode: OrchestrationMode;
+}
+
+export function snapshotWorkHubTaskSettings(
+  header: Pick<
+    SessionHeader,
+    'id' | 'cwd' | 'backend' | 'model' | 'llmConnectionSlug' | 'permissionMode'
+  > &
+    Partial<
+      Pick<
+        SessionHeader,
+        | 'projectId'
+        | 'llmConnectionId'
+        | 'executorId'
+        | 'executorConfig'
+        | 'thinkingLevel'
+        | 'toolMode'
+        | 'collaborationMode'
+        | 'orchestrationMode'
+      >
+    >,
+  basis: WorkHubTaskSettingsSnapshot['basis'],
+): WorkHubTaskSettingsSnapshot {
+  if (header.backend !== 'ai-sdk' && header.backend !== 'plugin-executor')
+    throw new Error('WorkHub cannot snapshot unsupported execution settings');
+  const snapshot: WorkHubTaskSettingsSnapshot = {
+    basis,
+    sessionId: header.id,
+    cwd: header.cwd,
+    projectId: header.projectId ?? null,
+    backend: header.backend,
+    model: header.model,
+    llmConnectionId: header.llmConnectionId ?? null,
+    llmConnectionSlug: header.llmConnectionSlug,
+    ...(header.executorId ? { executorId: header.executorId } : {}),
+    ...(header.executorConfig ? { executorConfig: { ...header.executorConfig } } : {}),
+    thinkingLevel: header.thinkingLevel ?? null,
+    permissionMode: header.permissionMode,
+    toolMode: header.toolMode ?? 'direct',
+    collaborationMode: header.collaborationMode ?? 'agent',
+    orchestrationMode: header.orchestrationMode ?? 'default',
+  };
+  if (!isWorkHubTaskSettingsSnapshot(snapshot))
+    throw new Error('Invalid WorkHub persistent settings');
+  return snapshot;
+}
+
+export function isWorkHubTaskSettingsSnapshot(
+  value: unknown,
+): value is WorkHubTaskSettingsSnapshot {
+  if (!isRecord(value)) return false;
+  const required = [
+    'basis',
+    'sessionId',
+    'cwd',
+    'projectId',
+    'backend',
+    'model',
+    'llmConnectionId',
+    'llmConnectionSlug',
+    'thinkingLevel',
+    'permissionMode',
+    'toolMode',
+    'collaborationMode',
+    'orchestrationMode',
+  ];
+  if (
+    required.some((key) => !Object.hasOwn(value, key)) ||
+    Object.keys(value).some(
+      (key) => !required.includes(key) && key !== 'executorId' && key !== 'executorConfig',
+    )
+  )
+    return false;
+  const text = (v: unknown) => typeof v === 'string' && v.length > 0 && !v.includes('\0');
+  return (
+    (value.basis === 'creation' || value.basis === 'current_segment') &&
+    text(value.sessionId) &&
+    text(value.cwd) &&
+    (value.projectId === null || text(value.projectId)) &&
+    (value.backend === 'ai-sdk' || value.backend === 'plugin-executor') &&
+    text(value.model) &&
+    (value.llmConnectionId === null || text(value.llmConnectionId)) &&
+    text(value.llmConnectionSlug) &&
+    (value.thinkingLevel === null || isThinkingLevel(value.thinkingLevel)) &&
+    isPermissionMode(value.permissionMode) &&
+    isToolMode(value.toolMode) &&
+    isCollaborationMode(value.collaborationMode) &&
+    isOrchestrationMode(value.orchestrationMode) &&
+    (value.backend === 'plugin-executor'
+      ? isExecutorId(value.executorId) &&
+        (value.executorConfig === undefined || isExecutorConfiguration(value.executorConfig))
+      : value.executorId === undefined && value.executorConfig === undefined)
+  );
+}
+
 export type WorkHubDelegationDisposition = 'delegate_existing' | 'create_new';
 
 export type WorkHubDelegationWorkspace =
@@ -1119,6 +1230,10 @@ export interface WorkHubDelegationAssignedMessage extends WorkHubCoordinationMes
   kind: 'delegation_assigned';
   /** Absent on legacy records: do not guess that equal Session identities mean equal work. */
   work?: WorkHubWorkBinding;
+  /** Absent on old records; never synthesize a historical creation snapshot from defaults. */
+  settings?: WorkHubTaskSettingsSnapshot;
+  /** Host-authenticated input provenance; feedback's userText is historical background. */
+  inputOrigin?: 'user' | 'feedback';
   /** New delegations opt into Host-owned asynchronous result delivery. */
   returnResults?: true;
   delegationId: string;
@@ -1201,6 +1316,10 @@ export interface WorkHubDelegationStopRequestedMessage {
   targetMessageId: string;
   targetSessionName: string;
   userText: string;
+  /** Added for distinct-target confirmation; older claims remain readable. */
+  workId?: string;
+  /** Host-derived binding captured under target admission; never retarget on replay. */
+  executionBinding?: string;
 }
 
 /** Durable observed result of a direct-stop attempt. */
@@ -1483,6 +1602,8 @@ const WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE =
       'replacesDelegationId',
       'delegationText',
       'work',
+      'settings',
+      'inputOrigin',
     ],
   );
 const WORKHUB_DELEGATION_REPLACEMENT_REQUESTED_MESSAGE_SHAPE =
@@ -1564,7 +1685,7 @@ const WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE =
       'targetSessionName',
       'userText',
     ],
-    [],
+    ['workId', 'executionBinding'],
   );
 const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
   defineObjectShape<WorkHubDelegationStopResolvedMessage>()(
@@ -1793,6 +1914,13 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
     return (
       hasMessageEnvelope(message, true) &&
       hasExactShape(message, WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE) &&
+      (message.workId === undefined ||
+        (typeof message.workId === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(message.workId))) &&
+      (message.executionBinding === undefined ||
+        (typeof message.executionBinding === 'string' &&
+          message.executionBinding.length > 0 &&
+          message.executionBinding.length <= 4096 &&
+          !message.executionBinding.includes('\0'))) &&
       message.schemaVersion === WORKHUB_COORDINATION_STOP_SCHEMA_VERSION &&
       isWorkHubActionIdentity(message) &&
       typeof message.stopsActionId === 'string' &&
@@ -1900,6 +2028,10 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
   return (
     message.kind === 'delegation_assigned' &&
     hasExactShape(message, WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE) &&
+    (message.settings === undefined || isWorkHubTaskSettingsSnapshot(message.settings)) &&
+    (message.inputOrigin === undefined ||
+      message.inputOrigin === 'user' ||
+      message.inputOrigin === 'feedback') &&
     isWorkHubMessageAttachments(message.targetAttachments) &&
     typeof message.delegationId === 'string' &&
     typeof message.targetTurnId === 'string' &&

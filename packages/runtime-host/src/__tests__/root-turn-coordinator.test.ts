@@ -33,7 +33,7 @@ import {
   readLogicalRuntimeExecutionForRun,
 } from '@maka/core/runtime-logical-execution';
 import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-model';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createSessionTranscriptReader } from '../server/session-transcript-reader.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -4184,8 +4184,12 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
-test('active WorkHub authority reads the admitted v2 input and refuses other or completed Turns', async () => {
-  for (const toolProfile of ['workhub-coordination-v1', 'workhub-coordination-v2'] as const) {
+test('active WorkHub authority authenticates user/feedback origin and refuses other or completed Turns', async () => {
+  for (const [toolProfile, feedback] of [
+    ['workhub-coordination-v1', false],
+    ['workhub-coordination-v2', false],
+    ['workhub-coordination-v2', true],
+  ] as const) {
     let backend: BlockingRootBackend | undefined;
     const consumed: string[] = [];
     const sent: BackendSendInput[] = [];
@@ -4279,14 +4283,70 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
       );
       const turnId = 'live-workhub-turn';
       const content = { text: 'Continue Payments and explain the result here' };
+      const priorSuffix = createHash('sha256')
+        .update('prior-assignment')
+        .digest('hex')
+        .slice(0, 48);
+      const origin = feedback
+        ? {
+            kind: 'workhub_result' as const,
+            eventId: turnId,
+            actionId: 'prior-assignment',
+            delegationId: `whd_${priorSuffix}`,
+            targetSessionId: fixture.sessionId,
+            targetTurnId: 'prior-task-turn',
+          }
+        : undefined;
+      if (origin) {
+        await fixture.stores.sessionStore.assignWorkHubMessage({
+          assignment: {
+            type: 'workhub_coordination',
+            id: `wha_${priorSuffix}`,
+            turnId: 'prior-coordination-turn',
+            ts: Date.now(),
+            schemaVersion: 1,
+            kind: 'delegation_assigned',
+            actionId: origin.actionId,
+            actionFingerprint: `sha256:${'a'.repeat(64)}`,
+            coordinationTurnId: 'prior-coordination-turn',
+            targetSessionId: origin.targetSessionId,
+            targetSessionName: ordinary.name,
+            targetTurnId: origin.targetTurnId,
+            targetMessageId: `whm_${priorSuffix}`,
+            delegationId: origin.delegationId,
+            disposition: 'delegate_existing',
+            userText: content.text,
+          },
+          admission: {
+            sessionId: origin.targetSessionId,
+            turnId: origin.targetTurnId,
+            runId: `whr_${priorSuffix}`,
+            messageId: `whm_${priorSuffix}`,
+            content,
+            submittedContentDigest: messageContentDigest(content),
+            submittedPlacement: 'current_turn',
+            placement: 'current_turn',
+            disposition: 'steering',
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+            admittedAt: Date.now(),
+          },
+        });
+      }
       assert.equal(await fixture.coordinator.readActiveWorkHubRequest(turnId), undefined);
       const started = await fixture.coordinator.startWorkHubCoordinationMessage(
         {
           sessionId: WORKHUB_COORDINATION_SESSION_ID,
           turnId,
           archivedMessage: 'Archived',
-          execution: { kind: 'workhub_coordination', inputDigest: `sha256:${'d'.repeat(64)}` },
-          prepareFreshContent: async () => ({ kind: 'ready', content }),
+          execution: {
+            kind: 'workhub_coordination',
+            inputDigest: `sha256:${'d'.repeat(64)}`,
+            ...(origin ? { feedback: origin } : {}),
+          },
+          prepareFreshContent: async () => ({
+            kind: 'ready',
+            content: origin ? { text: 'Automatic result, not another user request' } : content,
+          }),
         },
         operationContext(fixture.hostEpoch, fixture.acquireResidency, 'desktop'),
       );
@@ -4307,7 +4367,8 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
           ? {
               content,
               runId: started.result.runId,
-              sourceMessageId: admission.userMessageId,
+              ...(origin ? {} : { sourceMessageId: admission.userMessageId }),
+              origin: origin ? 'feedback' : 'user',
             }
           : undefined,
       );
@@ -4341,6 +4402,7 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
             content: { text: 'workhub-followup' },
             runId: sent[1]!.runId,
             sourceMessageId: 'workhub-followup',
+            origin: 'user',
           },
         );
         assert.deepEqual(

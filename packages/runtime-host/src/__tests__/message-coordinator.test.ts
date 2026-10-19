@@ -639,11 +639,29 @@ test('a durable cancellation claim preserves cancelled_pending across restart-st
   fixture.coordinator.reserveRootTurn(ROOT);
   await submit(fixture, 'linked-message', 'wrong delegation', 'next_turn');
 
+  await assert.rejects(
+    fixture.coordinator.cancelMessageIfPending(
+      ROOT.sessionId,
+      'linked-message',
+      'changed-stop',
+      async () => {
+        throw new Error('target changed');
+      },
+    ),
+    /target changed/,
+  );
+  assert.equal(
+    (await fixture.coordinator.readMessageExecutionDisposition(ROOT.sessionId, 'linked-message'))
+      .kind,
+    'pending',
+  );
+
   assert.deepEqual(
     await fixture.coordinator.cancelMessageIfPending(
       ROOT.sessionId,
       'linked-message',
       'stop-claim',
+      async () => undefined,
     ),
     { kind: 'cancelled_pending' },
   );
@@ -652,6 +670,7 @@ test('a durable cancellation claim preserves cancelled_pending across restart-st
       ROOT.sessionId,
       'linked-message',
       'stop-claim',
+      async () => assert.fail('an owned cancellation tombstone needs no new confirmation'),
     ),
     { kind: 'cancelled_pending' },
   );

@@ -66,6 +66,7 @@ export interface WorkHubAdmittedAction
     { readonly disposition: 'continue_work' }
   >;
   readonly sourceMessageId?: string;
+  readonly inputOrigin?: 'user' | 'feedback';
   /** Host-resolved work selection; never a second semantic target selection. */
   readonly continuation?: {
     readonly workId: string;
@@ -199,6 +200,7 @@ export interface WorkHubActionGateEffects {
 export interface WorkHubDelegationRetirementClaim {
   readonly cancellationClaimId: string;
   readonly cause: 'direct_stop' | 'replacement';
+  readonly executionBinding?: string;
 }
 
 export interface WorkHubDelegationResumeInput {
@@ -216,6 +218,7 @@ export interface WorkHubRetirementResult {
 }
 
 export interface WorkHubDelegationAssignmentInput {
+  readonly inputOrigin?: 'user' | 'feedback';
   readonly taskInput?: WorkHubTaskInputRequest;
   readonly work?: WorkHubWorkBinding;
   /** Rechecked under the target admission lease, only before a fresh assignment. */
@@ -863,6 +866,7 @@ export class WorkHubCoordinationActionGate {
     const retirement = await this.#effects.retireDelegation(source, {
       cancellationClaimId: request.actionId,
       cause: 'direct_stop',
+      ...(request.executionBinding ? { executionBinding: request.executionBinding } : {}),
     });
     const outcome =
       retirement.outcome === 'recovering'
@@ -1337,6 +1341,7 @@ function delegationAssignment(
     disposition: input.proposal.disposition,
     userText: input.userText,
     ...(input.taskInput ? { taskInput: input.taskInput } : {}),
+    ...(input.inputOrigin ? { inputOrigin: input.inputOrigin } : {}),
     ...(input.attachments ? { attachments: input.attachments } : {}),
     ...(input.delegationText === undefined ? {} : { delegationText: input.delegationText }),
   } as const;
@@ -1438,6 +1443,7 @@ function actionRequestFingerprint(input: WorkHubAdmittedAction): `sha256:${strin
   const {
     coordinationRunId: _coordinationRunId,
     sourceMessageId: _sourceMessageId,
+    inputOrigin: _inputOrigin,
     ...proposal
   } = input;
   if (input.continuation) {
@@ -1547,6 +1553,7 @@ function assignmentInputFromRecord(
   return {
     actionId: assignment.actionId,
     ...(assignment.work ? { work: assignment.work } : {}),
+    ...(assignment.inputOrigin ? { inputOrigin: assignment.inputOrigin } : {}),
     coordinationTurnId: assignment.coordinationTurnId,
     actionFingerprint: assignment.actionFingerprint,
     targetSessionId: assignment.targetSessionId,

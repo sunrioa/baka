@@ -736,8 +736,9 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     sessionId: string,
     messageId: string,
     cancellationClaimId: string,
+    validate?: (lease: SessionAdmissionLease) => Promise<void>,
   ): Promise<HostMessageCancellationDisposition> {
-    return this.#sessionAdmission.run(sessionId, async () => {
+    return this.#sessionAdmission.run(sessionId, async (lease) => {
       const disposition = await this.#resolveMessageExecution(sessionId, messageId);
       if (disposition.kind === 'cancelled') {
         const outcome = await this.#admissions.claimMessageAdmissionCancellation(
@@ -749,6 +750,9 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           ? { kind: 'cancelled_pending' as const }
           : { kind: 'cancelled' as const };
       }
+      // Reconcile an already committed cancellation first; validation guards
+      // new effects, not this caller's tombstone after a lost response/crash.
+      await validate?.(lease);
       if (disposition.kind !== 'pending') return disposition;
 
       const state = this.#sessions.get(sessionId);

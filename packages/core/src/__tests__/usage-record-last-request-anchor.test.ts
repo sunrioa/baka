@@ -32,6 +32,36 @@ test('a last-request anchor accepts the new usage shape and retired payload key'
   assert.equal(isLastRequestAnchor({ inputTokens: 0, payloadChars: 4_000 }), false);
   assert.equal(isLastRequestAnchor({ inputTokens: 120, outputTokens: -1 }), false);
   assert.equal(isLastRequestAnchor({ inputTokens: 120, foo: 1 }), false);
+  const observed = {
+    inputTokens: 120,
+    outputTokens: 20,
+    requestedAt: 10,
+    latestRequestAt: 12,
+    usageScope: 'last_completed_request',
+    cacheSourceVersion: 2,
+    cacheReadInputTokens: 100,
+    cacheWriteInputTokens: 0,
+    cacheMissInputTokens: 20,
+    cacheReadInputSource: 'reported',
+    cacheWriteInputSource: 'reported',
+    cacheMissInputSource: 'derived',
+  };
+  assert.equal(isLastRequestAnchor(observed), true);
+  assert.equal(isLastRequestAnchor({ ...observed, cacheSourceVersion: undefined }), true);
+  for (const key of [
+    'requestedAt',
+    'latestRequestAt',
+    'cacheReadInputTokens',
+    'cacheWriteInputTokens',
+    'cacheMissInputTokens',
+  ])
+    for (const invalid of [-1, NaN, 1.5, 'unknown'])
+      assert.equal(isLastRequestAnchor({ ...observed, [key]: invalid }), false);
+  assert.equal(isLastRequestAnchor({ inputTokens: 120, cacheReadInputSource: 'reported' }), false);
+  assert.equal(isLastRequestAnchor({ ...observed, usageScope: 'latest_failed_request' }), false);
+  assert.equal(isLastRequestAnchor({ ...observed, cacheMissInputSource: 'guessed' }), false);
+  for (const invalid of [0, 1, 3, '2', null])
+    assert.equal(isLastRequestAnchor({ ...observed, cacheSourceVersion: invalid }), false);
 });
 
 test('token-usage fields carry the anchor and reject a broken one', () => {

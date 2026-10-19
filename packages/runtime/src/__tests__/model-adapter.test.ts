@@ -22,6 +22,8 @@ import { describe, test } from 'node:test';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { RetryError } from 'ai';
 import { convertArrayToReadableStream, MockLanguageModelV4 } from 'ai/test';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 
 import { ModelAdapter, normalizeAiSdkUsage } from '../model-adapter.js';
 import type { ModelStreamEvent } from '../model-protocol.js';
@@ -1075,10 +1077,12 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 20,
         outputTokens: 5,
         cacheHitInputTokens: 7,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 10,
         cacheMissInputSource: 'derived',
         cachedInputTokens: 7,
         cacheWriteInputTokens: 3,
+        cacheWriteInputSource: 'reported',
         reasoningTokens: 2,
         totalTokens: 30,
       },
@@ -1101,6 +1105,113 @@ describe('ModelAdapter stream and error normalization', () => {
     });
   });
 
+  test('preserves the difference between missing and reported-zero cache fields', () => {
+    const missing = normalizeAiSdkUsage({ inputTokens: 100, outputTokens: 10 });
+    assert.equal(missing?.cacheHitInputTokens, 0, 'legacy aggregate normalization stays unchanged');
+    assert.equal(missing?.cacheReadInputSource, undefined);
+    assert.equal(missing?.cacheWriteInputSource, undefined);
+    const zero = normalizeAiSdkUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadInputTokens: 0,
+      cacheWriteInputTokens: 0,
+    });
+    assert.equal(zero?.cacheReadInputSource, 'reported');
+    assert.equal(zero?.cacheWriteInputSource, 'reported');
+    assert.equal(zero?.cacheMissInputSource, 'derived');
+  });
+
+  for (const provider of ['openai', 'compatible'] as const)
+    for (const cachedTokens of [undefined, 0, 25])
+      test(`actual ${provider} SDK conversion preserves cache provenance (${cachedTokens ?? 'missing'})`, async () => {
+        let requests = 0;
+        const fetch = async () => {
+          requests++;
+          const chunk = {
+            id: 'usage-fixture',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'usage-fixture',
+          };
+          const parts = [
+            {
+              ...chunk,
+              choices: [
+                { index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null },
+              ],
+            },
+            {
+              ...chunk,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              usage: {
+                prompt_tokens: 100,
+                completion_tokens: 2,
+                total_tokens: 102,
+                ...(cachedTokens === undefined
+                  ? {}
+                  : { prompt_tokens_details: { cached_tokens: cachedTokens } }),
+              },
+            },
+          ];
+          return new Response(
+            `${parts.map((p) => `data: ${JSON.stringify(p)}\n\n`).join('')}data: [DONE]\n\n`,
+            {
+              headers: { 'content-type': 'text/event-stream' },
+            },
+          );
+        };
+        const model =
+          provider === 'openai'
+            ? createOpenAI({ apiKey: 'fixture', fetch }).chat('usage-fixture')
+            : createOpenAICompatible({
+                name: 'fixture',
+                baseURL: 'https://fixture.invalid/v1',
+                apiKey: 'fixture',
+                fetch,
+              }).chatModel('usage-fixture');
+        const adapter = new ModelAdapter({
+          connection: {
+            slug: 'usage-fixture',
+            providerType: 'custom',
+            baseUrl: 'https://fixture.invalid/v1',
+            defaultApiProtocol: 'openai-chat',
+            defaultModel: 'usage-fixture',
+          },
+          apiKey: 'fixture',
+          modelId: 'usage-fixture',
+          modelFactory: () => model,
+          newId: idGenerator(),
+          now: monotonicClock(),
+        });
+        const streamed = await adapter.startStream({
+          model,
+          messages: [{ role: 'user', content: 'hello' }],
+          tools: {},
+          activeTools: [],
+          onStreamActivity() {},
+          abortSignal: new AbortController().signal,
+          repairToolCall: async () => null,
+        });
+        for await (const event of streamed.events) void event;
+        const outcome = await streamed.outcome;
+        assert.equal(outcome.kind, 'completed');
+        if (outcome.kind !== 'completed') throw new Error('Fixture provider did not finish');
+        assert.equal(requests, 1, 'the local fetch fixture, never a real endpoint');
+        assert.equal(outcome.usage?.inputTokens, 100);
+        assert.equal(outcome.usage?.outputTokens, 2);
+        assert.equal(outcome.usage?.cacheHitInputTokens, cachedTokens ?? 0);
+        assert.equal(
+          outcome.usage?.cacheReadInputSource,
+          cachedTokens === undefined ? undefined : 'reported',
+        );
+        assert.equal(outcome.usage?.cacheWriteInputSource, undefined);
+        assert.equal(
+          outcome.usage?.cacheMissInputSource,
+          'derived',
+          'SDK noCache is inferred, not a raw vendor counter',
+        );
+      });
+
   test('derives totals from detail-only AI SDK usage', () => {
     assert.deepEqual(
       normalizeAiSdkUsage({
@@ -1120,10 +1231,12 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 17,
         outputTokens: 7,
         cacheHitInputTokens: 5,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 10,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 5,
         cacheWriteInputTokens: 2,
+        cacheWriteInputSource: 'reported',
         reasoningTokens: 3,
         totalTokens: 24,
       },
@@ -1151,6 +1264,7 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 100,
         outputTokens: 20,
         cacheHitInputTokens: 40,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 60,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 40,
@@ -1191,6 +1305,7 @@ describe('ModelAdapter stream and error normalization', () => {
         inputTokens: 1460,
         outputTokens: 2,
         cacheHitInputTokens: 1408,
+        cacheReadInputSource: 'reported',
         cacheMissInputTokens: 52,
         cacheMissInputSource: 'explicit',
         cachedInputTokens: 1408,
