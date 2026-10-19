@@ -181,6 +181,25 @@ resume ledger.
 New WorkHub conversations persist across application and Host restarts. Migration
 of pre-cutover beta WorkHub history is not part of this cutover contract.
 
+## Same-task historical input
+
+Native `WorkHubEvidence` task-history pages include canonical accepted task-input
+facts as well as original assignment requests and owned execution records. An
+accepted fact returns `originalUserText` when present, otherwise the legacy input
+text. It is explicitly not consumption or compliance proof. Automatic feedback
+remains distinguishable from user requests; it is historical background, not a
+renewed instruction. Old assignments without origin evidence remain unknown.
+Input facts must match the source task, generation,
+delegation, target Session and coordination Turn before projection.
+
+The existing fact scan, current actor boundary, page budgets, hidden-record filter
+and per-source authorization still apply. Cursors retain references and offsets,
+not transcript bodies. Missing exclusive executions are listed explicitly in
+`history.unavailableExecutions`; cancellation before execution does not erase
+accepted requirements or manufacture tool output. This adds no message admission,
+context import, handoff summary or cross-task transcript authority. The six-tool
+unified read entry remains a separate rollout step.
+
 ## Read-only Session inspection
 
 `WorkHubInspect` is a Host-native tool available only to the Coordination Session.
