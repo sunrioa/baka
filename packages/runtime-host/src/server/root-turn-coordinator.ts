@@ -1252,12 +1252,29 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   }
 
   stopRoot(identity: RuntimeMessageRunIdentity, input: StopSessionInput = {}): Promise<void> {
+    return this.#stopRoot(identity, input, false);
+  }
+
+  /** Host-local primitive: the caller still proves task ownership of this
+   * exact Root. Stop its current input, not already accepted later work. */
+  stopRootPreservingFollowups(
+    identity: RuntimeMessageRunIdentity,
+    input: StopSessionInput = {},
+  ): Promise<void> {
+    return this.#stopRoot(identity, input, true);
+  }
+
+  #stopRoot(
+    identity: RuntimeMessageRunIdentity,
+    input: StopSessionInput,
+    preserveFollowups: boolean,
+  ): Promise<void> {
     normalizeStopSessionSource(input.source, input.workHubActionId);
     return this.runCommand(async () => {
       const declared = await this.sessionAdmission.run(identity.sessionId, (lease) =>
         this.declareStopFence(
           identity,
-          () => this.messages.commitStopFence(identity),
+          () => this.messages.commitStopFence(identity, preserveFollowups),
           lease,
           input,
         ),
@@ -1265,7 +1282,11 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
       await declared?.deliverStop();
       await declared?.active.startSettled.promise;
       const disposition = await this.sessionAdmission.run(identity.sessionId, (lease) =>
-        this.prepareStopDisposition(identity, () => this.messages.commitStopFence(identity), lease),
+        this.prepareStopDisposition(
+          identity,
+          () => this.messages.commitStopFence(identity, preserveFollowups),
+          lease,
+        ),
       );
       if (disposition.kind === 'complete') {
         if (!disposition.outcome.ok) throwHostedStopError(identity.sessionId, disposition.outcome);

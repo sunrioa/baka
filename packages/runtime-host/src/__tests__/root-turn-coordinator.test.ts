@@ -4184,6 +4184,343 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
+for (const scope of [
+  'preserve',
+  'full',
+  'upgrade',
+  'late_nack',
+  'late_ack',
+  'mixed_recovery',
+  'successor_proof',
+] as const)
+  test('exact Root stop preserves later accepted work only when requested (' + scope + ')', {
+    timeout: 20_000,
+  }, async () => {
+    const entered = {
+      a: deferred<BackendSendInput>(),
+      b: deferred<BackendSendInput>(),
+      c: deferred<BackendSendInput>(),
+    };
+    const release = { a: deferred<void>(), b: deferred<void>(), c: deferred<void>() };
+    const pullCorrection = deferred<void>();
+    const correctionPulled = deferred<void>();
+    const stopEntered = deferred<void>();
+    const seen: string[] = [];
+    let stopCount = 0;
+    const fixture = await createFailureFixture({
+      registerBackend: (backends) =>
+        backends.register(
+          'ai-sdk',
+          (context) =>
+            new (class extends FakeBackend {
+              override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+                const key = input.text;
+                assert.ok(
+                  key === 'a' || key === 'b' || key === 'c',
+                  'no correction or another task is folded into the successor',
+                );
+                seen.push(key);
+                entered[key].resolve(input);
+                const steering =
+                  key === 'a' && (scope === 'late_nack' || scope === 'late_ack')
+                    ? await (async () => {
+                        await pullCorrection.promise;
+                        const leases = await input.pullSteering!();
+                        assert.equal(leases.length, 1);
+                        return leases;
+                      })()
+                    : [];
+                if (scope === 'late_ack')
+                  for (const lease of steering)
+                    yield {
+                      type: 'steering_message',
+                      id: randomUUID(),
+                      turnId: input.turnId,
+                      ts: Date.now(),
+                      messageId: lease.messageId,
+                      content: lease.content,
+                      submittedContentDigest: lease.submittedContentDigest,
+                    };
+                if (steering.length) correctionPulled.resolve();
+                await release[key].promise;
+                if (steering.length) {
+                  const leaseIds = steering.map((lease) => lease.id);
+                  if (scope === 'late_ack') input.ackSteering!(leaseIds);
+                  else {
+                    input.nackSteering!(leaseIds);
+                    await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+                    assert.deepEqual(
+                      fixture.messages.projection(fixture.sessionId).steering,
+                      [],
+                      'recovery cannot reopen the stopped A before its terminal event',
+                    );
+                  }
+                }
+                yield {
+                  type: 'complete',
+                  id: randomUUID(),
+                  turnId: input.turnId,
+                  ts: Date.now(),
+                  stopReason: 'end_turn',
+                };
+              }
+              override async stop(): Promise<void> {
+                stopCount++;
+                stopEntered.resolve();
+              }
+            })(context),
+        ),
+    });
+    const stopping: Promise<void>[] = [];
+    try {
+      const context = operationContext(fixture.hostEpoch, fixture.acquireResidency);
+      const started = await fixture.interactiveTurns.handlers['turn.start'](
+        {
+          sessionId: fixture.sessionId,
+          turnId: 'stop-queue-a',
+          content: { text: 'a' },
+        },
+        context,
+      );
+      assertStartedTurn(started);
+      await entered.a.promise;
+      for (const [messageId, text, placement] of [
+        ['a-correction', 'do not move this correction to b', 'current_turn'],
+        ['accepted-b', 'b', 'next_turn'],
+        ['accepted-c', 'c', 'next_turn'],
+      ] as const)
+        assert.ok(
+          (
+            await fixture.messages.handlers['turn.message.submit'](
+              {
+                originHostEpoch: fixture.hostEpoch,
+                sessionId: fixture.sessionId,
+                messageId,
+                content: { text },
+                placement,
+              },
+              context,
+            )
+          ).ok,
+        );
+      const acceptedCorrection = (
+        await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)
+      ).find((entry) => entry.messageId === 'a-correction');
+      assert.ok(acceptedCorrection);
+      if (scope === 'late_nack' || scope === 'late_ack') {
+        pullCorrection.resolve();
+        await correctionPulled.promise;
+      }
+      const identity = {
+        sessionId: fixture.sessionId,
+        turnId: started.result.turn.turnId,
+        runId: started.result.turn.runId,
+      };
+      const stop =
+        scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof'
+          ? fixture.coordinator.stopRoot(identity)
+          : fixture.coordinator.stopRootPreservingFollowups(identity);
+      stopping.push(stop);
+      void stop.catch(() => undefined);
+      await stopEntered.promise;
+      if (scope === 'upgrade') {
+        const broad = fixture.coordinator.stopRoot(identity);
+        stopping.push(broad);
+        void broad.catch(() => undefined);
+        await waitUntil(
+          async () =>
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'accepted-b',
+            ),
+        );
+      }
+      release.a.resolve();
+      await Promise.all(stopping);
+      assert.equal((await fixture.coordinator.read(identity)).status, 'cancelled');
+      if (scope === 'preserve' || scope === 'late_nack' || scope === 'late_ack') {
+        const b = await entered.b.promise;
+        assert.ok(b.runId);
+        await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+        const leaked = await b.pullSteering!();
+        try {
+          assert.deepEqual(leaked, [], 'a stopped A correction cannot become B steering');
+        } finally {
+          b.ackSteering!(leaked.map((lease) => lease.id));
+        }
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), {
+          kind: 'active',
+          sessionId: fixture.sessionId,
+          turnId: b.turnId,
+          runId: b.runId,
+        });
+        const queue = fixture.messages.projection(fixture.sessionId);
+        assert.deepEqual(
+          queue.followup.map((item) => item.messageId),
+          ['accepted-c'],
+        );
+        await fixture.coordinator.stopRootPreservingFollowups(identity);
+        assert.equal(stopCount, 1, 'a stale A retry does not stop active B');
+        assert.deepEqual(fixture.messages.projection(fixture.sessionId), queue);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+          );
+        release.b.resolve();
+        await entered.c.promise;
+        release.c.resolve();
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a', 'b', 'c']);
+      } else {
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a']);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            true,
+          );
+      }
+      assert.equal(
+        await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+          fixture.sessionId,
+          'a-correction',
+        ),
+        scope !== 'late_ack',
+      );
+      if (scope === 'late_ack') {
+        assert.ok(
+          await fixture.stores.runtimeEventStore.readImmutableSteeringMessageProof(
+            fixture.sessionId,
+            'a-correction',
+          ),
+          'a durable echo remains consumed even when ack arrives after Stop',
+        );
+        assert.equal(
+          (await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)).length,
+          0,
+        );
+      }
+      if (scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof') {
+        // Simulate the durable residue from a crash after the terminal event
+        // but before Message materialization. Runtime/Root proof and SQLite are
+        // real; inserting this pending fixture is not a whole-Host crash test.
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), { kind: 'idle' });
+        const messageId = 'a-unmaterialized-at-crash';
+        await fixture.stores.sessionStore.commitMessageAdmission({
+          ...acceptedCorrection,
+          messageId,
+        });
+        if (scope === 'mixed_recovery') {
+          await fixture.stores.sessionStore.commitMessageAdmission({
+            ...acceptedCorrection,
+            messageId: 'a-promoted-at-crash',
+            submittedPlacement: 'next_turn',
+          });
+          for (const text of ['b', 'c'])
+            await fixture.stores.sessionStore.commitMessageAdmission({
+              ...acceptedCorrection,
+              messageId: 'recovered-' + text,
+              content: { text },
+              submittedContentDigest: messageContentDigest({ text }),
+              submittedPlacement: 'next_turn',
+              placement: 'next_turn',
+              disposition: 'followup',
+            });
+        }
+        if (scope === 'successor_proof') {
+          // Older execution could already have folded this native correction
+          // into a successor before the upgrade. Commit the real Root receipt
+          // but leave the mutable queue row, as at that documented crash gap.
+          const successor = await fixture.stores.agentRunStore.admitRootTurn({
+            sessionId: fixture.sessionId,
+            turnId: 'consumed-successor-root',
+            proposedRunId: 'consumed-successor-run',
+            proposedUserMessageId: messageId,
+            previousRootTurnId: identity.turnId,
+            execution: { kind: 'external_message' },
+            normalizedInput: acceptedCorrection.content,
+            sourceMessages: [
+              {
+                messageId,
+                content: acceptedCorrection.content,
+                submittedContentDigest: acceptedCorrection.submittedContentDigest,
+                submittedPlacement: acceptedCorrection.submittedPlacement,
+                placement: acceptedCorrection.placement,
+                disposition: acceptedCorrection.disposition,
+                skillInvocation: acceptedCorrection.skillInvocation,
+              },
+            ],
+            admittedAt: acceptedCorrection.admittedAt + 1,
+          });
+          assert.equal(successor.kind, 'admitted');
+          await fixture.messages.materializeMessageHandoffsForRun({ ...identity, messageIds: [] });
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+            'a committed successor source is consumption proof, not a cancellable A residue',
+          );
+        }
+        await fixture.messages.recoverPendingAfterHostRestart([fixture.sessionId]);
+        if (scope === 'mixed_recovery') {
+          await entered.b.promise;
+          release.b.resolve();
+          await entered.c.promise;
+          release.c.resolve();
+          await fixture.coordinator.whenIdle(fixture.sessionId);
+          assert.deepEqual(seen, ['a', 'b', 'c'], 'recovery keeps unrelated B/C FIFO');
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'a-promoted-at-crash',
+            ),
+            true,
+          );
+          for (const text of ['b', 'c'])
+            assert.equal(
+              await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+                fixture.sessionId,
+                'recovered-' + text,
+              ),
+              false,
+            );
+        }
+        assert.equal(
+          await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+            fixture.sessionId,
+            messageId,
+          ),
+          scope !== 'successor_proof',
+        );
+        assert.deepEqual(
+          await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId),
+          [],
+        );
+        if (scope !== 'mixed_recovery')
+          assert.deepEqual(seen, ['a'], 'recovery does not replay a cancelled Root correction');
+      }
+      assert.equal(stopCount, 1);
+      assert.equal(fixture.drainRequested(), false);
+      await fixture.coordinator.close();
+      await fixture.messages.close();
+    } finally {
+      pullCorrection.resolve();
+      for (const gate of Object.values(release)) gate.resolve();
+      await Promise.allSettled(stopping);
+      await fixture.coordinator.close();
+      await fixture.dispose();
+    }
+  });
+
 test('active WorkHub authority authenticates user/feedback origin and refuses other or completed Turns', async () => {
   for (const [toolProfile, feedback] of [
     ['workhub-coordination-v1', false],
