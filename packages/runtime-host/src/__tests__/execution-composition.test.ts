@@ -8060,12 +8060,13 @@ for (const entry of ['pane', 'model', 'fresh'] as const)
     });
   });
 
-for (const mode of ['single', 'set', 'cancel'] as const)
+for (const mode of ['single', 'set', 'cancel', 'promoted-set'] as const)
   test(`task Stop preserves same-Session FIFO and its exact receipt after coordinator end and Host restart (${mode})`, async () => {
     await withCompositionRoot(async ({ root, owner }) => {
       const connectionId = await configureFakeDefaultTarget(owner);
       let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
       const release = deferred<void>();
+      const finishPredecessor = deferred<void>();
       const sends: string[] = [];
       let { composition, manager } = await createCapturedExecutionComposition(owner, {
         primaryBackendFactory: (context) =>
@@ -8076,7 +8077,11 @@ for (const mode of ['single', 'set', 'cancel'] as const)
               this.stopRequested = deferred<void>();
               this.stoppedByTest = false;
               sends.push(input.text);
-              await Promise.race([release.promise, this.stopRequested.promise]);
+              await Promise.race([
+                release.promise,
+                this.stopRequested.promise,
+                ...(input.text === 'running-A' ? [finishPredecessor.promise] : []),
+              ]);
               if (this.stoppedByTest) {
                 yield {
                   type: 'abort',
@@ -8155,7 +8160,15 @@ for (const mode of ['single', 'set', 'cancel'] as const)
         assert.ok(
           (
             await composition.handlers['workhub.coordination.answer'](
-              { turnId, text: 'Stop only the current A, leave B and C alone.' },
+              {
+                turnId,
+                text:
+                  mode === 'single'
+                    ? 'Stop only A, leave B/C alone.'
+                    : mode === 'promoted-set'
+                      ? 'Stop B/C after confirmation; A may finish naturally.'
+                      : 'Stop A/B together, leave C alone.',
+              },
               context,
             )
           ).ok,
@@ -8163,8 +8176,14 @@ for (const mode of ['single', 'set', 'cancel'] as const)
         const command = {
           turnId,
           actionId: 'actual-task-stop',
-          taskIds: mode === 'single' ? [a.work!.id] : [a.work!.id, b.work!.id],
+          taskIds:
+            mode === 'single'
+              ? [a.work!.id]
+              : mode === 'promoted-set'
+                ? [b.work!.id, c.work!.id]
+                : [a.work!.id, b.work!.id],
         };
+        const firstTarget = mode === 'promoted-set' ? b : a;
         const pending = composition.handlers['workhub.tasks.stop'](command, context);
         if (mode !== 'single') {
           await waitFor(
@@ -8176,7 +8195,10 @@ for (const mode of ['single', 'set', 'cancel'] as const)
               ).length === 1,
           );
           assert.equal(
-            await stores.sessionStore.readWorkHubStopRequest(a.delegationId, command.actionId),
+            await stores.sessionStore.readWorkHubStopRequest(
+              firstTarget.delegationId,
+              command.actionId,
+            ),
             undefined,
           );
           assert.deepEqual(
@@ -8194,6 +8216,11 @@ for (const mode of ['single', 'set', 'cancel'] as const)
             context,
           );
           assert.ok(offered.ok && offered.result.request.kind === 'form');
+          if (mode === 'promoted-set') {
+            finishPredecessor.resolve();
+            await waitFor(async () => sends.length === 2);
+            assert.deepEqual(sends, ['running-A', 'queued-B']);
+          }
           assert.ok(
             (
               await composition.handlers['interaction.answer'](
@@ -8213,6 +8240,38 @@ for (const mode of ['single', 'set', 'cancel'] as const)
         }
         const first = await withTimeout(pending, 10000, 'Task Stop did not finish its exact Root');
         assert.ok(first.ok, JSON.stringify(first));
+        if (mode === 'promoted-set') {
+          assert.equal(first.result.kind, 'result');
+          if (first.result.kind === 'result')
+            assert.deepEqual(
+              first.result.targets.map((row) => row.outcome),
+              ['stop_delivered', 'cancelled_pending'],
+            );
+          assert.deepEqual(
+            sends,
+            ['running-A', 'queued-B'],
+            'C must be withdrawn before B Stop can hand off',
+          );
+          assert.deepEqual(
+            await composition.handlers['workhub.tasks.stop'](command, context),
+            first,
+          );
+          await desktop.close();
+          desktop = undefined;
+          await composition.close();
+          ({ composition, manager } = await createCapturedExecutionComposition(owner));
+          stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+          const before = await stores.runtimeEventStore.listSessionInvocations(target.id);
+          assert.deepEqual(
+            await composition.handlers['workhub.tasks.stop'](command, context),
+            first,
+          );
+          assert.deepEqual(
+            await stores.runtimeEventStore.listSessionInvocations(target.id),
+            before,
+          );
+          return;
+        }
         if (mode === 'cancel') {
           assert.equal(first.result.kind, 'cancelled');
           assert.equal(

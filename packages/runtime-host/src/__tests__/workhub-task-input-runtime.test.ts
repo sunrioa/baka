@@ -108,6 +108,16 @@ const modelInput = {
   text: input.text,
 };
 
+test('a modern terminal Stop observation does not block legacy direct correction', async () => {
+  const f = fixture();
+  f.state = 'modern_noop';
+  const result = await f.handlers['workhub.tasks.send'](input, context);
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.equal(result.result.mode, 'steering');
+  assert.equal(f.commits, 1);
+  assert.equal(f.continuations, 0);
+});
+
 test('a saved legacy continuation retains its pre-upgrade six-field action fingerprint', async () => {
   const f = fixture();
   f.state = 'ended';
@@ -421,8 +431,16 @@ function fixture() {
         readWorkHubReplacement: async () => (f.state === 'replacement' ? {} : undefined),
         readWorkHubReplacementAbort: async () => (f.state === 'aborted' ? {} : undefined),
         readWorkHubSupersession: async () => (f.state === 'superseded' ? {} : undefined),
-        readWorkHubStopRequest: async () => (f.state === 'stopped' ? {} : undefined),
-        readWorkHubStopResolution: async () => undefined,
+        readWorkHubStopRequest: async () =>
+          f.state === 'stopped'
+            ? {}
+            : f.state === 'modern_noop'
+              ? { actionId: 'noop', stopsDelegationId: 'delegation', taskStop: true }
+              : undefined,
+        readWorkHubStopResolution: async () =>
+          f.state === 'modern_noop'
+            ? { actionId: 'noop', stopsDelegationId: 'delegation', outcome: 'already_terminal' }
+            : undefined,
         readHeaderSnapshot: async () => ({
           isArchived: f.state === 'archived',
           backend: f.state === 'plugin' ? 'plugin-executor' : 'ai-sdk',

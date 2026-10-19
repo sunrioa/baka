@@ -606,6 +606,36 @@ test('message query reports only durable cancellation proof', async () => {
   });
 });
 
+test('batch cancellation requires the exact Session lease and preserves other queued Messages', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.reserveRootTurn(ROOT);
+  await submit(fixture, 'batch-linked', 'target', 'next_turn');
+  await submit(fixture, 'batch-unrelated', 'keep', 'next_turn');
+  const cancel = (
+    lease: Parameters<typeof fixture.coordinator.cancelMessageIfPendingAdmitted>[3],
+  ) =>
+    fixture.coordinator.cancelMessageIfPendingAdmitted(
+      ROOT.sessionId,
+      'batch-linked',
+      'batch-stop',
+      lease,
+    );
+  await assert.rejects(fixture.sessionAdmission.run('wrong-session', cancel));
+  const otherGate = new SessionAdmissionGate();
+  await assert.rejects(otherGate.run(ROOT.sessionId, cancel));
+  assert.deepEqual(
+    fixture.coordinator.projection(ROOT.sessionId).followup.map((item) => item.messageId),
+    ['batch-linked', 'batch-unrelated'],
+  );
+  assert.deepEqual(await fixture.sessionAdmission.run(ROOT.sessionId, cancel), {
+    kind: 'cancelled_pending',
+  });
+  assert.deepEqual(
+    fixture.coordinator.projection(ROOT.sessionId).followup.map((item) => item.messageId),
+    ['batch-unrelated'],
+  );
+});
+
 test('exact pending cancellation removes only the linked Message', async () => {
   const fixture = createFixture();
   fixture.coordinator.reserveRootTurn(ROOT);

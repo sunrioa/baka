@@ -61,6 +61,7 @@ import {
 import {
   type SessionHeader,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationStopRequestedMessage,
   snapshotWorkHubTaskSettings,
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
@@ -3068,6 +3069,24 @@ export async function createExecutionRuntimeHostComposition(
           `[runtime-host] WorkHub task input failed: ${boundedFailureDiagnostic(error)}`,
         ),
     });
+    const stopClaim = (
+      request: WorkHubDelegationStopRequestedMessage,
+    ): WorkHubDelegationRetirementClaim => ({
+      cause: 'direct_stop',
+      cancellationClaimId: request.actionId,
+      executionBinding: request.executionBinding,
+    });
+    const stopDeps = (
+      validate: (lease: SessionAdmissionLease) => Promise<boolean>,
+    ): WorkHubRetirementDependencies => ({
+      messages,
+      coordinator,
+      readStopTarget,
+      taskStop: {
+        validate,
+        stopRoot: (identity, input) => coordinator.stopRootPreservingFollowups(identity, input),
+      },
+    });
     const workHubTaskStop = createWorkHubTaskStopRuntime({
       stores,
       messages,
@@ -3076,25 +3095,13 @@ export async function createExecutionRuntimeHostComposition(
       evidence: workHubEvidence,
       coordination: workHubCoordination,
       readStopTarget,
+      cancelPendingTaskStop: (source, request, validate, lease) =>
+        retireWorkHubDelegation(source, stopClaim(request), stopDeps(validate), {
+          pendingOnly: true,
+          admission: lease,
+        }),
       retireTaskStop: (source, request, validate) =>
-        retireWorkHubDelegation(
-          source,
-          {
-            cause: 'direct_stop',
-            cancellationClaimId: request.actionId,
-            executionBinding: request.executionBinding,
-          },
-          {
-            messages,
-            coordinator,
-            readStopTarget,
-            taskStop: {
-              validate,
-              stopRoot: (identity, input) =>
-                coordinator.stopRootPreservingFollowups(identity, input),
-            },
-          },
-        ),
+        retireWorkHubDelegation(source, stopClaim(request), stopDeps(validate)),
       requestForm: (input) => interactions.requestForm(input),
       onError: (error) =>
         console.error(`[runtime-host] Task stop failed: ${boundedFailureDiagnostic(error)}`),
@@ -3773,47 +3780,82 @@ export async function createExecutionRuntimeHostComposition(
 
 class WorkHubStopTargetChangedError extends Error {}
 
-/** Replays the committed stop's exact execution, never the delegation's later continuation. */
+interface WorkHubRetirementDependencies {
+  readonly messages: Pick<HostMessageCoordinator, 'cancelMessageIfPending'> &
+    Partial<Pick<HostMessageCoordinator, 'cancelMessageIfPendingAdmitted'>>;
+  readonly coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>;
+  readonly readStopTarget: (
+    source: WorkHubDelegationAssignedMessage,
+    lease?: SessionAdmissionLease,
+  ) => Promise<WorkHubStopTarget>;
+  /** Server-only task Stop scope. No fallback to a Session-wide stop. */
+  readonly taskStop?: {
+    readonly validate: (lease: SessionAdmissionLease) => Promise<boolean>;
+    readonly stopRoot: RootTurnCoordinator['stopRootPreservingFollowups'];
+  };
+}
+type PendingTaskStopPhase = {
+  readonly admission: SessionAdmissionLease;
+  readonly pendingOnly: true;
+};
+type DeferredTaskStop = { readonly outcome: 'owned_execution' };
+
+export function retireWorkHubDelegation(
+  assignment: WorkHubDelegationAssignedMessage,
+  retirement: WorkHubDelegationRetirementClaim,
+  deps: WorkHubRetirementDependencies,
+  pending: PendingTaskStopPhase,
+): Promise<WorkHubRetirementResult | DeferredTaskStop>;
+export function retireWorkHubDelegation(
+  assignment: WorkHubDelegationAssignedMessage,
+  retirement: WorkHubDelegationRetirementClaim,
+  deps: WorkHubRetirementDependencies,
+): Promise<WorkHubRetirementResult>;
+/** Replays the exact execution; batch preparation never stops a Root under its leases. */
 export async function retireWorkHubDelegation(
   assignment: WorkHubDelegationAssignedMessage,
   retirement: WorkHubDelegationRetirementClaim,
-  deps: {
-    readonly messages: Pick<HostMessageCoordinator, 'cancelMessageIfPending'>;
-    readonly coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>;
-    readonly readStopTarget: (
-      source: WorkHubDelegationAssignedMessage,
-      lease?: SessionAdmissionLease,
-    ) => Promise<WorkHubStopTarget>;
-    /** Server-only task Stop scope. No fallback to a Session-wide stop. */
-    readonly taskStop?: {
-      readonly validate: (lease: SessionAdmissionLease) => Promise<boolean>;
-      readonly stopRoot: RootTurnCoordinator['stopRootPreservingFollowups'];
-    };
-  },
-): Promise<WorkHubRetirementResult> {
+  deps: WorkHubRetirementDependencies,
+  pending?: PendingTaskStopPhase,
+): Promise<WorkHubRetirementResult | DeferredTaskStop> {
   if (
     deps.taskStop &&
     (retirement.cause !== 'direct_stop' || retirement.executionBinding === undefined)
   )
     throw new Error('Task Stop requires a confirmed execution binding');
+  if (pending && (!deps.taskStop || !deps.messages.cancelMessageIfPendingAdmitted))
+    throw new WorkHubActionEffectFailure(
+      'operation_unavailable',
+      'Task Stop batch cancellation is unavailable',
+    );
   let authorized: WorkHubStopTarget['execution'];
   let disposition: Awaited<ReturnType<HostMessageCoordinator['cancelMessageIfPending']>>;
+  const validate =
+    retirement.executionBinding === undefined
+      ? undefined
+      : async (lease: SessionAdmissionLease) => {
+          if (deps.taskStop && !(await deps.taskStop.validate(lease)))
+            throw new WorkHubStopTargetChangedError();
+          const target = await deps.readStopTarget(assignment, lease);
+          if (!workHubStopBindingMatches(assignment, retirement.executionBinding!, target))
+            throw new WorkHubStopTargetChangedError();
+          authorized = target.execution;
+        };
   try {
-    disposition = await deps.messages.cancelMessageIfPending(
-      assignment.targetSessionId,
-      assignment.targetMessageId,
-      retirement.cancellationClaimId,
-      retirement.executionBinding === undefined
-        ? undefined
-        : async (lease) => {
-            if (deps.taskStop && !(await deps.taskStop.validate(lease)))
-              throw new WorkHubStopTargetChangedError();
-            const target = await deps.readStopTarget(assignment, lease);
-            if (!workHubStopBindingMatches(assignment, retirement.executionBinding!, target))
-              throw new WorkHubStopTargetChangedError();
-            authorized = target.execution;
-          },
-    );
+    disposition = pending
+      ? await deps.messages.cancelMessageIfPendingAdmitted!(
+          assignment.targetSessionId,
+          assignment.targetMessageId,
+          retirement.cancellationClaimId,
+          pending.admission,
+          validate,
+        )
+      : await deps.messages.cancelMessageIfPending(
+          assignment.targetSessionId,
+          assignment.targetMessageId,
+          retirement.cancellationClaimId,
+          validate,
+        );
   } catch (error) {
     if (error instanceof WorkHubStopTargetChangedError) return { outcome: 'not_owned' };
     throw error;
@@ -3823,6 +3865,7 @@ export async function retireWorkHubDelegation(
   if (disposition.kind === 'cancelled_pending') return { outcome: 'cancelled_pending' };
   if (disposition.kind === 'shared_turn')
     return { outcome: 'not_owned', targetTurnId: disposition.turnId };
+  if (pending) return { outcome: 'owned_execution' };
   const original = {
     sessionId: assignment.targetSessionId,
     turnId: disposition.turnId,

@@ -1341,6 +1341,8 @@ export interface WorkHubDelegationStopResolvedMessage {
   targetSessionId: string;
   outcome: WorkHubDelegationStopOutcome;
   targetTurnId?: string;
+  /** Task-scoped non-ownership may have no execution Turn to identify. */
+  taskStop?: true;
 }
 
 /**
@@ -1393,9 +1395,11 @@ export type WorkHubCoordinationMessage =
 function isWorkHubDelegationStopResolution(
   outcome: unknown,
   targetTurnId: unknown,
+  taskStop: boolean,
 ): outcome is WorkHubDelegationStopOutcome {
   const hasTargetTurnId = typeof targetTurnId === 'string' && targetTurnId.length > 0;
-  if (outcome === 'stop_delivered' || outcome === 'not_owned') return hasTargetTurnId;
+  if (outcome === 'stop_delivered') return hasTargetTurnId;
+  if (outcome === 'not_owned') return hasTargetTurnId || (taskStop && targetTurnId === undefined);
   if (outcome === 'cancelled_pending') return targetTurnId === undefined;
   return outcome === 'already_terminal' && (targetTurnId === undefined || hasTargetTurnId);
 }
@@ -1708,7 +1712,7 @@ const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
       'targetSessionId',
       'outcome',
     ],
-    ['targetTurnId'],
+    ['targetTurnId', 'taskStop'],
   );
 const WORKHUB_DELEGATION_CREATE_SHAPE = defineObjectShape<WorkHubDelegationCreateSpec>()(
   ['title', 'workspace'],
@@ -1954,7 +1958,12 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       message.stopsDelegationId.length > 0 &&
       typeof message.targetSessionId === 'string' &&
       message.targetSessionId.length > 0 &&
-      isWorkHubDelegationStopResolution(message.outcome, message.targetTurnId)
+      (message.taskStop === undefined || message.taskStop === true) &&
+      isWorkHubDelegationStopResolution(
+        message.outcome,
+        message.targetTurnId,
+        message.taskStop === true,
+      )
     );
   }
   if (message.kind === 'delegation_replacement_aborted') {

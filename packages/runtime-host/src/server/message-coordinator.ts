@@ -741,7 +741,26 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     cancellationClaimId: string,
     validate?: (lease: SessionAdmissionLease) => Promise<void>,
   ): Promise<HostMessageCancellationDisposition> {
-    return this.#sessionAdmission.run(sessionId, async (lease) => {
+    return this.#sessionAdmission.run(sessionId, (lease) =>
+      this.cancelMessageIfPendingAdmitted(
+        sessionId,
+        messageId,
+        cancellationClaimId,
+        lease,
+        validate,
+      ),
+    );
+  }
+
+  /** Host-local batch operation: validate the same lease, never reacquire it. */
+  cancelMessageIfPendingAdmitted(
+    sessionId: string,
+    messageId: string,
+    cancellationClaimId: string,
+    lease: SessionAdmissionLease,
+    validate?: (lease: SessionAdmissionLease) => Promise<void>,
+  ): Promise<HostMessageCancellationDisposition> {
+    return this.#sessionAdmission.runAdmitted(sessionId, lease, async () => {
       const disposition = await this.#resolveMessageExecution(sessionId, messageId);
       if (disposition.kind === 'cancelled') {
         const outcome = await this.#admissions.claimMessageAdmissionCancellation(

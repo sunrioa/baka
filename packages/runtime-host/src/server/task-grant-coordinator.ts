@@ -34,6 +34,7 @@ import { readLogicalRuntimeExecutionForRun } from '@maka/core/runtime-logical-ex
 import { isSessionNotFoundError, type ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { ToolExecutionScope, ToolExecutionAuthority } from '@maka/runtime/tool-runtime';
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 
 /** Rebuildable resource fences over canonical grants and execution facts, not a task database. */
 export class HostTaskGrantCoordinator {
@@ -205,11 +206,7 @@ export class HostTaskGrantCoordinator {
       if (!assignments.some((a) => a.delegationId === grant.delegationId && a.returnResults))
         return false;
       if (await store.readWorkHubReplacement(grant.delegationId)) return false;
-      if (
-        (await store.readWorkHubStopRequest(grant.delegationId)) &&
-        (await store.readWorkHubStopResolution(grant.delegationId))?.outcome !== 'not_owned'
-      )
-        return false;
+      if ((await readWorkHubStopProjection(store, grant.delegationId))?.retires) return false;
       if (
         (await store.readExecutionBoundary(grant.rootSessionId)).revision !==
           grant.rootBoundaryRevision ||

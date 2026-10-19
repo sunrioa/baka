@@ -24,6 +24,7 @@ import {
   type WorkHubTaskStopTarget,
 } from '@maka/core/workhub-task-stop';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import type {
   WorkHubTaskInputRequest,
   WorkHubTaskInputProvenance,
@@ -379,18 +380,11 @@ export class HostWorkHubCoordinationCoordinator {
             'action_conflict',
             'WorkHub correction source belongs to a retired work generation',
           );
-        const stopRequest = await this.#stores.readWorkHubStopRequest(input.replacesDelegationId);
-        if (stopRequest) {
-          const resolution = await this.#stores.readWorkHubStopResolution(
-            input.replacesDelegationId,
+        if ((await readWorkHubStopProjection(this.#stores, input.replacesDelegationId))?.retires)
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'WorkHub delegation already has a stop claim',
           );
-          if (resolution?.outcome !== 'not_owned') {
-            throw new WorkHubActionGateFailure(
-              'action_conflict',
-              'WorkHub delegation already has a stop claim',
-            );
-          }
-        }
         const header = await this.#stores.readHeaderSnapshot(WORKHUB_COORDINATION_SESSION_ID);
         if (!validCoordinationHeader(header)) {
           throw new WorkHubActionEffectFailure(
@@ -722,6 +716,10 @@ export class HostWorkHubCoordinationCoordinator {
         stopsDelegationId: request.stopsDelegationId,
         targetSessionId: request.targetSessionId,
         outcome: input.outcome,
+        ...(request.taskStop === true ||
+        (input.outcome === 'not_owned' && input.targetTurnId === undefined)
+          ? { taskStop: true as const }
+          : {}),
         ...(input.targetTurnId ? { targetTurnId: input.targetTurnId } : {}),
       }),
       additionalMessages: async (resolved) => {
@@ -734,9 +732,12 @@ export class HostWorkHubCoordinationCoordinator {
           primary !== undefined &&
           priorRequest !== undefined &&
           !workHubStopRetiresDelegation(priorRequest, primary);
-        if (request.taskStop === true || priorNoop) {
-          // A modern no-op must not occupy the immutable retirement slot.
-          if (!workHubStopRetiresDelegation(request, resolved)) return [];
+        if (
+          workHubStopRetiresDelegation(request, resolved) &&
+          (request.taskStop === true || priorNoop)
+        ) {
+          // Retirements supersede observations without rewriting them. No-op
+          // observations still settle older unresolved requests in the old slots.
           if (primary && primary.outcome !== 'not_owned' && !priorNoop) return [];
           return [
             {

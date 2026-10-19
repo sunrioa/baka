@@ -393,6 +393,17 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(requested), requested);
+    const unknownTurn = {
+      ...resolved,
+      outcome: 'not_owned',
+      targetTurnId: undefined,
+      taskStop: true,
+    };
+    assert.deepEqual(decodeCanonicalMessage(unknownTurn), unknownTurn);
+    const { taskStop: _marker, ...legacyUnknownTurn } = unknownTurn;
+    assert.throws(() => decodeCanonicalMessage(legacyUnknownTurn));
+    assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, taskStop: false }));
+    assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, outcome: 'stop_delivered' }));
     const bound = {
       ...requested,
       workId: 'original-action',

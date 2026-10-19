@@ -1026,107 +1026,118 @@ test('old and task-bound stop requests retain exact set snapshots across SQLite 
   }
 });
 
-test('an unresolved stop claim blocks replacement while not_owned releases the link', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-stop-arbitration-'));
-  const store = createSessionStore(root);
-  try {
-    await createCoordinationSession(store, root);
-    const source = await store.create({
-      cwd: root,
-      name: 'Payments',
-      llmConnectionSlug: 'test',
-      model: 'test',
-      permissionMode: 'ask',
-    });
-    const destination = await store.create({
-      cwd: root,
-      name: 'Login',
-      llmConnectionSlug: 'test',
-      model: 'test',
-      permissionMode: 'ask',
-    });
-    const original = assignmentRequest('stop-source', source.id, 'Payments', 'source-turn');
-    await store.assignWorkHubMessage(original);
-    const delegationSuffix = createHash('sha256')
-      .update(original.assignment.delegationId)
-      .digest('hex')
-      .slice(0, 48);
-    const request: WorkHubDelegationStopRequestedMessage = {
-      type: 'workhub_coordination',
-      id: `whq_${delegationSuffix}`,
-      turnId: 'stop-action',
-      ts: 11,
-      schemaVersion: 3,
-      kind: 'delegation_stop_requested',
-      actionId: 'stop-action',
-      actionFingerprint: `sha256:${'d'.repeat(64)}`,
-      coordinationTurnId: 'stop-action',
-      stopsActionId: original.assignment.actionId,
-      stopsDelegationId: original.assignment.delegationId,
-      targetSessionId: source.id,
-      targetMessageId: original.assignment.targetMessageId,
-      targetSessionName: 'Payments',
-      userText: 'Stop Payments',
-    };
-    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [request]);
-    assert.deepEqual(await store.readWorkHubStopRequest(original.assignment.delegationId), request);
+for (const observation of ['not_owned', 'modern_noop'] as const)
+  test(`an unresolved stop claim blocks replacement while nonretiring evidence releases the link (${observation})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-workhub-stop-arbitration-'));
+    const store = createSessionStore(root);
+    try {
+      await createCoordinationSession(store, root);
+      const source = await store.create({
+        cwd: root,
+        name: 'Payments',
+        llmConnectionSlug: 'test',
+        model: 'test',
+        permissionMode: 'ask',
+      });
+      const destination = await store.create({
+        cwd: root,
+        name: 'Login',
+        llmConnectionSlug: 'test',
+        model: 'test',
+        permissionMode: 'ask',
+      });
+      const original = assignmentRequest('stop-source', source.id, 'Payments', 'source-turn');
+      await store.assignWorkHubMessage(original);
+      const delegationSuffix = createHash('sha256')
+        .update(original.assignment.delegationId)
+        .digest('hex')
+        .slice(0, 48);
+      const request: WorkHubDelegationStopRequestedMessage = {
+        type: 'workhub_coordination',
+        id: `whq_${delegationSuffix}`,
+        turnId: 'stop-action',
+        ts: 11,
+        schemaVersion: 3,
+        kind: 'delegation_stop_requested',
+        actionId: 'stop-action',
+        actionFingerprint: `sha256:${'d'.repeat(64)}`,
+        coordinationTurnId: 'stop-action',
+        stopsActionId: original.assignment.actionId,
+        stopsDelegationId: original.assignment.delegationId,
+        targetSessionId: source.id,
+        targetMessageId: original.assignment.targetMessageId,
+        targetSessionName: 'Payments',
+        userText: 'Stop Payments',
+        ...(observation === 'modern_noop'
+          ? {
+              taskStop: true,
+              workId: original.assignment.actionId,
+              executionBinding: 'root-binding',
+            }
+          : {}),
+      };
+      await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [request]);
+      assert.deepEqual(
+        await store.readWorkHubStopRequest(original.assignment.delegationId),
+        request,
+      );
 
-    const base = assignmentRequest('after-stop', destination.id, 'Login', 'destination-turn');
-    const assignment: WorkHubDelegationAssignedMessage = {
-      ...base.assignment,
-      schemaVersion: 2,
-      replacesActionId: original.assignment.actionId,
-      replacesDelegationId: original.assignment.delegationId,
-    };
-    const supersession: WorkHubDelegationSupersededMessage = {
-      type: 'workhub_coordination',
-      id: `whx_${delegationSuffix}`,
-      turnId: assignment.actionId,
-      ts: assignment.ts,
-      schemaVersion: 2,
-      kind: 'delegation_superseded',
-      actionId: assignment.actionId,
-      actionFingerprint: assignment.actionFingerprint,
-      coordinationTurnId: assignment.coordinationTurnId,
-      supersededActionId: original.assignment.actionId,
-      supersededDelegationId: original.assignment.delegationId,
-      replacementDelegationId: assignment.delegationId,
-    };
-    await assert.rejects(
-      store.assignWorkHubMessage({ ...base, assignment, supersession }),
-      /stop claim/u,
-    );
+      const base = assignmentRequest('after-stop', destination.id, 'Login', 'destination-turn');
+      const assignment: WorkHubDelegationAssignedMessage = {
+        ...base.assignment,
+        schemaVersion: 2,
+        replacesActionId: original.assignment.actionId,
+        replacesDelegationId: original.assignment.delegationId,
+      };
+      const supersession: WorkHubDelegationSupersededMessage = {
+        type: 'workhub_coordination',
+        id: `whx_${delegationSuffix}`,
+        turnId: assignment.actionId,
+        ts: assignment.ts,
+        schemaVersion: 2,
+        kind: 'delegation_superseded',
+        actionId: assignment.actionId,
+        actionFingerprint: assignment.actionFingerprint,
+        coordinationTurnId: assignment.coordinationTurnId,
+        supersededActionId: original.assignment.actionId,
+        supersededDelegationId: original.assignment.delegationId,
+        replacementDelegationId: assignment.delegationId,
+      };
+      await assert.rejects(
+        store.assignWorkHubMessage({ ...base, assignment, supersession }),
+        /stop claim/u,
+      );
 
-    const resolution: WorkHubDelegationStopResolvedMessage = {
-      type: 'workhub_coordination',
-      id: `whz_${delegationSuffix}`,
-      turnId: 'stop-action',
-      ts: 12,
-      schemaVersion: 3,
-      kind: 'delegation_stop_resolved',
-      actionId: 'stop-action',
-      actionFingerprint: request.actionFingerprint,
-      coordinationTurnId: 'stop-action',
-      stopsActionId: original.assignment.actionId,
-      stopsDelegationId: original.assignment.delegationId,
-      targetSessionId: source.id,
-      targetTurnId: 'shared-turn',
-      outcome: 'not_owned',
-    };
-    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [resolution]);
-    assert.deepEqual(
-      await store.readWorkHubStopResolution(original.assignment.delegationId),
-      resolution,
-    );
-    assert.equal(
-      (await store.assignWorkHubMessage({ ...base, assignment, supersession })).kind,
-      'assigned',
-    );
-  } finally {
-    await store.close?.();
-    await rm(root, { recursive: true, force: true });
-  }
-});
+      const resolution: WorkHubDelegationStopResolvedMessage = {
+        type: 'workhub_coordination',
+        id: `whz_${delegationSuffix}`,
+        turnId: 'stop-action',
+        ts: 12,
+        schemaVersion: 3,
+        kind: 'delegation_stop_resolved',
+        actionId: 'stop-action',
+        actionFingerprint: request.actionFingerprint,
+        coordinationTurnId: 'stop-action',
+        stopsActionId: original.assignment.actionId,
+        stopsDelegationId: original.assignment.delegationId,
+        targetSessionId: source.id,
+        targetTurnId: 'shared-turn',
+        outcome: observation === 'modern_noop' ? 'already_terminal' : 'not_owned',
+      };
+      await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [resolution]);
+      assert.deepEqual(
+        await store.readWorkHubStopResolution(original.assignment.delegationId),
+        resolution,
+      );
+      assert.equal(
+        (await store.assignWorkHubMessage({ ...base, assignment, supersession })).kind,
+        'assigned',
+      );
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
 function terminalSuffix(delegationId: string): string {
   return createHash('sha256').update(delegationId, 'utf8').digest('hex').slice(0, 48);

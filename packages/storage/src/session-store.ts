@@ -581,51 +581,8 @@ class SqliteSessionStore implements SessionAuthorityStore {
     delegationId: string,
     actionId?: string,
   ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
-    if (!actionId) {
-      const retirement = await this.readWorkHubCoordinationMessage(
-        `whzs_${workHubIdentitySuffix(delegationId)}`,
-      );
-      if (
-        retirement?.type === 'workhub_coordination' &&
-        retirement.kind === 'delegation_stop_resolved' &&
-        retirement.outcome !== 'not_owned'
-      )
-        return retirement;
-      const terminal = await this.readWorkHubCoordinationMessage(
-        `whzt_${workHubIdentitySuffix(delegationId)}`,
-      );
-      if (
-        terminal?.type === 'workhub_coordination' &&
-        terminal.kind === 'delegation_stop_resolved' &&
-        terminal.outcome !== 'not_owned'
-      )
-        return terminal;
-    }
-    const scoped = actionId
-      ? await this.readWorkHubCoordinationMessage(
-          `whz_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-        )
-      : undefined;
-    const primary = await this.readWorkHubCoordinationMessage(
-      `whz_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      scoped ??
-      (actionId &&
-      primary?.type === 'workhub_coordination' &&
-      primary.kind === 'delegation_stop_resolved' &&
-      primary.actionId !== actionId
-        ? undefined
-        : primary);
-    if (!message && !actionId) {
-      // Modern no-ops are per-action observations, not permanent retirement.
-      const first = await this.readWorkHubStopRequest(delegationId);
-      if (first?.taskStop === true)
-        return this.readWorkHubStopResolution(delegationId, first.actionId);
-    }
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_resolved'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopResolution(delegationId, actionId);
   }
 
   async claimWorkHubAction(claim: WorkHubActionClaim): Promise<WorkHubActionClaimOutcome> {

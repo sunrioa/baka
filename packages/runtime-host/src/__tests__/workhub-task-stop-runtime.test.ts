@@ -29,7 +29,10 @@ import {
   type WorkHubDelegationStopResolvedMessage,
 } from '@maka/core/session';
 import { createWorkHubTaskStopRuntime } from '../server/workhub-task-stop-runtime.js';
-import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import {
+  SessionAdmissionGate,
+  type SessionAdmissionLease,
+} from '../server/session-admission-gate.js';
 import {
   workHubPendingStopBinding,
   workHubStopBindingMatches,
@@ -114,6 +117,32 @@ function fixture() {
   };
   // Mock external authorities, real admission leases and orchestration. Actual
   // SQLite/Root/provider composition is verified separately, not by this fixture.
+  const perform = async (
+    source: WorkHubDelegationAssignedMessage,
+    request: WorkHubDelegationStopRequestedMessage,
+    validate: (lease: SessionAdmissionLease) => Promise<boolean>,
+    lease: SessionAdmissionLease,
+    pendingOnly: boolean,
+  ) => {
+    f.beforeRetire?.();
+    const current = target(source);
+    if (
+      !(await validate(lease)) ||
+      !workHubStopBindingMatches(source, request.executionBinding!, current)
+    )
+      return { outcome: 'not_owned' as const };
+    if (pendingOnly && current.execution) return { outcome: 'owned_execution' as const };
+    const workId = source.work!.id;
+    if (f.failWork === workId) {
+      f.failWork = undefined;
+      throw new Error('injected effect failure');
+    }
+    f.effects.push(workId);
+    f.trace.push('effect:' + workId);
+    return current.execution
+      ? { outcome: 'stop_delivered' as const, targetTurnId: current.execution.turnId }
+      : { outcome: 'cancelled_pending' as const };
+  };
   const runtime = createWorkHubTaskStopRuntime({
     admission,
     onError: () => {},
@@ -233,25 +262,16 @@ function fixture() {
         return resolution;
       },
     },
+    cancelPendingTaskStop: (source, request, validate, lease) =>
+      admission.runAdmitted(source.targetSessionId, lease, () =>
+        perform(source, request, validate, lease, true),
+      ),
     retireTaskStop: (source, request, validate) =>
       admission.run(source.targetSessionId, async (lease) => {
-        f.beforeRetire?.();
-        const current = target(source);
-        if (
-          !(await validate(lease)) ||
-          !workHubStopBindingMatches(source, request.executionBinding!, current)
-        )
-          return { outcome: 'not_owned' };
-        const workId = source.work!.id;
-        if (f.failWork === workId) {
-          f.failWork = undefined;
-          throw new Error('injected effect failure');
-        }
-        f.effects.push(workId);
-        f.trace.push('effect:' + workId);
-        return current.execution
-          ? { outcome: 'stop_delivered', targetTurnId: current.execution.turnId }
-          : { outcome: 'cancelled_pending' };
+        const result = await perform(source, request, validate, lease, false);
+        if (result.outcome === 'owned_execution')
+          assert.fail('Full retirement cannot defer execution');
+        return result;
       }),
     requestForm: async (form) => {
       const offered = await form.create();
@@ -321,6 +341,21 @@ test('confirm the whole known set, prepare all facts, then cancel queued targets
       ],
     );
   }
+});
+
+test('a pending target promoted during confirmation cannot launch its queued sibling when stopped', async () => {
+  const f = fixture();
+  f.pending.add('b');
+  f.pending.add('c');
+  f.state.beforeConfirm = () => f.pending.delete('b');
+  const result = await stop(f, { ...input, taskIds: ['b', 'c'] });
+  assert.deepEqual(f.trace, ['confirm', 'prepare:b', 'prepare:c', 'effect:c', 'effect:b']);
+  assert.equal(result.kind, 'result');
+  if (result.kind === 'result')
+    assert.deepEqual(
+      result.targets.map((row) => row.outcome),
+      ['stop_delivered', 'cancelled_pending'],
+    );
 });
 
 test('a binding changed while confirmation is open rejects the whole set without effects', async () => {

@@ -51,11 +51,7 @@ import {
 } from './workhub-coordination-action-gate.js';
 import type { OperationHandlerMap } from './operation-dispatcher.js';
 import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
-import {
-  workHubPendingStopBinding,
-  workHubStopBindingMatches,
-  type WorkHubStopTarget,
-} from './workhub-stop-binding.js';
+import { workHubStopBindingMatches, type WorkHubStopTarget } from './workhub-stop-binding.js';
 
 type Authority = NonNullable<
   Awaited<ReturnType<RootTurnCoordinator['readActiveWorkHubRoutingRequest']>>
@@ -64,6 +60,7 @@ interface Captured {
   readonly source: WorkHubDelegationAssignedMessage;
   readonly target: WorkHubTaskStopTarget;
 }
+type PendingStopResult = WorkHubRetirementResult | { readonly outcome: 'owned_execution' };
 const digest = (value: unknown): `sha256:${string}` =>
   `sha256:${createHash('sha256').update(JSON.stringify(value)).digest('hex')}`;
 const targetIdentity = (target: WorkHubTaskStopTarget) => [
@@ -99,6 +96,12 @@ export function createWorkHubTaskStopRuntime(options: {
     request: WorkHubDelegationStopRequestedMessage,
     validate: (lease: SessionAdmissionLease) => Promise<boolean>,
   ) => Promise<WorkHubRetirementResult>;
+  readonly cancelPendingTaskStop: (
+    source: WorkHubDelegationAssignedMessage,
+    request: WorkHubDelegationStopRequestedMessage,
+    validate: (lease: SessionAdmissionLease) => Promise<boolean>,
+    admission: SessionAdmissionLease,
+  ) => Promise<PendingStopResult>;
   readonly requestForm?: HostInteractionCoordinator['requestForm'];
   readonly onError: (error: unknown) => void;
 }) {
@@ -430,36 +433,54 @@ export function createWorkHubTaskStopRuntime(options: {
             ),
           );
         }
-        return prepared;
+        // All selected Sessions are still leased. Cancel every queued Message
+        // before releasing any lane that could promote it. Owned Roots only defer.
+        const pending = new Map<string, PendingStopResult>();
+        for (const [index, item] of items.entries()) {
+          const request = prepared[index]!;
+          if (await sessions.readWorkHubStopResolution(item.source.delegationId, request.actionId))
+            continue;
+          const removed =
+            (await sessions.probeSessionRemoval(item.target.targetSessionId)).kind === 'removed';
+          pending.set(
+            item.target.workId,
+            removed
+              ? { outcome: 'already_terminal' }
+              : await options.cancelPendingTaskStop(
+                  item.source,
+                  request,
+                  () => eligible(item),
+                  lease,
+                ),
+          );
+        }
+        return { requests: prepared, pending };
       });
     // The distinct-target check and the first visible stop request share one
     // admission. A concurrent single-target command must observe that request.
     // Only native confirmation waits outside the leases, then revalidates all.
-    let requests = await admit(false);
-    if (!requests) {
+    let admitted = await admit(false);
+    if (!admitted) {
       if (!(await confirm()))
         return { actionId: input.actionId, kind: 'cancelled', taskIds: input.taskIds };
-      requests = await admit(true);
-      if (!requests) conflict('The confirmed stop set could not be admitted');
+      admitted = await admit(true);
+      if (!admitted) conflict('The confirmed stop set could not be admitted');
     }
+    const { requests, pending } = admitted;
     const results = new Map<string, WorkHubTaskStopTargetResult>();
-    const queueFirst = [...items.entries()].sort(
-      ([, a], [, b]) =>
-        Number(b.target.executionBinding === workHubPendingStopBinding(b.source)) -
-        Number(a.target.executionBinding === workHubPendingStopBinding(a.source)),
-    );
-    for (const [index, item] of queueFirst) {
+    for (const [index, item] of items.entries()) {
       const request = requests[index]!;
       let resolved = await sessions.readWorkHubStopResolution(
         item.source.delegationId,
         request.actionId,
       );
       if (!resolved) {
-        const removed =
-          (await sessions.probeSessionRemoval(item.target.targetSessionId)).kind === 'removed';
-        const result = removed
-          ? { outcome: 'already_terminal' as const }
-          : await options.retireTaskStop(item.source, request, () => eligible(item));
+        const staged = pending.get(item.target.workId);
+        if (!staged) conflict('Task Stop preparation outcome is unavailable');
+        const result =
+          staged.outcome === 'owned_execution'
+            ? await options.retireTaskStop(item.source, request, () => eligible(item))
+            : staged;
         if (result.outcome !== 'recovering')
           resolved = await options.coordination.resolveTaskStop({
             request,

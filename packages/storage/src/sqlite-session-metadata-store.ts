@@ -136,6 +136,8 @@ import {
   type WorkHubActionClaimOutcome,
   type WorkHubActionOperation,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationStopRequestedMessage,
+  type WorkHubDelegationStopResolvedMessage,
   type WorkHubDelegationSupersededMessage,
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
@@ -2056,23 +2058,9 @@ export class SqliteSessionMetadataStore {
           .update(assignment.replacesDelegationId)
           .digest('hex')
           .slice(0, 48);
-        const stopRequest = this.readMessageByIdSync(
-          WORKHUB_COORDINATION_SESSION_ID,
-          `whq_${abortSuffix}`,
-        );
-        if (stopRequest) {
-          const stopResolution = this.readMessageByIdSync(
-            WORKHUB_COORDINATION_SESSION_ID,
-            `whz_${abortSuffix}`,
-          );
-          if (
-            stopResolution?.type !== 'workhub_coordination' ||
-            stopResolution.kind !== 'delegation_stop_resolved' ||
-            stopResolution.outcome !== 'not_owned'
-          ) {
-            throw new SessionMetadataConflictError('WorkHub delegation already has a stop claim');
-          }
-        }
+        const stop = this.readWorkHubStopProjectionSync(assignment.replacesDelegationId);
+        if (stop.request && stop.retires)
+          throw new SessionMetadataConflictError('WorkHub delegation already has a stop claim');
         const existingAbort = this.readMessageByIdSync(
           WORKHUB_COORDINATION_SESSION_ID,
           `whb_${abortSuffix}`,
@@ -2275,6 +2263,95 @@ export class SqliteSessionMetadataStore {
     return existing;
   }
 
+  private readWorkHubStopRequestSync(
+    delegationId: string,
+    actionId?: string,
+  ): WorkHubDelegationStopRequestedMessage | undefined {
+    const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
+    const first = this.readMessageByIdSync(
+      WORKHUB_COORDINATION_SESSION_ID,
+      `whq_${suffix(delegationId)}`,
+    );
+    const scoped = actionId
+      ? this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `whq_${suffix(JSON.stringify([delegationId, actionId]))}`,
+        )
+      : undefined;
+    const value = scoped ?? first;
+    return value?.type === 'workhub_coordination' &&
+      value.kind === 'delegation_stop_requested' &&
+      (!actionId || value.actionId === actionId)
+      ? value
+      : undefined;
+  }
+
+  private readWorkHubStopResolutionSync(
+    delegationId: string,
+    actionId?: string,
+  ): WorkHubDelegationStopResolvedMessage | undefined {
+    const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
+    const read = (prefix: string) =>
+      this.readMessageByIdSync(
+        WORKHUB_COORDINATION_SESSION_ID,
+        `${prefix}_${suffix(delegationId)}`,
+      );
+    if (!actionId)
+      for (const prefix of ['whzs', 'whzt']) {
+        const value = read(prefix);
+        if (
+          value?.type === 'workhub_coordination' &&
+          value.kind === 'delegation_stop_resolved' &&
+          value.outcome !== 'not_owned'
+        )
+          return value;
+      }
+    const scoped = actionId
+      ? this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `whz_${suffix(JSON.stringify([delegationId, actionId]))}`,
+        )
+      : undefined;
+    const value = scoped ?? read('whz');
+    if (
+      value?.type === 'workhub_coordination' &&
+      value.kind === 'delegation_stop_resolved' &&
+      (!actionId || value.actionId === actionId)
+    )
+      return value;
+    if (!actionId) {
+      const first = this.readWorkHubStopRequestSync(delegationId);
+      if (first?.taskStop === true)
+        return this.readWorkHubStopResolutionSync(delegationId, first.actionId);
+    }
+    return undefined;
+  }
+
+  async readWorkHubStopResolution(
+    delegationId: string,
+    actionId?: string,
+  ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
+    this.assertOpen();
+    return this.readTransaction(() => this.readWorkHubStopResolutionSync(delegationId, actionId));
+  }
+
+  private readWorkHubStopProjectionSync(delegationId: string) {
+    const request = this.readWorkHubStopRequestSync(delegationId);
+    const resolution = this.readWorkHubStopResolutionSync(delegationId);
+    const matched = resolution
+      ? this.readWorkHubStopRequestSync(delegationId, resolution.actionId)
+      : request;
+    return {
+      request,
+      resolution,
+      retires: matched
+        ? workHubStopRetiresDelegation(matched, resolution)
+        : resolution
+          ? resolution.outcome !== 'not_owned'
+          : request !== undefined,
+    };
+  }
+
   private assertWorkHubTaskInputSourceSync(
     input: WorkHubTaskInputMessage,
   ): WorkHubDelegationAssignedMessage {
@@ -2310,18 +2387,12 @@ export class SqliteSessionMetadataStore {
     const delegation = suffix(source.delegationId);
     const read = (prefix: string) =>
       this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `${prefix}_${delegation}`);
-    const stop = read('whq');
-    const resolution = read('whzt') ?? read('whz');
+    const stop = this.readWorkHubStopProjectionSync(source.delegationId);
     if (
       read('whp') ||
       read('whx') ||
       read('whb') ||
-      (stop &&
-        !(
-          resolution?.type === 'workhub_coordination' &&
-          resolution.kind === 'delegation_stop_resolved' &&
-          (resolution.outcome === 'not_owned' || input.mode === 'continuation')
-        ))
+      (stop.request && stop.retires && !(stop.resolution && input.mode === 'continuation'))
     )
       throw new SessionMetadataConflictError('The selected work is being retired');
     return source;
@@ -2392,8 +2463,7 @@ export class SqliteSessionMetadataStore {
         WORKHUB_COORDINATION_SESSION_ID,
         `${prefix}_${suffix(ref.delegationId)}`,
       );
-    const stop = terminal('whq');
-    const stopResolution = terminal('whzt') ?? terminal('whz');
+    const stop = this.readWorkHubStopProjectionSync(ref.delegationId);
     if (
       assignment?.type !== 'workhub_coordination' ||
       assignment.kind !== 'delegation_assigned' ||
@@ -2413,12 +2483,7 @@ export class SqliteSessionMetadataStore {
       terminal('whp') ||
       terminal('whx') ||
       terminal('whb') ||
-      (stop &&
-        !(
-          stopResolution?.type === 'workhub_coordination' &&
-          stopResolution.kind === 'delegation_stop_resolved' &&
-          stopResolution.outcome === 'not_owned'
-        ))
+      (stop.request && stop.retires)
     )
       throw new SessionMetadataConflictError('Peer task identity is unavailable or retired');
     return assignment;
@@ -2934,51 +2999,8 @@ export class SqliteSessionMetadataStore {
         ) {
           continue;
         }
-        const retirement = this.readMessageByIdSync(
-          WORKHUB_COORDINATION_SESSION_ID,
-          `whzs_${terminalSuffix}`,
-        );
-        const stopResolution =
-          retirement?.type === 'workhub_coordination' &&
-          retirement.kind === 'delegation_stop_resolved' &&
-          retirement.outcome !== 'not_owned'
-            ? retirement
-            : (this.readMessageByIdSync(
-                WORKHUB_COORDINATION_SESSION_ID,
-                `whzt_${terminalSuffix}`,
-              ) ??
-              this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whz_${terminalSuffix}`));
-        if (
-          !includeStopped &&
-          stopResolution?.type === 'workhub_coordination' &&
-          stopResolution.kind === 'delegation_stop_resolved' &&
-          stopResolution.outcome !== 'not_owned'
-        ) {
-          let retires = true;
-          if (stopResolution.outcome === 'already_terminal') {
-            const first = this.readMessageByIdSync(
-              WORKHUB_COORDINATION_SESSION_ID,
-              `whq_${terminalSuffix}`,
-            );
-            const actionSuffix = createHash('sha256')
-              .update(JSON.stringify([assignment.delegationId, stopResolution.actionId]))
-              .digest('hex')
-              .slice(0, 48);
-            const matched =
-              first?.type === 'workhub_coordination' &&
-              first.kind === 'delegation_stop_requested' &&
-              first.actionId === stopResolution.actionId
-                ? first
-                : this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whq_${actionSuffix}`);
-            if (
-              matched?.type === 'workhub_coordination' &&
-              matched.kind === 'delegation_stop_requested' &&
-              matched.stopsDelegationId === assignment.delegationId
-            )
-              retires = workHubStopRetiresDelegation(matched, stopResolution);
-          }
-          if (retires) continue;
-        }
+        const stop = this.readWorkHubStopProjectionSync(assignment.delegationId);
+        if (!includeStopped && stop.resolution && stop.retires) continue;
         const workId = assignment.work?.id ?? assignment.actionId;
         if (!generations.has(workId)) {
           const latest = this.readLatestWorkHubAssignmentSync(workId);
@@ -3631,7 +3653,7 @@ export class SqliteSessionMetadataStore {
                   (length(message.message_id)=52 AND substr(message.message_id,1,4)
                     IN ('wha_', 'whp_', 'whx_', 'whb_', 'whq_', 'whz_'))
                   OR (length(message.message_id)=53 AND substr(message.message_id,1,5)
-                    IN ('whti_', 'whzt_')))`
+                    IN ('whti_', 'whzt_', 'whzs_')))`
                 : ''
             }
             ${
