@@ -21,6 +21,7 @@ import { isExecutorConfiguration, type ExecutorConfiguration } from './executor-
 
 import { isWorkHubActionReceipt, type WorkHubActionReceipt } from './workhub-action-result.js';
 import { isWorkHubTaskInputMessage, type WorkHubTaskInputMessage } from './workhub-task-input.js';
+import { isWorkHubTaskStopFields, type WorkHubTaskStopFields } from './workhub-task-stop.js';
 import {
   isWorkHubEvidenceRequest,
   isWorkHubEvidenceResolution,
@@ -1302,7 +1303,7 @@ export type WorkHubDelegationStopOutcome =
   | 'not_owned';
 
 /** Durable destructive claim written before attempting to retire one delegation. */
-export interface WorkHubDelegationStopRequestedMessage {
+export interface WorkHubDelegationStopRequestedMessage extends WorkHubTaskStopFields {
   type: 'workhub_coordination';
   id: string;
   turnId: string;
@@ -1688,7 +1689,7 @@ const WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE =
       'targetSessionName',
       'userText',
     ],
-    ['workId', 'executionBinding'],
+    ['workId', 'executionBinding', 'taskStop', 'stopSet'],
   );
 const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
   defineObjectShape<WorkHubDelegationStopResolvedMessage>()(
@@ -1917,6 +1918,7 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
     return (
       hasMessageEnvelope(message, true) &&
       hasExactShape(message, WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE) &&
+      isWorkHubTaskStopFields(message) &&
       (message.workId === undefined ||
         (typeof message.workId === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(message.workId))) &&
       (message.executionBinding === undefined ||
