@@ -837,6 +837,14 @@ export async function createExecutionRuntimeHostComposition(
         ) => Promise<string[]>)
       | undefined;
     const hostChanges = new HostChangeFeed();
+    let workHubTaskIndex: ReturnType<typeof createWorkHubTaskIndexProjection> | undefined;
+    const publishSessionCatalog: HostChangeFeed['publishSessionCatalog'] = (
+      sessionId,
+      attention,
+    ) => {
+      hostChanges.publishSessionCatalog(sessionId, attention);
+      sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
+    };
     // Startup, once, in the background: the Host owns the model catalog, so it
     // is the one process that gets to ask models.dev what is true today. On any
     // failure the build's committed snapshot stands.
@@ -918,7 +926,7 @@ export async function createExecutionRuntimeHostComposition(
       openedProjectCatalog,
       { publish: () => hostChanges.publishProjectCatalog() },
       {
-        publish: (sessionId: string) => hostChanges.publishSessionCatalog(sessionId),
+        publish: publishSessionCatalog,
       },
       projectMembership,
       context.requestDrain,
@@ -927,7 +935,6 @@ export async function createExecutionRuntimeHostComposition(
     let rootCoordinator: RootTurnCoordinator | undefined;
     let workHubCoordination: HostWorkHubCoordinationCoordinator;
     let workHubResults: ReturnType<typeof createWorkHubResultRuntime> | undefined;
-    let workHubTaskIndex: ReturnType<typeof createWorkHubTaskIndexProjection> | undefined;
     let workHubEvidence: ReturnType<typeof createWorkHubEvidenceRuntime> | undefined;
     let workHubInspection: MakaTool | undefined;
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
@@ -1036,8 +1043,7 @@ export async function createExecutionRuntimeHostComposition(
             console.warn('[runtime-host] Could not read notification privacy policy', error);
           }
         }
-        hostChanges.publishSessionCatalog(sessionId, attention);
-        sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
+        publishSessionCatalog(sessionId, attention);
       },
       context.sessionAccessAuthority,
       async (sessionId, execution) => {
@@ -3081,7 +3087,7 @@ export async function createExecutionRuntimeHostComposition(
         await requireSessionManager(manager).recoverInterruptedSessionsForSessions(sessionIds);
         await stores.runtimeEventStore.rebuildTerminalToolProjectionsForSessions(sessionIds);
       },
-      onImported: (sessionId) => hostChanges.publishSessionCatalog(sessionId),
+      onImported: publishSessionCatalog,
     });
     const externalSessions = new HostExternalSessionCoordinator({
       adapters: createExternalSessionAdapterRegistry(),
@@ -3127,6 +3133,7 @@ export async function createExecutionRuntimeHostComposition(
       isSessionActive: (sessionId) => coordinator.readRootState(sessionId).kind !== 'idle',
       requestDrain: context.requestDrain,
     });
+    const retirementCapabilities = requireClientCapabilities(clientCapabilities);
     const sessionRetirement = new HostSessionRetirementCoordinator({
       stores: stores.sessionStore,
       admission: sessionAdmission,
@@ -3147,7 +3154,19 @@ export async function createExecutionRuntimeHostComposition(
           await pluginExecutors.retireConversation(sessionId);
         },
       },
-      capabilities: clientCapabilities,
+      capabilities: {
+        retireSessions: async (sessionIds) => {
+          try {
+            await retirementCapabilities.retireSessions(sessionIds);
+          } finally {
+            // Retirement has committed by this point, including when later
+            // capability cleanup fails and the Host must recover. The cache
+            // must not keep a deleted manual Session in search results.
+            for (const sessionId of sessionIds)
+              sessionAdmission.detach(() => workHubTaskIndex?.notify(sessionId));
+          }
+        },
+      },
       continuity: continuityCoordinator,
       artifacts: openedArtifactStore,
       sessionTodo: sessionTodoStore,

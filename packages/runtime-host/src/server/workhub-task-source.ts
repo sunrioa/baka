@@ -52,9 +52,12 @@ export async function readCurrentWorkHubTaskSource(
     evidence?: Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'taskExecution'>;
   },
   workId: string,
+  /** Advisory projection only: its watermark already located this canonical fact.
+   * Effect paths must re-read current authority and must not supply this shortcut. */
+  observedLatest?: WorkHubDelegationAssignedMessage,
 ): Promise<WorkHubDelegationAssignedMessage | undefined> {
   const { stores, messages, executions } = options;
-  const latest = await stores.sessionStore.readLatestWorkHubAssignment(workId);
+  const latest = observedLatest ?? (await stores.sessionStore.readLatestWorkHubAssignment(workId));
   if (!latest || (latest.work?.id ?? latest.actionId) !== workId) return undefined;
   const active = executions.readRootState(latest.targetSessionId);
   if (active.kind !== 'active') return latest;

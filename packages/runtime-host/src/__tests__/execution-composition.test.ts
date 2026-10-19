@@ -1434,6 +1434,112 @@ test('WorkHub find reads configured connection pricing through the production co
   });
 });
 
+test('WorkHub find discovers a manual Session imported after its first lookup', async () => {
+  await withCompositionRoot(async ({ root: sourceRoot, owner: sourceOwner }) => {
+    const sourceConnectionId = await configureFakeDefaultTarget(sourceOwner);
+    const source = await createExecutionRuntimeHostComposition(compositionContext(sourceOwner));
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'import-discovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const sourceStores = await openInteractiveExecutionStoresForWrite(sourceOwner.lease);
+      const manual = await sourceStores.sessionStore.create({
+        cwd: sourceRoot,
+        name: 'Imported manual discovery',
+        model: 'fake-model',
+        llmConnectionId: sourceConnectionId,
+        llmConnectionSlug: 'fake',
+        permissionMode: 'ask',
+      });
+      const bundle = join(sourceRoot, 'manual-discovery.maka-session');
+      const exported = await source.handlers['session-bundle.export'](
+        { sessionId: manual.id, destination: bundle },
+        context,
+      );
+      assert.ok(exported.ok, JSON.stringify(exported));
+      await withCompositionRoot(async ({ owner }) => {
+        await configureFakeDefaultTarget(owner);
+        const target = await createExecutionRuntimeHostComposition(compositionContext(owner));
+        try {
+          const before = await target.handlers['workhub.tasks.find']({}, context);
+          assert.ok(before.ok);
+          assert.deepEqual(before.result.items, []);
+          const imported = await target.handlers['session-bundle.import'](
+            { source: bundle },
+            context,
+          );
+          assert.ok(imported.ok, JSON.stringify(imported));
+          const after = await target.handlers['workhub.tasks.find'](
+            { query: manual.name },
+            context,
+          );
+          assert.ok(after.ok, JSON.stringify(after));
+          assert.equal(
+            after.result.items.find((item) => item.kind === 'session' && item.id === manual.id)
+              ?.available,
+            true,
+          );
+        } finally {
+          await target.close();
+        }
+      });
+    } finally {
+      await source.close();
+    }
+  });
+});
+
+test('WorkHub find removes a directly deleted manual Session without requiring restart', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    const connectionId = await configureFakeDefaultTarget(owner);
+    const composition = await createExecutionRuntimeHostComposition(compositionContext(owner));
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'remove-discovery',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const manual = await stores.sessionStore.create({
+        cwd: root,
+        name: 'Deleted manual discovery',
+        model: 'fake-model',
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        permissionMode: 'ask',
+      });
+      const before = await composition.handlers['workhub.tasks.find'](
+        { query: manual.name },
+        context,
+      );
+      assert.ok(before.ok);
+      assert.equal(before.result.items[0]?.id, manual.id);
+      const current = await stores.sessionStore.readCatalogRecord(manual.id);
+      const removed = await composition.handlers['session.remove'](
+        { sessionId: manual.id, expectedRevision: current.revision },
+        context,
+      );
+      assert.ok(removed.ok, JSON.stringify(removed));
+      const after = await composition.handlers['workhub.tasks.find'](
+        { query: manual.name },
+        context,
+      );
+      assert.ok(after.ok);
+      assert.deepEqual(after.result.items, []);
+      assert.equal(
+        await stores.sessionStore.workHubTaskIndex!.read('session', manual.id),
+        undefined,
+      );
+    } finally {
+      await composition.close();
+    }
+  });
+});
+
 test('hosted execution settles while its tracked environment resource remains verifiable', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);

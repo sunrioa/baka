@@ -840,7 +840,11 @@ export function createWorkHubResultRuntime(options: {
     },
   };
   async function projectTask(source: WorkHubDelegationAssignedMessage, detail = false) {
-    const current = await readCurrentWorkHubTaskSource(options, source.work?.id ?? source.actionId);
+    const current = await readCurrentWorkHubTaskSource(
+      options,
+      source.work?.id ?? source.actionId,
+      source,
+    );
     if (!current) return undefined;
     const basic = await admission.runMany(
       [WORKHUB_COORDINATION_SESSION_ID, current.targetSessionId],

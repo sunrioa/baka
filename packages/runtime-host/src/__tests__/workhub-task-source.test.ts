@@ -197,3 +197,14 @@ test('task source follows a proved safe-boundary continuation back to the actual
     'the located Message must still own the exact active lineage',
   );
 });
+
+test('an advisory indexed projection reuses its canonical watermark source without rescanning every other task', async () => {
+  const { f, options } = fixture();
+  options.stores.sessionStore.readLatestWorkHubAssignment = async () => {
+    assert.fail('a backfill must not rescan the full assignment ledger once per indexed task');
+  };
+  assert.equal(await readCurrentWorkHubTaskSource(options, 'work', f.latest), f.running);
+  f.active = false;
+  assert.equal(await readCurrentWorkHubTaskSource(options, 'work', f.latest), f.latest);
+  assert.equal(await readCurrentWorkHubTaskSource(options, 'other', f.latest), undefined);
+});

@@ -275,7 +275,10 @@ export function createWorkHubTaskIndexProjection(options: {
           entry.originActionId !== null,
         cwd: h?.cwd ?? entry.cwd,
         activityAt: Math.max(entry.activityAt, activityAt ?? source.ts),
-        sourceActionId: detail?.task.actionId ?? entry.sourceActionId,
+        // Keep the latest canonical fact located by the scan watermark. The
+        // actually running input can be older (for example a later withdrawn
+        // queued input) and is resolved separately by the execution projection.
+        sourceActionId: entry.sourceActionId,
         sessionNames: names(entry.sessionNames, h?.name ?? ''),
       },
       entry.dirtyRevision,
