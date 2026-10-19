@@ -32,6 +32,7 @@ export interface WorkHubStopTarget {
     readonly runId: string;
   };
   readonly initialExecution?: WorkHubStopTarget['execution'];
+  readonly pendingContinuationRequestId?: string;
 }
 
 export function workHubPendingStopBinding(source: StopSource): string {

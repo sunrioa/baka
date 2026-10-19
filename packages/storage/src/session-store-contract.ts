@@ -639,6 +639,8 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
   readWorkHubStopRequest(
     delegationId: string,
     actionId?: string,
+    /** Read-side pending-state check only; default keeps the original immutable claim. */
+    latest?: true,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined>;
   /** Whether this coordination Turn has already claimed a different stop target. */
   hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean>;

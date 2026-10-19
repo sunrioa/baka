@@ -23,6 +23,8 @@ import { z } from 'zod';
 import type {
   StoredMessage,
   WorkHubDelegationAssignedMessage,
+  WorkHubDelegationStopRequestedMessage,
+  WorkHubDelegationStopResolvedMessage,
   SessionHeader,
 } from '@maka/core/session';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
@@ -84,6 +86,8 @@ function fixture() {
   const peerPending = new Set<string>();
   const queuedInputs: string[] = [];
   const stopped = new Set<string>();
+  const stopRequests = new Map<string, WorkHubDelegationStopRequestedMessage>();
+  const stopResolutions = new Map<string, WorkHubDelegationStopResolvedMessage>();
   const replaced = new Set<string>();
   const outputs = new Map<string, StoredMessage[]>();
   const cancelledMessages = new Set<string>();
@@ -146,8 +150,12 @@ function fixture() {
           assignments.filter((a) => ids.includes(a.targetSessionId) && active.has(a.actionId)),
         readWorkHubReplacement: async (id: string) => (replaced.has(id) ? {} : undefined),
         readWorkHubSupersession: async () => undefined,
-        readWorkHubStopRequest: async (id: string) => (stopped.has(id) ? {} : undefined),
-        readWorkHubStopResolution: async () => undefined,
+        readWorkHubStopRequest: async (id: string, actionId?: string, latest?: true) =>
+          (latest ? [...stopRequests.values()].reverse() : [...stopRequests.values()]).find(
+            (q) => q.stopsDelegationId === id && (!actionId || q.actionId === actionId),
+          ) ?? (stopped.has(id) ? {} : undefined),
+        readWorkHubStopResolution: async (id: string, actionId?: string) =>
+          actionId ? stopResolutions.get(actionId) : stopResolutions.get(id),
         readWorkHubAssignment: async (id: string) => assignments.find((a) => a.actionId === id),
         readLatestWorkHubAssignment: async (id: string) =>
           [...assignments].reverse().find((a) => (a.work?.id ?? a.actionId) === id),
@@ -411,6 +419,8 @@ function fixture() {
     peerPending,
     queuedInputs,
     stopped,
+    stopRequests,
+    stopResolutions,
     replaced,
     outputs,
     records,
@@ -427,6 +437,75 @@ function fixture() {
     },
   };
 }
+
+for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy'] as const)
+  test(`already-terminal evidence uses its own stop request marker (${scenario})`, async () => {
+    const f = fixture();
+    f.terminal('b');
+    f.outputs.set('b', [
+      {
+        type: 'assistant',
+        id: 'completed-b',
+        turnId: 'turn-b',
+        ts: 1,
+        text: 'Actual completed result',
+        modelId: 'test',
+      },
+    ]);
+    const read = () => f.runtime.tool.impl({ operation: 'read', sourceActionId: 'b' }, f.caller());
+    assert.equal(((await read()) as { status: string }).status, 'ok');
+    const modern = scenario === 'modern' || scenario === 'mixed-modern';
+    const source = f.assignments.find((a) => a.actionId === 'b')!;
+    const add = (actionId: string, marker: boolean, outcome: 'already_terminal' | 'not_owned') => {
+      const request: WorkHubDelegationStopRequestedMessage = {
+        type: 'workhub_coordination',
+        kind: 'delegation_stop_requested',
+        schemaVersion: 3,
+        id: 'request-' + actionId,
+        turnId: 'stop-turn',
+        ts: 1,
+        actionId,
+        actionFingerprint: `sha256:${'b'.repeat(64)}`,
+        coordinationTurnId: 'stop-turn',
+        stopsActionId: source.actionId,
+        stopsDelegationId: source.delegationId,
+        targetSessionId: source.targetSessionId,
+        targetMessageId: source.targetMessageId,
+        targetSessionName: source.targetSessionName,
+        userText: 'Stop',
+        ...(marker ? { taskStop: true, workId: 'b', executionBinding: 'binding-b' } : {}),
+      };
+      const resolution: WorkHubDelegationStopResolvedMessage = {
+        type: 'workhub_coordination',
+        kind: 'delegation_stop_resolved',
+        schemaVersion: 3,
+        id: 'resolution-' + actionId,
+        turnId: 'stop-turn',
+        ts: 2,
+        actionId,
+        actionFingerprint: request.actionFingerprint,
+        coordinationTurnId: 'stop-turn',
+        stopsActionId: source.actionId,
+        stopsDelegationId: source.delegationId,
+        targetSessionId: source.targetSessionId,
+        outcome,
+        targetTurnId: 'turn-b',
+      };
+      f.stopRequests.set(actionId, request);
+      f.stopResolutions.set(actionId, resolution);
+      f.stopResolutions.set(source.delegationId, resolution);
+    };
+    if (scenario.startsWith('mixed')) add('earlier-stop', !modern, 'not_owned');
+    add('matched-stop', modern, 'already_terminal');
+    assert.equal(((await read()) as { status: string }).status, modern ? 'ok' : 'unavailable');
+    const list = (await f.runtime.tool.impl({ operation: 'list' }, f.caller())) as {
+      tasks: { actionId: string }[];
+    };
+    assert.equal(
+      list.tasks.some((task) => task.actionId === 'b'),
+      modern,
+    );
+  });
 
 test('WorkHubEvidence advertises an object schema without losing any operation fields', () => {
   const f = fixture();

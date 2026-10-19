@@ -31,6 +31,7 @@ function fixture() {
     status = 'running',
     retired = false,
     revision = 0;
+  let stop: { taskStop?: true; outcome: 'already_terminal' | 'stop_delivered' } | undefined;
   let graphClaim:
     | {
         graphId: string;
@@ -86,7 +87,14 @@ function fixture() {
     readExecutionBoundary: async () => ({ ...createGenesisExecutionBoundary('ask'), revision }),
     readActiveWorkHubAssignmentsByTarget: async () => (retired ? [] : [assignment]),
     readWorkHubReplacement: async () => undefined,
-    readWorkHubStopRequest: async () => undefined,
+    readWorkHubStopRequest: async () =>
+      stop
+        ? { actionId: 'stop', stopsDelegationId: 'delegation', taskStop: stop.taskStop }
+        : undefined,
+    readWorkHubStopResolution: async () =>
+      stop
+        ? { actionId: 'stop', stopsDelegationId: 'delegation', outcome: stop.outcome }
+        : undefined,
     listTaskExecutionGrants: async () => records.filter((r) => !r.closure),
     closeTaskExecutionGrant: async (id: string, reason: string, closedAt: number) => {
       const index = records.findIndex((r) => r.grant.grantId === id);
@@ -145,6 +153,9 @@ function fixture() {
     headers,
     runs,
     store,
+    observeStop: (value: typeof stop) => {
+      stop = value;
+    },
     setTime: (time: number) => {
       now = time;
     },
@@ -172,6 +183,29 @@ const sandbox = {
     network: { enabled: true as const },
   },
 };
+
+test('terminal no-op observations preserve live grants; legacy and actual retirement still close them', async () => {
+  for (const observation of [
+    { taskStop: true as const, outcome: 'already_terminal' as const },
+    { outcome: 'already_terminal' as const },
+    { taskStop: true as const, outcome: 'stop_delivered' as const },
+  ]) {
+    const f = fixture(),
+      c = f.coordinator();
+    try {
+      const grant = await c.create(f.assignment, root, { ...root, requestId: 'request' }, sandbox);
+      f.records.push({ grant });
+      const authority = await c.read(root);
+      f.observeStop(observation);
+      await c.reconcile();
+      const retires = observation.taskStop !== true || observation.outcome !== 'already_terminal';
+      assert.equal(authority.signal!.aborted, retires);
+      assert.equal(f.records[0]!.closure !== undefined, retires);
+    } finally {
+      await c.close();
+    }
+  }
+});
 
 test('task authority follows exact root and authenticated child runs, never Session ancestry alone', async () => {
   const f = fixture(),

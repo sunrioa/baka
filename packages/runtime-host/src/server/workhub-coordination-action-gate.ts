@@ -52,6 +52,7 @@ import type {
 import { WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS } from '../protocol/index.js';
 import type { ConnectionContext } from './operation-dispatcher.js';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import type {
   WorkHubTaskInputRequest,
   WorkHubTaskInputProvenance,
@@ -158,6 +159,7 @@ export interface WorkHubActionGateEffects {
   readStopRequest(
     delegationId: string,
     actionId?: string,
+    latest?: true,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined>;
   readStopResolution(
     delegationId: string,
@@ -212,7 +214,7 @@ export interface WorkHubDelegationRetirementClaim {
 
 export interface WorkHubDelegationResumeInput {
   /** Only fresh admission revalidates the target; replay acknowledges its existing Turn. */
-  readonly validateFreshTarget: () => Promise<void>;
+  readonly validateFreshTarget: (admission?: SessionAdmissionLease) => Promise<void>;
   readonly prepareTargetExecution?: () => Promise<void>;
   readonly assertTargetExecutionReady?: () => Promise<void>;
   readonly actionId: string;
@@ -222,6 +224,7 @@ export interface WorkHubDelegationResumeInput {
 export interface WorkHubRetirementResult {
   readonly outcome: WorkHubDelegationStopOutcome | 'recovering';
   readonly targetTurnId?: string;
+  readonly cancelledWaitRequestId?: string;
 }
 
 export interface WorkHubDelegationAssignmentInput {
@@ -279,6 +282,7 @@ export interface WorkHubDelegationStopResolutionInput {
   readonly request: WorkHubDelegationStopRequestedMessage;
   readonly outcome: WorkHubDelegationStopOutcome;
   readonly targetTurnId?: string;
+  readonly cancelledWaitRequestId?: string;
 }
 
 export type WorkHubActionEffectFailureCode =
@@ -501,7 +505,12 @@ export class WorkHubCoordinationActionGate {
           'WorkHub resume target delegation changed',
         );
       }
-      const validateFreshTarget = async () => {
+      const validateFreshTarget = async (admission?: SessionAdmissionLease) => {
+        if (await this.#hasPendingStop(source.delegationId))
+          throw new WorkHubActionGateFailure(
+            'action_conflict',
+            'The task is still stopping; wait for its original Stop to settle',
+          );
         const candidates = await this.candidates();
         const target = candidates.candidates.find(
           (candidate) => candidate.sessionId === proposal.expects.targetSessionId,
@@ -512,7 +521,7 @@ export class WorkHubCoordinationActionGate {
             'WorkHub resume target is unavailable',
           );
         this.#assertTarget(target, 'resume');
-        const current = await this.#soleWorkingDelegation(target.sessionId, 'resume');
+        const current = await this.#soleWorkingDelegation(target.sessionId, 'resume', admission);
         if (current.actionId !== source.actionId) {
           throw new WorkHubActionGateFailure(
             'action_conflict',
@@ -746,6 +755,18 @@ export class WorkHubCoordinationActionGate {
     );
   }
 
+  async #hasPendingStop(delegationId: string): Promise<boolean> {
+    const stop = await readWorkHubStopProjection(
+      {
+        readWorkHubStopRequest: (id, actionId, latest) =>
+          this.#effects.readStopRequest(id, actionId, latest),
+        readWorkHubStopResolution: (id, actionId) => this.#effects.readStopResolution(id, actionId),
+      },
+      delegationId,
+    );
+    return stop?.retires === true && stop.resolution === undefined;
+  }
+
   async #continuedSource(input: AdmittedWorkHubAction, targetSessionId: string) {
     await input.validateTaskInput?.();
     const ref = input.selectedTarget?.sourceTask;
@@ -768,8 +789,7 @@ export class WorkHubCoordinationActionGate {
         (link) => link.actionId === ref.actionId && link.delegationId === ref.delegationId,
       ) ||
       (await this.#effects.readReplacement(source.delegationId)) ||
-      ((await this.#effects.readStopRequest(source.delegationId)) &&
-        !(await this.#effects.readStopResolution(source.delegationId)))
+      (await this.#hasPendingStop(source.delegationId))
     )
       throw new WorkHubActionGateFailure(
         'action_conflict',
@@ -837,6 +857,7 @@ export class WorkHubCoordinationActionGate {
   async #soleWorkingDelegation(
     targetSessionId: string,
     operation: 'resume' | 'stop',
+    admission?: SessionAdmissionLease,
   ): Promise<WorkHubDelegationAssignedMessage> {
     const onTarget = await this.#effects.listActiveAssignments(targetSessionId, true);
     if (onTarget.length === 0) {
@@ -858,7 +879,7 @@ export class WorkHubCoordinationActionGate {
     if (onTarget.length > 1) {
       const holdingWork: WorkHubDelegationAssignedMessage[] = [];
       for (const assignment of onTarget) {
-        if ((await this.#effects.readDelegationRetirement(assignment)) !== 'retired') {
+        if ((await this.#effects.readDelegationRetirement(assignment, admission)) !== 'retired') {
           holdingWork.push(assignment);
         }
       }

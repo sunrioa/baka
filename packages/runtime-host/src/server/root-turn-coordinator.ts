@@ -2475,7 +2475,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   startTurnResumeWithValidation(
     input: TurnResumeStartInput,
     context: ConnectionContext,
-    beforeFreshAdmission?: () => Promise<void>,
+    beforeFreshAdmission?: (lease: SessionAdmissionLease) => Promise<void>,
   ): Promise<TurnResumeStartOutcome> {
     return this.startTurnResume(input, context, beforeFreshAdmission);
   }
@@ -2483,7 +2483,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   private startTurnResume(
     input: TurnResumeStartInput,
     context: ConnectionContext,
-    beforeFreshAdmission?: () => Promise<void>,
+    beforeFreshAdmission?: (lease: SessionAdmissionLease) => Promise<void>,
   ): Promise<TurnResumeStartOutcome> {
     if (isWorkHubCoordinationSessionId(input.sessionId)) {
       return Promise.resolve(
@@ -2596,7 +2596,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           }
 
           try {
-            await beforeFreshAdmission?.();
+            await beforeFreshAdmission?.(lease);
           } catch (error) {
             return {
               kind: 'complete',

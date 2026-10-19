@@ -29,7 +29,11 @@ import {
   normalizeMessageContent,
   type AttachmentRef,
 } from '@maka/core/events';
-import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  type WorkHubDelegationStopRequestedMessage,
+  type WorkHubDelegationStopResolvedMessage,
+} from '@maka/core/session';
 import {
   SessionMetadataConflictError,
   SessionMetadataVersionConflictError,
@@ -242,240 +246,323 @@ test('retained execution contract cannot read or assign after its root lease is 
 });
 
 for (const mode of ['queued_supplement', 'steering', 'continuation'] as const) {
-  test(`leased task input ${mode} is atomic, source-bound and replayable without changing FIFO or defaults`, async () => {
-    await withComposition(async (storage, root, owner) => {
-      const store = storage.execution.sessionStore;
-      await createCoordinationSession(store, root);
-      const target = await store.create({
-        cwd: root,
-        name: 'Worker',
-        llmConnectionSlug: 'test',
-        model: 'original-model',
-        permissionMode: 'ask',
-      });
-      const before = await store.readHeaderRecordSnapshot(target.id);
-      const base = assignmentRequest('work-a', target.id, 'Worker', 'original-turn');
-      const original: WorkHubMessageAssignmentRequest = {
-        ...base,
-        assignment: {
-          ...base.assignment,
-          schemaVersion: 4,
-          work: { id: 'work-a', generationId: 'work-a' },
-        },
-        admission:
+  for (const stopState of (mode === 'continuation'
+    ? ['none', 'modern_noop', 'modern_retired', 'modern_pending']
+    : ['none', 'modern_noop', 'modern_pending']) as readonly string[])
+    test(`leased task input ${mode} is atomic, source-bound and replayable without changing FIFO or defaults (${stopState})`, async () => {
+      await withComposition(async (storage, root, owner) => {
+        const store = storage.execution.sessionStore;
+        await createCoordinationSession(store, root);
+        const target = await store.create({
+          cwd: root,
+          name: 'Worker',
+          llmConnectionSlug: 'test',
+          model: 'original-model',
+          permissionMode: 'ask',
+        });
+        const before = await store.readHeaderRecordSnapshot(target.id);
+        const base = assignmentRequest('work-a', target.id, 'Worker', 'original-turn');
+        const original: WorkHubMessageAssignmentRequest = {
+          ...base,
+          assignment: {
+            ...base.assignment,
+            schemaVersion: 4,
+            work: { id: 'work-a', generationId: 'work-a' },
+          },
+          admission:
+            mode === 'queued_supplement'
+              ? {
+                  ...base.admission,
+                  placement: 'next_turn',
+                  submittedPlacement: 'next_turn',
+                  disposition: 'followup',
+                }
+              : base.admission,
+        };
+        await store.assignWorkHubMessage(original);
+        if (stopState !== 'none') {
+          // Constructed stop facts exercise the atomic input contract; they do
+          // not claim this fixture executed or stopped a model Root.
+          const source = original.assignment;
+          const suffix = createHash('sha256')
+            .update(source.delegationId)
+            .digest('hex')
+            .slice(0, 48);
+          const q: WorkHubDelegationStopRequestedMessage = {
+            type: 'workhub_coordination',
+            kind: 'delegation_stop_requested',
+            schemaVersion: 3,
+            id: 'whq_' + suffix,
+            turnId: 'stop-turn',
+            ts: 10,
+            actionId: 'stop-action',
+            actionFingerprint: `sha256:${'a'.repeat(64)}`,
+            coordinationTurnId: 'stop-turn',
+            stopsActionId: source.actionId,
+            stopsDelegationId: source.delegationId,
+            targetSessionId: target.id,
+            targetMessageId: source.targetMessageId,
+            targetSessionName: target.name,
+            userText: 'Stop',
+            taskStop: true,
+            workId: 'work-a',
+            executionBinding: 'root-binding',
+          };
+          const r: WorkHubDelegationStopResolvedMessage = {
+            type: 'workhub_coordination',
+            kind: 'delegation_stop_resolved',
+            schemaVersion: 3,
+            id: (stopState === 'modern_retired' ? 'whzs_' : 'whz_') + suffix,
+            turnId: q.turnId,
+            ts: 11,
+            actionId: q.actionId,
+            actionFingerprint: q.actionFingerprint,
+            coordinationTurnId: q.coordinationTurnId,
+            stopsActionId: source.actionId,
+            stopsDelegationId: source.delegationId,
+            targetSessionId: target.id,
+            outcome: stopState === 'modern_retired' ? 'stop_delivered' : 'already_terminal',
+            targetTurnId: source.targetTurnId,
+          };
+          await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [q, r]);
+          if (stopState === 'modern_pending') {
+            const later = {
+              ...q,
+              actionId: 'later-stop',
+              ts: 12,
+              id:
+                'whq_' +
+                createHash('sha256')
+                  .update(JSON.stringify([source.delegationId, 'later-stop']))
+                  .digest('hex')
+                  .slice(0, 48),
+            };
+            await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [later]);
+            assert.equal(
+              (await store.readWorkHubStopRequest(source.delegationId))?.actionId,
+              q.actionId,
+            );
+            assert.equal(
+              (await store.readWorkHubStopRequest(source.delegationId, undefined, true))?.actionId,
+              later.actionId,
+            );
+          }
+        }
+        const independent = assignmentRequest(
+          'independent-c',
+          target.id,
+          'Worker',
+          'original-turn',
+        );
+        await store.assignWorkHubMessage({
+          ...independent,
+          admission: {
+            ...independent.admission,
+            placement: 'next_turn',
+            submittedPlacement: 'next_turn',
+            disposition: 'followup',
+          },
+        });
+        const clientId = `input-${mode}`;
+        const hash = createHash('sha256').update(clientId).digest('hex').slice(0, 48);
+        const text =
+          mode === 'steering'
+            ? 'Only A: ' + '\\'.repeat(32 * 1024 - 100)
+            : 'Only supplement A; leave independent C alone';
+        const content = normalizeMessageContent({
+          text:
+            mode === 'queued_supplement' ? `${original.admission.content.text}\n\n${text}` : text,
+        });
+        const next = assignmentRequest(`input-action-${mode}`, target.id, 'Worker', 'next-turn');
+        const admission =
           mode === 'queued_supplement'
             ? {
-                ...base.admission,
-                placement: 'next_turn',
-                submittedPlacement: 'next_turn',
-                disposition: 'followup',
+                ...original.admission,
+                content,
+                submittedContentDigest: messageContentDigest(content),
               }
-            : base.admission,
-      };
-      await store.assignWorkHubMessage(original);
-      const independent = assignmentRequest('independent-c', target.id, 'Worker', 'original-turn');
-      await store.assignWorkHubMessage({
-        ...independent,
-        admission: {
-          ...independent.admission,
-          placement: 'next_turn',
-          submittedPlacement: 'next_turn',
-          disposition: 'followup',
-        },
-      });
-      const clientId = `input-${mode}`;
-      const hash = createHash('sha256').update(clientId).digest('hex').slice(0, 48);
-      const text =
-        mode === 'steering'
-          ? 'Only A: ' + '\\'.repeat(32 * 1024 - 100)
-          : 'Only supplement A; leave independent C alone';
-      const content = normalizeMessageContent({
-        text: mode === 'queued_supplement' ? `${original.admission.content.text}\n\n${text}` : text,
-      });
-      const next = assignmentRequest(`input-action-${mode}`, target.id, 'Worker', 'next-turn');
-      const admission =
-        mode === 'queued_supplement'
-          ? {
-              ...original.admission,
-              content,
-              submittedContentDigest: messageContentDigest(content),
-            }
-          : {
-              ...(mode === 'continuation' ? next.admission : original.admission),
-              messageId: mode === 'continuation' ? next.admission.messageId : `whtm_${hash}`,
-              content,
-              submittedContentDigest: messageContentDigest(content),
-              admittedAt: 20,
-            };
-      const input: WorkHubTaskInputMessage = {
-        type: 'workhub_coordination',
-        kind: 'task_input',
-        schemaVersion: 1,
-        id: `whti_${hash}`,
-        turnId: original.assignment.coordinationTurnId,
-        ts: 20,
-        inputId: clientId,
-        workId: 'work-a',
-        generationId: 'work-a',
-        sourceActionId: original.assignment.actionId,
-        sourceDelegationId: original.assignment.delegationId,
-        text,
-        targetSessionId: target.id,
-        targetMessageId: admission.messageId,
-        targetContentDigest: messageContentDigest(content),
-        mode,
-        ...(mode === 'steering'
-          ? { execution: { turnId: admission.turnId, runId: admission.runId } }
-          : {}),
-      };
-      const commit = (value = input) =>
-        mode === 'continuation'
-          ? store.assignWorkHubMessage({
-              ...next,
-              assignment: {
-                ...next.assignment,
-                schemaVersion: 4,
-                userText: text,
-                work: { id: 'work-a', generationId: 'work-a', continuesActionId: 'work-a' },
-              },
-              admission,
-              taskInput: value,
-            })
-          : store.commitWorkHubTaskInput({
-              input: value,
-              admission,
-              ...(mode === 'queued_supplement' ? { expectedAdmission: original.admission } : {}),
-            });
-      const pendingBefore = await store.listMessageAdmissions(target.id);
-      for (const invalid of [
-        { ...input, generationId: 'retired-generation' },
-        { ...input, sourceDelegationId: 'foreign-delegation' },
-        { ...input, workId: 'foreign-work' },
-      ]) {
-        await assert.rejects(commit(invalid), SessionMetadataConflictError);
-        assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
-        assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
-      }
-      const database = await runWithStorageRootLease(
-        owner.lease,
-        'interactive',
-        'write',
-        async (path) => acquireOperationalStateDatabase(path),
-      );
-      try {
-        database.database.exec(`CREATE TEMP TRIGGER workhub_input_rollback BEFORE INSERT ON session_messages
+            : {
+                ...(mode === 'continuation' ? next.admission : original.admission),
+                messageId: mode === 'continuation' ? next.admission.messageId : `whtm_${hash}`,
+                content,
+                submittedContentDigest: messageContentDigest(content),
+                admittedAt: 20,
+              };
+        const input: WorkHubTaskInputMessage = {
+          type: 'workhub_coordination',
+          kind: 'task_input',
+          schemaVersion: 1,
+          id: `whti_${hash}`,
+          turnId: original.assignment.coordinationTurnId,
+          ts: 20,
+          inputId: clientId,
+          workId: 'work-a',
+          generationId: 'work-a',
+          sourceActionId: original.assignment.actionId,
+          sourceDelegationId: original.assignment.delegationId,
+          text,
+          targetSessionId: target.id,
+          targetMessageId: admission.messageId,
+          targetContentDigest: messageContentDigest(content),
+          mode,
+          ...(mode === 'steering'
+            ? { execution: { turnId: admission.turnId, runId: admission.runId } }
+            : {}),
+        };
+        const commit = (value = input) =>
+          mode === 'continuation'
+            ? store.assignWorkHubMessage({
+                ...next,
+                assignment: {
+                  ...next.assignment,
+                  schemaVersion: 4,
+                  userText: text,
+                  work: { id: 'work-a', generationId: 'work-a', continuesActionId: 'work-a' },
+                },
+                admission,
+                taskInput: value,
+              })
+            : store.commitWorkHubTaskInput({
+                input: value,
+                admission,
+                ...(mode === 'queued_supplement' ? { expectedAdmission: original.admission } : {}),
+              });
+        const pendingBefore = await store.listMessageAdmissions(target.id);
+        if (stopState === 'modern_pending') {
+          await assert.rejects(commit(), /being retired/);
+          assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
+          assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
+          return;
+        }
+        for (const invalid of [
+          { ...input, generationId: 'retired-generation' },
+          { ...input, sourceDelegationId: 'foreign-delegation' },
+          { ...input, workId: 'foreign-work' },
+        ]) {
+          await assert.rejects(commit(invalid), SessionMetadataConflictError);
+          assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
+          assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
+        }
+        const database = await runWithStorageRootLease(
+          owner.lease,
+          'interactive',
+          'write',
+          async (path) => acquireOperationalStateDatabase(path),
+        );
+        try {
+          database.database.exec(`CREATE TEMP TRIGGER workhub_input_rollback BEFORE INSERT ON session_messages
           WHEN NEW.session_id = 'maka_workhub_coordination' AND NEW.message_id GLOB 'whti_*'
           BEGIN SELECT RAISE(ABORT, 'workhub_input_rollback'); END;`);
-        await assert.rejects(commit(), /workhub_input_rollback/);
-        assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
-        assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
-        if (mode === 'continuation')
-          assert.equal(await store.readWorkHubAssignment(next.assignment.actionId), undefined);
-        database.database.exec('DROP TRIGGER workhub_input_rollback');
-        await commit();
-        assert.deepEqual(await store.readWorkHubTaskInput(clientId), input);
-        await commit({ ...input, ts: 30 });
-        await assert.rejects(
-          commit({ ...input, text: 'Different payload under the same input ID' }),
-          SessionMetadataConflictError,
-        );
-        const after = await store.listMessageAdmissions(target.id);
-        assert.deepEqual(
-          after.map((item) => item.messageId),
-          mode === 'queued_supplement'
-            ? pendingBefore.map((item) => item.messageId)
-            : [...pendingBefore.map((item) => item.messageId), admission.messageId],
-        );
-        assert.deepEqual(
-          after.find((item) => item.messageId === independent.admission.messageId),
-          pendingBefore.find((item) => item.messageId === independent.admission.messageId),
-        );
-        assert.deepEqual(await store.readHeaderRecordSnapshot(target.id), before);
-        assert.equal(
-          (await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID)).filter(
-            (item) => item.id === input.id,
-          ).length,
-          1,
-        );
-      } finally {
-        database.database.exec('DROP TRIGGER IF EXISTS workhub_input_rollback');
-        database.close();
-      }
-      if (mode === 'steering') {
-        const execution = storage.execution.agentRunStore;
-        for (const [item, turnId, runId, previousRootTurnId] of [
-          [original.admission, original.admission.turnId, original.admission.runId, null],
-          [admission, 'folded-input-turn', 'folded-input-run', original.admission.turnId],
-        ] as const) {
+          await assert.rejects(commit(), /workhub_input_rollback/);
+          assert.equal(await store.readWorkHubTaskInput(clientId), undefined);
+          assert.deepEqual(await store.listMessageAdmissions(target.id), pendingBefore);
+          if (mode === 'continuation')
+            assert.equal(await store.readWorkHubAssignment(next.assignment.actionId), undefined);
+          database.database.exec('DROP TRIGGER workhub_input_rollback');
+          await commit();
+          assert.deepEqual(await store.readWorkHubTaskInput(clientId), input);
+          await commit({ ...input, ts: 30 });
+          await assert.rejects(
+            commit({ ...input, text: 'Different payload under the same input ID' }),
+            SessionMetadataConflictError,
+          );
+          const after = await store.listMessageAdmissions(target.id);
+          assert.deepEqual(
+            after.map((item) => item.messageId),
+            mode === 'queued_supplement'
+              ? pendingBefore.map((item) => item.messageId)
+              : [...pendingBefore.map((item) => item.messageId), admission.messageId],
+          );
+          assert.deepEqual(
+            after.find((item) => item.messageId === independent.admission.messageId),
+            pendingBefore.find((item) => item.messageId === independent.admission.messageId),
+          );
+          assert.deepEqual(await store.readHeaderRecordSnapshot(target.id), before);
           assert.equal(
-            (
-              await execution.admitRootTurn({
-                sessionId: target.id,
-                turnId,
-                proposedRunId: runId,
-                proposedUserMessageId: item.messageId,
-                previousRootTurnId,
-                execution: {
-                  kind: 'external_message',
-                  inputDigest: messageContentDigest(item.content),
-                },
-                normalizedInput: item.content,
-                sourceMessages: [
-                  {
-                    messageId: item.messageId,
-                    content: item.content,
-                    submittedContentDigest: item.submittedContentDigest,
-                    placement: item.placement,
-                    disposition: item.disposition,
+            (await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID)).filter(
+              (item) => item.id === input.id,
+            ).length,
+            1,
+          );
+        } finally {
+          database.database.exec('DROP TRIGGER IF EXISTS workhub_input_rollback');
+          database.close();
+        }
+        if (mode === 'steering') {
+          const execution = storage.execution.agentRunStore;
+          for (const [item, turnId, runId, previousRootTurnId] of [
+            [original.admission, original.admission.turnId, original.admission.runId, null],
+            [admission, 'folded-input-turn', 'folded-input-run', original.admission.turnId],
+          ] as const) {
+            assert.equal(
+              (
+                await execution.admitRootTurn({
+                  sessionId: target.id,
+                  turnId,
+                  proposedRunId: runId,
+                  proposedUserMessageId: item.messageId,
+                  previousRootTurnId,
+                  execution: {
+                    kind: 'external_message',
+                    inputDigest: messageContentDigest(item.content),
                   },
-                ],
-                admittedAt: item.admittedAt,
-              })
-            ).kind,
-            'admitted',
+                  normalizedInput: item.content,
+                  sourceMessages: [
+                    {
+                      messageId: item.messageId,
+                      content: item.content,
+                      submittedContentDigest: item.submittedContentDigest,
+                      placement: item.placement,
+                      disposition: item.disposition,
+                    },
+                  ],
+                  admittedAt: item.admittedAt,
+                })
+              ).kind,
+              'admitted',
+            );
+          }
+          const ref = {
+            sessionId: target.id,
+            turnId: original.admission.turnId,
+            runId: original.admission.runId,
+          };
+          assert.deepEqual(await store.readWorkHubTaskInputByMessage(admission.messageId), input);
+          assert.deepEqual(
+            await store.readWorkHubTaskInputSuccessors(ref),
+            [input],
+            'chunked native input facts retain their successor binding',
+          );
+          assert.deepEqual(
+            await store.readWorkHubTaskInputSuccessors({ ...ref, runId: 'foreign-run' }),
+            [],
           );
         }
-        const ref = {
-          sessionId: target.id,
-          turnId: original.admission.turnId,
-          runId: original.admission.runId,
-        };
-        assert.deepEqual(await store.readWorkHubTaskInputByMessage(admission.messageId), input);
-        assert.deepEqual(
-          await store.readWorkHubTaskInputSuccessors(ref),
-          [input],
-          'chunked native input facts retain their successor binding',
-        );
-        assert.deepEqual(
-          await store.readWorkHubTaskInputSuccessors({ ...ref, runId: 'foreign-run' }),
-          [],
-        );
-      }
-      await storage.close();
-      const reopened = await openStorageWriterComposition(owner.lease);
-      try {
-        assert.deepEqual(
-          await reopened.execution.sessionStore.readWorkHubTaskInput(clientId),
-          input,
-        );
-        assert.deepEqual(
-          await reopened.execution.sessionStore.readHeaderRecordSnapshot(target.id),
-          before,
-        );
-        if (mode === 'steering')
+        await storage.close();
+        const reopened = await openStorageWriterComposition(owner.lease);
+        try {
           assert.deepEqual(
-            await reopened.execution.sessionStore.readWorkHubTaskInputSuccessors({
-              sessionId: target.id,
-              turnId: original.admission.turnId,
-              runId: original.admission.runId,
-            }),
-            [input],
+            await reopened.execution.sessionStore.readWorkHubTaskInput(clientId),
+            input,
           );
-      } finally {
-        await reopened.close();
-      }
+          assert.deepEqual(
+            await reopened.execution.sessionStore.readHeaderRecordSnapshot(target.id),
+            before,
+          );
+          if (mode === 'steering')
+            assert.deepEqual(
+              await reopened.execution.sessionStore.readWorkHubTaskInputSuccessors({
+                sessionId: target.id,
+                turnId: original.admission.turnId,
+                runId: original.admission.runId,
+              }),
+              [input],
+            );
+        } finally {
+          await reopened.close();
+        }
+      });
     });
-  });
 }
 
 async function withComposition(

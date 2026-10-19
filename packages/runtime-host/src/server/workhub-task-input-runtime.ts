@@ -50,6 +50,7 @@ import {
   WorkHubActionGateFailure,
 } from './workhub-coordination-action-gate.js';
 import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 
 type BoundInput = WorkHubTaskInputRequest & WorkHubTaskInputProvenance;
 type ModelAuthority = NonNullable<
@@ -247,13 +248,12 @@ export function createWorkHubTaskInputRuntime(options: {
         'operation_conflict',
         'The selected work generation changed; return to its current task',
       );
-    const stop = await sessions.readWorkHubStopRequest(a.delegationId);
-    const resolution = stop ? await sessions.readWorkHubStopResolution(a.delegationId) : undefined;
+    const stop = await readWorkHubStopProjection(sessions, a.delegationId);
     if (
       (await sessions.readWorkHubReplacement(a.delegationId)) ||
       (await sessions.readWorkHubSupersession(a.delegationId)) ||
       (await sessions.readWorkHubReplacementAbort(a.delegationId)) ||
-      (stop && (!resolution || (!taskAware && resolution.outcome !== 'not_owned')))
+      (stop && (!stop.resolution || (!taskAware && stop.retires)))
     )
       throw new InputFailure('operation_conflict', 'The selected task is being retired');
     const header = await sessions.readHeaderSnapshot(a.targetSessionId);

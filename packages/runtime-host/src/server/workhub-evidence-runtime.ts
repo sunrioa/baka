@@ -50,6 +50,7 @@ import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admi
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 import type { WorkHubResultObservation } from './workhub-result-coordinator.js';
 import { readHostedExecutionMembership } from './hosted-execution-membership.js';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import {
   readWorkHubTaskInputBinding,
   readWorkHubTaskInputContinuation,
@@ -236,12 +237,8 @@ export function createWorkHubEvidenceRuntime(options: {
       )
         return false;
       if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
-      const stop = await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId);
-      return (
-        !stop ||
-        (await stores.sessionStore.readWorkHubStopResolution(assignment.delegationId))?.outcome ===
-          'not_owned'
-      );
+      return !(await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))
+        ?.retires;
     } catch (error) {
       if (isSessionNotFoundError(error)) return false;
       throw error;

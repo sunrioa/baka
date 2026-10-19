@@ -555,22 +555,10 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async readWorkHubStopRequest(
     delegationId: string,
     actionId?: string,
+    latest?: true,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined> {
-    const first = await this.readWorkHubCoordinationMessage(
-      `whq_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      actionId &&
-      first?.type === 'workhub_coordination' &&
-      first.kind === 'delegation_stop_requested' &&
-      first.actionId !== actionId
-        ? await this.readWorkHubCoordinationMessage(
-            `whq_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-          )
-        : first;
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_requested'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopRequest(delegationId, actionId, latest);
   }
 
   hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
@@ -581,36 +569,8 @@ class SqliteSessionStore implements SessionAuthorityStore {
     delegationId: string,
     actionId?: string,
   ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
-    if (!actionId) {
-      const terminal = await this.readWorkHubCoordinationMessage(
-        `whzt_${workHubIdentitySuffix(delegationId)}`,
-      );
-      if (
-        terminal?.type === 'workhub_coordination' &&
-        terminal.kind === 'delegation_stop_resolved' &&
-        terminal.outcome !== 'not_owned'
-      )
-        return terminal;
-    }
-    const scoped = actionId
-      ? await this.readWorkHubCoordinationMessage(
-          `whz_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-        )
-      : undefined;
-    const primary = await this.readWorkHubCoordinationMessage(
-      `whz_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      scoped ??
-      (actionId &&
-      primary?.type === 'workhub_coordination' &&
-      primary.kind === 'delegation_stop_resolved' &&
-      primary.actionId !== actionId
-        ? undefined
-        : primary);
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_resolved'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopResolution(delegationId, actionId);
   }
 
   async claimWorkHubAction(claim: WorkHubActionClaim): Promise<WorkHubActionClaimOutcome> {

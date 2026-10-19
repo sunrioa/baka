@@ -19,6 +19,7 @@
 
 import { z } from 'zod';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import {
   WORKHUB_INBOX_MAX_ITEMS,
   type WorkHubPendingInteraction,
@@ -127,12 +128,8 @@ export function createWorkHubResultRuntime(options: {
         return false;
       // Retirement intent takes precedence even before its final receipt exists.
       if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
-      if (await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId)) {
-        const resolution = await stores.sessionStore.readWorkHubStopResolution(
-          assignment.delegationId,
-        );
-        if (resolution?.outcome !== 'not_owned') return false;
-      }
+      if ((await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))?.retires)
+        return false;
       return true;
     } catch (error) {
       if (isSessionNotFoundError(error)) return false;
@@ -359,14 +356,9 @@ export function createWorkHubResultRuntime(options: {
       createdAt: assignment.ts,
       status: 'queued',
     };
-    const stopped = await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId);
-    if (stopped) {
-      const resolution = await stores.sessionStore.readWorkHubStopResolution(
-        assignment.delegationId,
-      );
-      if (resolution?.outcome !== 'not_owned')
-        return { task: { ...task, status: resolution ? 'stopped' : 'stopping' } };
-    }
+    const stopped = await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId);
+    if (stopped?.retires)
+      return { task: { ...task, status: stopped.resolution ? 'stopped' : 'stopping' } };
     const disposition = await messages.readMessageExecutionDispositionAdmitted(
       assignment.targetSessionId,
       assignment.targetMessageId,
