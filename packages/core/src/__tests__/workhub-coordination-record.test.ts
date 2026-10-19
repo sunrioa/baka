@@ -24,6 +24,11 @@ import {
   snapshotWorkHubTaskSettings,
   isWorkHubTaskSettingsSnapshot,
 } from '../session.js';
+import {
+  isWorkHubTaskStopSet,
+  isWorkHubTaskStopTarget,
+  WORKHUB_TASK_STOP_MAX_TARGETS,
+} from '../workhub-task-stop.js';
 
 const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
 
@@ -394,6 +399,39 @@ describe('WorkHub Coordination stored records', () => {
       executionBinding: '["payments","turn-1","run-1"]',
     };
     assert.deepEqual(decodeCanonicalMessage(bound), bound);
+    const target = {
+      workId: bound.workId,
+      generationId: 'original-generation',
+      sourceActionId: requested.stopsActionId,
+      sourceDelegationId: requested.stopsDelegationId,
+      targetSessionId: requested.targetSessionId,
+      targetMessageId: requested.targetMessageId,
+      executionBinding: bound.executionBinding,
+    };
+    const taskStop = {
+      ...bound,
+      taskStop: true,
+      stopSet: { actionId: requested.actionId, targets: [target] },
+    };
+    assert.deepEqual(decodeCanonicalMessage(taskStop), taskStop);
+    assert.deepEqual(decodeCanonicalMessage({ ...bound, taskStop: true }), {
+      ...bound,
+      taskStop: true,
+    });
+    for (const invalid of [
+      { ...taskStop, taskStop: false },
+      { ...taskStop, taskStop: undefined },
+      { ...taskStop, workId: undefined },
+      { ...taskStop, executionBinding: undefined },
+      { ...taskStop, executionBinding: 'other-root' },
+      { ...taskStop, targetMessageId: 'another-message' },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, actionId: 'different-action' } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, targets: [] } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, targets: [target, target] } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, confirmed: true } },
+      { ...taskStop, confirmed: true },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid), /Invalid stored message schema/u);
     assert.deepEqual(decodeCanonicalMessage(resolved), resolved);
     for (const invalid of [
       { ...requested, candidateRef: 'injected' },
@@ -422,5 +460,39 @@ describe('WorkHub Coordination stored records', () => {
         targetTurnId: undefined,
       },
     );
+  });
+
+  test('task-stop sets are bounded, exact and reject duplicate task identities', () => {
+    const target = {
+      workId: 'work',
+      generationId: 'generation',
+      sourceActionId: 'source',
+      sourceDelegationId: 'delegation',
+      targetSessionId: 'session',
+      targetMessageId: 'message',
+      executionBinding: 'binding',
+    };
+    const targets = Array.from({ length: WORKHUB_TASK_STOP_MAX_TARGETS }, (_, i) => ({
+      ...target,
+      workId: 'work-' + i,
+    }));
+    const set = { actionId: 'stop-action', targets };
+    assert.equal(isWorkHubTaskStopSet(set), true);
+    assert.equal(isWorkHubTaskStopTarget({ ...target, executionBinding: '😀'.repeat(1024) }), true);
+    for (const invalid of [
+      { ...set, targets: [] },
+      { ...set, targets: [...targets, { ...target, workId: 'one-too-many' }] },
+      { ...set, targets: [target, { ...target, generationId: 'newer-generation' }] },
+      { ...set, targets: [{ ...target, permissionMode: 'bypass' }] },
+      { ...set, targets: [{ ...target, workId: '../outside' }] },
+      { ...set, targets: [{ ...target, generationId: '' }] },
+      { ...set, targets: [{ ...target, sourceActionId: 'a'.repeat(129) }] },
+      { ...set, targets: [{ ...target, executionBinding: 'bad\0binding' }] },
+      { ...set, targets: [{ ...target, executionBinding: 'x'.repeat(4097) }] },
+      { ...set, targets: [{ ...target, executionBinding: '😀'.repeat(1025) }] },
+      { ...set, actionId: 'outside/path' },
+      { ...set, handoffSummary: 'not part of stop authority' },
+    ])
+      assert.equal(isWorkHubTaskStopSet(invalid), false);
   });
 });

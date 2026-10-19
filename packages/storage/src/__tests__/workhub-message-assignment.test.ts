@@ -938,6 +938,94 @@ test('an aborted replacement cannot later commit a supersession', async () => {
   }
 });
 
+test('old and task-bound stop requests retain exact set snapshots across SQLite reopen', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-task-stop-record-'));
+  let store = createSessionStore(root);
+  try {
+    await createCoordinationSession(store, root);
+    const target = await store.create({
+      cwd: root,
+      name: 'Task stop record fixture',
+      llmConnectionSlug: 'test',
+      model: 'test',
+      permissionMode: 'ask',
+    });
+    const assignments = ['a', 'b', 'legacy'].map((key) =>
+      assignmentRequest('stop-contract-' + key, target.id, target.name, 'turn-' + key),
+    );
+    for (const input of assignments) await store.assignWorkHubMessage(input);
+    const [a, b, old] = assignments.map((input) => input.assignment);
+    assert.ok(a && b && old);
+    const request = (source: WorkHubDelegationAssignedMessage, actionId: string) => ({
+      type: 'workhub_coordination' as const,
+      kind: 'delegation_stop_requested' as const,
+      schemaVersion: 3 as const,
+      id: 'whq_' + createHash('sha256').update(source.delegationId).digest('hex').slice(0, 48),
+      turnId: 'coordinator-turn',
+      coordinationTurnId: 'coordinator-turn',
+      ts: 20,
+      actionId,
+      actionFingerprint: `sha256:${'d'.repeat(64)}` as const,
+      stopsActionId: source.actionId,
+      stopsDelegationId: source.delegationId,
+      targetSessionId: source.targetSessionId,
+      targetMessageId: source.targetMessageId,
+      targetSessionName: source.targetSessionName,
+      userText: 'Stop the captured tasks',
+    });
+    const legacy = request(old, 'legacy-stop');
+    const targets = [a, b].map((source) => ({
+      workId: source.actionId,
+      generationId: source.actionId,
+      sourceActionId: source.actionId,
+      sourceDelegationId: source.delegationId,
+      targetSessionId: source.targetSessionId,
+      targetMessageId: source.targetMessageId,
+      executionBinding: JSON.stringify([
+        'pending_message',
+        source.actionId,
+        source.delegationId,
+        source.targetSessionId,
+        source.targetMessageId,
+      ]),
+    }));
+    const first = targets[0]!;
+    const modern: WorkHubDelegationStopRequestedMessage = {
+      ...request(a, 'set-stop'),
+      workId: first.workId,
+      executionBinding: first.executionBinding,
+      taskStop: true,
+      stopSet: { actionId: 'set-stop', targets },
+    };
+    const claim = {
+      actionId: modern.actionId,
+      actionFingerprint: modern.actionFingerprint,
+      operation: 'stop' as const,
+      subject: a.delegationId,
+    };
+    await store.claimWorkHubAction(claim);
+    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [legacy, modern]);
+    const pending = await store.listMessageAdmissions(target.id);
+    await store.close?.();
+    store = createSessionStore(root);
+    assert.deepEqual(await store.readWorkHubStopRequest(old.delegationId), legacy);
+    assert.deepEqual(await store.readWorkHubStopRequest(a.delegationId, modern.actionId), modern);
+    assert.deepEqual(await store.readWorkHubActionClaim(modern.actionId), claim);
+    assert.deepEqual(await store.listMessageAdmissions(target.id), pending);
+    const header = await store.readHeaderSnapshot(target.id);
+    assert.equal(header.permissionMode, 'ask');
+    assert.equal(header.model, 'test');
+    assert.equal(header.cwd, target.cwd);
+    // This is record compatibility only: no stop effect, Form or execution is
+    // invoked, and acceptance of a manifest is not execution authorization.
+    assert.equal(await store.hasCancelledMessageAdmission(target.id, a.targetMessageId), false);
+    assert.equal(await store.hasCancelledMessageAdmission(target.id, b.targetMessageId), false);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('an unresolved stop claim blocks replacement while not_owned releases the link', async () => {
   const root = await mkdtemp(join(tmpdir(), 'maka-workhub-stop-arbitration-'));
   const store = createSessionStore(root);

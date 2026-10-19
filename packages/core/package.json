@@ -76,6 +76,7 @@
     "./workhub-evidence": "./dist/workhub-evidence.js",
     "./workhub-result-context": "./dist/workhub-result-context.js",
     "./workhub-task-input": "./dist/workhub-task-input.js",
+    "./workhub-task-stop": "./dist/workhub-task-stop.js",
     "./client-plugin-bridge": "./dist/client-plugin-bridge.js",
     "./health": "./dist/health.js",
     "./search": "./dist/search.js",
