@@ -25,6 +25,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { z } from 'zod';
@@ -2149,7 +2150,7 @@ test('production backend preserves coordinator Client Capability semantics acros
 test('cold WorkHub recovery waits for Desktop tools across pending-message and admitted-root crash cuts', {
   timeout: 30_000,
 }, async () => {
-  for (const crashCut of ['pending-message', 'admitted-root'] as const) {
+  for (const crashCut of ['pending-message', 'admitted-root', 'legacy-admitted-root'] as const) {
     const base = await mkdtemp(join(tmpdir(), 'maka-workhub-cold-recovery-'));
     const root = join(base, 'interactive');
     const provider = await startProvider();
@@ -2322,8 +2323,9 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
         skillInvocation: { loaded: [], failed: [], receipts: [] },
         admittedAt: Date.now(),
       });
-      if (crashCut === 'admitted-root') {
-        await stores.agentRunStore.admitRootTurn({
+      let expectedAdmittedIdentity: { turnId: string; runId: string } | undefined;
+      if (crashCut !== 'pending-message') {
+        const admitted = await stores.agentRunStore.admitRootTurn({
           sessionId,
           turnId: randomUUID(),
           proposedRunId: randomUUID(),
@@ -2348,6 +2350,50 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           ],
           admittedAt: Date.now(),
         });
+        expectedAdmittedIdentity = {
+          turnId: admitted.admission.turnId,
+          runId: admitted.admission.runId,
+        };
+      }
+      if (crashCut === 'legacy-admitted-root') {
+        // Write an actual old record only after closing every cached writer.
+        // The next Host must read it from disk, not reuse a normalized object.
+        const policyStores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+        const policySnapshot = await policyStores.runtimePolicy.getSnapshot();
+        await owner.close();
+        const database = new DatabaseSync(join(root, 'runtime.sqlite'));
+        try {
+          const updated = database
+            .prepare(`
+            UPDATE core_root_turn_admissions
+            SET record_json = json_set(record_json, '$.execution.routingDecision', json(?))
+            WHERE session_id = ? AND turn_id = ?
+          `)
+            .run(
+              JSON.stringify({
+                kind: 'routing',
+                disposition: 'delegate_existing',
+                candidateSetId: `sha256:${'c'.repeat(64)}`,
+                candidateRef: 'obsolete-history-target',
+              }),
+              sessionId,
+              expectedAdmittedIdentity!.turnId,
+            );
+          assert.equal(updated.changes, 1);
+        } finally {
+          database.close();
+        }
+        const policyPath = join(root, 'runtime-policy.json');
+        await writeFile(
+          policyPath,
+          JSON.stringify({
+            schemaVersion: 4,
+            revision: policySnapshot.revision,
+            policy: { ...policySnapshot.policy, jev: { enabled: true } },
+          }),
+        );
+        owner = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(owner);
       }
       const requestsBeforeRecovery = provider.requests.length;
       composition = await createComposition();
@@ -2441,6 +2487,39 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       assert.ok(successor.execution.kind === 'workhub_coordination');
       assert.equal(successor.execution.capabilityBinding, capabilityBinding);
       assert.equal('routingDecision' in successor.execution, false);
+      if (expectedAdmittedIdentity) {
+        assert.equal(successor.turnId, expectedAdmittedIdentity.turnId);
+        assert.equal(successor.runId, expectedAdmittedIdentity.runId);
+      }
+      const recoveredPolicy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+      assert.equal('jev' in (await recoveredPolicy.runtimePolicy.getSnapshot()).policy, false);
+      if (crashCut === 'legacy-admitted-root') {
+        const settledRequestCount = provider.requests.length;
+        await composition.close();
+        composition = undefined;
+        await owner.close();
+        owner = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(owner);
+        composition = await createComposition();
+        await composition.recover();
+        composition.clientCapabilities!.attachConnection(
+          clientCapabilityConnectionIdentity('desktop'),
+          { send: async () => {} },
+        );
+        await registerDesktop('after-second-restart', ['control', 'tasks']);
+        const query = await composition.handlers['turn.query'](
+          { sessionId, turnId: expectedAdmittedIdentity!.turnId },
+          context,
+        );
+        assert.ok(query.ok, JSON.stringify(query));
+        assert.equal(query.result.status, 'completed');
+        assert.equal(query.result.runId, expectedAdmittedIdentity!.runId);
+        assert.equal(
+          provider.requests.length,
+          settledRequestCount,
+          'a second Host restart must not replay the settled legacy root',
+        );
+      }
       if (crashCut === 'pending-message') {
         // The recovered WorkHub keeps its permanent Session but new turns
         // must follow the current switch rather than its creation-time default.
