@@ -24,7 +24,7 @@ import { parseHTML } from 'linkedom';
 import { ChatSurfaceLayout, LocaleProvider } from '@maka/ui';
 import { WorkHubConversation, WorkHubHighlightContext, WorkHubTaskView, workHubLinkedWork } from '../../renderer/features/workhub/testing.js';
 import { renderTranscriptMarkup } from './transcript-test-dom.js';
-import type { ToolCallMessage, ToolResultMessage } from '@maka/core/session';
+import type { StoredMessage, ToolCallMessage, ToolResultMessage } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
 
@@ -191,6 +191,55 @@ test('flat stop links keep each requested task and do not present stopping as a 
   const { document } = parseHTML(markup);
   assert.equal(document.querySelectorAll('.workhub-dispatch').length, 0);
   assert.equal(document.querySelectorAll('[data-work-session-id]').length > 0, true, 'the task remains navigable');
+});
+
+test('flat continuation links survive an unloaded original assignment and a task outside the recent overview', () => {
+  const target = desktopSession('host-a', 'old-segment');
+  const coordination = desktopSession('host-a', 'maka_workhub_coordination');
+  const call: ToolCallMessage = { type: 'tool_call', id: 'continue-old', turnId: 'current-turn', ts: 3,
+    toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue it' } };
+  for (const mode of ['steering', 'queued_supplement', 'continuation'] as const) {
+    const input: Extract<StoredMessage, { kind: 'task_input' }> = {
+      type: 'workhub_coordination', kind: 'task_input', schemaVersion: 1, id: 'accepted-input',
+      turnId: 'original-assignment-turn', ts: 4, inputId: 'input', workId: 'old-task', generationId: 'old-generation',
+      sourceActionId: 'old-action', sourceDelegationId: 'old-delegation', text: 'Continue it',
+      targetSessionId: target, targetMessageId: 'target-message', targetContentDigest: 'sha256:content',
+      sourceMessageId: 'current-user-message', mode,
+    };
+    const result: ToolResultMessage = { type: 'tool_result', id: 'continued', turnId: call.turnId, ts: 5,
+      toolUseId: call.id, isError: false, content: { kind: 'json', value: { taskId: 'old-task', container: 'reuse', mode, delivery: 'queued' } } };
+    const links = workHubLinkedWork([call, input, result], [{ id: target, name: 'Original task', cwd: '/projects/original' }], 'Work', coordination);
+    assert.deepEqual(links, [{ workId: 'old-task', operation: 'continue', id: 'continued', coordinationTurnId: call.turnId,
+      targetSessionId: target, targetSessionName: 'Original task', workspaceName: 'original' }], mode);
+    assert.equal(workHubLinkedWork([call, input, result], [], 'Work', coordination)[0]?.targetSessionName, 'Work', 'a canonical target needs no loaded Session catalog');
+    for (const changed of [
+      { ...input, targetSessionId: desktopSession('other-host', 'old-segment') },
+      { ...input, targetSessionId: 'unscoped-model-session' },
+      { ...input, workId: 'another-task' },
+    ]) assert.deepEqual(workHubLinkedWork([call, changed, result], [], 'Work', coordination), []);
+    assert.deepEqual(workHubLinkedWork([call, input, { ...result, turnId: 'another-turn' }], [], 'Work', coordination), []);
+    assert.deepEqual(workHubLinkedWork([call, input, { ...result, isError: true }], [], 'Work', coordination), []);
+  }
+});
+
+test('flat stop links recover every old task from its new canonical stop claim without the recent overview', () => {
+  const coordination = desktopSession('host-a', 'maka_workhub_coordination');
+  const call: ToolCallMessage = { type: 'tool_call', id: 'stop-old', turnId: 'stop-turn', ts: 3,
+    toolName: 'mcp__desktop_workhub__stop', args: { taskIds: ['old-a', 'old-b'] } };
+  const claims: Extract<StoredMessage, { kind: 'delegation_stop_requested' }>[] = ['old-a', 'old-b'].map(workId => ({
+    type: 'workhub_coordination', kind: 'delegation_stop_requested', schemaVersion: 3, id: `claim-${workId}`,
+    turnId: call.turnId, coordinationTurnId: call.turnId, ts: 4, actionId: `stop-${workId}`, actionFingerprint: 'sha256:stop',
+    stopsActionId: `assignment-${workId}`, stopsDelegationId: `delegation-${workId}`, workId, taskStop: true,
+    targetSessionId: desktopSession('host-a', workId), targetMessageId: `message-${workId}`, targetSessionName: `Title ${workId}`, userText: 'Stop both',
+  }));
+  const result: ToolResultMessage = { type: 'tool_result', id: 'stopped', turnId: call.turnId, ts: 5, toolUseId: call.id, isError: false,
+    content: { kind: 'json', value: { kind: 'result', targets: ['old-a', 'old-b', 'not-requested'].map(taskId => ({ taskId, outcome: 'already_terminal' })) } } };
+  const links = workHubLinkedWork([call, ...claims, result], [], 'Work', coordination);
+  assert.deepEqual(links.map(link => [link.workId, link.operation, link.coordinationTurnId, link.targetSessionId, link.targetSessionName]),
+    claims.map(claim => [claim.workId, 'stop', call.turnId, claim.targetSessionId, claim.targetSessionName]));
+  assert.deepEqual(workHubLinkedWork([call, ...claims.map(claim => ({ ...claim, targetSessionId: desktopSession('other-host', 'target') })), result], [], 'Work', coordination), []);
+  assert.deepEqual(workHubLinkedWork([call, ...claims.map(claim => ({ ...claim, taskStop: undefined })), result], [], 'Work', coordination), [], 'legacy stop claims are not native task bindings');
+  assert.deepEqual(workHubLinkedWork([call, ...claims, { ...result, isError: true }], [], 'Work', coordination), []);
 });
 
 function desktopSession(hostId: string, sessionId: string) { return JSON.stringify([hostId, sessionId]); }

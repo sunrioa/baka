@@ -54,17 +54,29 @@ export function workHubLinkedWork(
     ['mcp__desktop_workhub__start', 'mcp__desktop_workhub__continue', 'mcp__desktop_workhub__stop'].includes(message.toolName)
       ? [[callKey(message.turnId, message.id), message] as const] : []));
   // Model receipts contain task IDs, not Session IDs. Resolve their display
-  // targets only through this Host's durable assignment or task projection.
+  // targets only through this Host's durable facts or task projection. A new
+  // input/stop fact still identifies an old task outside the recent overview
+  // when its original assignment has not been loaded into the transcript.
   const targets = new Map<string, { targetSessionId: string; targetSessionName: string; at: number }>();
-  const remember = (workId: string, targetSessionId: string, targetSessionName: string, at: number) => {
+  const remember = (workId: string, targetSessionId: string, targetSessionName: string | undefined, at: number) => {
     if (!coordinationSessionKey) return;
     try {
       if (parseDesktopSessionKey(targetSessionId).hostId !== parseDesktopSessionKey(coordinationSessionKey).hostId) return;
     } catch { return; }
-    if ((targets.get(workId)?.at ?? -1) <= at) targets.set(workId, { targetSessionId, targetSessionName, at });
+    const previous = targets.get(workId);
+    if ((previous?.at ?? -1) <= at) targets.set(workId, { targetSessionId,
+      targetSessionName: sessionById.get(targetSessionId)?.name ?? targetSessionName ??
+        (previous?.targetSessionId === targetSessionId ? previous.targetSessionName : undefined) ?? fallbackName, at });
   };
-  for (const message of messages) if (message.type === 'workhub_coordination' && message.kind === 'delegation_assigned')
-    remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts);
+  for (const message of messages) {
+    if (message.type !== 'workhub_coordination') continue;
+    if (message.kind === 'delegation_assigned')
+      remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts);
+    else if (message.kind === 'task_input')
+      remember(message.workId, message.targetSessionId, undefined, message.ts);
+    else if (message.kind === 'delegation_stop_requested' && message.taskStop === true && message.workId)
+      remember(message.workId, message.targetSessionId, message.targetSessionName, message.ts);
+  }
   for (const task of tasks) remember(task.workId ?? task.actionId, task.targetSessionId, task.targetSessionName, task.createdAt);
   const readResult = (message: StoredMessage | undefined): Record<string, unknown> | undefined => {
     if (message?.type !== 'tool_result') return undefined;
