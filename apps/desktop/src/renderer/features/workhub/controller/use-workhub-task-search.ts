@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { WorkHubServices } from '../ports.js';
 import { createWorkHubTaskSearchModel } from '../model/task-search-model.js';
+import { workHubTaskTitle } from '../model/task-presentation.js';
 
 export function useWorkHubTaskSearch(services: WorkHubServices, owner: string, available: boolean) {
   const [query, setQuery] = useState('');
@@ -42,7 +43,12 @@ export function useWorkHubTaskSearch(services: WorkHubServices, owner: string, a
     return a && a.services === services && a.owner === owner && a.query === query && b.services === services && b.owner === owner && b.query === query && b.available ? a.value : undefined;
   };
   const value = state.services === services && state.owner === owner && state.query === query ? state.value : undefined;
-  return { items: value?.items ?? [], cursor: value?.cursor ?? null, match: value?.match ?? 'recent', error: value?.error,
+  // These are presentation rows, not fabricated indexed hits. Recent records
+  // retain their original exact assignment reference for the native task read.
+  const rows = value?.recent ? value.recent.tasks.map(task => ({ id: task.workId ?? task.actionId, title: workHubTaskTitle(task),
+    status: task.status, summary: task.text, ref: { actionId: task.actionId, delegationId: task.delegationId } }))
+    : (value?.items ?? []).map(item => ({ id: item.id, title: item.title, status: item.state, summary: item.summary, ref: { workId: item.id } }));
+  return { items: value?.items ?? [], rows, mode: value?.mode ?? 'indexed', recent: value?.recent, cursor: value?.cursor ?? null, match: value?.match, error: value?.error,
     ready: available && Boolean(value?.ready), loadingMore: Boolean(value?.loadingMore), query, setQuery: (text: string) => setQuery(Array.from(text).slice(0, 256).join('')),
     refresh: async () => { await current()?.refresh(); }, loadMore: async () => { await current()?.loadMore(); } };
 }

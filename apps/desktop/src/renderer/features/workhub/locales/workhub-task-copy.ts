@@ -26,6 +26,9 @@ export const workHubTaskCopy = {
     "loadMore": "Load more tasks",
     "searchRelaxed": "Showing tasks matching any search term.",
     "searchUnmatched": "No match. Showing recent tasks.",
+    "recentOnly": "This connection supports only the original recent-task window (up to 32 tasks). Indexed search and pagination are not authorized.",
+    "indexNotAuthorized": "Indexed task search and pagination are not authorized for this connection. Try the original recent-task window.",
+    "showRecent": "Show recent tasks",
     "close": "Close task sidebar",
     "progress": "In progress",
     "delivery": "Recently ended",
@@ -72,6 +75,9 @@ export const workHubTaskCopy = {
     "loadMore": "加载更多任务",
     "searchRelaxed": "正在显示匹配任一搜索词的任务。",
     "searchUnmatched": "未找到匹配，显示近期任务。",
+    "recentOnly": "此连接仅支持原有的近期任务窗口（最多 32 条），尚未获准使用索引搜索和分页。",
+    "indexNotAuthorized": "此连接尚未获准使用任务索引搜索和分页，可尝试读取原有的近期任务窗口。",
+    "showRecent": "显示近期任务",
     "close": "收起任务侧栏",
     "progress": "执行进度",
     "delivery": "最近结束",
@@ -118,6 +124,9 @@ export const workHubTaskCopy = {
     "loadMore": "載入更多任務",
     "searchRelaxed": "正在顯示符合任一搜尋詞的任務。",
     "searchUnmatched": "未找到相符項目，顯示近期任務。",
+    "recentOnly": "此連線僅支援原有的近期任務視窗（最多 32 筆），尚未獲准使用索引搜尋與分頁。",
+    "indexNotAuthorized": "此連線尚未獲准使用任務索引搜尋與分頁，可嘗試讀取原有的近期任務視窗。",
+    "showRecent": "顯示近期任務",
     "close": "收起任務側欄",
     "progress": "執行進度",
     "delivery": "最近結束",
@@ -157,4 +166,4 @@ export const workHubTaskCopy = {
       "unavailable": "失敗 / 已停止"
     }
   }
-} satisfies UiCatalog<{title: string; search: string; noMatches: string; loadMore: string; searchRelaxed: string; searchUnmatched: string; close: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;
+} satisfies UiCatalog<{title: string; search: string; noMatches: string; loadMore: string; searchRelaxed: string; searchUnmatched: string; recentOnly: string; indexNotAuthorized: string; showRecent: string; close: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;

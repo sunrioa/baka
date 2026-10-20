@@ -32,6 +32,7 @@ import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import type { WorkHubServices } from '../ports.js';
 import type { WorkHubTaskSelection } from '../../../../shared/workhub-presentation.js';
+import type { OperationInput } from '@maka/runtime-host/protocol';
 
 type Task = NonNullable<WorkHubTaskSelection['work']>;
 
@@ -43,25 +44,25 @@ export function WorkHubTaskPanel({ owner, available = true }: { owner: string; a
   const search = useWorkHubTaskSearch(services, owner, available);
   const [error, setError] = useState<string>();
   const locale = useUiLocale();
-  const choices = new Map(search.items.map(item => [item.id, item.title]));
-  if (selected && !choices.has(selected.workId)) choices.set(selected.workId, selected.name);
-  async function openTask(workId: string, title: string) {
-    await selection.open({ workId }, title);
+  const choices = new Map(search.rows.map(item => [item.id, { title: item.title, ref: item.ref }]));
+  if (selected && !choices.has(selected.workId)) choices.set(selected.workId, { title: selected.name, ref: { workId: selected.workId } });
+  async function openTask(ref: OperationInput<'workhub.tasks.read'>, title: string) {
+    await selection.open(ref, title);
   }
   return <section className="workHubTaskPanel" aria-label={workHubTaskViewCopy[locale].panel} data-view={selected ? 'execution' : 'overview'}>
     {(error || selection.error) && <p role="alert">{error ?? selection.error}</p>}
     {selected ? <>
       <header className="workHubTaskPanelToolbar">
         <Selector label={workHubTaskViewCopy[locale].chooseTask} isLabelHidden variant="ghost" size="sm" width="100%" value={selected.workId}
-          options={[{ value: '', label: workHubTaskCopy[locale].title }, ...[...choices].map(([value, label]) => ({ value, label }))]}
+          options={[{ value: '', label: workHubTaskCopy[locale].title }, ...[...choices].map(([value, { title: label }]) => ({ value, label }))]}
           onChange={id => {
             setError(undefined);
             if (!id) selection.select(undefined);
-            else { const title = choices.get(id); if (title) void openTask(id, title).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); }
+            else { const choice = choices.get(id); if (choice) void openTask(choice.ref, choice.title).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); }
           }} />
       </header>
       <TaskPreview key={owner} services={services} owner={owner} selected={selected} available={available} />
-    </> : <WorkHubTaskOverview search={search} onView={task => openTask(task.id, task.title)} />}
+    </> : <WorkHubTaskOverview search={search} onView={task => openTask(task.ref, task.title)} />}
   </section>;
 }
 

@@ -17,14 +17,16 @@
  * under the License.
  */
 
-import type { WorkHubTaskFindItem, WorkHubTaskFindResult } from '@maka/runtime-host/protocol';
+import type { WorkHubTaskFindItem, WorkHubTaskFindResult, WorkHubTasksQueryResult } from '@maka/runtime-host/protocol';
 import type { WorkHubServices } from '../ports.js';
 import { orderWorkHubTasks } from './task-presentation.js';
 
 interface TaskSearchSnapshot {
+  readonly mode: 'indexed' | 'recent_only' | 'index_not_authorized';
   readonly items: readonly WorkHubTaskFindItem[];
+  readonly recent?: WorkHubTasksQueryResult;
   readonly cursor: string | null;
-  readonly match: WorkHubTaskFindResult['match'];
+  readonly match?: WorkHubTaskFindResult['match'];
   readonly ready: boolean;
   readonly loadingMore: boolean;
   readonly error?: string;
@@ -32,7 +34,7 @@ interface TaskSearchSnapshot {
 
 /** One query and its loaded pages only. Preview selection is never an input to discovery. */
 export function createWorkHubTaskSearchModel(services: Pick<WorkHubServices, 'findTasks'>, owner: string, query: string) {
-  let state: TaskSearchSnapshot = { items: [], cursor: null, match: 'recent', ready: false, loadingMore: false };
+  let state: TaskSearchSnapshot = { mode: 'indexed', items: [], cursor: null, ready: false, loadingMore: false };
   let closed = false;
   let version = 0;
   let reading: Promise<void> | undefined;
@@ -59,7 +61,13 @@ export function createWorkHubTaskSearchModel(services: Pick<WorkHubServices, 'fi
         try {
           const page = await services.findTasks(owner, input);
           if (closed || generation !== version) continue;
-          publish({ items: present(taskItems(page)), cursor: page.nextCursor, match: page.match, ready: true, loadingMore: false, error: undefined });
+          if ('kind' in page) {
+            if (page.kind === 'recent_only' && query.trim()) throw new Error('Recent tasks cannot answer an indexed search');
+            publish({ mode: page.kind, recent: page.kind === 'recent_only' ? page.result : undefined,
+              items: [], cursor: null, match: undefined, ready: true, loadingMore: false, error: undefined });
+          } else {
+            publish({ mode: 'indexed', recent: undefined, items: present(taskItems(page)), cursor: page.nextCursor, match: page.match, ready: true, loadingMore: false, error: undefined });
+          }
         } catch (reason) {
           if (!closed && generation === version) { publish({ ready: false, loadingMore: false }); fail(reason); }
         }
@@ -74,12 +82,17 @@ export function createWorkHubTaskSearchModel(services: Pick<WorkHubServices, 'fi
     refresh,
     invalidate() { ++version; publish({ ready: false }); void refresh(); },
     async loadMore() {
-      if (closed || !state.ready || state.loadingMore || !state.cursor) return;
+      if (closed || !state.ready || state.mode !== 'indexed' || state.loadingMore || !state.cursor) return;
       const generation = version, cursor = state.cursor;
       publish({ loadingMore: true });
       try {
         const page = await services.findTasks(owner, { ...input, cursor });
         if (closed || generation !== version) return;
+        if ('kind' in page) {
+          if (page.kind === 'recent_only') throw new Error('Recent tasks cannot answer an indexed page');
+          publish({ mode: page.kind, items: [], recent: undefined, cursor: null, match: undefined, error: undefined });
+          return;
+        }
         if (page.nextCursor === cursor) throw new Error('Task search did not advance');
         const items = new Map(state.items.map(item => [item.id, item]));
         for (const item of taskItems(page)) items.set(item.id, item);

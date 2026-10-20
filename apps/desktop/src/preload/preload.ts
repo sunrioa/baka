@@ -30,6 +30,7 @@ import type {
   WorkHubAnswerResult,
   WorkHubPrepareAttachmentsResult,
   WorkHubTaskSendResult,
+  WorkHubTaskListResult,
 } from '../shared/workhub-conversation.js';
 import type { SessionObservationMessage } from '../shared/session-execution-projection.js';
 import { executionEventChannel, sameExecutionScope } from '../shared/execution-observation.js';
@@ -2195,7 +2196,10 @@ const makaBridge = {
   workHub: {
     async findTasks(coordinationSessionId: string, input: OperationInput<'workhub.tasks.find'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      return invokeWhenReady('workhub:findTasks', scope, input) as Promise<OperationOutput<'workhub.tasks.find'>>;
+      const result = await invokeWhenReady('workhub:findTasks', scope, input) as WorkHubTaskListResult;
+      return 'kind' in result && result.kind === 'recent_only' ? { ...result, result: { ...result.result,
+        tasks: result.result.tasks.map(task => ({ ...task, targetSessionId: observeRuntimeHostSessionScope(scope, task.targetSessionId).sessionId })),
+      } } : result;
     },
     async queryTasks(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);

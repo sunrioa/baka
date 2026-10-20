@@ -33,6 +33,7 @@ import type {
   WorkHubCoordinationSessionResolution,
   WorkHubPrepareAttachmentsResult,
   WorkHubTaskSendResult,
+  WorkHubTaskListResult,
 } from '../shared/workhub-conversation.js';
 import { toDesktopHostSessionSummary } from './runtime-host-session-catalog-ipc-main.js';
 import {
@@ -146,7 +147,29 @@ export function registerRuntimeHostWorkHubIpc(
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
   handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
   handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
-  handleReconnectableRead(ipcMain, 'workhub:findTasks', (_event, input) => client.findWorkHubTasks(input));
+  handleReconnectableRead(ipcMain, 'workhub:findTasks', async (_event, input): Promise<WorkHubTaskListResult> => {
+    const { hostId, hostEpoch } = client;
+    const requireSameHost = () => {
+      if (client.hostId !== hostId || client.hostEpoch !== hostEpoch) throw new Error('Runtime Host changed during task list read');
+    };
+    try {
+      const result = await client.findWorkHubTasks(input);
+      requireSameHost();
+      return result;
+    } catch (error) {
+      // Electron drops custom error fields. Classify only this exact denial in
+      // Main; a path denial or failed search/page is never a recent-data fallback.
+      if (!(error instanceof RuntimeHostOperationError && error.operation === 'workhub.tasks.find' && error.code === 'unauthorized') ||
+          !input || typeof input !== 'object' || Array.isArray(input) || 'cwd' in input) throw error;
+      requireSameHost();
+      if (Object.keys(input).length) return { kind: 'index_not_authorized' };
+      // The same client must independently authorize query. Never upgrade or
+      // persist credentials, and never turn these records into a find result.
+      const result = await client.queryWorkHubTasks();
+      requireSameHost();
+      return { kind: 'recent_only', result };
+    }
+  });
   handleReconnectableRead(ipcMain, 'workhub:taskHistory', (_event, input) => client.readWorkHubTaskHistory(input));
   handleReconnectableRead(ipcMain, 'workhub:taskExecutions', (_event, input) => client.readWorkHubTaskExecutions(input));
   handleReconnectableRead(ipcMain, 'workhub:readTaskInput', (_event, input) => client.readWorkHubTaskInput(input));

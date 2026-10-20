@@ -20,18 +20,17 @@
 import { useState } from 'react';
 import { Button, IconButton, TextInput, useUiLocale } from '@maka/ui';
 import { PanelRightClose, RefreshCcw } from '@maka/ui/icons';
-import type { WorkHubTaskFindItem } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskSearch } from '../controller/use-workhub-task-search.js';
 import { workHubTaskCategory } from '../model/task-presentation.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 
 export function WorkHubTaskOverview({ search, onView, onClose }: {
-  search: ReturnType<typeof useWorkHubTaskSearch>; onView(task: WorkHubTaskFindItem): Promise<void>; onClose?(): void;
+  search: ReturnType<typeof useWorkHubTaskSearch>; onView(task: ReturnType<typeof useWorkHubTaskSearch>['rows'][number]): Promise<void>; onClose?(): void;
 }) {
   const t = workHubTaskCopy[useUiLocale()];
   const [error, setError] = useState<string>();
-  const label = (item: WorkHubTaskFindItem) => {
-    const category = workHubTaskCategory(item.state);
+  const label = (item: ReturnType<typeof useWorkHubTaskSearch>['rows'][number]) => {
+    const category = workHubTaskCategory(item.status);
     return category === 'attention' ? t.status.waiting_for_user : category === 'running' ? t.status.running
       : category === 'queued' ? t.status.queued : category === 'ended' ? t.status.pending_acceptance : t.status.stopped;
   };
@@ -40,15 +39,18 @@ export function WorkHubTaskOverview({ search, onView, onClose }: {
       <IconButton size="sm" variant="ghost" icon={<RefreshCcw size={14} />} label={t.refresh} onClick={() => { void search.refresh(); }} />
       {onClose && <IconButton size="sm" variant="ghost" icon={<PanelRightClose size={16} />} label={t.close} onClick={onClose} />}
     </header>
-    <TextInput size="sm" label={t.search} value={search.query} onChange={search.setQuery} />
-    {!search.ready && <p role={search.error ? 'alert' : 'status'}>{search.items.length ? t.stale : search.error ? t.unavailable : t.loading}</p>}
+    <TextInput size="sm" label={t.search} value={search.query} onChange={search.setQuery} isDisabled={search.mode !== 'indexed'} />
+    {search.mode !== 'indexed' && <p role="status">{search.mode === 'recent_only' ? t.recentOnly : t.indexNotAuthorized}</p>}
+    {search.mode === 'index_not_authorized' && <Button size="sm" variant="ghost" label={t.showRecent} onClick={() => { if (search.query) search.setQuery(''); else void search.refresh(); }} />}
+    {search.recent?.truncated && <p role="status">{t.truncated}</p>}
+    {!search.ready && <p role={search.error ? 'alert' : 'status'}>{search.rows.length ? t.stale : search.error ? t.unavailable : t.loading}</p>}
     {search.ready && search.error && <p role="alert">{t.unavailable}</p>}
     {error && <p role="alert">{error}</p>}
-    {search.ready && !search.items.length && <p>{search.query ? t.noMatches : t.empty}</p>}
+    {search.ready && search.mode !== 'index_not_authorized' && !search.rows.length && <p>{search.query ? t.noMatches : t.empty}</p>}
     {search.match === 'any' && <p role="status">{t.searchRelaxed}</p>}
     {search.match === 'unmatched' && <p role="status">{t.searchUnmatched}</p>}
     <div className="workHubTaskRows">
-      {search.items.map(item => <article key={item.id} className="workHubTaskCard" data-status={workHubTaskCategory(item.state)}>
+      {search.rows.map(item => <article key={item.id} className="workHubTaskCard" data-status={workHubTaskCategory(item.status)}>
         <Button variant="ghost" size="sm" width="100%" className="workHubTaskHeading" label={`${item.title} · ${label(item)}`} isDisabled={!search.ready}
           onClick={() => { setError(undefined); void onView(item).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); }}>
           <span className="workHubTaskHeadingContent"><span className="workHubTaskName">{item.title}</span><span className="workHubTaskStatus">{label(item)}</span></span>
@@ -56,6 +58,6 @@ export function WorkHubTaskOverview({ search, onView, onClose }: {
         {item.summary && <p className="workHubTaskText">{item.summary}</p>}
       </article>)}
     </div>
-    {search.cursor && <Button size="sm" variant="ghost" label={t.loadMore} isDisabled={!search.ready || search.loadingMore} onClick={() => { void search.loadMore(); }} />}
+    {search.mode === 'indexed' && search.cursor && <Button size="sm" variant="ghost" label={t.loadMore} isDisabled={!search.ready || search.loadingMore} onClick={() => { void search.loadMore(); }} />}
   </section>;
 }

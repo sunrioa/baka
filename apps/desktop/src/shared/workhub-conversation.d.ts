@@ -37,6 +37,12 @@ export type WorkHubTaskSendResult =
   | { readonly kind: 'unknown' }
   | { readonly kind: 'rejected'; readonly code: string; readonly message: string };
 
+/** Desktop presentation only: old read grants do not imply indexed discovery permission. */
+export type WorkHubTaskListResult =
+  | OperationOutput<'workhub.tasks.find'>
+  | { readonly kind: 'recent_only'; readonly result: OperationOutput<'workhub.tasks.query'> }
+  | { readonly kind: 'index_not_authorized' };
+
 export type WorkHubCoordinationSessionResolution =
   | { readonly sessionId: string }
   | { readonly kind: 'model_required' };

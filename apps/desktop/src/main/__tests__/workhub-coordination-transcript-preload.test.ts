@@ -113,6 +113,7 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   const taskPage = await bridge.workHub.queryTasks(session('host-b'));
   assert.equal(taskPage.tasks[0]!.targetSessionId, session('host-b', 'original-task'));
   const found = await bridge.workHub.findTasks(session('host-b'), { query: '登录 限流', cursor: 'host-cursor' });
+  assert.ok(!('kind' in found), 'authorized indexed discovery retains its original result');
   assert.equal(found.items[0]!.title, '登录限流');
   assert.equal(found.items[0]!.id, 'older-than-recent-task');
   assert.equal(found.nextCursor, 'next-page');
