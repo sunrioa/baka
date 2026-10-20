@@ -139,7 +139,8 @@ export function createWorkHubEvidenceRuntime(options: {
         )
       )
         return false;
-      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
+      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId, true))
+        return false;
       return !(await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))
         ?.retires;
     } catch (error) {

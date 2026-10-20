@@ -33,6 +33,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationReplacementRequestedMessage,
 } from '@maka/core/session';
 import { createSessionStore, type SessionAuthorityStore } from '@maka/storage/session-store';
 import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
@@ -62,6 +63,201 @@ const CONTEXT: ConnectionContext = {
   principal: 'local_os_user',
   acquireResidency: () => ({ release() {} }),
 };
+
+for (const scenario of [
+  'pending',
+  'lost_ack',
+  'source_mismatch',
+  'claim_mismatch',
+  'aborted',
+  'assigned',
+  'superseded',
+] as const)
+  test(`legacy replacement retirement only settles the unassigned intent (${scenario})`, async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-legacy-replacement-')));
+    let store = createSessionStore(root);
+    try {
+      const host = coordinator(root, store, undefined, undefined, undefined, undefined, {
+        assign: persistTestAssignmentAction(store, 'continued-turn'),
+      });
+      assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+      const worker = await store.create({
+        cwd: root,
+        name: 'Original worker',
+        model: 'test',
+        llmConnectionSlug: 'test',
+        permissionMode: 'ask',
+      });
+      await persistTestAssignment(
+        store,
+        {
+          actionId: 'old-task',
+          actionFingerprint: `sha256:${'a'.repeat(64)}`,
+          disposition: 'delegate_existing',
+          targetSessionId: worker.id,
+          targetSessionName: worker.name,
+          userText: 'Original requirement',
+        },
+        'original-worker-turn',
+      );
+      const source = (await store.readWorkHubAssignment('old-task'))!;
+      const suffix = createHash('sha256').update(source.delegationId).digest('hex').slice(0, 48);
+      const request: WorkHubDelegationReplacementRequestedMessage = {
+        type: 'workhub_coordination',
+        kind: 'delegation_replacement_requested',
+        schemaVersion: 2,
+        id: `whp_${suffix}`,
+        turnId: 'old-correction-turn',
+        coordinationTurnId: 'old-correction-turn',
+        actionId: 'old-correction',
+        actionFingerprint: `sha256:${'b'.repeat(64)}`,
+        ts: 2,
+        disposition: 'create_new',
+        create: {
+          title: 'Never dispatched replacement',
+          workspace: { kind: 'host_path', path: root },
+        },
+        targetSessionId: 'never-created-worker',
+        targetSessionName: 'Never dispatched replacement',
+        userText: 'Unfinished old replacement intent',
+        replacesActionId: source.actionId,
+        replacesDelegationId: source.delegationId,
+        replacedTargetSessionId: source.targetSessionId,
+        replacedTargetMessageId:
+          scenario === 'source_mismatch' ? 'wrong-message' : source.targetMessageId,
+      };
+      await store.claimWorkHubAction({
+        actionId: request.actionId,
+        operation: scenario === 'claim_mismatch' ? 'stop' : 'replace',
+        actionFingerprint: request.actionFingerprint,
+        subject: source.delegationId,
+      });
+      await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, request);
+      if (scenario === 'aborted')
+        await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, {
+          type: 'workhub_coordination',
+          kind: 'delegation_replacement_aborted',
+          schemaVersion: 2,
+          id: `whb_${suffix}`,
+          turnId: request.turnId,
+          ts: 3,
+          actionId: request.actionId,
+          actionFingerprint: request.actionFingerprint,
+          coordinationTurnId: request.coordinationTurnId,
+          abortedActionId: source.actionId,
+          abortedDelegationId: source.delegationId,
+          targetSessionId: request.targetSessionId,
+          reason: 'target_unavailable',
+        });
+      if (scenario === 'assigned')
+        await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, {
+          ...source,
+          schemaVersion: 2,
+          id: `wha_${createHash('sha256').update(request.actionId).digest('hex').slice(0, 48)}`,
+          actionId: request.actionId,
+          actionFingerprint: request.actionFingerprint,
+          replacesActionId: source.actionId,
+          replacesDelegationId: source.delegationId,
+        });
+      if (scenario === 'superseded')
+        await store.appendMessage(WORKHUB_COORDINATION_SESSION_ID, {
+          type: 'workhub_coordination',
+          kind: 'delegation_superseded',
+          schemaVersion: 2,
+          id: `whx_${suffix}`,
+          turnId: request.turnId,
+          ts: 3,
+          actionId: request.actionId,
+          actionFingerprint: request.actionFingerprint,
+          coordinationTurnId: request.coordinationTurnId,
+          supersededActionId: source.actionId,
+          supersededDelegationId: source.delegationId,
+          replacementDelegationId: 'legacy-replacement-delegation',
+        });
+      const before = {
+        header: await store.readHeaderSnapshot(worker.id),
+        admissions: await store.listMessageAdmissions(worker.id),
+        headers: (await store.listHeaders()).map((header) =>
+          header.id === WORKHUB_COORDINATION_SESSION_ID ? { id: header.id } : header,
+        ),
+        claim: await store.readWorkHubActionClaim(request.actionId),
+      };
+      const beforeFacts = await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID);
+      if (scenario === 'lost_ack') {
+        const append = store.appendMessages.bind(store);
+        store.appendMessages = async (...args) => {
+          await append(...args);
+          throw new Error('Simulated lost write acknowledgement');
+        };
+      }
+      const expected = scenario === 'pending' || scenario === 'lost_ack';
+      const result = await host.retireLegacyReplacements();
+      assert.equal(result.retired, expected ? 1 : 0);
+      assert.equal(result.unavailable, scenario.endsWith('mismatch') ? 1 : 0);
+      const abort = await store.readWorkHubReplacementAbort(source.delegationId);
+      assert.equal(
+        abort?.reason,
+        expected
+          ? 'legacy_protocol_retirement'
+          : scenario === 'aborted'
+            ? 'target_unavailable'
+            : undefined,
+      );
+      assert.deepEqual(await store.readWorkHubReplacement(source.delegationId), request);
+      assert.deepEqual(
+        {
+          header: await store.readHeaderSnapshot(worker.id),
+          admissions: await store.listMessageAdmissions(worker.id),
+          headers: (await store.listHeaders()).map((header) =>
+            header.id === WORKHUB_COORDINATION_SESSION_ID ? { id: header.id } : header,
+          ),
+          claim: await store.readWorkHubActionClaim(request.actionId),
+        },
+        before,
+        'retiring the protocol intent must not cancel, restart or configure any worker',
+      );
+      const afterFacts = await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID);
+      assert.equal(afterFacts.length, beforeFacts.length + (expected ? 1 : 0));
+      assert.deepEqual(afterFacts.slice(0, beforeFacts.length), beforeFacts);
+      await store.close?.();
+      store = createSessionStore(root);
+      const reopened = coordinator(root, store);
+      assert.equal((await reopened.retireLegacyReplacements()).retired, 0);
+      assert.deepEqual(
+        await store.readMessagesSnapshot(WORKHUB_COORDINATION_SESSION_ID),
+        afterFacts,
+      );
+      if (expected) {
+        assert.equal(await store.readWorkHubReplacement(source.delegationId, true), undefined);
+        assert.equal(
+          (await store.readActiveWorkHubAssignmentsByTarget([worker.id]))[0]?.actionId,
+          source.actionId,
+        );
+        const continued = coordinator(root, store, undefined, undefined, undefined, undefined, {
+          assign: persistTestAssignmentAction(store, 'continued-turn'),
+        });
+        const result = await continued.continueTaskInput(
+          {
+            inputId: 'native-followup',
+            workId: source.actionId,
+            generationId: source.actionId,
+            sourceActionId: source.actionId,
+            sourceDelegationId: source.delegationId,
+            text: 'Continue through the new task entry',
+          },
+          CONTEXT,
+        );
+        assert.equal(result.targetSessionId, worker.id);
+        assert.equal(result.disposition, 'delegate_existing');
+        assert.ok(result.disposition === 'delegate_existing');
+        assert.equal(result.workId, source.actionId);
+        assert.equal((await store.listHeaders()).length, before.headers.length);
+      }
+    } finally {
+      await store.close?.();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 
 describe('task-centric start and selection', () => {
   for (const mode of ['native', 'lost_authority', 'executor'] as const)
@@ -1867,6 +2063,7 @@ function coordinator(
   });
   return {
     handlers: host.handlers,
+    retireLegacyReplacements: host.retireLegacyReplacements.bind(host),
     continueTaskFresh: host.continueTaskFresh.bind(host),
     continueTaskInput: host.continueTaskInput.bind(host),
     prepareTaskStop: host.prepareTaskStop.bind(host),

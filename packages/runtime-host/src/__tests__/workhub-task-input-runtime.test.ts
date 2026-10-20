@@ -25,7 +25,12 @@ import type {
   WorkHubTaskInputMessage,
   WorkHubTaskInputRequest,
 } from '@maka/core/workhub-task-input';
-import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubActionClaim } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  type WorkHubActionClaim,
+  type WorkHubDelegationReplacementRequestedMessage,
+  type WorkHubDelegationReplacementAbortedMessage,
+} from '@maka/core/session';
 import { messageContentDigest } from '@maka/core/events';
 import type { PendingMessageAdmission } from '@maka/storage/execution-stores';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
@@ -50,6 +55,75 @@ const context = {
   principal: 'local_os_user' as const,
   acquireResidency: () => ({ release() {} }),
 };
+
+test('only a bound Host intent retirement admits original task inputs without changing delivery mode', async () => {
+  for (const state of ['active', 'pending', 'ended']) {
+    for (const marker of [
+      'bound',
+      'wrong_action',
+      'wrong_source',
+      'orphan',
+      'old_abort',
+    ] as const) {
+      const f = fixture();
+      f.state = state;
+      f.replacement =
+        marker === 'orphan'
+          ? undefined
+          : {
+              type: 'workhub_coordination',
+              kind: 'delegation_replacement_requested',
+              schemaVersion: 2,
+              id: 'legacy-request',
+              turnId: 'correction-turn',
+              coordinationTurnId: 'correction-turn',
+              ts: 1,
+              actionId: 'correction',
+              actionFingerprint: `sha256:${'a'.repeat(64)}`,
+              targetSessionId: 'unused-worker',
+              targetSessionName: 'Unused worker',
+              disposition: 'delegate_existing',
+              userText: 'An old correction',
+              replacesActionId: 'action',
+              replacesDelegationId: 'delegation',
+              replacedTargetSessionId: 'target',
+              replacedTargetMessageId: marker === 'wrong_source' ? 'foreign-message' : 'original',
+            };
+      f.replacementAbort = {
+        type: 'workhub_coordination',
+        kind: 'delegation_replacement_aborted',
+        schemaVersion: 2,
+        id: 'legacy-abort',
+        turnId: 'correction-turn',
+        coordinationTurnId: 'correction-turn',
+        ts: 2,
+        actionId: marker === 'wrong_action' ? 'foreign-correction' : 'correction',
+        actionFingerprint: `sha256:${'a'.repeat(64)}`,
+        targetSessionId: 'unused-worker',
+        abortedActionId: 'action',
+        abortedDelegationId: 'delegation',
+        reason: marker === 'old_abort' ? 'target_unavailable' : 'legacy_protocol_retirement',
+      };
+      const result = await f.handlers['workhub.tasks.send'](input, context);
+      assert.equal(result.ok, marker === 'bound', `${state}/${marker}: ${JSON.stringify(result)}`);
+      if (marker !== 'bound') {
+        assert.equal(f.commits + f.continuations, 0);
+        continue;
+      }
+      assert.ok(result.ok);
+      assert.equal(
+        result.result.mode,
+        state === 'active'
+          ? 'steering'
+          : state === 'pending'
+            ? 'queued_supplement'
+            : 'continuation',
+      );
+      assert.equal(f.continuations, state === 'ended' ? 1 : 0);
+      assert.equal(f.drains, 0);
+    }
+  }
+});
 
 test('task input fails closed for retired, foreign, unsupported and unresolved execution sources', async () => {
   for (const state of [
@@ -386,6 +460,8 @@ function fixture() {
     modelAttachments: [] as AttachmentRef[],
     latestWithdrawn: false,
     claims: new Map<string, WorkHubActionClaim>(),
+    replacement: undefined as WorkHubDelegationReplacementRequestedMessage | undefined,
+    replacementAbort: undefined as WorkHubDelegationReplacementAbortedMessage | undefined,
     continuation: undefined as
       | Parameters<Options['coordination']['continueTaskInput']>[0]
       | undefined,
@@ -440,8 +516,10 @@ function fixture() {
           f.claims.set(claim.actionId, claim);
           return 'claimed';
         },
-        readWorkHubReplacement: async () => (f.state === 'replacement' ? {} : undefined),
-        readWorkHubReplacementAbort: async () => (f.state === 'aborted' ? {} : undefined),
+        readWorkHubReplacement: async () =>
+          f.replacement ?? (f.state === 'replacement' ? {} : undefined),
+        readWorkHubReplacementAbort: async () =>
+          f.replacementAbort ?? (f.state === 'aborted' ? {} : undefined),
         readWorkHubSupersession: async () => (f.state === 'superseded' ? {} : undefined),
         readWorkHubStopRequest: async (_id: string, _actionId?: string, latest?: true) =>
           f.state === 'stopped'
@@ -484,6 +562,33 @@ function fixture() {
       runtimeEventStore: { readImmutableSteeringMessageProof: async () => undefined },
     } as unknown as Options['stores'],
     messages: {
+      supplementWorkHubMessageAdmitted: async (
+        ...[request, _lease, commit]: Parameters<
+          Options['messages']['supplementWorkHubMessageAdmitted']
+        >
+      ) => {
+        const content = normalizeMessageContent({ text: 'Original queued task' });
+        const before: PendingMessageAdmission = {
+          sessionId: 'target',
+          messageId: 'original',
+          turnId: 'queued-turn',
+          runId: 'queued-run',
+          content,
+          submittedContentDigest: messageContentDigest(content),
+          submittedPlacement: 'next_turn',
+          placement: 'next_turn',
+          disposition: 'followup',
+          admittedAt: 1,
+          skillInvocation: { loaded: [], failed: [], receipts: [] },
+        };
+        const after = {
+          ...before,
+          content: normalizeMessageContent({ text: `${content.text}\n${request.text}` }),
+        };
+        await commit(after, before);
+        assert.equal(f.pending?.admittedAt, before.admittedAt);
+        return { ok: true, result: { messageId: before.messageId } };
+      },
       readMessageExecutionDispositionAdmitted: async (_sessionId: string, messageId: string) =>
         f.state === 'pending'
           ? { kind: 'pending' }

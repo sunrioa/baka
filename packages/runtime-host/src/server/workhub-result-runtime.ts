@@ -28,6 +28,7 @@ import {
 import type { OperationHandlerMap } from './operation-dispatcher.js';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
+  isWorkHubReplacementIntentRetired,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
 import type { MakaToolContext, ToolExecutionScope } from '@maka/runtime/tool-runtime';
@@ -212,6 +213,10 @@ export function createWorkHubResultRuntime(options: {
     // Read-only discovery already located the canonical latest fact at its
     // watermark. Do not re-scan every task's target ledger to rediscover its
     // generation. Effect paths never pass this advisory observation.
+    const abort = await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId);
+    const replacement = abort
+      ? await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)
+      : undefined;
     return (
       (observedLatest.work?.id ?? observedLatest.actionId) ===
         (assignment.work?.id ?? assignment.actionId) &&
@@ -219,7 +224,13 @@ export function createWorkHubResultRuntime(options: {
         (assignment.work?.generationId ?? assignment.actionId) &&
       observedLatest.targetSessionId === assignment.targetSessionId &&
       !(await stores.sessionStore.readWorkHubSupersession(assignment.delegationId)) &&
-      !(await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId))
+      (!abort ||
+        (replacement &&
+          isWorkHubReplacementIntentRetired(replacement, abort) &&
+          replacement.replacesActionId === assignment.actionId &&
+          replacement.replacesDelegationId === assignment.delegationId &&
+          replacement.replacedTargetSessionId === assignment.targetSessionId &&
+          replacement.replacedTargetMessageId === assignment.targetMessageId))
     );
   }
   async function isActive(
@@ -232,7 +243,8 @@ export function createWorkHubResultRuntime(options: {
       if (!assignment.returnResults || !(await visible(assignment, false, observedLatest)))
         return false;
       // Retirement intent takes precedence even before its final receipt exists.
-      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
+      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId, true))
+        return false;
       if ((await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))?.retires)
         return false;
       return true;
@@ -507,7 +519,8 @@ export function createWorkHubResultRuntime(options: {
     )
       return undefined;
     if (!(await visible(assignment, true, observedLatest))) return undefined;
-    if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return undefined;
+    if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId, true))
+      return undefined;
     const task: WorkHubTask = {
       workId: assignment.work?.id ?? assignment.actionId,
       actionId: assignment.actionId,

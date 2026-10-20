@@ -3307,6 +3307,11 @@ export async function createExecutionRuntimeHostComposition(
         recovery: {
           executions: async () => {
             await coordinator.prepareRecovery();
+            const replacements = await workHubCoordination.retireLegacyReplacements();
+            if (replacements.unavailable)
+              console.warn(
+                `[runtime-host] ${replacements.unavailable} legacy WorkHub replacement intents remain unavailable; no replacement was started`,
+              );
             // Only copied legacy coordinator questions are retired here; the
             // ordinary recovery below still owns original worker interactions.
             await workHubResults?.retireLegacy();

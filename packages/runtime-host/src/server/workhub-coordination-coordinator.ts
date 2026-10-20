@@ -37,16 +37,22 @@ import type { CreateSessionInput } from '@maka/core/runtime-inputs';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
+  WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
   WORKHUB_COORDINATION_STOP_SCHEMA_VERSION,
   isWorkHubCoordinationSession,
   isWorkHubCoordinationSessionId,
   type SessionHeader,
   type StoredMessage,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationReplacementRequestedMessage,
   type WorkHubDelegationStopRequestedMessage,
   type WorkHubDelegationStopResolvedMessage,
 } from '@maka/core/session';
-import type { ExecutionSessionWriter, SessionHeaderSnapshot } from '@maka/storage/execution-stores';
+import {
+  isSessionNotFoundError,
+  type ExecutionSessionWriter,
+  type SessionHeaderSnapshot,
+} from '@maka/storage/execution-stores';
 import type {
   OperationOutcome,
   WorkHubCoordinationActResult,
@@ -120,6 +126,9 @@ type CoordinationStores = Pick<
   | 'readLatestWorkHubAssignment'
   | 'readActiveWorkHubAssignmentsByTarget'
   | 'readWorkHubReplacement'
+  | 'readWorkHubReplacementAbort'
+  | 'readWorkHubSupersession'
+  | 'readWorkHubTaskFactsPage'
   | 'readWorkHubStopRequest'
   | 'readWorkHubStopResolution'
   | 'readTranscriptHighWaterSnapshot'
@@ -234,7 +243,7 @@ export class HostWorkHubCoordinationCoordinator {
           undefined,
           includeStopped,
         ),
-      readReplacement: (delegationId) => this.#stores.readWorkHubReplacement(delegationId),
+      readReplacement: (delegationId) => this.#stores.readWorkHubReplacement(delegationId, true),
       readStopRequest: (delegationId, actionId, latest) =>
         this.#stores.readWorkHubStopRequest(delegationId, actionId, latest),
       readStopResolution: (delegationId, actionId) =>
@@ -242,6 +251,102 @@ export class HostWorkHubCoordinationCoordinator {
 
       assign: options.sessionActions.assign,
     });
+  }
+
+  /** Startup only: settle old unassigned replacement intents without touching their workers. */
+  async retireLegacyReplacements() {
+    const result = { retired: 0, unavailable: 0 };
+    let afterSequence = -1;
+    let through: number | null | undefined;
+    for (;;) {
+      let page;
+      try {
+        page = await this.#stores.readWorkHubTaskFactsPage({
+          afterSequence,
+          maxMessages: 64,
+          maxStoredBytes: 256 * 1024,
+        });
+      } catch (error) {
+        if (isSessionNotFoundError(error)) return result;
+        throw error;
+      }
+      through ??= page.highWaterSequence;
+      for (const row of page.records) {
+        afterSequence = row.sequence;
+        if (through !== null && through !== undefined && row.sequence > through) return result;
+        const request = row.message;
+        if (
+          request.type === 'workhub_coordination' &&
+          request.kind === 'delegation_replacement_requested'
+        ) {
+          const status = await this.#retireLegacyReplacement(request);
+          if (status === 'retired') result.retired++;
+          if (status === 'unavailable') result.unavailable++;
+        }
+      }
+      if (!page.records.length || through === null || afterSequence >= (through ?? -1))
+        return result;
+    }
+  }
+
+  #retireLegacyReplacement(request: WorkHubDelegationReplacementRequestedMessage) {
+    return this.#admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, request.replacedTargetSessionId],
+      async (lease) => {
+        const suffix = workHubDestructiveClaimIdentitySuffix(request.replacesDelegationId);
+        const current = await this.#stores.readWorkHubReplacement(request.replacesDelegationId);
+        if (request.id !== `whp_${suffix}` || !isDeepStrictEqual(request, current))
+          return 'unavailable' as const;
+        // Committed replacement assignments/supersessions and previous terminal
+        // outcomes are immutable history, not work for this retirement path.
+        if (
+          (await this.#stores.readWorkHubReplacementAbort(request.replacesDelegationId)) ||
+          (await this.#stores.readWorkHubSupersession(request.replacesDelegationId)) ||
+          (await this.#stores.readWorkHubAssignment(request.actionId))
+        )
+          return 'settled' as const;
+        const source = await this.#stores.readWorkHubAssignment(request.replacesActionId);
+        const claim = await this.#stores.readWorkHubActionClaim(request.actionId);
+        const header = await this.#stores.readHeaderSnapshot(WORKHUB_COORDINATION_SESSION_ID);
+        if (
+          !validCoordinationIdentityHeader(header) ||
+          !source ||
+          source.actionId !== request.replacesActionId ||
+          source.delegationId !== request.replacesDelegationId ||
+          source.targetSessionId !== request.replacedTargetSessionId ||
+          source.targetMessageId !== request.replacedTargetMessageId ||
+          (claim &&
+            (claim.operation !== 'replace' ||
+              claim.subject !== source.delegationId ||
+              claim.actionFingerprint !== request.actionFingerprint))
+        )
+          return 'unavailable' as const;
+        await this.#commitCoordinationFact({
+          admission: lease,
+          admissionSessionIds: [WORKHUB_COORDINATION_SESSION_ID, source.targetSessionId],
+          read: () => this.#stores.readWorkHubReplacementAbort(source.delegationId),
+          build: (existing) => ({
+            type: 'workhub_coordination' as const,
+            kind: 'delegation_replacement_aborted' as const,
+            schemaVersion: WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
+            id: `whb_${suffix}`,
+            turnId: request.coordinationTurnId,
+            ts: existing?.ts ?? Date.now(),
+            actionId: request.actionId,
+            actionFingerprint: request.actionFingerprint,
+            coordinationTurnId: request.coordinationTurnId,
+            abortedActionId: source.actionId,
+            abortedDelegationId: source.delegationId,
+            targetSessionId: request.targetSessionId,
+            reason: 'legacy_protocol_retirement' as const,
+          }),
+          beforeAppend: async () => undefined,
+          conflictMessage: 'Legacy replacement already has a different terminal outcome',
+          unknownOutcomeMessage: 'Legacy replacement retirement outcome is unknown',
+        });
+        return 'retired' as const;
+      },
+    );
   }
 
   /** Server-only task snapshots; the caller already owns the complete set's admission. */

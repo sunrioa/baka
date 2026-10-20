@@ -21,7 +21,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
+  isWorkHubReplacementIntentRetired,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationReplacementRequestedMessage,
+  type WorkHubDelegationReplacementAbortedMessage,
 } from '@maka/core/session';
 import { SessionNotFoundError } from '@maka/storage/session-store';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
@@ -33,6 +36,56 @@ import {
 } from '../server/session-admission-gate.js';
 
 type Options = Parameters<typeof createWorkHubResultRuntime>[0];
+
+test('indexed task projection only preserves a retired intent bound to its original assignment', async () => {
+  for (const wrongSource of [false, true]) {
+    const f = fixture();
+    const source = f.assignment;
+    const request: WorkHubDelegationReplacementRequestedMessage = {
+      type: 'workhub_coordination',
+      kind: 'delegation_replacement_requested',
+      schemaVersion: 2,
+      id: 'legacy-intent',
+      turnId: 'legacy-turn',
+      coordinationTurnId: 'legacy-turn',
+      ts: 1,
+      actionId: 'legacy-action',
+      actionFingerprint: `sha256:${'a'.repeat(64)}`,
+      targetSessionId: 'unused-target',
+      targetSessionName: 'Unused target',
+      disposition: 'delegate_existing',
+      userText: 'Legacy replacement intent',
+      replacesActionId: source.actionId,
+      replacesDelegationId: source.delegationId,
+      replacedTargetSessionId: source.targetSessionId,
+      replacedTargetMessageId: wrongSource ? 'foreign-message' : source.targetMessageId,
+    };
+    f.setReplacement(request, {
+      type: 'workhub_coordination',
+      kind: 'delegation_replacement_aborted',
+      schemaVersion: 2,
+      id: 'legacy-abort',
+      turnId: request.turnId,
+      coordinationTurnId: request.coordinationTurnId,
+      ts: 2,
+      actionId: request.actionId,
+      actionFingerprint: request.actionFingerprint,
+      abortedActionId: source.actionId,
+      abortedDelegationId: source.delegationId,
+      targetSessionId: request.targetSessionId,
+      reason: 'legacy_protocol_retirement',
+    });
+    const task = await f.projectTask();
+    if (wrongSource) assert.equal(task, undefined);
+    else {
+      assert.equal(task?.task.workId, source.actionId);
+      assert.equal(task?.task.status, 'waiting_for_user');
+      assert.equal(task?.task.targetMessageId, source.targetMessageId);
+    }
+    assert.equal(f.forwarded.length + f.closedRelays.length, 0);
+    assert.equal(f.questions.length, 1, 'the original unanswered question remains intact');
+  }
+});
 
 test('task-id detail lookup resolves old tasks outside the overview without scanning assignment history', async () => {
   const f = fixture();
@@ -296,6 +349,8 @@ function fixture(childRequest = false) {
   let stopRequest: import('@maka/core/session').WorkHubDelegationStopRequestedMessage | undefined;
   let stopResolution: import('@maka/core/session').WorkHubDelegationStopResolvedMessage | undefined;
   let secondaryStopRequest: typeof stopRequest;
+  let replacement: WorkHubDelegationReplacementRequestedMessage | undefined;
+  let replacementAbort: WorkHubDelegationReplacementAbortedMessage | undefined;
   let requests = true;
   let childOwned = true;
   let status = 'waiting_for_user';
@@ -343,7 +398,15 @@ function fixture(childRequest = false) {
     turnId: context.turnId,
     runId: context.runId!,
   };
-  const assignment = {
+  const assignment: WorkHubDelegationAssignedMessage = {
+    type: 'workhub_coordination',
+    kind: 'delegation_assigned',
+    schemaVersion: 1,
+    id: 'assignment',
+    turnId: 'coordinator-turn',
+    coordinationTurnId: 'coordinator-turn',
+    actionFingerprint: `sha256:${'a'.repeat(64)}`,
+    disposition: 'delegate_existing',
     ts: 1,
     userText: 'Release task',
     targetSessionName: 'Release',
@@ -442,7 +505,14 @@ function fixture(childRequest = false) {
             : { id: 'target', name: 'Release', isArchived: false };
         },
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
-        readWorkHubReplacement: async () => undefined,
+        readWorkHubReplacement: async (_id: string, pendingOnly?: true) =>
+          pendingOnly &&
+          replacement &&
+          isWorkHubReplacementIntentRetired(replacement, replacementAbort)
+            ? undefined
+            : replacement,
+        readWorkHubReplacementAbort: async () => replacementAbort,
+        readWorkHubSupersession: async () => undefined,
         readWorkHubStopRequest: async (_delegationId: string, actionId?: string, latest?: true) =>
           (latest && secondaryStopRequest) ||
           (actionId && secondaryStopRequest?.actionId === actionId)
@@ -566,6 +636,14 @@ function fixture(childRequest = false) {
     coordinatorAdmission,
     coordinatorRoot,
     assignment,
+    projectTask: () => runtime.projectTask(assignment),
+    setReplacement: (
+      request: WorkHubDelegationReplacementRequestedMessage,
+      abort: WorkHubDelegationReplacementAbortedMessage,
+    ) => {
+      replacement = request;
+      replacementAbort = abort;
+    },
     readResult: (input: Parameters<typeof runtime.readResult>[0], ctx = context) =>
       runtime.readResult(input, ctx),
     forbidWake: () => {
@@ -831,7 +909,7 @@ test('pure result reads preserve pending, obsolete, missing and no-result-opt-in
   }
   const f = fixture();
   await assert.rejects(f.readResult({ actionId: 'missing' }), /Unknown WorkHub result assignment/u);
-  f.assignment.returnResults = false;
+  delete f.assignment.returnResults;
   await assert.rejects(f.readResult({ actionId: 'action' }), /Unknown WorkHub result assignment/u);
   assert.equal(f.resultReads(), 0);
   const cancelled = fixture();

@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
+  isWorkHubReplacementIntentRetired,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
@@ -244,10 +245,18 @@ export function createWorkHubTaskInputRuntime(options: {
         'The selected work generation changed; return to its current task',
       );
     const stop = await readWorkHubStopProjection(sessions, a.delegationId);
+    const replacement = await sessions.readWorkHubReplacement(a.delegationId);
+    const abort = await sessions.readWorkHubReplacementAbort(a.delegationId);
+    const retiredIntent =
+      replacement &&
+      isWorkHubReplacementIntentRetired(replacement, abort) &&
+      replacement.replacesActionId === a.actionId &&
+      replacement.replacesDelegationId === a.delegationId &&
+      replacement.replacedTargetSessionId === a.targetSessionId &&
+      replacement.replacedTargetMessageId === a.targetMessageId;
     if (
-      (await sessions.readWorkHubReplacement(a.delegationId)) ||
+      ((replacement || abort) && !retiredIntent) ||
       (await sessions.readWorkHubSupersession(a.delegationId)) ||
-      (await sessions.readWorkHubReplacementAbort(a.delegationId)) ||
       (stop && (!stop.resolution || (!taskAware && stop.retires)))
     )
       throw new InputFailure('operation_conflict', 'The selected task is being retired');
