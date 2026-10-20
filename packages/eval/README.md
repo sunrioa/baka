@@ -30,6 +30,7 @@ Experiment → Cells → Attempts → Results
 - [Architecture](#architecture)
 - [Experiment spec format](#experiment-spec-format)
 - [Running an evaluation](#running-an-evaluation)
+- [WorkHub Desktop evidence checks](#workhub-desktop-evidence-checks)
 - [Extending: custom executors and subjects](#extending-custom-executors-and-subjects)
 - [Relay protocol](#relay-protocol)
 - [Docker harness profiles](#docker-harness-profiles)
@@ -89,6 +90,21 @@ maka eval run experiment.json --out .maka-eval/run-001
 Use `--cell <cell-id>` to replace one failed or indeterminate cell. The attempt log is append-only and result selection always uses the earliest valid attempt.
 
 Before starting a trial, the public CLI validates the selected executor's machine paths, bundled relay files, pinned Harbor or Pier Python distribution, and Docker daemon availability for Docker environments. A missing or mismatched prerequisite is reported with the configured environment-variable name and expected framework version; the CLI does not start a trial or install external software. Subject-specific toolchain verification remains part of subject preparation and also completes before any trial starts.
+
+## WorkHub Desktop evidence checks
+
+The separate WorkHub checker emits fixed UI plans and validates private exports from the normal
+Desktop model/tool cycle. It neither routes tasks nor runs models or writes user profiles.
+
+```sh
+node packages/eval/dist/workhub-cli.js plan T01
+node packages/eval/dist/workhub-cli.js check /private/path/capture.json
+node --test packages/eval/dist/__tests__/workhub-evidence.test.js
+```
+
+See [the case and evidence contract](../../docs/workhub-task-centric-evaluation.zh-CN.md).
+The deterministic tests are offline checker fixtures; they never count as real-model passes.
+Real Desktop execution remains pending until a source-bound capture passes every required check.
 
 ## Extending: custom executors and subjects
 
