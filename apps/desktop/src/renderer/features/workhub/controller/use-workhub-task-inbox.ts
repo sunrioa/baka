@@ -23,7 +23,7 @@ import type { WorkHubServices } from '../ports.js';
 
 const empty: WorkHubInteractionsQueryResult = { requests: [], truncated: false };
 const emptyWorkIds: ReadonlyMap<string, string> = new Map();
-const assignmentKey = (item: WorkHubPendingInteraction) => JSON.stringify([item.actionId, item.delegationId, item.interaction.sessionId]);
+const assignmentKey = (item: WorkHubPendingInteraction) => JSON.stringify([item.actionId, item.delegationId]);
 export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string | undefined) {
   const current = useRef(sessionId);
   current.current = sessionId;
@@ -67,7 +67,9 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
               const key = assignmentKey(item);
               if (!sources.has(key)) sources.set(key, (async () => {
                 const { task } = await services.readTask(sessionId!, { actionId: item.actionId, delegationId: item.delegationId });
-                if (task.actionId !== item.actionId || task.delegationId !== item.delegationId || task.targetSessionId !== item.interaction.sessionId)
+                // The Host inbox already proves child-run ancestry. Its original
+                // child snapshot need not share the task's root Session.
+                if (task.actionId !== item.actionId || task.delegationId !== item.delegationId)
                   throw new Error('The original task request changed identity');
                 return task.workId ?? task.actionId;
               })());

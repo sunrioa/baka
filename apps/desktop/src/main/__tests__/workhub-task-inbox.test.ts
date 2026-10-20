@@ -136,7 +136,97 @@ test('opening an inbox approval resolves its task independently of the first eig
   assert.doesNotMatch(container.textContent, /Allow once|Other task tool/);
 });
 
-for (const failure of ['read', 'action', 'delegation', 'session'] as const)
+test('Host-proven child approvals retain their own Session and execution while sharing the parent task lookup', async () => {
+  const { owner, task: source, request } = inboxFixture('host');
+  const task: WorkHubTask = { ...source, execution: { turnId: 'turn', runId: 'run', sharedTurn: false } };
+  const rootRequest: WorkHubPendingInteraction = { ...request, interaction: { ...request.interaction,
+    request: { kind: 'permission', toolUseId: 'root-tool',
+      prompt: { kind: 'tool_permission', toolName: 'Parent tool', category: 'shell_unsafe', reason: 'shell_dangerous',
+        review: { kind: 'command', command: 'npm test' }, rememberForTurnAllowed: false } } } };
+  const childRequest: WorkHubPendingInteraction = { ...request, interaction: { ...request.interaction,
+    sessionId: desktopSessionKey({ hostId: 'host', sessionId: 'graph-child' }),
+    interactionId: 'child-request', turnId: 'child-turn', runId: 'child-run',
+    request: { kind: 'permission', toolUseId: 'child-tool',
+      prompt: { kind: 'tool_permission', toolName: 'Child tool', category: 'shell_unsafe', reason: 'shell_dangerous',
+        review: { kind: 'command', command: 'npm test -- child' }, rememberForTurnAllowed: false } } } };
+  let requests = [rootRequest, childRequest];
+  const reads: Array<Parameters<WorkHubServices['readTask']>> = [];
+  const answers: Array<Parameters<WorkHubServices['answerTaskInteraction']>> = [];
+  const assignment: WorkHubTaskAssignment = { workId: 'work', generationId: 'work', actionId: task.actionId,
+    delegationId: task.delegationId, targetSessionId: task.targetSessionId, targetSessionName: task.targetSessionName,
+    targetMessageId: task.targetMessageId, text: task.text, createdAt: 1, state: 'owned', superseded: false,
+    execution: { turnId: rootRequest.interaction.turnId, runId: rootRequest.interaction.runId } };
+  const services = {
+    async readTask(sessionId, ref) {
+      reads.push([sessionId, ref]);
+      assert.equal(sessionId, owner);
+      assert.deepEqual(ref, { actionId: task.actionId, delegationId: task.delegationId });
+      return { task };
+    },
+    // This port preserves the Host's belongsToRoot-proven original snapshots;
+    // the child Session is not rewritten to the task's root Session.
+    queryTaskInteractions: async () => ({ requests, truncated: false }),
+    async answerTaskInteraction(sessionId, input) {
+      answers.push([sessionId, input]);
+      const original = requests.find(item => item.interaction.interactionId === input.interactionId);
+      assert.ok(original);
+      assert.equal(input.actionId, task.actionId);
+      assert.equal(input.expectedTurnId, original.interaction.turnId);
+      assert.equal(input.expectedRunId, original.interaction.runId);
+      assert.equal(input.answer.kind, 'permission');
+      if (input.answer.kind !== 'permission') assert.fail('Expected the original permission answer');
+      requests = requests.filter(item => item !== original);
+      return { ...original.interaction, status: 'answered' as const, revision: 2,
+        outcome: { ...input.answer, kind: 'permission_answer' as const, reviewer: 'user' as const, committedAt: 2 } };
+    },
+    taskHistory: async () => ({ workId: 'work', assignments: [assignment], nextCursor: null }),
+    taskExecutions: async () => ({ actionId: task.actionId, delegationId: task.delegationId, targetSessionId: task.targetSessionId,
+      executions: [{ sessionId: task.targetSessionId, turnId: 'turn', runId: 'run', status: 'waiting_for_user' as const }], nextCursor: null }),
+    subscribeSessions: () => () => {}, subscribeAvailability: () => () => {}, subscribeActiveInteractions: () => () => {},
+    getTaskSession: async () => null,
+    observe(_id, _event, _error, phase) { phase('ready'); return () => {}; },
+    async openTranscript(_id, accept) {
+      accept({ messages: [], ready: true, hasOlder: false });
+      return { observationChanged() {}, loadEarlier: async () => {}, close: async () => {} };
+    },
+  } satisfies Pick<WorkHubServices, 'readTask' | 'queryTaskInteractions' | 'answerTaskInteraction' | 'taskHistory' |
+    'taskExecutions' | 'subscribeSessions' | 'subscribeAvailability' | 'subscribeActiveInteractions' | 'getTaskSession' | 'observe' | 'openTranscript'>;
+  const ports = services as unknown as WorkHubServices;
+  let inbox!: ReturnType<typeof useWorkHubTaskInbox>;
+  function Probe() {
+    inbox = useWorkHubTaskInbox(ports, owner);
+    const view = useWorkHubTaskView(ports, owner, 'work');
+    return createElement(WorkHubTaskView, { services: ports, owner, workId: 'work', name: 'Task', view, inbox });
+  }
+  const { root, container } = installReactRenderer();
+  await act(async () => { root.render(createElement(LocaleProvider, { locale: 'en', children:
+    createElement(WorkHubServicesProvider, { services: ports, children: createElement(Probe) }) })); });
+  assert.equal(inbox.error, undefined, 'Host-proven child ancestry is not rejected by a same-Session rule');
+  assert.equal(inbox.ready, true);
+  assert.deepEqual(reads, [[owner, { actionId: task.actionId, delegationId: task.delegationId }]], 'one exact assignment lookup per refresh, including root and child requests');
+  assert.notEqual(childRequest.interaction.sessionId, task.targetSessionId);
+  assert.deepEqual(inbox.requestsForWork('work'), [rootRequest, childRequest]);
+  assert.equal(inbox.requests[0], rootRequest);
+  assert.equal(inbox.requests[1], childRequest);
+  assert.match(container.textContent, /Parent tool/);
+  assert.match(container.textContent, /Child tool/);
+  assert.equal(container.textContent.match(/Allow once/g)?.length, 2);
+  await act(async () => { await inbox.respond(childRequest, { kind: 'permission', decision: 'allow', rememberForTurn: false }); });
+  assert.deepEqual(inbox.requestsForWork('work'), [rootRequest]);
+  assert.match(container.textContent, /Parent tool/);
+  assert.doesNotMatch(container.textContent, /Child tool/);
+  await act(async () => { await inbox.respond(rootRequest, { kind: 'permission', decision: 'deny', rememberForTurn: false }); });
+  assert.deepEqual(answers, [
+    [owner, { actionId: task.actionId, interactionId: 'child-request', expectedTurnId: 'child-turn', expectedRunId: 'child-run',
+      answer: { kind: 'permission', decision: 'allow', rememberForTurn: false } }],
+    [owner, { actionId: task.actionId, interactionId: rootRequest.interaction.interactionId, expectedTurnId: 'turn', expectedRunId: 'run',
+      answer: { kind: 'permission', decision: 'deny', rememberForTurn: false } }],
+  ]);
+  assert.equal(reads.length, 2, 'answer reconciliation reads the remaining source once; an empty inbox reads no task');
+  assert.deepEqual(inbox.requests, []);
+});
+
+for (const failure of ['read', 'action', 'delegation'] as const)
   test(`inbox ownership fails closed after ${failure} failure and refresh deduplicates the original source`, async () => {
     const { owner, task, request } = inboxFixture('host');
     const another = { ...request, interaction: { ...request.interaction, interactionId: 'second-request' } };
@@ -149,7 +239,6 @@ for (const failure of ['read', 'action', 'delegation', 'session'] as const)
         const bad = !healthy ? {
           ...(failure === 'action' ? { actionId: 'foreign-action' } : {}),
           ...(failure === 'delegation' ? { delegationId: 'foreign-delegation' } : {}),
-          ...(failure === 'session' ? { targetSessionId: desktopSessionKey({ hostId: 'other', sessionId: 'worker' }) } : {}),
         } : {};
         return { task: { ...task, ...bad } };
       },
