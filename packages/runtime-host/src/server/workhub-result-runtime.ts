@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { z } from 'zod';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
 import { readLogicalRuntimeExecutionForRun } from '@maka/core/runtime-logical-execution';
 import { readWorkHubStopProjection } from './workhub-stop-projection.js';
@@ -29,7 +30,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
-import type { ToolExecutionScope } from '@maka/runtime/tool-runtime';
+import type { MakaToolContext, ToolExecutionScope } from '@maka/runtime/tool-runtime';
 import { isSessionNotFoundError, type ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
 import type { HostMessageCoordinator } from './message-coordinator.js';
@@ -43,6 +44,7 @@ import {
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
 import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
+import { readHostedExecutionMembership } from './hosted-execution-membership.js';
 import {
   WORKHUB_TASK_MAX_ITEMS,
   WORKHUB_TASK_TEXT_MAX_BYTES,
@@ -50,6 +52,18 @@ import {
   type WorkHubTask,
   type WorkHubTaskDetail,
 } from '../protocol/workhub-tasks.js';
+
+const resultReadParameters = z
+  .object({ actionId: z.string().min(1), offset: z.number().int().nonnegative().default(0) })
+  .strict();
+
+export type WorkHubResultRead =
+  | { readonly status: 'pending'; readonly targetSessionId: string; readonly message: string }
+  | { readonly status: 'obsolete'; readonly targetSessionId: string }
+  | (WorkHubResultObservation & {
+      readonly targetSessionId: string;
+      readonly nextOffset: number | null;
+    });
 
 /** Read-only task ancestry; interaction visibility grants no additional execution authority. */
 export function createWorkHubInteractionOwnership(input: {
@@ -336,6 +350,73 @@ export function createWorkHubResultRuntime(options: {
       : admission.runMany([WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId], (lane) =>
           inspectLocked(assignment, lane, includeResult),
         );
+  }
+  async function assertResultReader(ctx: MakaToolContext): Promise<void> {
+    ctx.abortSignal.throwIfAborted();
+    if (ctx.sessionId !== WORKHUB_COORDINATION_SESSION_ID || !ctx.runId || !ctx.invocationId)
+      throw new Error('WorkHub result access requires a current coordination invocation');
+    const run = await stores.runtimeEventStore.readRunInvocation(ctx.sessionId, ctx.runId);
+    if (
+      !run ||
+      run.sessionId !== ctx.sessionId ||
+      run.runId !== ctx.runId ||
+      run.turnId !== ctx.turnId ||
+      run.invocationId !== ctx.invocationId ||
+      run.opening.root.kind !== 'user' ||
+      run.terminalEvent
+    )
+      throw new Error('WorkHub result reader is not the current root invocation');
+    const root = await stores.agentRunStore.readRootTurnAdmission(ctx.sessionId, ctx.turnId);
+    const current = executions.readRootState(ctx.sessionId);
+    if (
+      root?.execution.kind !== 'workhub_coordination' ||
+      current.kind !== 'active' ||
+      current.turnId !== root.turnId ||
+      current.runId !== root.runId ||
+      (await readHostedExecutionMembership(stores.runtimeEventStore, root))?.tip.runId !== ctx.runId
+    )
+      throw new Error('WorkHub result access requires coordination authority');
+  }
+  /** Full coordinator results, not task-card excerpts or worker evidence envelopes. */
+  async function readResult(
+    raw: { actionId: string; offset?: number },
+    ctx: MakaToolContext,
+  ): Promise<WorkHubResultRead> {
+    const input = resultReadParameters.parse(raw);
+    const assignment = await admission.run(WORKHUB_COORDINATION_SESSION_ID, async () => {
+      await assertResultReader(ctx);
+      return stores.sessionStore.readWorkHubAssignment(input.actionId);
+    });
+    if (!assignment?.returnResults) throw new Error('Unknown WorkHub result assignment');
+    return admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
+      async (lease) => {
+        await assertResultReader(ctx);
+        const observation = await inspectLocked(assignment, lease);
+        ctx.abortSignal.throwIfAborted();
+        if (!observation) {
+          const active = await isActive(assignment);
+          ctx.abortSignal.throwIfAborted();
+          return active
+            ? {
+                status: 'pending',
+                targetSessionId: assignment.targetSessionId,
+                message:
+                  'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
+              }
+            : { status: 'obsolete', targetSessionId: assignment.targetSessionId };
+        }
+        const chars = Array.from(observation.result);
+        if (input.offset > chars.length) throw new Error('WorkHub result offset is out of bounds');
+        const end = input.offset + 16000;
+        return {
+          ...observation,
+          targetSessionId: assignment.targetSessionId,
+          result: chars.slice(input.offset, end).join(''),
+          nextOffset: end < chars.length ? end : null,
+        };
+      },
+    );
   }
   async function taskRequests(
     assignment: WorkHubDelegationAssignedMessage,
@@ -797,5 +878,5 @@ export function createWorkHubResultRuntime(options: {
       taskProjection(current, lease, detail, lanes, source),
     );
   }
-  return { coordinator, notify, handlers, projectTask, retireLegacy };
+  return { coordinator, notify, handlers, projectTask, retireLegacy, readResult };
 }

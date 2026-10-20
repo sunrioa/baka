@@ -19,8 +19,14 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  type WorkHubDelegationAssignedMessage,
+} from '@maka/core/session';
+import { SessionNotFoundError } from '@maka/storage/session-store';
+import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import { createWorkHubResultRuntime } from '../server/workhub-result-runtime.js';
+import { createWorkHubReadTool } from '../server/workhub-read-tool.js';
 import {
   SessionAdmissionGate,
   type SessionAdmissionLease,
@@ -273,6 +279,10 @@ function fixture(childRequest = false) {
   let status = 'waiting_for_user';
   let disposition: 'owned_root' | 'cancelled' | 'shared_turn' | 'pending' = 'owned_root';
   let resultReads = 0;
+  let resultText = '😀'.repeat(16001);
+  let targetMissing = false;
+  let onReadResult = () => {};
+  let onReadAssignment = () => {};
   let waitReason: 'concurrency' | 'workspace' | undefined;
   let tip = { sessionId: 'target', turnId: 'target-turn', runId: 'target-run' };
   let dependency:
@@ -282,6 +292,35 @@ function fixture(childRequest = false) {
   const coordinatorPending: import('@maka/storage/interaction-store').StoredInteractionRequest[] =
     [];
   const relayEvents: import('@maka/core/runtime-event').RuntimeEvent[] = [];
+  const context: MakaToolContext = {
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    turnId: 'coordinator-turn',
+    runId: 'coordinator-run',
+    invocationId: 'coordinator-invocation',
+    toolCallId: 'read-call',
+    cwd: '/workspace',
+    emitOutput() {},
+    abortSignal: new AbortController().signal,
+  };
+  const coordinatorRun = {
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    runId: context.runId!,
+    invocationId: context.invocationId!,
+    opening: { source: { kind: 'fresh' }, root: { kind: 'user' } },
+  };
+  const coordinatorAdmission = {
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    runId: context.runId!,
+    execution: { kind: 'workhub_coordination' },
+  };
+  const coordinatorRoot = {
+    kind: 'active',
+    sessionId: context.sessionId,
+    turnId: context.turnId,
+    runId: context.runId!,
+  };
   const assignment = {
     ts: 1,
     userText: 'Release task',
@@ -345,15 +384,19 @@ function fixture(childRequest = false) {
                   : []),
               ]
             : [],
-        readWorkHubAssignment: async () => assignment,
+        readWorkHubAssignment: async (actionId: string) => {
+          onReadAssignment();
+          return actionId === assignment.actionId ? assignment : undefined;
+        },
         readLatestWorkHubAssignment: async (workId: string) => {
           latestLookups.push(workId);
           return workId === assignment.actionId ? assignment : undefined;
         },
         readWorkHubAssignmentsPage: async () =>
           assert.fail('Exact task lookup must not scan global assignment history'),
-        readHeaderSnapshot: async (id: string) =>
-          id === 'child'
+        readHeaderSnapshot: async (id: string) => {
+          if (id === 'target' && targetMissing) throw new SessionNotFoundError(id);
+          return id === 'child'
             ? {
                 id: 'child',
                 name: 'Child',
@@ -374,7 +417,8 @@ function fixture(childRequest = false) {
                   },
                 },
               }
-            : { id: 'target', name: 'Release', isArchived: false },
+            : { id: 'target', name: 'Release', isArchived: false };
+        },
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async () => undefined,
         readWorkHubStopRequest: async (_delegationId: string, actionId?: string, latest?: true) =>
@@ -397,28 +441,40 @@ function fixture(childRequest = false) {
               : [],
       },
       runtimeEventStore: {
-        readRunInvocation: async (sessionId: string, runId: string) => ({
-          sessionId,
-          runId,
-          turnId: sessionId === 'child' ? 'child-turn' : 'target-turn',
-          invocationId: 'inv-' + runId,
-          opening: { source: { kind: 'fresh' } },
-        }),
+        readRunInvocation: async (sessionId: string, runId: string) =>
+          sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? runId === coordinatorRun.runId
+              ? coordinatorRun
+              : undefined
+            : {
+                sessionId,
+                runId,
+                turnId: sessionId === 'child' ? 'child-turn' : 'target-turn',
+                invocationId: 'inv-' + runId,
+                opening: { source: { kind: 'fresh' } },
+              },
         readImmutableRuntimeEvents: async (sessionId: string, runId: string) =>
           sessionId === WORKHUB_COORDINATION_SESSION_ID
             ? relayEvents.filter((event) => event.runId === runId)
             : [],
       },
       agentRunStore: {
-        readRootTurnAdmission: async (sessionId: string, turnId: string) => ({
-          sessionId,
-          turnId,
-          runId: 'child-run',
-          execution: { kind: childOwned ? 'linked_child_initial' : 'external_message' },
-        }),
+        readRootTurnAdmission: async (sessionId: string, turnId: string) =>
+          sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? turnId === coordinatorAdmission.turnId
+              ? coordinatorAdmission
+              : undefined
+            : {
+                sessionId,
+                turnId,
+                runId: 'child-run',
+                execution: { kind: childOwned ? 'linked_child_initial' : 'external_message' },
+              },
       },
     } as unknown as Options['stores'],
     executions: {
+      readRootState: (sessionId: string) =>
+        sessionId === WORKHUB_COORDINATION_SESSION_ID ? coordinatorRoot : { kind: 'idle' },
       readWorkHubDispatchWait: () => waitReason,
       startWorkHubResult,
       readLatestRootTurnLineage: async (identity: {
@@ -467,7 +523,8 @@ function fixture(childRequest = false) {
       assert.equal(sessionId, 'target');
       assert.equal(turnId, tip.turnId);
       resultReads++;
-      return '😀'.repeat(16001);
+      onReadResult();
+      return resultText;
     },
     readTurnInput: async (sessionId, turnId) => {
       assert.equal(sessionId, 'target');
@@ -482,6 +539,28 @@ function fixture(childRequest = false) {
     },
   });
   return {
+    context,
+    coordinatorRun,
+    coordinatorAdmission,
+    coordinatorRoot,
+    assignment,
+    readResult: (input: Parameters<typeof runtime.readResult>[0], ctx = context) =>
+      runtime.readResult(input, ctx),
+    forbidWake: () => {
+      runtime.coordinator.notify = () => assert.fail('Result reads must not wake the coordinator');
+    },
+    setResultText: (text: string) => {
+      resultText = text;
+    },
+    setTargetMissing: () => {
+      targetMissing = true;
+    },
+    onReadResult: (hook: () => void) => {
+      onReadResult = hook;
+    },
+    onReadAssignment: (hook: () => void) => {
+      onReadAssignment = hook;
+    },
     latestLookups,
     hideFromOverview: () => {
       overviewVisible = false;
@@ -551,6 +630,291 @@ function fixture(childRequest = false) {
     record,
   };
 }
+
+test('pure result reads return complete Unicode pages and an exact full-result execution key without waking work', async () => {
+  const f = fixture();
+  f.forbidWake();
+  f.hideFromOverview();
+  f.setCompleted();
+  const first = await f.readResult({ actionId: 'action' });
+  assert.ok(first.status === 'completed');
+  assert.deepEqual(
+    [first.targetSessionId, first.turnId, first.runId, first.eventKey, first.sharedTurn],
+    ['target', 'target-turn', 'target-run', 'terminal', false],
+  );
+  assert.equal(Array.from(first.result).length, 16000);
+  assert.ok(Buffer.byteLength(first.result) > 16 * 1024, 'Full results are not task-card excerpts');
+  assert.equal(first.nextOffset, 16000);
+  const last = await f.readResult({ actionId: 'action', offset: first.nextOffset });
+  assert.ok(last.status === 'completed');
+  assert.equal(last.result, '😀');
+  assert.equal(last.nextOffset, null);
+  assert.equal(first.result + last.result, '😀'.repeat(16001));
+  const end = await f.readResult({ actionId: 'action', offset: 16001 });
+  assert.ok(end.status === 'completed');
+  assert.equal(end.result, '');
+  assert.equal(end.nextOffset, null);
+  await assert.rejects(
+    f.readResult({ actionId: 'action', offset: 16002 }),
+    /offset is out of bounds/u,
+  );
+  for (const raw of [
+    { actionId: 'action', offset: -1 },
+    { actionId: 'action', offset: 0.5 },
+    { actionId: 'action', offset: Number.NaN },
+    { actionId: 'action', offset: Number.POSITIVE_INFINITY },
+    { actionId: 'action', offset: Number.MAX_SAFE_INTEGER + 1 },
+    { actionId: 'action', operation: 'read' },
+    { actionId: 'action', answer: { kind: 'permission', decision: 'allow' } },
+  ])
+    await assert.rejects(f.readResult(raw));
+  f.setResultText('');
+  const empty = await f.readResult({ actionId: 'action' });
+  assert.ok(empty.status === 'completed');
+  assert.equal(empty.result, '');
+  assert.equal(empty.nextOffset, null);
+  assert.deepEqual(f.notifications, []);
+  assert.deepEqual(f.forwarded, []);
+  assert.deepEqual(f.closedRelays, []);
+});
+
+test('unified read wraps pure full-result pages and refuses crossing a changed execution', async () => {
+  const f = fixture();
+  f.forbidWake();
+  f.setCompleted();
+  const source = f.assignment as unknown as WorkHubDelegationAssignedMessage;
+  const unexpected = async () =>
+    assert.fail('Full result reads must not use another read envelope');
+  const tool = createWorkHubReadTool({
+    sessions: {
+      readWorkHubAssignment: async () => source,
+      readLatestWorkHubAssignment: async () => source,
+      readHeaderSnapshot: async () => ({ labels: [] }) as never,
+      readWorkHubTaskFactsPage: unexpected,
+    },
+    admission: new SessionAdmissionGate(),
+    authorize: async () => undefined,
+    status: unexpected,
+    result: f.readResult,
+    evidence: unexpected,
+    catalog: unexpected,
+    history: unexpected,
+    inspect: unexpected,
+  });
+  const first = (await tool.impl({ taskId: 'action', view: 'result' }, f.context)) as {
+    targetSessionId: string;
+    result: string;
+    nextCursor: string;
+  };
+  assert.equal(first.targetSessionId, 'target');
+  assert.equal(Array.from(first.result).length, 16000);
+  assert.equal(typeof first.nextCursor, 'string');
+  const next = (await tool.impl(
+    { taskId: 'action', view: 'result', cursor: first.nextCursor },
+    f.context,
+  )) as {
+    result: string;
+    nextCursor: null;
+  };
+  assert.equal(next.result, '😀');
+  assert.equal(next.nextCursor, null);
+  f.setTip({ sessionId: 'target', turnId: 'new-turn', runId: 'new-run' });
+  await assert.rejects(
+    Promise.resolve().then(() =>
+      tool.impl(
+        {
+          taskId: 'action',
+          view: 'result',
+          cursor: first.nextCursor,
+        },
+        f.context,
+      ),
+    ),
+    /Task result execution changed/u,
+  );
+  assert.deepEqual(f.notifications, []);
+});
+
+test('pure result reads retain terminal status, continuation identity and shared-Turn metadata', async () => {
+  for (const status of ['completed', 'failed', 'cancelled'] as const) {
+    const f = fixture();
+    f.forbidWake();
+    f.setStatus(status);
+    f.setTip({ sessionId: 'target', turnId: 'continued-turn', runId: 'continued-run' });
+    f.setResultText('Exact committed result');
+    f.setLatestInput('Keep the later correction');
+    const result = await f.readResult({ actionId: 'action', offset: 0 });
+    assert.ok('nextOffset' in result);
+    assert.equal(result.status, status);
+    assert.equal(result.targetSessionId, 'target');
+    assert.equal(result.turnId, 'continued-turn');
+    assert.equal(result.runId, 'continued-run');
+    assert.equal(result.eventKey, 'terminal');
+    assert.equal(result.result, 'Exact committed result');
+    assert.equal(result.latestUserInput, 'Keep the later correction');
+    assert.deepEqual(
+      result.details,
+      status === 'failed'
+        ? { failureClass: null, message: null }
+        : status === 'cancelled'
+          ? { abortSource: null }
+          : null,
+    );
+    assert.equal(result.nextOffset, null);
+    assert.deepEqual(f.notifications, []);
+  }
+  const shared = fixture();
+  shared.setCompleted();
+  shared.setDisposition('shared_turn');
+  const result = await shared.readResult({ actionId: 'action' });
+  assert.ok('sharedTurn' in result);
+  assert.equal(result.sharedTurn, true);
+  assert.equal(shared.inputReads(), 0);
+});
+
+test('pure result reads preserve pending, obsolete, missing and no-result-opt-in behavior without dispatch', async () => {
+  for (const setup of [
+    (f: ReturnType<typeof fixture>) => f.setDisposition('pending'),
+    (f: ReturnType<typeof fixture>) => f.setRunning(),
+    (f: ReturnType<typeof fixture>) => {
+      f.record.runId = 'previous-run';
+    },
+  ]) {
+    const f = fixture();
+    f.forbidWake();
+    setup(f);
+    assert.deepEqual(await f.readResult({ actionId: 'action' }), {
+      status: 'pending',
+      targetSessionId: 'target',
+      message:
+        'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
+    });
+    assert.equal(f.resultReads(), 0);
+    assert.deepEqual(f.notifications, []);
+  }
+  for (const setup of [
+    (f: ReturnType<typeof fixture>) => f.setActive(false),
+    (f: ReturnType<typeof fixture>) => f.setStopped(),
+    (f: ReturnType<typeof fixture>) => f.setTargetMissing(),
+  ]) {
+    const f = fixture();
+    f.forbidWake();
+    setup(f);
+    assert.deepEqual(await f.readResult({ actionId: 'action' }), {
+      status: 'obsolete',
+      targetSessionId: 'target',
+    });
+    assert.equal(f.resultReads(), 0);
+    assert.deepEqual(f.notifications, []);
+  }
+  const f = fixture();
+  await assert.rejects(f.readResult({ actionId: 'missing' }), /Unknown WorkHub result assignment/u);
+  f.assignment.returnResults = false;
+  await assert.rejects(f.readResult({ actionId: 'action' }), /Unknown WorkHub result assignment/u);
+  assert.equal(f.resultReads(), 0);
+  const cancelled = fixture();
+  cancelled.setDisposition('cancelled');
+  const result = await cancelled.readResult({ actionId: 'action' });
+  assert.ok(result.status === 'cancelled');
+  assert.equal(result.eventKey, 'message_cancelled_before_execution');
+  assert.equal(result.runId, 'message:message');
+  assert.equal(cancelled.resultReads(), 0);
+});
+
+test('reading a pending question or approval keeps the original request and never asks, answers or grants', async () => {
+  for (const kind of ['question', 'form', 'permission', 'sandbox_boundary', 'client_capability']) {
+    const f = fixture();
+    f.forbidWake();
+    f.record.request.kind = kind;
+    const original = structuredClone(f.record);
+    const result = await f.readResult(
+      { actionId: 'action' },
+      {
+        ...f.context,
+        askUserQuestion: async () => assert.fail('A read cannot forward a question or approval'),
+      },
+    );
+    assert.ok(result.status === 'waiting_for_user');
+    assert.deepEqual(result.details, [{ interactionId: 'question', kind }]);
+    assert(!result.result.includes(f.questions[0]!.question));
+    assert.deepEqual(f.record, original);
+    assert.equal(f.resultReads(), 0);
+    assert.deepEqual(f.forwarded, []);
+    assert.deepEqual(f.closedRelays, []);
+    assert.deepEqual(f.notifications, []);
+  }
+});
+
+test('pure result reader rejects foreign, stale, non-WorkHub and terminated coordinator invocations', async () => {
+  for (const patch of [
+    { sessionId: 'worker' },
+    { turnId: 'old-turn' },
+    { runId: 'old-run' },
+    { invocationId: 'old-invocation' },
+    { runId: undefined },
+    { invocationId: undefined },
+  ]) {
+    const f = fixture();
+    await assert.rejects(
+      f.readResult({ actionId: 'action' }, { ...f.context, ...patch }),
+      /coordination|root invocation/u,
+    );
+    assert.equal(f.resultReads(), 0);
+  }
+  for (const retire of [
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorAdmission.execution.kind = 'external_message';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorAdmission.runId = 'old-run';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorRoot.kind = 'idle';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorRoot.turnId = 'another-turn';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorRoot.runId = 'another-run';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      f.coordinatorRun.opening.root.kind = 'agent';
+    },
+    (f: ReturnType<typeof fixture>) => {
+      Object.assign(f.coordinatorRun, { terminalEvent: {} });
+    },
+  ]) {
+    const f = fixture();
+    retire(f);
+    await assert.rejects(f.readResult({ actionId: 'action' }), /coordination|root invocation/u);
+    assert.equal(f.resultReads(), 0);
+  }
+  const stale = fixture();
+  stale.onReadAssignment(() => {
+    stale.coordinatorRoot.kind = 'idle';
+  });
+  await assert.rejects(stale.readResult({ actionId: 'action' }), /coordination authority/u);
+  assert.equal(stale.resultReads(), 0);
+});
+
+test('pure result reader observes cancellation before and during a full read without side effects', async () => {
+  for (const duringRead of [false, true]) {
+    const f = fixture();
+    f.setCompleted();
+    f.forbidWake();
+    const abort = new AbortController();
+    const cancel = () => abort.abort(new Error('Result read cancelled'));
+    if (duringRead) f.onReadResult(cancel);
+    else cancel();
+    await assert.rejects(
+      f.readResult({ actionId: 'action' }, { ...f.context, abortSignal: abort.signal }),
+      /Result read cancelled/u,
+    );
+    assert.equal(f.resultReads(), duringRead ? 1 : 0);
+    assert.deepEqual(f.notifications, []);
+    assert.deepEqual(f.forwarded, []);
+  }
+});
 
 test('delivered terminal events do not reread the target transcript on reconciliation', async () => {
   const f = fixture();
