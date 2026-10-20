@@ -37,4 +37,6 @@ export { workHubTaskCategory, workHubTaskTitle, workHubTaskSegments } from './mo
 export { createWorkHubTaskSearchModel } from './model/task-search-model.js';
 export { useWorkHubTaskSearch } from './controller/use-workhub-task-search.js';
 export { WorkHubTaskRequest } from './ui/workhub-task-inbox.js';
+export { WorkHubTaskInbox } from './ui/workhub-task-inbox.js';
+export { useWorkHubTaskInbox } from './controller/use-workhub-task-inbox.js';
 export { workHubTaskCopy } from './locales/workhub-task-copy.js';

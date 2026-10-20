@@ -130,7 +130,7 @@ test('task permission prompts expose only original once, turn and deny decisions
       schemaVersion: 1, interactionId: 'opaque-request', sessionId: 'opaque-session', turnId: 'opaque-turn', runId: 'opaque-run', revision: 1, status: 'pending', outcome: null,
       request: { kind: 'permission', toolUseId: 'opaque-tool', prompt: { kind: 'tool_permission', toolName: 'Bash', category: 'shell_unsafe', reason: 'shell_dangerous', review: { kind: 'command', command: 'npm test' }, rememberForTurnAllowed } },
     } };
-    const inbox = { requests: [item], truncated: false, ready: true, error: undefined, respond: async () => {}, refresh: async () => {}, isAnswering: () => false };
+    const inbox = { requests: [item], truncated: false, ready: true, error: undefined, requestsForWork: () => [item], respond: async () => {}, refresh: async () => {}, isAnswering: () => false };
     const markup = await renderTranscriptMarkup(createElement(LocaleProvider, { locale: 'en', children: null }, createElement(WorkHubServicesProvider, {
       services: {} as WorkHubServices, children: createElement(WorkHubTaskRequest, { item, inbox }),
     })));

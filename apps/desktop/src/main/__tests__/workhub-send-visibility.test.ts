@@ -30,11 +30,23 @@ import type { DesktopSessionStopResult } from '../../preload/bridge-contract.js'
 import type { AttachmentRef } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
+import type { WorkHubPendingInteraction } from '@maka/runtime-host/protocol';
 import { WorkHubModelConfigurationRequiredError, WorkHubServicesProvider, type WorkHubServices, type WorkHubTranscriptSnapshot } from '../../renderer/features/workhub/index.js';
 import { useWorkHubController } from '../../renderer/features/workhub/testing.js';
 import { cleanupFakeDom, installReactRenderer } from './fake-dom.js';
 
 afterEach(cleanupFakeDom);
+
+function readOriginalTask(items: readonly WorkHubPendingInteraction[]): WorkHubServices['readTask'] {
+  return async (_owner, ref) => {
+    assert.ok('actionId' in ref);
+    const item = items.find(item => item.actionId === ref.actionId && item.delegationId === ref.delegationId);
+    assert.ok(item, 'the fixture exposes only its exact original task');
+    return { task: { workId: item.actionId, actionId: item.actionId, delegationId: item.delegationId,
+      targetSessionId: item.interaction.sessionId, targetSessionName: item.targetSessionName, targetMessageId: 'source-message',
+      text: 'Original task', createdAt: 1, status: 'waiting_for_user' } };
+  };
+}
 
 test('task overview coalesces notification bursts and rebuilds disconnected authority', async () => {
   const delayed = deferred<import('@maka/runtime-host/protocol').WorkHubTasksQueryResult>();
@@ -1024,6 +1036,7 @@ test('WorkHub task inbox keeps coordinator input independent and answers the ori
   const answers: unknown[] = [];
   const h = await mountController(false, {
     queryTaskInteractions: async () => ({ requests, truncated: false }),
+    readTask: readOriginalTask([item]),
     answerTaskInteraction: async (owner, input) => {
       answers.push([owner, input]);
       requests = [];
@@ -1056,6 +1069,7 @@ test('native task approvals keep original scope and duplicate clicks never repla
   const receipt = deferred<void>();
   const h = await mountController(false, {
     queryTaskInteractions: async () => ({ requests, truncated: false }),
+    readTask: readOriginalTask([item]),
     answerTaskInteraction: async (owner, input) => {
       writes.push([owner, input]); requests = [];
       await receipt.promise;
@@ -1089,6 +1103,7 @@ test('ordinary task permission answers preserve once, turn and deny fields witho
   const writes: unknown[] = [];
   const h = await mountController(false, {
     queryTaskInteractions: async () => ({ requests, truncated: false }),
+    readTask: readOriginalTask(items),
     answerTaskInteraction: async (owner, input) => {
       writes.push([owner, input]);
       const original = requests.find(item => item.interaction.interactionId === input.interactionId)!;
@@ -1122,6 +1137,7 @@ test('WorkHub task inbox drops old Host reads and rebuilds a lost answer acknowl
     resolve: async () => selected,
     subscribeHosts: (listener) => { hostChange = listener; return () => {}; },
     queryTaskInteractions: async (owner) => owner === first ? oldRead.promise : { requests: current, truncated: false },
+    readTask: readOriginalTask([pending]),
     answerTaskInteraction: async () => { calls++; current = []; throw new Error('Acknowledgement lost'); },
   });
   selected = second;

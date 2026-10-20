@@ -399,6 +399,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.interactions.query',
   'workhub.interactions.answer',
   'workhub.tasks.query',
+  'workhub.tasks.find',
   'workhub.tasks.read',
   'workhub.tasks.history',
   'workhub.tasks.executions',

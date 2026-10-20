@@ -19,7 +19,16 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HOST_OPERATION_SPECS, operationAllowsRemoteOwner } from '../protocol/index.js';
+import {
+  HOST_OPERATION_SPECS,
+  operationAllowsRemoteOwner,
+  REMOTE_OWNER_OPERATION_GRANTS,
+  type RequestFrame,
+} from '../protocol/index.js';
+import {
+  authorizeRuntimeHostOperation,
+  createRuntimeHostConnectionAuthority,
+} from '../server/connection-authority.js';
 
 const start = HOST_OPERATION_SPECS['workhub.tasks.start'];
 const ask = HOST_OPERATION_SPECS['workhub.tasks.ask'];
@@ -33,6 +42,90 @@ const defaults = {
   model: { llmConnectionId: 'connection', llmConnectionSlug: 'connection', model: 'model' },
   permissionMode: 'ask' as const,
 };
+
+test('remote task discovery preserves read grants without widening explicit grants, Host paths or task commands', () => {
+  const authority = createRuntimeHostConnectionAuthority({
+    principalKind: 'remote_owner',
+    principalId: 'remote-owner',
+    credentialId: 'credential',
+    operationGrants: REMOTE_OWNER_OPERATION_GRANTS,
+    canPublishClientCapabilities: false,
+    canUseHostPaths: false,
+  });
+  const find: RequestFrame = {
+    requestId: 'find',
+    operation: 'workhub.tasks.find',
+    input: { query: 'Original requirement' },
+  };
+  assert.equal(HOST_OPERATION_SPECS['workhub.tasks.find'].mode, 'query');
+  assert.equal(authorizeRuntimeHostOperation(authority, find), true);
+  assert.equal(
+    authorizeRuntimeHostOperation(authority, {
+      requestId: 'query',
+      operation: 'workhub.tasks.query',
+      input: {},
+    }),
+    true,
+  );
+  const limited = createRuntimeHostConnectionAuthority({
+    ...authority,
+    operationGrants: ['workhub.tasks.query'],
+  });
+  assert.equal(
+    authorizeRuntimeHostOperation(limited, find),
+    false,
+    'a credential needs its own explicit read grant',
+  );
+  const readOnly = createRuntimeHostConnectionAuthority({
+    ...authority,
+    operationGrants: ['workhub.tasks.find'],
+  });
+  assert.equal(authorizeRuntimeHostOperation(readOnly, find), true);
+  assert.equal(
+    authorizeRuntimeHostOperation(readOnly, {
+      requestId: 'other-read',
+      operation: 'workhub.tasks.query',
+      input: {},
+    }),
+    false,
+  );
+  assert.equal(
+    authorizeRuntimeHostOperation(authority, { ...find, input: { cwd: '/host/workspace' } }),
+    false,
+  );
+  const withPaths = createRuntimeHostConnectionAuthority({ ...authority, canUseHostPaths: true });
+  assert.equal(
+    authorizeRuntimeHostOperation(withPaths, { ...find, input: { cwd: '/host/workspace' } }),
+    true,
+  );
+  const all = createRuntimeHostConnectionAuthority({ ...withPaths, operationGrants: 'all' });
+  const commands: RequestFrame[] = [
+    {
+      requestId: 'start',
+      operation: 'workhub.tasks.start',
+      input: { ...fields, sessionRef: 'existing' },
+    },
+    {
+      requestId: 'continue',
+      operation: 'workhub.tasks.continue',
+      input: { turnId: 'turn', actionId: 'continue', taskId: 'work', text: 'Continue' },
+    },
+    {
+      requestId: 'ask',
+      operation: 'workhub.tasks.ask',
+      input: { turnId: 'turn', actionId: 'ask', question: 'Which task?', choices: [] },
+    },
+    {
+      requestId: 'stop',
+      operation: 'workhub.tasks.stop',
+      input: { turnId: 'turn', actionId: 'stop', taskIds: ['work'] },
+    },
+  ];
+  for (const command of commands) {
+    assert.equal(operationAllowsRemoteOwner(command.operation), false, command.operation);
+    assert.equal(authorizeRuntimeHostOperation(all, command), false, command.operation);
+  }
+});
 
 test('task start requires explicit creation settings or an exact existing Session without overrides', () => {
   const manual = { ...fields, sessionRef: 'manual' };

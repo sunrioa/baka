@@ -38,12 +38,13 @@ export function WorkHubTaskView({ services, workId, name, view, inbox, onReady }
   }, [view.error, view.ready, sessions, placed, onReady]);
   const execution = view.executions.find(item => item.turnId === view.execution?.turnId && item.runId === view.execution.runId);
   const status = execution?.status ?? view.assignment?.state;
-  const requests = inbox?.requests.filter(item => view.assignments.some(assignment => assignment.actionId === item.actionId && assignment.delegationId === item.delegationId)) ?? [];
+  const requests = inbox?.requestsForWork(workId) ?? [];
   return <section className="workHubTaskView" aria-label={`${copy.title}: ${name}`} data-work-id={workId}>
     <span className="maka-visually-hidden" data-status={status} role="status">
       {execution ? copy.status[execution.status] : view.assignment ? copy.state[view.assignment.state] : copy.loading}
     </span>
     {view.error && <div role="alert">{view.error}<Button size="sm" variant="ghost" label={copy.refresh} onClick={() => { void view.refresh(); }} /></div>}
+    {inbox?.error && <div role="alert">{inbox.error}<Button size="sm" variant="ghost" label={copy.refresh} onClick={() => { void inbox.refresh(); }} /></div>}
     {!view.ready && <p role="status">{copy.loading}</p>}
     {view.ready && !view.assignments.length && <p role="status">{copy.noAssignments}</p>}
     {view.historyCursor && <Button size="sm" variant="ghost" label={copy.loadEarlier} isDisabled={view.loadingEarlier} onClick={() => { void view.loadEarlier(); }} />}
