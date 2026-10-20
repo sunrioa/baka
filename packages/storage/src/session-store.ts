@@ -1126,6 +1126,7 @@ function projectStableSessionCreateProbe(
 function toCatalogRecordSummary(record: SessionMetadataCatalogRecord): SessionSummary {
   return {
     ...toSummary(record.header),
+    ...(record.workHubCreated ? { workHubCreated: true } : {}),
     ...(record.lastMessagePreview === undefined
       ? {}
       : { lastMessagePreview: record.lastMessagePreview }),

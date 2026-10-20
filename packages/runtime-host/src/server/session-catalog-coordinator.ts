@@ -1789,6 +1789,7 @@ export function projectSessionCatalogRecord(
     name: header.name,
     isFlagged: header.isFlagged,
     isArchived: header.isArchived,
+    ...(summary.workHubCreated === undefined ? {} : { workHubCreated: summary.workHubCreated }),
     // The archive state is `isArchived` alone. A stray time on an active row
     // is dropped here rather than failing this Host's own decoder and hiding
     // the task behind an unsupported-record placeholder.

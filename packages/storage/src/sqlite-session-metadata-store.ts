@@ -311,6 +311,8 @@ export interface SessionMetadataRecord {
 
 export interface SessionMetadataCatalogRecord extends SessionMetadataRecord {
   readonly activityAt: number;
+  /** Derived from the original create assignment, not stored on the Session header. */
+  readonly workHubCreated?: true;
   readonly lastMessagePreview?: string;
   /**
    * When the Session last entered the archive. Absent while it is not
@@ -1347,7 +1349,7 @@ export class SqliteSessionMetadataStore {
       )
       .get(sessionId, ...role.parameters) as SessionMetadataCatalogRow | undefined;
     if (!row) throw new SessionNotFoundError(sessionId);
-    return decodeCatalogRecord(row);
+    return this.projectCatalogRecordsSync([row])[0]!;
   }
 
   async has(sessionId: string): Promise<boolean> {
@@ -1583,7 +1585,7 @@ export class SqliteSessionMetadataStore {
       `,
       )
       .all(...parameters) as unknown as SessionMetadataCatalogRow[];
-    return rows.map(decodeCatalogRecord);
+    return this.projectCatalogRecordsSync(rows);
   }
 
   async listCatalogPage(
@@ -1611,7 +1613,7 @@ export class SqliteSessionMetadataStore {
         .all(...query.parameters, limit + 1) as unknown as SessionMetadataCatalogRow[];
       return {
         revision: this.readCatalogRevisionSync(),
-        records: rows.slice(0, limit).map(decodeCatalogRecord),
+        records: this.projectCatalogRecordsSync(rows.slice(0, limit)),
         hasMore: rows.length > limit,
       };
     });
@@ -1620,6 +1622,87 @@ export class SqliteSessionMetadataStore {
   async readCatalogRevision(): Promise<SessionCatalogRevisionState> {
     this.assertOpen();
     return this.readCatalogRevisionSync();
+  }
+
+  private projectCatalogRecordsSync(
+    rows: readonly SessionMetadataCatalogRow[],
+  ): SessionMetadataCatalogRecord[] {
+    const created = new Set<string>();
+    // Metadata-only stores are also used without an AgentRunStore. Do not make
+    // their catalog reads initialize the execution schema just for display.
+    const hasRootProofs =
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'core_root_source_message_proofs'",
+        )
+        .get() !== undefined;
+    // The lifecycle tables (or a pre-ledger transcript) retain each target
+    // Message identity after queue consumption or cancellation. They only
+    // locate candidate facts: neither an ID prefix nor a task adoption proves
+    // Session creation.
+    for (let offset = 0; offset < rows.length; offset += WORKHUB_TARGET_LINKAGE_MAX_SESSIONS) {
+      const sessionIds = rows
+        .slice(offset, offset + WORKHUB_TARGET_LINKAGE_MAX_SESSIONS)
+        .map((row) => row.session_id);
+      const list = sessionIds.map(() => '?').join(', ');
+      const candidates = this.db
+        .prepare(`
+          WITH target_messages(session_id, message_id) AS (
+            SELECT session_id, message_id FROM message_admissions
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+            ${
+              hasRootProofs
+                ? `UNION
+            SELECT session_id, message_id FROM core_root_source_message_proofs
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52`
+                : ''
+            }
+            UNION
+            SELECT session_id, message_id FROM cancelled_message_admissions
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+            UNION
+            SELECT session_id, message_id FROM session_messages
+            WHERE session_id IN (${list}) AND message_type = 'user'
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+          )
+          SELECT target.session_id, target.message_id
+          FROM target_messages AS target
+          CROSS JOIN session_messages AS assignment INDEXED BY session_messages_by_identity
+          WHERE assignment.session_id = ?
+            AND assignment.message_id = 'wha_' || substr(target.message_id, 5)
+          ORDER BY assignment.sequence ASC
+        `)
+        .iterate(
+          ...sessionIds,
+          ...(hasRootProofs ? sessionIds : []),
+          ...sessionIds,
+          ...sessionIds,
+          WORKHUB_COORDINATION_SESSION_ID,
+        ) as Iterable<{ session_id: string; message_id: string }>;
+      for (const candidate of candidates) {
+        if (created.has(candidate.session_id)) continue;
+        const assignment = this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `wha_${candidate.message_id.slice(4)}`,
+        );
+        if (
+          assignment?.type === 'workhub_coordination' &&
+          assignment.kind === 'delegation_assigned' &&
+          assignment.disposition === 'create_new' &&
+          assignment.targetSessionId === candidate.session_id &&
+          assignment.targetMessageId === candidate.message_id
+        ) {
+          created.add(candidate.session_id);
+        }
+      }
+    }
+    return rows.map((row) => ({
+      ...decodeCatalogRecord(row),
+      ...(created.has(row.session_id) ? { workHubCreated: true as const } : {}),
+    }));
   }
 
   /**

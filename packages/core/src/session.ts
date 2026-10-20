@@ -377,6 +377,8 @@ export type PersistedBackendKind = BackendKind | 'fake';
 
 export interface SessionSummary {
   id: string;
+  /** Display-only provenance from a canonical WorkHub create assignment, never a permission. */
+  workHubCreated?: boolean;
   cwd?: string;
   projectId?: string | null;
   name: string;

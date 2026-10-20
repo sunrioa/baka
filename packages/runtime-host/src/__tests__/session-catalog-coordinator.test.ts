@@ -3126,6 +3126,19 @@ test('reselecting the persisted executor model still confirms the Agent state an
   }
 });
 
+test('projects only the supplied canonical WorkHub creation provenance', () => {
+  const record = catalogRecord(sessionHeader('ordinary', []), 2);
+  const ordinary = projectSessionCatalogRecord(record);
+  if ('kind' in ordinary) assert.fail('Expected a supported Session projection');
+  assert.equal(Object.hasOwn(ordinary, 'workHubCreated'), false);
+  const created = projectSessionCatalogRecord({
+    ...record,
+    summary: { ...record.summary, workHubCreated: true },
+  });
+  if ('kind' in created) assert.fail('Expected a supported Session projection');
+  assert.equal(created.workHubCreated, true);
+});
+
 test('projects the archive time of an archived Session and drops one on an active Session', () => {
   const archivedHeader = { ...sessionHeader('archived', []), isArchived: true };
   const archived = catalogRecord(archivedHeader, 2);
