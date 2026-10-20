@@ -3366,7 +3366,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
         hostEpoch: 'execution-composition-test',
         connectionId: 'fresh-client',
         principal: 'local_os_user',
-        acquireResidency: () => ({ release() {} }),
+        acquireResidency: () => residencies.acquire('hosted-execution'),
       };
       const attach = () =>
         composition.clientCapabilities!.attachConnection(
