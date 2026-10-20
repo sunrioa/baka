@@ -5315,8 +5315,12 @@ test('WorkHub task history separates same-Session work and exposes only original
 }, async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
+    const residencies = new HostResidencyRegistry();
+    const hostedRoots = () =>
+      residencies.snapshot().find(({ label }) => label === 'hosted-execution')?.count ?? 0;
     const sends: string[] = [];
     const { composition, manager } = await createCapturedExecutionComposition(owner, {
+      residencies,
       primaryBackendFactory: (backendContext) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput) {
@@ -5329,7 +5333,7 @@ test('WorkHub task history separates same-Session work and exposes only original
       hostEpoch: 'execution-composition-test',
       connectionId: 'task-history-client',
       principal: 'local_os_user',
-      acquireResidency: () => ({ release() {} }),
+      acquireResidency: () => residencies.acquire('hosted-execution'),
     };
     try {
       assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
@@ -5352,11 +5356,12 @@ test('WorkHub task history separates same-Session work and exposes only original
       );
       assert.ok(initial.ok, JSON.stringify(initial));
       const source = initial.result.assignments[0]!;
+      // A canonical terminal fact precedes release of the actual Root and workspace slot.
       await waitFor(
         async () =>
           (await manager.listTurns(target.id)).some(
             (turn) => turn.turnId === source.execution?.turnId && turn.status === 'completed',
-          ),
+          ) && hostedRoots() === 0,
         12_000,
       );
       assert.equal(source.workId, 'view-work-a');
@@ -5408,7 +5413,7 @@ test('WorkHub task history separates same-Session work and exposes only original
         async () =>
           (await manager.listTurns(target.id)).some(
             (turn) => turn.turnId === followup.execution?.turnId && turn.status === 'completed',
-          ),
+          ) && hostedRoots() === 0,
         12_000,
       );
       await delegateWorkHubTarget(
