@@ -84,6 +84,7 @@ export function workHubResultContent(
 ): MessageContent {
   return createWorkHubResultContext({
     origin: workHubResultOrigin(assignment, observation),
+    taskId: assignment.work?.id ?? assignment.actionId,
     targetSessionName: assignment.taskTitle ?? assignment.targetSessionName,
     targetRunId: observation.runId,
     originalRequest: assignment.userText,

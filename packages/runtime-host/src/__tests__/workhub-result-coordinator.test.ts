@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkHubDelegationAssignedMessage } from '@maka/core/session';
 import { deferred } from '@maka/core/test-only/async-primitives';
+import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
 import type { SessionAdmissionLease } from '../server/session-admission-gate.js';
 import { HostResidencyRegistry } from '../server/host-residency-registry.js';
 import {
@@ -68,6 +69,57 @@ const observation: WorkHubResultObservation = {
   result: 'Report ready at /workspace/report.pdf',
   sharedTurn: false,
 };
+
+test('result notifications identify the logical task and recommend only the current read entry', () => {
+  for (const work of [
+    undefined,
+    { id: 'original-task', generationId: 'fresh-generation', continuesActionId: 'previous-action' },
+  ]) {
+    const current = { ...assignment, ...(work ? { work } : {}) };
+    const content = workHubResultContent(current, observation);
+    const split = content.text.lastIndexOf('\n\n');
+    const instruction = content.text.slice(0, split);
+    const data = JSON.parse(content.text.slice(split + 2));
+    assert.match(instruction, /WorkHubRead/u);
+    assert.doesNotMatch(instruction, /WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
+    assert.match(instruction, /sourceActionId/u);
+    assert.equal(data.taskId, work?.id ?? assignment.actionId);
+    assert.equal(data.actionId, assignment.actionId);
+    assert.equal(data.result, observation.result);
+    assert.equal(data.originalRequest, assignment.userText);
+    const projected = projectWorkHubResultContext(
+      content.text,
+      workHubResultOrigin(current, observation),
+    );
+    assert.equal(projected, content.text, 'current task identity survives historical projection');
+  }
+});
+
+test('legacy result projection updates read guidance without guessing a logical task identity', () => {
+  const origin = workHubResultOrigin(assignment, observation);
+  const payload = {
+    actionId: origin.actionId,
+    delegationId: origin.delegationId,
+    targetSessionId: origin.targetSessionId,
+    targetTurnId: origin.targetTurnId,
+    status: 'completed',
+    result: 'Committed legacy result',
+    originalRequest: 'Original legacy requirement',
+  };
+  const raw = `Read WorkHubResult with the original action.\n\n${JSON.stringify(payload)}`;
+  const projected = projectWorkHubResultContext(raw, origin);
+  const split = projected.lastIndexOf('\n\n');
+  assert.match(projected.slice(0, split), /WorkHubRead/u);
+  assert.doesNotMatch(projected.slice(0, split), /WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
+  const data = JSON.parse(projected.slice(split + 2));
+  assert.equal(data.taskId, undefined, 'an old action ID is not proof of its logical task ID');
+  assert.equal(data.actionId, payload.actionId);
+  assert.equal(data.result, payload.result);
+  assert.equal(data.originalRequest, payload.originalRequest);
+  assert.equal(projectWorkHubResultContext(projected, origin), projected);
+  assert.match(raw, /Read WorkHubResult/u, 'projection leaves the durable text untouched');
+});
+
 function fixture() {
   let current: WorkHubResultObservation | undefined = observation;
   let active = true,
