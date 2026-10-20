@@ -3957,6 +3957,11 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.match(freshUserText, /Use WorkHubRead with taskId and view=history/u);
         assert.ok(freshUserText.includes('"taskId":"source-a"'));
         assert.doesNotMatch(freshUserText, /Use WorkHubEvidence read/u);
+        assert.match(
+          freshUserText,
+          /Follow the top-level nextCursor as the next request's cursor/u,
+        );
+        assert.doesNotMatch(freshUserText, /history\.nextCursor/u);
         assert.ok(
           freshRequests.every(
             (request) =>
