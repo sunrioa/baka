@@ -628,8 +628,8 @@ async function createExecutionStoresForWrite(
             includeStopped,
           ),
         ),
-      readWorkHubReplacement: (delegationId) =>
-        run(() => sessionStore.readWorkHubReplacement(delegationId)),
+      readWorkHubReplacement: (delegationId, pendingOnly) =>
+        run(() => sessionStore.readWorkHubReplacement(delegationId, pendingOnly)),
       readWorkHubReplacementAbort: (delegationId) =>
         run(() => sessionStore.readWorkHubReplacementAbort(delegationId)),
       readWorkHubSupersession: (delegationId) =>

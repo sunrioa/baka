@@ -629,6 +629,8 @@ export interface SessionAuthorityStore extends SessionStore, MessageAdmissionSto
   ): Promise<readonly WorkHubDelegationAssignedMessage[]>;
   readWorkHubReplacement(
     delegationId: string,
+    /** Hide only an exactly bound Host protocol-retirement abort; raw history is the default. */
+    pendingOnly?: true,
   ): Promise<WorkHubDelegationReplacementRequestedMessage | undefined>;
   readWorkHubReplacementAbort(
     delegationId: string,

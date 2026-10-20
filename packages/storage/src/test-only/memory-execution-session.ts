@@ -38,6 +38,7 @@ import {
 import {
   decodeCanonicalMessage,
   deriveTurnRecords,
+  isWorkHubReplacementIntentRetired,
   WORKHUB_COORDINATION_SESSION_ID as HUB,
   WORKHUB_COORDINATION_SESSION_ROLE,
   type SessionHeader,
@@ -1432,12 +1433,19 @@ export function createMemorySessionStore(
       a.notify(HUB);
       return result;
     },
-    readWorkHubReplacement: async (id) =>
+    readWorkHubReplacement: async (id, pendingOnly) =>
       read((s) => {
         const m = hubMessage(s, 'whp_' + suffix(id));
-        return m?.type === 'workhub_coordination' && m.kind === 'delegation_replacement_requested'
-          ? m
-          : undefined;
+        if (m?.type !== 'workhub_coordination' || m.kind !== 'delegation_replacement_requested')
+          return undefined;
+        const abort = pendingOnly && hubMessage(s, 'whb_' + suffix(id));
+        return m.replacesDelegationId === id &&
+          abort &&
+          abort.type === 'workhub_coordination' &&
+          abort.kind === 'delegation_replacement_aborted' &&
+          isWorkHubReplacementIntentRetired(m, abort)
+          ? undefined
+          : m;
       }),
     readWorkHubReplacementAbort: async (id) =>
       read((s) => {
@@ -1483,12 +1491,27 @@ export function createMemorySessionStore(
               m.kind !== 'delegation_assigned' ||
               !ids.includes(m.targetSessionId) ||
               hubMessage(s, 'whx_' + suffix(m.delegationId)) ||
-              hubMessage(s, 'whb_' + suffix(m.delegationId)) ||
               (!admissions(s).has(key(m.targetSessionId, m.targetMessageId)) &&
                 !rows(s, 'cancelledAdmissions').has(key(m.targetSessionId, m.targetMessageId)) &&
                 !memoryRootSourceReceipt(s, m.targetSessionId, m.targetMessageId))
             )
               return false;
+            const abort = hubMessage(s, 'whb_' + suffix(m.delegationId));
+            if (abort) {
+              const replacement = hubMessage(s, 'whp_' + suffix(m.delegationId));
+              if (
+                replacement?.type !== 'workhub_coordination' ||
+                replacement.kind !== 'delegation_replacement_requested' ||
+                replacement.replacesActionId !== m.actionId ||
+                replacement.replacesDelegationId !== m.delegationId ||
+                replacement.replacedTargetSessionId !== m.targetSessionId ||
+                replacement.replacedTargetMessageId !== m.targetMessageId ||
+                abort.type !== 'workhub_coordination' ||
+                abort.kind !== 'delegation_replacement_aborted' ||
+                !isWorkHubReplacementIntentRetired(replacement, abort)
+              )
+                return false;
+            }
             const latest = latestWorkAssignment(s, m.work?.id ?? m.actionId);
             if (
               !latest ||

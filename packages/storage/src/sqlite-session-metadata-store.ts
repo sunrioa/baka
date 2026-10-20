@@ -142,6 +142,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
   decodeCanonicalMessage,
+  isWorkHubReplacementIntentRetired,
   decodeStoredMessage as decodePersistedStoredMessage,
 } from '@maka/core/session';
 import { markPersisted } from '@maka/core/persisted-value';
@@ -3138,7 +3139,20 @@ export class SqliteSessionMetadataStore {
           replacementAbort?.type === 'workhub_coordination' &&
           replacementAbort.kind === 'delegation_replacement_aborted'
         ) {
-          continue;
+          const replacement = this.readMessageByIdSync(
+            WORKHUB_COORDINATION_SESSION_ID,
+            `whp_${terminalSuffix}`,
+          );
+          if (
+            replacement?.type !== 'workhub_coordination' ||
+            replacement.kind !== 'delegation_replacement_requested' ||
+            replacement.replacesActionId !== assignment.actionId ||
+            replacement.replacesDelegationId !== assignment.delegationId ||
+            replacement.replacedTargetSessionId !== assignment.targetSessionId ||
+            replacement.replacedTargetMessageId !== assignment.targetMessageId ||
+            !isWorkHubReplacementIntentRetired(replacement, replacementAbort)
+          )
+            continue;
         }
         const stop = this.readWorkHubStopProjectionSync(assignment.delegationId);
         if (!includeStopped && stop.resolution && stop.retires) continue;

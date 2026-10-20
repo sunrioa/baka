@@ -23,6 +23,7 @@ import {
   decodeCanonicalMessage,
   snapshotWorkHubTaskSettings,
   isWorkHubTaskSettingsSnapshot,
+  isWorkHubReplacementIntentRetired,
 } from '../session.js';
 import {
   isWorkHubTaskStopSet,
@@ -31,7 +32,7 @@ import {
   workHubStopRetiresDelegation,
 } from '../workhub-task-stop.js';
 
-const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
+const FINGERPRINT = `sha256:${'a'.repeat(64)}` as const;
 
 describe('WorkHub Coordination stored records', () => {
   test('task input facts bind a source and distinguish acceptance from delivery', () => {
@@ -348,6 +349,51 @@ describe('WorkHub Coordination stored records', () => {
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
     assert.deepEqual(decodeCanonicalMessage(superseded), superseded);
     assert.deepEqual(decodeCanonicalMessage(aborted), aborted);
+    const retired = { ...aborted, reason: 'legacy_protocol_retirement' } as const;
+    assert.deepEqual(decodeCanonicalMessage(retired), retired);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, retired), true);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, undefined), false);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, aborted), false);
+    assert.equal(
+      isWorkHubReplacementIntentRetired(replacement, {
+        ...aborted,
+        reason: 'target_waiting_for_user',
+      }),
+      false,
+    );
+    for (const mismatch of [
+      { actionId: 'foreign-action' },
+      { actionFingerprint: `sha256:${'b'.repeat(64)}` as const },
+      { turnId: 'foreign-turn', coordinationTurnId: 'foreign-turn' },
+      { turnId: 'foreign-turn' },
+      { coordinationTurnId: 'foreign-turn' },
+      { abortedActionId: 'foreign-action' },
+      { abortedDelegationId: 'foreign-delegation' },
+      { targetSessionId: 'foreign-session' },
+      { schemaVersion: 1 },
+      { reason: 'unknown_retirement' },
+    ]) {
+      assert.equal(
+        isWorkHubReplacementIntentRetired(replacement, {
+          ...retired,
+          ...mismatch,
+        } as typeof retired),
+        false,
+      );
+    }
+    for (const mismatch of [
+      { actionId: 'foreign-action' },
+      { actionFingerprint: `sha256:${'b'.repeat(64)}` as const },
+      { turnId: 'foreign-turn', coordinationTurnId: 'foreign-turn' },
+      { replacesActionId: 'foreign-action' },
+      { replacesDelegationId: 'foreign-delegation' },
+      { targetSessionId: 'foreign-session' },
+    ]) {
+      assert.equal(
+        isWorkHubReplacementIntentRetired({ ...replacement, ...mismatch }, retired),
+        false,
+      );
+    }
     assert.throws(
       () => decodeCanonicalMessage({ ...superseded, replacementDelegationId: '' }),
       /Invalid stored message schema/u,

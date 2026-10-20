@@ -118,6 +118,7 @@ import { DEFAULT_SESSION_NAME, normalizeUserSessionName } from '@maka/core/sessi
 import {
   decodeCanonicalMessage,
   deriveTurnRecords,
+  isWorkHubReplacementIntentRetired,
   WORKHUB_COORDINATION_SESSION_ID,
 } from '@maka/core/session';
 import type {
@@ -519,14 +520,26 @@ class SqliteSessionStore implements SessionAuthorityStore {
 
   async readWorkHubReplacement(
     delegationId: string,
+    pendingOnly?: true,
   ): Promise<WorkHubDelegationReplacementRequestedMessage | undefined> {
     const message = await this.readWorkHubCoordinationMessage(
       `whp_${workHubIdentitySuffix(delegationId)}`,
     );
-    return message?.type === 'workhub_coordination' &&
-      message.kind === 'delegation_replacement_requested'
-      ? message
-      : undefined;
+    if (
+      message?.type !== 'workhub_coordination' ||
+      message.kind !== 'delegation_replacement_requested'
+    )
+      return undefined;
+    if (
+      pendingOnly &&
+      message.replacesDelegationId === delegationId &&
+      isWorkHubReplacementIntentRetired(
+        message,
+        await this.readWorkHubReplacementAbort(delegationId),
+      )
+    )
+      return undefined;
+    return message;
   }
 
   async readWorkHubReplacementAbort(

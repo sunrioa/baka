@@ -1281,7 +1281,7 @@ export interface WorkHubDelegationSupersededMessage {
   replacementDelegationId: string;
 }
 
-/** Durable terminal proof that retirement succeeded but replacement admission did not. */
+/** Durable closure of a replacement attempt; protocol retirement cancels only its intent. */
 export interface WorkHubDelegationReplacementAbortedMessage {
   type: 'workhub_coordination';
   id: string;
@@ -1295,7 +1295,38 @@ export interface WorkHubDelegationReplacementAbortedMessage {
   abortedActionId: string;
   abortedDelegationId: string;
   targetSessionId: string;
-  reason: 'target_unavailable' | 'target_waiting_for_user';
+  reason:
+    | 'target_unavailable'
+    | 'target_waiting_for_user'
+    /** Cancels only the legacy intent, never the original task, admission, or execution. */
+    | 'legacy_protocol_retirement';
+}
+
+/** Exact Host-record binding for retiring an old replacement intent, not its original task. */
+export function isWorkHubReplacementIntentRetired(
+  request: WorkHubDelegationReplacementRequestedMessage,
+  abort: WorkHubDelegationReplacementAbortedMessage | undefined,
+): boolean {
+  return (
+    isRecord(request) &&
+    isRecord(abort) &&
+    request.type === 'workhub_coordination' &&
+    request.kind === 'delegation_replacement_requested' &&
+    abort.type === 'workhub_coordination' &&
+    abort.kind === 'delegation_replacement_aborted' &&
+    isWorkHubCoordinationMessage(request) &&
+    isWorkHubCoordinationMessage(abort) &&
+    abort.reason === 'legacy_protocol_retirement' &&
+    request.actionId.length > 0 &&
+    request.targetSessionId.length > 0 &&
+    abort.actionId === request.actionId &&
+    abort.actionFingerprint === request.actionFingerprint &&
+    abort.coordinationTurnId === request.coordinationTurnId &&
+    abort.turnId === request.turnId &&
+    abort.abortedActionId === request.replacesActionId &&
+    abort.abortedDelegationId === request.replacesDelegationId &&
+    abort.targetSessionId === request.targetSessionId
+  );
 }
 
 export type WorkHubDelegationStopOutcome =
@@ -1993,7 +2024,9 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       message.abortedDelegationId.length > 0 &&
       typeof message.targetSessionId === 'string' &&
       message.targetSessionId.length > 0 &&
-      (message.reason === 'target_unavailable' || message.reason === 'target_waiting_for_user')
+      (message.reason === 'target_unavailable' ||
+        message.reason === 'target_waiting_for_user' ||
+        message.reason === 'legacy_protocol_retirement')
     );
   }
   if (message.kind === 'delegation_superseded') {
