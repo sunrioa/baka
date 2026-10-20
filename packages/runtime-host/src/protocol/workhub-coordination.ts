@@ -238,7 +238,7 @@ const contextEstimatesSchema = z
         baselineTokens: nullableCount,
         replyReserveTokens: nullableCount,
         configuredThreshold: nullableCount,
-        baselineAtOrOverWindow: z.boolean().nullable(),
+        baselineAtOrOverThreshold: z.boolean().nullable(),
         nextRequest: z.literal('unknown'),
       })
       .strict(),

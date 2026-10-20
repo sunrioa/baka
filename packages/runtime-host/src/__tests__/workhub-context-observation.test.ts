@@ -192,7 +192,7 @@ test('context estimates use the runtime window/reserve and explicit connection p
     baselineTokens: 126000,
     replyReserveTokens: 2000,
     configuredThreshold: 128000,
-    baselineAtOrOverWindow: true,
+    baselineAtOrOverThreshold: true,
     nextRequest: 'unknown',
   });
   assert.deepEqual(result.estimates?.cache, {

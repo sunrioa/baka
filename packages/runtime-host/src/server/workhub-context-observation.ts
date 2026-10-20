@@ -123,7 +123,7 @@ export function createWorkHubContextObserver(options: {
           baselineTokens: baseline,
           replyReserveTokens: reserve,
           configuredThreshold: compactionWindow,
-          baselineAtOrOverWindow:
+          baselineAtOrOverThreshold:
             baseline !== null && reserve !== null && compactionWindow !== null
               ? baseline + reserve >= compactionWindow
               : null,

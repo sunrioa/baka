@@ -339,7 +339,11 @@ export function createWorkHubTaskHistoryReader(options: {
             {
               kind: 'user',
               recordSource: 'task_input',
-              inputOrigin: accepted.inputOrigin ?? 'user',
+              inputOrigin: accepted.inputOrigin ?? 'unknown_legacy',
+              textSource:
+                accepted.originalUserText === undefined
+                  ? 'accepted_text_legacy'
+                  : 'original_user_text',
               messageId: accepted.id,
               inputId: accepted.inputId,
               timestamp: accepted.ts,
@@ -367,7 +371,8 @@ export function createWorkHubTaskHistoryReader(options: {
               {
                 kind: 'user',
                 inputOrigin: 'coordination_request',
-                requestOrigin: a.inputOrigin ?? 'unknown',
+                requestOrigin: a.inputOrigin ?? 'unknown_legacy',
+                textSource: 'recorded_user_context',
                 messageId: a.work?.sourceMessageId ?? a.id,
                 timestamp: a.ts,
                 format: 'text',
