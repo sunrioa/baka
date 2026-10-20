@@ -8667,7 +8667,7 @@ test('active plugin executor task rejects unsupported Steering without queuing o
       assert.equal(before.header.header.model, 'held-model');
       assert.deepEqual(before.header.header.executorConfig, { model: 'held-model' });
       assert.equal(before.header.header.permissionMode, 'ask');
-      assert.equal(before.header.header.cwd, root);
+      assert.equal(before.header.header.cwd, await realpath(root));
       assert.deepEqual(manager.runningTurnIds(target), [original.turnId]);
       assert.equal(before.invocations.length, 1);
       assert.equal(before.invocations[0]!.runId, original.runId);
