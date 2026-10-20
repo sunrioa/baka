@@ -2873,6 +2873,34 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
+  for (const providerProjectionVersion of [4, 5] as const) {
+    it(`durably claims and reopens WorkHub projection v${providerProjectionVersion} without duplicate admission`, async () => {
+      await withStore(async (store, dbPath) => {
+        const claim = { ...continuationClaim(), providerProjectionVersion };
+        await persistImmutablePrefix(store, continuationSourcePrefix());
+        assert.equal((await store.claimContinuation({ claim })).kind, 'acquired');
+        assert.equal((await store.claimContinuation({ claim })).kind, 'existing');
+        store.close();
+        const reopened = createSqliteRuntimeStore(dbPath);
+        try {
+          assert.deepEqual(
+            await reopened.readContinuationClaimByBoundary(claim.boundaryDigest),
+            claim,
+          );
+          const repeated = await reopened.claimContinuation({ claim });
+          assert.equal(repeated.kind, 'existing');
+          assert.deepEqual(repeated.claim, claim);
+          assert.equal(
+            (await reopened.listContinuationClaimsForRecovery(claim.target.sessionId)).length,
+            1,
+          );
+        } finally {
+          reopened.close();
+        }
+      });
+    });
+  }
+
   it('refuses a continuation target opening it cannot read, stored or submitted', async () => {
     await withStore(async (store, dbPath) => {
       const claim = continuationClaim();

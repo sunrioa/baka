@@ -30,7 +30,7 @@ import { desktopSessionResourceKey } from "../../shared/runtime-host-identity.js
 import type { MakaTool } from "@maka/runtime/tool-runtime";
 
 const scope = { hostId: "host", targetEpoch: "epoch" };
-function harness(prepareWindow: () => Promise<void> = async () => {}) {
+function harness(prepareWindow: () => Promise<void> = async () => {}, taskHandler?: Parameters<typeof createWorkHubControl>[0]['actTask']) {
   let command!: Parameters<IpcMain["handle"]>[1];
   let current = true;
   let activeTurn = "turn";
@@ -60,11 +60,11 @@ function harness(prepareWindow: () => Promise<void> = async () => {}) {
     interrupt: async (_scope, turnId) => {
       interrupted.push(turnId);
     },
-    actTasks: async (_scope, turnId, callId, input) => ({
+    actTask: taskHandler ?? (async (_scope, turnId, callId, input) => ({
       turnId,
       callId,
       input,
-    }),
+    })),
   });
   const tool = control.group(scope).tools[0] as MakaTool;
   const ctx = (turnId = activeTurn) => ({
@@ -441,12 +441,42 @@ test("task coordination does not open or focus the controlled main window", asyn
     throw new Error("Must not prepare the window");
   });
   t.after(() => h.control.close());
-  const tasks = h.control.group(scope).tools[1] as MakaTool;
-  assert.deepEqual(await tasks.impl({ request: { operation: "candidates" } }, h.ctx()), {
+  const tools = h.control.group(scope).tools as MakaTool[];
+  assert.deepEqual(tools.map(tool => tool.name), ['control', 'find', 'start', 'continue', 'ask', 'stop']);
+  const find = tools.find(tool => tool.name === 'find')!;
+  assert.deepEqual(await find.impl({ query: '登录' }, h.ctx()), {
     turnId: "turn",
     callId: "call",
-    input: { operation: "candidates" },
+    input: { kind: 'find', input: { query: '登录' } },
   });
+  await assert.rejects(async () => find.impl({ request: { operation: 'candidates' } }, h.ctx()));
+  await assert.rejects(async () => find.impl({ actor: 'forged' }, h.ctx()));
+  await assert.rejects(async () => find.impl({}, h.ctx('not-current')), /Inactive turn/);
+});
+
+test('all flat task tools retain the shared control busy and cancellation guard', async (t) => {
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let calls = 0;
+  const h = harness(async () => { throw Error('Must not focus a window'); }, async () => { calls++; entered(); await held; return {}; });
+  t.after(() => h.control.close());
+  const tools = h.control.group(scope).tools as MakaTool[];
+  const find = tools.find(tool => tool.name === 'find')!;
+  const start = tools.find(tool => tool.name === 'start')!;
+  const pending = find.impl({}, h.ctx());
+  await started;
+  try {
+    await assert.rejects(async () => start.impl({ title: 'Independent', text: 'Do it' }, h.ctx()), /Another WorkHub control call is still running/);
+    await assert.rejects(async () => h.tool.impl({ status: 'Observe', request: { operation: 'observe' } }, h.ctx()), /Another WorkHub control call is still running/);
+    assert.equal(calls, 1);
+  } finally { release(); await pending; }
+  const aborted = new AbortController(); aborted.abort(Error('Cancelled before dispatch'));
+  await assert.rejects(async () => find.impl({}, { ...h.ctx(), abortSignal: aborted.signal }), /Cancelled before dispatch/);
+  assert.equal(calls, 1, 'an aborted execution cannot reach any native task command');
+  h.setCurrent(false);
+  await assert.rejects(async () => start.impl({ title: 'Independent', text: 'Do it' }, h.ctx()), /Runtime Host changed/);
+  assert.equal(calls, 1);
 });
 
 

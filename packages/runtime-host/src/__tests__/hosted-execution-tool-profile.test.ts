@@ -161,7 +161,9 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     impl: async () => name,
   });
   const control = makeTool('mcp__desktop_workhub__control');
-  const tasks = makeTool('mcp__desktop_workhub__tasks');
+  const tasks = ['find', 'start', 'continue', 'ask', 'stop'].map((name) =>
+    makeTool(`mcp__desktop_workhub__${name}`),
+  );
   const browserCalls: unknown[] = [];
   const browserNavigate: MakaTool = {
     name: 'mcp__desktop_browser__browser_navigate',
@@ -194,7 +196,8 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     builtinRead,
     ...browserTools,
     control,
-    tasks,
+    ...tasks,
+    makeTool('mcp__desktop_workhub__tasks'),
     makeTool('AskUserQuestion'),
     makeTool('WorkHubResult'),
     makeTool('WorkHubEvidence'),
@@ -231,7 +234,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     projected.map(({ name }) => name),
     [
       control.name,
-      tasks.name,
+      ...tasks.map(({ name }) => name),
       ...browserTools.map(({ name }) => name),
       'Read',
       'AskUserQuestion',
@@ -270,19 +273,24 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   );
   assert.equal(hostedExecutionRunProfile('workhub-coordination-v2')?.memoryExtraction, false);
   const prompt = hostedExecutionRunProfile('workhub-coordination-v2')?.systemPrompt ?? '';
-  assert.match(prompt, /discover candidates and use only returned identities/u);
-  assert.match(
-    prompt,
-    /Before selecting an existing Session for independent work, discover candidates/u,
-  );
+  assert.match(prompt, /find searches tasks and eligible manual Sessions one bounded page/u);
+  assert.match(prompt, /Use start for a clearly independent execution goal/u);
   assert.match(prompt, /clearly independent execution goal/u);
   assert.match(prompt, /without requiring the user to say create a Session/u);
-  assert.match(prompt, /continuation lookup requires clarification; it never implies create_new/u);
-  assert.match(prompt, /Admit all clear goals before asking about an ambiguous remainder/u);
+  assert.match(
+    prompt,
+    /explicit old-task reference that cannot be resolved requires clarification/u,
+  );
+  assert.match(prompt, /admit all clear goals before asking about an ambiguous remainder/u);
   assert.match(prompt, /private task workspace, not the selected project/u);
-  assert.match(prompt, /exact returned projectRef/u);
-  assert.match(prompt, /never implies create_new/u);
-  assert.match(prompt, /ordinary request to continue work is routing, not a linked resume/u);
+  assert.match(prompt, /known intended directory for coding/u);
+  assert.match(prompt, /Ordinary continuation does not replay interrupted tools/u);
+  assert.match(prompt, /side-pane preview does not change the target/u);
+  assert.match(prompt, /queued input supplements the original admission in place/u);
+  assert.match(prompt, /active input uses Steering at the next consumable boundary/u);
+  assert.match(prompt, /three pages/u);
+  assert.match(prompt, /submit all known targets together, never split calls/u);
+  assert.ok(!projected.some((tool) => tool.name === 'mcp__desktop_workhub__tasks'));
 
   let providerCatalog = '';
   let providerPrompt = '';

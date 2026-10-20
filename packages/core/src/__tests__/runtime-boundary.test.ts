@@ -319,14 +319,14 @@ describe('immutable RuntimeEvent boundary', () => {
 
   it('decodes released and compact-context claim versions without accepting unknown projections', () => {
     const claim = claimForBoundary(boundaryForRuns('run-projection'));
-    for (const providerProjectionVersion of [1, 2, 3, 4]) {
+    for (const providerProjectionVersion of [1, 2, 3, 4, 5]) {
       assert.equal(
         decodeContinuationClaim({ ...claim, providerProjectionVersion }).providerProjectionVersion,
         providerProjectionVersion,
       );
     }
     assert.throws(
-      () => decodeContinuationClaim({ ...claim, providerProjectionVersion: 5 }),
+      () => decodeContinuationClaim({ ...claim, providerProjectionVersion: 6 }),
       /Invalid continuation claim/,
     );
   });

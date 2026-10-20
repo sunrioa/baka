@@ -50,6 +50,7 @@ export interface WorkHubTaskRef {
   readonly actionId: string;
   readonly delegationId: string;
 }
+export type WorkHubTaskReadInput = WorkHubTaskRef | { readonly workId: string };
 export interface WorkHubTask extends WorkHubTaskRef {
   readonly workId?: string;
   readonly targetSessionId: string;
@@ -395,7 +396,13 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
     mode: 'query',
     availability: 'ready',
     errors,
-    decodeInput: decodeWorkHubTaskRef,
+    decodeInput(value: unknown): WorkHubTaskReadInput {
+      if (value && typeof value === 'object' && 'workId' in value) {
+        const item = requireExactRecord(value, 'WorkHub task identity', ['workId']);
+        return { workId: requireEntityId(item.workId, 'WorkHub work') };
+      }
+      return decodeWorkHubTaskRef(value);
+    },
     decodeOutput(value: unknown): WorkHubTaskDetail {
       const item = requireShapedRecord(value, 'WorkHub task detail', ['task'], ['delivery']);
       const task = decodeTask(item.task);
@@ -422,11 +429,12 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
       };
     },
     assertOutputForInput(input, output) {
-      if (
-        input.actionId !== output.task.actionId ||
-        input.delegationId !== output.task.delegationId
-      )
-        throw invalidProtocolFrame('WorkHub task response changed identity');
+      const matches =
+        'workId' in input
+          ? input.workId === (output.task.workId ?? output.task.actionId)
+          : input.actionId === output.task.actionId &&
+            input.delegationId === output.task.delegationId;
+      if (!matches) throw invalidProtocolFrame('WorkHub task response changed identity');
     },
   }),
 } as const;

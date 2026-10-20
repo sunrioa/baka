@@ -60,9 +60,9 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
   })), [worksByTurn, highlight.sessionId, workHubIdentityHue]);
   const promptTextByTurn = new Map(chat.messages?.flatMap((message) => message.type === 'user' ? [[message.turnId, message.text.slice(0, 80)] as const] : []));
   const turnDecorations = new Map<string, NonNullable<ComponentProps<typeof ChatView>['turnDecorations']> extends ReadonlyMap<string, infer V> ? V : never>([...worksByTurn].map(([turnId, works]) => [turnId, {
-    assistantDetailsLabel: works.some(work => work.workId) ? taskCopy.dispatchDetails : undefined,
-    assistantSummary: works.some(work => work.workId)
-      ? <WorkHubDispatchCard works={works.filter(work => work.workId)} tasks={taskFacts?.tasks ?? []} ready={taskFacts?.ready ?? false} promptText={promptTextByTurn.get(turnId) ?? turnId} />
+    assistantDetailsLabel: works.some(work => work.workId && work.operation !== 'stop') ? taskCopy.dispatchDetails : undefined,
+    assistantSummary: works.some(work => work.workId && work.operation !== 'stop')
+      ? <WorkHubDispatchCard works={works.filter(work => work.workId && work.operation !== 'stop')} tasks={taskFacts?.tasks ?? []} ready={taskFacts?.ready ?? false} promptText={promptTextByTurn.get(turnId) ?? turnId} />
       : undefined,
     accentColor: promptRailDecorations.get(turnId)?.accentColor ?? 'transparent',
     messageRail: <>{works.map((work, index) => <Button key={work.workId ?? work.targetSessionId}

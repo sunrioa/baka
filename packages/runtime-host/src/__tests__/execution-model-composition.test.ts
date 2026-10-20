@@ -2237,7 +2237,14 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       const desktop = capabilities.attachConnection(clientCapabilityConnectionIdentity('desktop'), {
         send: async () => {},
       });
-      await registerDesktop('before-crash', ['control', 'tasks']);
+      await registerDesktop('before-crash', [
+        'control',
+        'find',
+        'start',
+        'continue',
+        'ask',
+        'stop',
+      ]);
       // Disconnect after binding succeeds, before its caller can admit the root.
       // Reconnect only after admission, before the real backend composes tools.
       const bindSession = capabilities.bindSession.bind(capabilities);
@@ -2263,7 +2270,7 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           // this admission is still preparing its backend.
           await registerDesktop(
             'reconnected',
-            ['control', 'tasks'],
+            ['control', 'find', 'start', 'continue', 'ask', 'stop'],
             'desktop',
             capabilities.handlers,
           );
@@ -2417,7 +2424,11 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           },
         },
       );
-      await registerDesktop('hostile-reg', ['control', 'tasks'], 'hostile');
+      await registerDesktop(
+        'hostile-reg',
+        ['control', 'find', 'start', 'continue', 'ask', 'stop'],
+        'hostile',
+      );
       assert.equal(
         provider.requests.length,
         requestsBeforeRecovery,
@@ -2435,7 +2446,14 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
         requestsBeforeRecovery,
         'one missing required tool keeps the successor durable and pending',
       );
-      await registerDesktop('capable-desktop', ['control', 'tasks']);
+      await registerDesktop('capable-desktop', [
+        'control',
+        'find',
+        'start',
+        'continue',
+        'ask',
+        'stop',
+      ]);
       const recoveredStores = await openInteractiveExecutionStoresForWrite(owner.lease);
       await waitFor(
         async () => {
@@ -2462,7 +2480,11 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       assert.match(responsesDeveloperPrompt(requests[0]!.body) ?? '', /WorkHub/u);
       for (const name of [
         'mcp__desktop_workhub__control',
-        'mcp__desktop_workhub__tasks',
+        'mcp__desktop_workhub__find',
+        'mcp__desktop_workhub__start',
+        'mcp__desktop_workhub__continue',
+        'mcp__desktop_workhub__ask',
+        'mcp__desktop_workhub__stop',
         ...WORKHUB_BROWSER_TOOL_NAMES.map((name) => `mcp__desktop_browser__${name}`),
       ]) {
         assert.ok(responsesToolNames(requests[0]?.body).includes(name));
@@ -2506,7 +2528,14 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           clientCapabilityConnectionIdentity('desktop'),
           { send: async () => {} },
         );
-        await registerDesktop('after-second-restart', ['control', 'tasks']);
+        await registerDesktop('after-second-restart', [
+          'control',
+          'find',
+          'start',
+          'continue',
+          'ask',
+          'stop',
+        ]);
         const query = await composition.handlers['turn.query'](
           { sessionId, turnId: expectedAdmittedIdentity!.turnId },
           context,

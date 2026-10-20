@@ -291,12 +291,14 @@ function tool(name: string): MakaTool {
 }
 test('WorkHub v2 binds control, tasks, attachment reading and user questions while legacy WorkHub stays tool-free', () => {
   const control = tool('mcp__desktop_workhub__control');
-  const tasks = tool('mcp__desktop_workhub__tasks');
+  const tasks = ['find', 'start', 'continue', 'ask', 'stop'].map((name) =>
+    tool(`mcp__desktop_workhub__${name}`),
+  );
   const browserTools = WORKHUB_BROWSER_TOOL_NAMES.map((name) =>
     tool(`mcp__desktop_browser__${name}`),
   );
   const clientCapabilities = {
-    tools: [control, tasks, ...browserTools, tool('Bash')],
+    tools: [control, ...tasks, ...browserTools, tool('Bash')],
     groups: [],
   };
   assert.deepEqual(
@@ -313,7 +315,7 @@ test('WorkHub v2 binds control, tasks, attachment reading and user questions whi
     }).tools.map(({ name }) => name),
     [
       control.name,
-      tasks.name,
+      ...tasks.map(({ name }) => name),
       ...browserTools.map(({ name }) => name),
       'Read',
       'AskUserQuestion',
@@ -336,7 +338,7 @@ test('WorkHub v2 binds control, tasks, attachment reading and user questions whi
         toolProfile: 'workhub-coordination-v2',
         clientCapabilities: { tools: [control], groups: [] },
       }),
-    /Hosted tool profile is unavailable: mcp__desktop_workhub__tasks/,
+    /Hosted tool profile is unavailable: mcp__desktop_workhub__find/,
   );
   assert.throws(
     () =>

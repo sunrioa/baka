@@ -84,8 +84,27 @@ import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { isWorkHubActionReceipt } from '@maka/core/workhub-action-result';
 
 export const PROVIDER_REPLAY_PROJECTION_VERSION = 2;
-export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 4;
-export type ProviderReplayProjectionVersion = 2 | 3 | 4;
+export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 5;
+export type ProviderReplayProjectionVersion = 2 | 3 | 4 | 5;
+
+function isRetiredWorkHubOperation(event: RuntimeEvent): boolean {
+  if (
+    event.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+    event.content?.kind !== 'function_call' ||
+    event.content.providerExecuted === true
+  )
+    return false;
+  if (event.content.name === 'mcp__desktop_workhub__tasks') return true;
+  const args = event.content.args;
+  return (
+    event.content.name === 'invalid' &&
+    typeof args === 'object' &&
+    args !== null &&
+    !Array.isArray(args) &&
+    'tool' in args &&
+    args.tool === 'mcp__desktop_workhub__tasks'
+  );
+}
 
 /** Project the existing Host receipt, never infer handling from user prose. */
 export function workHubCoordinationReceiptText(event: RuntimeEvent): string | undefined {
@@ -609,6 +628,8 @@ export type RuntimeEventModelReplayItem =
       toolCallId: string;
       toolName: string;
       input: unknown;
+      /** Keep the exchange intact; lower a retired operation to facts only at materialization. */
+      retiredWorkHubOperation?: true;
       providerOptions?: NonNullable<ModelMessage['providerOptions']>;
       providerExecuted?: boolean;
       /** Assistant step id (from tool_start); groups the call with its step. */
@@ -1144,6 +1165,7 @@ export function buildRuntimeEventModelReplayPlan(
           toolCallId: event.content.id,
           toolName: event.content.name,
           input: event.content.args,
+          ...(isRetiredWorkHubOperation(event) ? { retiredWorkHubOperation: true } : {}),
           ...(event.content.providerOptions !== undefined
             ? {
                 providerOptions: event.content.providerOptions as NonNullable<

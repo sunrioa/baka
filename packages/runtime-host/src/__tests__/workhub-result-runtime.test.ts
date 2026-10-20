@@ -30,6 +30,22 @@ import {
 
 type Options = Parameters<typeof createWorkHubResultRuntime>[0];
 
+test('task-id detail lookup resolves old tasks outside the overview without scanning assignment history', async () => {
+  const f = fixture();
+  f.hideFromOverview();
+  f.setOriginalAnswered();
+  const overview = await f.handlers['workhub.tasks.query']({}, {} as never);
+  assert.ok(overview.ok);
+  assert.deepEqual(overview.result.tasks, []);
+  const detail = await f.handlers['workhub.tasks.read']({ workId: 'action' }, {} as never);
+  assert.ok(detail.ok);
+  assert.equal(detail.result.task.actionId, 'action');
+  assert.equal(detail.result.task.targetSessionId, 'target');
+  assert.deepEqual(f.latestLookups, ['action']);
+  const missing = await f.handlers['workhub.tasks.read']({ workId: 'missing' }, {} as never);
+  assert.equal(missing.ok, false);
+});
+
 test('task overview follows the owned continuation and separates queue, resources, dependency and user waiting without reading delivery', async () => {
   const f = fixture();
   const query = async () => {
@@ -246,6 +262,8 @@ for (const scenario of [
   );
 
 function fixture(childRequest = false) {
+  let overviewVisible = true;
+  const latestLookups: string[] = [];
   let active = true,
     stopped = false;
   let stopResolved = false;
@@ -318,20 +336,29 @@ function fixture(childRequest = false) {
     // Each stub is an external authority; use the real admission gate and tool.
     stores: {
       sessionStore: {
-        listHeaders: async () => [
-          { id: 'target', isArchived: false, labels: [] },
-          ...(childRequest
+        listHeaders: async () =>
+          overviewVisible
             ? [
-                {
-                  id: 'child',
-                  isArchived: false,
-                  labels: [],
-                  subagentParent: { parentSessionId: 'target' },
-                },
+                { id: 'target', isArchived: false, labels: [] },
+                ...(childRequest
+                  ? [
+                      {
+                        id: 'child',
+                        isArchived: false,
+                        labels: [],
+                        subagentParent: { parentSessionId: 'target' },
+                      },
+                    ]
+                  : []),
               ]
-            : []),
-        ],
+            : [],
         readWorkHubAssignment: async () => assignment,
+        readLatestWorkHubAssignment: async (workId: string) => {
+          latestLookups.push(workId);
+          return workId === assignment.actionId ? assignment : undefined;
+        },
+        readWorkHubAssignmentsPage: async () =>
+          assert.fail('Exact task lookup must not scan global assignment history'),
         readHeaderSnapshot: async () => ({ id: 'target', name: 'Release', isArchived: false }),
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async () => undefined,
@@ -415,6 +442,10 @@ function fixture(childRequest = false) {
   const call = (input: Record<string, unknown>, ctx = context) =>
     runtime.tool.impl(input as never, ctx);
   return {
+    latestLookups,
+    hideFromOverview: () => {
+      overviewVisible = false;
+    },
     setChildOwned: (value: boolean) => {
       childOwned = value;
     },

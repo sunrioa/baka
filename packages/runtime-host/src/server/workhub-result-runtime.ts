@@ -536,8 +536,17 @@ export function createWorkHubResultRuntime(options: {
         ok: false as const,
         error: { code: 'not_found' as const, message: 'The original WorkHub task is unavailable' },
       };
-      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
-      if (!assignment || assignment.delegationId !== input.delegationId) return missing;
+      const assignment =
+        'workId' in input
+          ? await stores.sessionStore.readLatestWorkHubAssignment(input.workId)
+          : await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      if (
+        !assignment ||
+        ('workId' in input
+          ? (assignment.work?.id ?? assignment.actionId) !== input.workId
+          : assignment.delegationId !== input.delegationId)
+      )
+        return missing;
       const lanes = await taskLanes(assignment);
       return admission.runMany(lanes, async (lease) => {
         const result = await taskProjection(assignment, lease, true, lanes);

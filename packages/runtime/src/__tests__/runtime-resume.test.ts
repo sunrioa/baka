@@ -30,7 +30,11 @@ import type { RuntimeEventInvocationOpenedContent } from '@maka/core/runtime-eve
 import type { RuntimeInvocationRecord } from '@maka/core/runtime-invocation';
 
 import { buildContinuationReplayPlan } from '../continuation-replay.js';
-import { PROVIDER_REPLAY_PROJECTION_VERSION } from '../model-history.js';
+import {
+  PROVIDER_REPLAY_PROJECTION_VERSION,
+  WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION,
+} from '../model-history.js';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { toolAvailabilityConnectorNames } from '../tool-availability.js';
 import {
   RUNTIME_RESUME_FAILPOINTS,
@@ -402,6 +406,65 @@ describe('runtime resume phase 1 safe-boundary continuation', () => {
       ['user-1', 'terminal-1'],
     );
   });
+
+  for (const name of ['invalid', 'mcp__desktop_workhub__tasks']) {
+    test(`the full continuation planner keeps the committed retired ${name} result boundary`, () => {
+      const initial = textEvent('user', 'user', 'Start A');
+      initial.actions = { runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' } };
+      const events = [
+        initial,
+        callEvent(
+          'old-call',
+          'old',
+          name,
+          name === 'invalid'
+            ? { tool: 'mcp__desktop_workhub__tasks' }
+            : { request: { operation: 'delegate', text: 'Start A' } },
+        ),
+        responseEvent('old-result', 'old', name, { workId: 'original-A' }, name === 'invalid'),
+        base({
+          id: 'unfinished-answer',
+          role: 'model',
+          content: { kind: 'text', text: 'Unfinished' },
+        }),
+      ].map((event) => ({ ...event, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
+      const route = sameRouteAdmission();
+      const replay = buildContinuationReplayPlan({
+        prefixes: [immutablePrefix(events)],
+        providerProjectionVersion: WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION,
+        admissionRoute: {
+          ...route,
+          invocations: route.invocations.map((record) => ({
+            ...record,
+            sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          })),
+        },
+      });
+      assert.equal(replay.kind, 'replayable');
+      if (replay.kind !== 'replayable') return;
+      const plan = buildSafeBoundaryContinuationPlan(events, {
+        ...safeBoundaryFacts(),
+        availableToolNames: ['invalid', 'mcp__desktop_workhub__start'],
+        continuationReplayPlan: replay.plan,
+      });
+      assert.ok(!plan.rejectionReasons.includes('provider_resume_boundary_unsupported'));
+      if (name === 'invalid') {
+        assert.equal(plan.disposition, 'continue');
+        assert.deepEqual(plan.rejectionReasons, []);
+        assert.deepEqual(
+          plan.continuation?.runtimeContext.map((event) => event.id),
+          ['user', 'old-call', 'old-result'],
+        );
+      } else {
+        assert.equal(plan.disposition, 'park');
+        assert.deepEqual(
+          plan.rejectionReasons,
+          ['tool_catalog_mismatch'],
+          'retired dispatch is never restored as a compatibility alias',
+        );
+      }
+    });
+  }
 
   test('creates a new execution identity from a fully committed safe boundary', () => {
     const events = [

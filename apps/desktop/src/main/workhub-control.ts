@@ -33,10 +33,15 @@ import {
 } from "../shared/runtime-host-identity.js";
 import {
   workHubControlSchema,
-  workHubTasksSchema,
   type WorkHubAction,
-  type WorkHubTasksInput,
 } from "../shared/workhub-tool-schema.js";
+import {
+  parseWorkHubTaskToolRequest,
+  workHubTaskToolSchemas,
+  workHubTaskToolDescriptions,
+  type WorkHubTaskToolName,
+  type WorkHubTaskToolRequest,
+} from '../shared/workhub-task-tool-schema.js';
 import type { WorkHubControlSnapshot } from '../shared/workhub-control.js';
 
 // Tool protocols require an object root; keep each operation's exact shape
@@ -45,7 +50,6 @@ const controlParameters = z.object({
   status: z.string().trim().min(1).max(80).regex(/^[^\r\n]+$/).describe('A short user-facing description of the current action, in the user\'s language. Match the language of the user\'s current request: Chinese for Chinese requests, English for English requests. Do not default to the language of these tool instructions. For example: Opening project settings. Describe the action, not reasoning or a claim of completion.'),
   request: workHubControlSchema,
 }).strict();
-const tasksParameters = z.object({ request: workHubTasksSchema }).strict();
 
 interface WorkHubControlDeps {
   ipcMain: Pick<IpcMain, "handle" | "removeHandler">;
@@ -59,11 +63,11 @@ interface WorkHubControlDeps {
   isCurrent(scope: DesktopTargetScope): boolean;
   assertTurn(scope: DesktopTargetScope, turnId: string): Promise<void>;
   interrupt(scope: DesktopTargetScope, turnId: string): Promise<void>;
-  actTasks(
+  actTask(
     scope: DesktopTargetScope,
     turnId: string,
     toolCallId: string,
-    input: WorkHubTasksInput,
+    input: WorkHubTaskToolRequest,
   ): Promise<unknown>;
 }
 interface Owner {
@@ -278,11 +282,10 @@ export function createWorkHubControl(deps: WorkHubControlDeps) {
         return { type: "text", value: JSON.stringify(output) };
       },
     };
-    const tasks: MakaTool = {
-      name: "tasks",
-      description:
-        "Discover or coordinate Host tasks through the WorkHub action gate. Delegate actual work with text; the model chooses the requested action and the Host checks target ownership, execution identity and admission, not natural-language intent. Use candidates before choosing an existing task. Never invent a candidate or delegation identity.",
-      parameters: tasksParameters,
+    const taskTools = (Object.keys(workHubTaskToolSchemas) as WorkHubTaskToolName[]).map((name): MakaTool => ({
+      name,
+      description: workHubTaskToolDescriptions[name],
+      parameters: workHubTaskToolSchemas[name],
       impl: async (input, ctx) => {
         if (busy)
           throw new Error("Another WorkHub control call is still running");
@@ -290,22 +293,22 @@ export function createWorkHubControl(deps: WorkHubControlDeps) {
         try {
           const active = await claim(scope, ctx);
           active.controller.signal.throwIfAborted();
-          return await deps.actTasks(
+          return await deps.actTask(
             scope,
             active.turnId,
             ctx.toolCallId,
-            tasksParameters.parse(input).request,
+            parseWorkHubTaskToolRequest(name, input),
           );
         } finally {
           busy = false;
         }
       },
-    };
+    }));
     return {
       offerId: "desktop_workhub",
       label: "WorkHub",
       description: "Operate Maka and coordinate its tasks.",
-      tools: [control, tasks],
+      tools: [control, ...taskTools],
     };
   };
   const complete = (resourceKey: string) => {

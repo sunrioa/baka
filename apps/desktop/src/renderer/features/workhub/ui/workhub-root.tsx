@@ -37,7 +37,7 @@ import { WorkHubTaskInbox } from './workhub-task-inbox.js';
 import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.js';
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
-import { workHubLinkedWork } from '../model/linked-work.js';
+import { useWorkHubLinkedWork } from '../controller/use-workhub-linked-work.js';
 import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
@@ -280,7 +280,7 @@ export function WorkHubRoot() {
       focus();
     };
   }, [services]);
-  const links = useMemo(() => workHubLinkedWork(transcript.messages, controller.sessions, t.work, controller.sessionId), [transcript.messages, controller.sessions, t.work, controller.sessionId]);
+  const links = useWorkHubLinkedWork(services, controller.sessionId, transcript.messages, controller.sessions, t.work, controller.taskOverview.tasks, controller.taskOverview.generation);
   const delegatedSessionIds = links.map((link) => link.targetSessionId);
   const call = (task: Promise<unknown>) => {
     void task.catch(controller.report);
