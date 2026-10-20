@@ -3088,10 +3088,21 @@ for (const readMode of ['evidence', 'native-history'] as const)
   test(`production WorkHub continues cold work in a fresh model route without replaying history or steering unrelated work (${readMode})`, {
     timeout: 30000,
   }, async (t) => {
-    const releaseSource = deferred<void>(),
+    const sourceCallEntered = deferred<void>(),
+      releaseSourceCall = deferred<void>(),
+      releaseSource = deferred<void>(),
       releaseB = deferred<void>();
+    // Deliberately extreme stored output, not a context-switch threshold.
     const cold = 'SELECTED_OLD_EVIDENCE\n' + 'x'.repeat(900000) + 'COLD_FAR_SENTINEL';
     const requests: Array<{ model: string; url: string; body: string; coordinator: boolean }> = [];
+    const reads: Array<{
+      taskId: string;
+      view: string;
+      sourceActionId?: string;
+      kinds?: string[];
+      cursor?: string;
+    }> = [];
+    let readDiscoveries = 0;
     const errors: unknown[] = [];
     const server = createServer((request, response) => {
       void (async () => {
@@ -3108,13 +3119,22 @@ for (const readMode of ['evidence', 'native-history'] as const)
           messages: { role: string; content: unknown }[];
         };
         for (const tool of input.tools ?? []) {
-          if (!['WorkHubEvidence', 'WorkHubRead'].includes(tool.function.name)) continue;
+          assert.ok(
+            !['WorkHubEvidence', 'WorkHubResult', 'WorkHubInspect'].includes(tool.function.name),
+            'retired E/F producers and old read surfaces are not published',
+          );
+          if (tool.function.name !== 'WorkHubRead') continue;
           assert.equal(tool.function.parameters.type, 'object');
           assert.equal(tool.function.parameters.oneOf, undefined);
           assert.equal(tool.function.parameters.anyOf, undefined);
         }
-        const coordinator =
-          input.tools?.some((tool) => tool.function.name === 'WorkHubResult') === true;
+        const coordinator = input.messages.some(
+          (message) =>
+            message.role === 'system' &&
+            JSON.stringify(message.content).includes(
+              'the WorkHub assistant for this Desktop window',
+            ),
+        );
         requests.push({ model: input.model, url: request.url ?? '', body, coordinator });
         const users = JSON.stringify(input.messages.filter((message) => message.role === 'user'));
         const chunk = (delta: unknown, finish: string | null) =>
@@ -3145,7 +3165,6 @@ for (const readMode of ['evidence', 'native-history'] as const)
           return;
         }
         if (
-          readMode === 'native-history' &&
           input.model === 'fake-model' &&
           users.includes('OLD_LONG_SOURCE') &&
           !users.includes('REUSE_CHECK') &&
@@ -3156,6 +3175,8 @@ for (const readMode of ['evidence', 'native-history'] as const)
               JSON.stringify(message.content).includes('OWNED_TOOL_EVIDENCE'),
           )
         ) {
+          sourceCallEntered.resolve();
+          await releaseSourceCall.promise;
           const visible = input.tools?.some((tool) => tool.function.name === 'Bash');
           response.write(
             chunk(
@@ -3184,33 +3205,62 @@ for (const readMode of ['evidence', 'native-history'] as const)
           response.end('data: [DONE]\n\n');
           return;
         }
+        const hasReply = input.messages.some(
+          (message) =>
+            message.role === 'tool' &&
+            JSON.stringify(message.content).includes('SELECTED_OLD_EVIDENCE'),
+        );
+        const historyPages = input.messages
+          .filter((message) => message.role === 'tool')
+          .flatMap((message) => {
+            try {
+              const value = JSON.parse(String(message.content)) as {
+                history?: { records: { kind: string; isError?: boolean; text?: string }[] };
+                nextCursor?: string | null;
+              };
+              return value.history ? [value] : [];
+            } catch {
+              return [];
+            }
+          });
+        const records = historyPages.flatMap((page) => page.history!.records);
+        const hasHistory =
+          records.some(
+            (record) =>
+              record.kind === 'tool_result' &&
+              record.isError === false &&
+              record.text?.includes('OWNED_TOOL_EVIDENCE'),
+          ) &&
+          records.some(
+            (record) => record.kind === 'user' && record.text === 'RAW_OLD_CORRECTION_KEEP_BIGINT',
+          );
         if (
           !coordinator &&
           input.model === 'new-model' &&
           users.includes('FRESH_CONTINUE') &&
-          !input.messages.some(
-            (message) =>
-              message.role === 'tool' &&
-              JSON.stringify(message.content).includes(
-                readMode === 'native-history' ? 'OWNED_TOOL_EVIDENCE' : 'SELECTED_OLD_EVIDENCE',
-              ),
-          )
+          (!hasHistory || (readMode === 'evidence' && !hasReply))
         ) {
-          const name = readMode === 'native-history' ? 'WorkHubRead' : 'WorkHubEvidence';
+          const name = 'WorkHubRead';
           const visible = input.tools?.some((tool) => tool.function.name === name);
-          const tool = visible
-            ? {
-                name,
-                args:
-                  readMode === 'native-history'
-                    ? {
-                        taskId: 'source-a',
-                        view: 'history',
-                        kinds: ['user', 'tool_call', 'tool_result'],
-                      }
-                    : { operation: 'read', sourceActionId: 'source-a' },
-              }
-            : { name: 'tool_search', args: { query: name } };
+          const cursor = historyPages.at(-1)?.nextCursor;
+          if (visible && (readMode !== 'evidence' || hasReply) && historyPages.length)
+            assert.equal(
+              typeof cursor,
+              'string',
+              'follow the top-level cursor until the source facts are read',
+            );
+          const args =
+            readMode === 'evidence' && !hasReply
+              ? { taskId: 'source-a', view: 'reply', sourceActionId: 'source-a' }
+              : {
+                  taskId: 'source-a',
+                  view: 'history',
+                  kinds: ['user', 'tool_call', 'tool_result'],
+                  ...(cursor ? { cursor } : {}),
+                };
+          if (visible) reads.push(args);
+          else readDiscoveries++;
+          const tool = visible ? { name, args } : { name: 'tool_search', args: { query: name } };
           response.write(
             chunk(
               {
@@ -3218,7 +3268,9 @@ for (const readMode of ['evidence', 'native-history'] as const)
                 tool_calls: [
                   {
                     index: 0,
-                    id: visible ? 'read-old-evidence' : 'discover-evidence',
+                    id: visible
+                      ? 'read-task-' + args.view + '-' + reads.length
+                      : 'discover-evidence-' + readDiscoveries,
                     type: 'function',
                     function: { name: tool.name, arguments: JSON.stringify(tool.args) },
                   },
@@ -3238,7 +3290,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
             await releaseB.promise;
             text = 'UNRELATED_B_SECRET';
           } else if (!coordinator && users.includes('REUSE_CHECK'))
-            text = 'The original route was reused.';
+            text = 'SELECTED_OLD_EVIDENCE: The original route was reused.';
           else if (!coordinator) {
             await releaseSource.promise;
             text = cold;
@@ -3256,6 +3308,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
     t.after(
       () =>
         new Promise<void>((resolve, reject) => {
+          releaseSourceCall.resolve();
           releaseSource.resolve();
           releaseB.resolve();
           server.closeAllConnections();
@@ -3265,7 +3318,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
     const address = server.address();
     assert.ok(address && typeof address === 'object');
     await withCompositionRoot(async ({ owner }) => {
-      await configureFakeDefaultTarget(
+      const originalId = await configureFakeDefaultTarget(
         owner,
         ['fake-model'],
         `http://127.0.0.1:${address.port}/old/v1`,
@@ -3337,18 +3390,23 @@ for (const readMode of ['evidence', 'native-history'] as const)
         const result = await composition.handlers['turn.query']({ sessionId, turnId }, context);
         return result.ok && result.result.status === 'completed';
       };
-      const act = (
-        actionId: string,
-        proposal: WorkHubCoordinationActFromTurnInput['proposal'],
-        delegationText: string,
-        extra: Partial<
-          Pick<WorkHubCoordinationActFromTurnInput, 'create' | 'candidateSetId' | 'newWorkDefaults'>
-        > = {},
-      ) =>
-        composition.handlers['workhub.coordination.actFromTurn'](
-          { turnId: 'fresh-authority', actionId, proposal, delegationText, ...extra },
+      const continueTask = (actionId: string, text: string, container: 'reuse' | 'fresh') =>
+        composition.handlers['workhub.tasks.continue'](
+          { turnId: 'fresh-authority', actionId, taskId: 'source-a', text, container },
           context,
         );
+      const inputReceipt = async (inputId: string) => {
+        const result = await composition.handlers['workhub.tasks.input.read'](
+          { workId: 'source-a', inputId },
+          context,
+        );
+        assert.ok(result.ok, JSON.stringify(result));
+        return result.result;
+      };
+      const newTaskDefaults = {
+        model: { llmConnectionId: originalId, llmConnectionSlug: 'fake', model: 'fake-model' },
+        permissionMode: 'bypass' as const,
+      };
       const failures: unknown[] = [];
       try {
         await composition.recover();
@@ -3358,83 +3416,68 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.ok(
           (
             await composition.handlers['workhub.coordination.answer'](
-              { turnId: 'fresh-authority', text: 'Authorize fresh continuation.' },
+              {
+                turnId: 'fresh-authority',
+                text: 'ORIGINAL_USER_GOAL: Complete OLD_LONG_SOURCE, reuse then fresh for related work, and admit independent B and C without mixing their requirements.',
+              },
               context,
             )
           ).ok,
         );
-        const original = await act(
-          'source-a',
-          { disposition: 'create_new', title: 'Same title' },
-          'OLD_LONG_SOURCE',
+        const original = await composition.handlers['workhub.tasks.start'](
           {
+            turnId: 'fresh-authority',
+            actionId: 'source-a',
+            title: 'Same title',
+            text: 'OLD_LONG_SOURCE',
             create: { workspace: { kind: 'isolated' } },
-            newWorkDefaults: { permissionMode: 'bypass' },
+            newWorkDefaults: newTaskDefaults,
           },
+          context,
         );
         assert.ok(original.ok, JSON.stringify(original));
         const a = await stores.sessionStore.readWorkHubAssignment('source-a');
         assert.ok(a);
-        await wait(async () =>
-          requests.some((request) => !request.coordinator && request.url.startsWith('/old/')),
-        );
-        const freshProposal = {
-          disposition: 'continue_work' as const,
-          workId: 'source-a',
-          sourceActionId: 'source-a',
-          container: 'fresh' as const,
-        };
-        const defaults = {
-          model: { llmConnectionId: newId, llmConnectionSlug: 'fresh', model: 'new-model' },
-          permissionMode: 'ask' as const,
-        };
-        const ignoredDefaults = {
-          ...defaults,
-          model: { ...defaults.model, model: 'missing-model' },
-          permissionMode: 'bypass' as const,
-        };
-        const invalidDefaults = await act('invalid-defaults', freshProposal, 'FRESH_CONTINUE', {
-          newWorkDefaults: { ...defaults, model: { ...defaults.model, model: 'missing-model' } },
-        });
-        assert.ok(
-          !invalidDefaults.ok && invalidDefaults.error.code === 'session_busy',
-          JSON.stringify(invalidDefaults),
-        );
-        assert.equal(
-          await stores.sessionStore.readWorkHubAssignment('invalid-defaults'),
-          undefined,
-        );
-        const blocked = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-          newWorkDefaults: ignoredDefaults,
-        });
+        await withTimeout(sourceCallEntered.promise, 10000, 'source model call entered');
+        await wait(async () => requests.filter((request) => request.coordinator).length === 1);
+        const beforeBlocked = (await stores.sessionStore.listHeaders()).map(({ id }) => id).sort();
+        const beforeBlockedRequests = requests.length;
+        const blocked = await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh');
         assert.ok(!blocked.ok && blocked.error.code === 'session_busy', JSON.stringify(blocked));
         assert.equal(await stores.sessionStore.readWorkHubAssignment('fresh-a'), undefined);
-        if (readMode === 'native-history') {
-          const correction = await composition.handlers['workhub.tasks.send'](
-            {
-              inputId: 'raw-source-correction',
-              workId: 'source-a',
-              generationId: 'source-a',
-              sourceActionId: a.actionId,
-              sourceDelegationId: a.delegationId,
-              text: 'RAW_OLD_CORRECTION_KEEP_BIGINT',
-            },
-            context,
-          );
-          assert.ok(correction.ok, JSON.stringify(correction));
-          assert.equal(correction.result.mode, 'steering');
-        }
+        assert.deepEqual(
+          (await stores.sessionStore.listHeaders()).map(({ id }) => id).sort(),
+          beforeBlocked,
+          'busy fresh rejection creates no container',
+        );
+        assert.equal(requests.length, beforeBlockedRequests, 'busy fresh admits no provider call');
+        assert.deepEqual(await stores.sessionStore.listMessageAdmissions(a.targetSessionId), []);
+        const correction = await composition.handlers['workhub.tasks.send'](
+          {
+            inputId: 'raw-source-correction',
+            workId: 'source-a',
+            generationId: 'source-a',
+            text: 'RAW_OLD_CORRECTION_KEEP_BIGINT',
+          },
+          context,
+        );
+        assert.ok(correction.ok, JSON.stringify(correction));
+        assert.equal(correction.result.mode, 'steering');
+        releaseSourceCall.resolve();
+        await wait(
+          async () => (await inputReceipt('raw-source-correction')).delivery === 'delivered',
+        );
         releaseSource.resolve();
         await wait(() => done(a.targetSessionId, a.targetTurnId));
-        const reused = await act(
-          'reuse-a',
-          { disposition: 'continue_work', workId: 'source-a', sourceActionId: 'source-a' },
-          'REUSE_CHECK',
-        );
+        const reused = await continueTask('reuse-a', 'REUSE_CHECK', 'reuse');
         assert.ok(reused.ok, JSON.stringify(reused));
-        const reuse = await stores.sessionStore.readWorkHubAssignment('reuse-a');
-        assert.ok(reuse);
-        await wait(() => done(a.targetSessionId, reuse.targetTurnId));
+        assert.equal(reused.result.container, 'reuse');
+        assert.ok(reused.result.container === 'reuse');
+        assert.equal(reused.result.input.targetSessionId, a.targetSessionId);
+        await wait(async () => (await inputReceipt('reuse-a')).delivery === 'delivered');
+        const reuse = await inputReceipt('reuse-a');
+        assert.ok(reuse.execution);
+        await wait(() => done(a.targetSessionId, reuse.execution!.turnId));
         await wait(async () => {
           if (
             !requests.some(
@@ -3455,10 +3498,10 @@ for (const readMode of ['evidence', 'native-history'] as const)
           );
         });
         const oldHeader = await stores.sessionStore.readHeaderSnapshot(a.targetSessionId);
-        const oldWorks = await composition.handlers['workhub.coordination.works']({}, context);
-        assert.ok(oldWorks.ok);
-        const oldObservation = oldWorks.result.works.find(
-          (work) => work.workId === 'source-a',
+        const oldTasks = await composition.handlers['workhub.tasks.find']({}, context);
+        assert.ok(oldTasks.ok, JSON.stringify(oldTasks));
+        const oldObservation = oldTasks.result.items.find(
+          (task) => task.kind === 'task' && task.id === 'source-a',
         )?.context;
         assert.equal(oldObservation?.configuredInputLimit, null);
         assert.equal(oldObservation?.lastRequest.status, 'observed');
@@ -3492,20 +3535,15 @@ for (const readMode of ['evidence', 'native-history'] as const)
           changedSource.ok && changedSource.result.kind === 'committed',
           JSON.stringify(changedSource),
         );
-        const candidates = await composition.handlers['workhub.coordination.candidates'](
-          {},
+        const bResult = await composition.handlers['workhub.tasks.start'](
+          {
+            turnId: 'fresh-authority',
+            actionId: 'independent-b',
+            title: 'Independent same-Session task B',
+            text: 'OLD_B_HOLD',
+            sessionRef: a.targetSessionId,
+          },
           context,
-        );
-        assert.ok(candidates.ok);
-        const candidate = candidates.result.candidates.find(
-          (candidate) => candidate.sessionId === a.targetSessionId,
-        );
-        assert.ok(candidate);
-        const bResult = await act(
-          'independent-b',
-          { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
-          'OLD_B_HOLD',
-          { candidateSetId: candidates.result.candidateSetId },
         );
         assert.ok(bResult.ok, JSON.stringify(bResult));
         await wait(async () =>
@@ -3517,18 +3555,20 @@ for (const readMode of ['evidence', 'native-history'] as const)
             stores.runtimeEventStore.readImmutableRuntimeEvents(a.targetSessionId, run.runId),
           ),
         );
-        const fresh = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-          newWorkDefaults: ignoredDefaults,
-        });
+        const fresh = await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh');
         assert.ok(fresh.ok, JSON.stringify(fresh));
-        assert.equal(fresh.result.disposition, 'create_new');
-        assert.equal(fresh.result.workId, 'source-a');
+        assert.equal(fresh.result.container, 'fresh');
+        assert.ok(fresh.result.container === 'fresh');
+        assert.equal(fresh.result.action.disposition, 'create_new');
+        assert.equal(fresh.result.action.workId, 'source-a');
         const current = await stores.sessionStore.readWorkHubAssignment('fresh-a');
         assert.ok(current);
         assert.equal(current.settings?.basis, 'current_segment');
         assert.equal(current.settings?.sessionId, a.targetSessionId);
         assert.equal(current.settings?.model, 'new-model');
         assert.equal(current.settings?.permissionMode, 'ask');
+        assert.notEqual(current.settings?.model, newTaskDefaults.model.model);
+        assert.notEqual(current.settings?.permissionMode, newTaskDefaults.permissionMode);
         assert.equal(a.settings?.permissionMode, 'bypass');
         assert.notEqual(current.targetSessionId, a.targetSessionId);
         assert.deepEqual(
@@ -3558,29 +3598,24 @@ for (const readMode of ['evidence', 'native-history'] as const)
           0,
           'one worker slot keeps fresh A behind unrelated B',
         );
-        const replay = await act('fresh-a', freshProposal, 'FRESH_CONTINUE', {
-          newWorkDefaults: ignoredDefaults,
-        });
+        const replay = await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh');
         assert.deepEqual(replay, fresh);
         const stale = await composition.handlers['workhub.tasks.send'](
           {
             inputId: 'stale-old-input',
             workId: 'source-a',
             generationId: 'source-a',
-            sourceActionId: a.actionId,
-            sourceDelegationId: a.delegationId,
             text: 'DO_NOT_STEER_B',
           },
           context,
         );
         assert.ok(!stale.ok && stale.error.code === 'operation_conflict', JSON.stringify(stale));
+        assert.equal(await stores.sessionStore.readWorkHubTaskInput('stale-old-input'), undefined);
         const supplement = await composition.handlers['workhub.tasks.send'](
           {
             inputId: 'fresh-supplement',
             workId: 'source-a',
             generationId: 'fresh-a',
-            sourceActionId: current.actionId,
-            sourceDelegationId: current.delegationId,
             text: 'QUEUED_FRESH_CORRECTION',
           },
           context,
@@ -3592,42 +3627,80 @@ for (const readMode of ['evidence', 'native-history'] as const)
           'the admitted root waits for a worker slot and accepts same-work steering',
         );
         assert.equal(
+          (await inputReceipt('fresh-supplement')).delivery,
+          'queued',
+          'acceptance is not immutable consumption while the worker slot is held by B',
+        );
+        assert.equal(
           requests.filter(
             (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
           ).length,
           0,
           'accepting a correction does not bypass the worker queue',
         );
-        const cResult = await act(
-          'independent-c',
-          { disposition: 'create_new', title: 'Same title' },
-          'INDEPENDENT_C',
+        const cResult = await composition.handlers['workhub.tasks.start'](
           {
+            turnId: 'fresh-authority',
+            actionId: 'independent-c',
+            title: 'Same title',
+            text: 'INDEPENDENT_C',
             create: { workspace: { kind: 'isolated' } },
-            newWorkDefaults: { permissionMode: 'ask' },
+            newWorkDefaults: { ...newTaskDefaults, permissionMode: 'ask' },
           },
+          context,
         );
         assert.ok(cResult.ok, JSON.stringify(cResult));
         const c = await stores.sessionStore.readWorkHubAssignment('independent-c');
         assert.ok(c);
         const b = await stores.sessionStore.readWorkHubAssignment('independent-b');
         assert.ok(b);
-        assert.equal(
-          (
-            await composition.handlers['turn.query'](
-              { sessionId: b.targetSessionId, turnId: b.targetTurnId },
-              context,
-            )
-          ).ok,
-          true,
+        const runningB = await composition.handlers['turn.query'](
+          { sessionId: b.targetSessionId, turnId: b.targetTurnId },
+          context,
         );
+        assert.ok(runningB.ok, JSON.stringify(runningB));
+        assert.equal(runningB.result.status, 'running');
+        assert.ok(!requests.some((request) => request.body.includes('DO_NOT_STEER_B')));
         releaseB.resolve();
+        await wait(async () => (await inputReceipt('fresh-supplement')).delivery === 'delivered');
+        const consumed = await inputReceipt('fresh-supplement');
+        assert.equal(consumed.targetSessionId, current.targetSessionId);
+        assert.equal(consumed.execution?.turnId, current.targetTurnId);
         await wait(() => done(current.targetSessionId, current.targetTurnId));
         await wait(() => done(c.targetSessionId, c.targetTurnId));
         const freshRequests = requests.filter(
           (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
         );
-        assert.equal(freshRequests.length, 3);
+        assert.deepEqual(
+          reads.filter((read) => read.view === 'reply'),
+          readMode === 'evidence'
+            ? [{ taskId: 'source-a', view: 'reply', sourceActionId: 'source-a' }]
+            : [],
+          'the optional reply read is explicitly pinned to the old source',
+        );
+        const historyReads = reads.filter((read) => read.view === 'history');
+        assert.ok(historyReads.length > 0);
+        assert.equal(historyReads[0]!.cursor, undefined);
+        for (const { cursor: _cursor, ...scope } of historyReads)
+          assert.deepEqual(scope, {
+            taskId: 'source-a',
+            view: 'history',
+            kinds: ['user', 'tool_call', 'tool_result'],
+          });
+        assert.equal(reads.length, historyReads.length + (readMode === 'evidence' ? 1 : 0));
+        assert.ok(readDiscoveries <= 1);
+        assert.equal(
+          freshRequests.length,
+          reads.length + readDiscoveries + 1,
+          'fresh makes only read/discovery steps and one final response, never a summary call',
+        );
+        const freshFinal = freshRequests.at(-1)!;
+        assert.equal(
+          requests.filter((request) => !request.coordinator && request.model === 'new-model')
+            .length,
+          freshRequests.length + 1,
+          'the new route sees only independent B and fresh A, not an auxiliary summary request',
+        );
         const freshStart = JSON.parse(freshRequests[0]!.body) as {
           messages: { role: string; content: unknown }[];
         };
@@ -3639,11 +3712,10 @@ for (const readMode of ['evidence', 'native-history'] as const)
           .join('\n');
         assert.match(freshUserText, /Use WorkHubRead with taskId and view=history/u);
         assert.ok(freshUserText.includes('"taskId":"source-a"'));
+        assert.ok(freshUserText.includes('ORIGINAL_USER_GOAL'));
+        assert.ok(freshUserText.includes('RAW_OLD_CORRECTION_KEEP_BIGINT'));
         assert.doesNotMatch(freshUserText, /Use WorkHubEvidence read/u);
-        assert.match(
-          freshUserText,
-          /Follow the top-level nextCursor as the next request's cursor/u,
-        );
+        assert.match(freshUserText, /Follow nextCursor without changing taskId, view or kinds/u);
         assert.doesNotMatch(freshUserText, /history\.nextCursor/u);
         assert.ok(
           freshRequests.every(
@@ -3651,60 +3723,65 @@ for (const readMode of ['evidence', 'native-history'] as const)
               request.url.startsWith('/fresh/') &&
               !request.body.includes('COLD_FAR_SENTINEL') &&
               !request.body.includes('UNRELATED_B_SECRET') &&
+              !request.body.includes('OLD_B_HOLD') &&
               Buffer.byteLength(request.body) < Buffer.byteLength(cold) / 2,
           ),
         );
         assert.ok(freshRequests[0]!.body.includes('QUEUED_FRESH_CORRECTION'));
+        assert.ok(freshFinal.body.includes('RAW_OLD_CORRECTION_KEEP_BIGINT'));
+        const finalRequest = JSON.parse(freshFinal.body) as {
+          messages: { role: string; content: string }[];
+        };
+        const historyPages = finalRequest.messages
+          .filter((message) => message.role === 'tool')
+          .map((message) => {
+            try {
+              return JSON.parse(message.content) as {
+                history?: { records: { kind: string; isError?: boolean; text?: string }[] };
+                nextCursor?: string | null;
+              };
+            } catch {
+              return {};
+            }
+          })
+          .filter((message) => message.history);
+        assert.equal(historyPages.length, historyReads.length);
+        for (let page = 1; page < historyReads.length; page++)
+          assert.equal(historyReads[page]!.cursor, historyPages[page - 1]!.nextCursor);
+        const historyRecords = historyPages.flatMap((page) => page.history!.records);
+        const kinds = historyRecords.map((record) => record.kind);
+        assert.ok(kinds.includes('user'));
+        assert.ok(kinds.includes('tool_call'));
+        assert.ok(kinds.includes('tool_result'));
         assert.ok(
-          freshRequests[2]!.body.includes(
-            readMode === 'native-history' ? 'OWNED_TOOL_EVIDENCE' : 'SELECTED_OLD_EVIDENCE',
+          historyRecords.some(
+            (record) => record.kind === 'user' && record.text === 'RAW_OLD_CORRECTION_KEEP_BIGINT',
           ),
         );
-        if (readMode === 'native-history') {
-          assert.ok(freshRequests[2]!.body.includes('RAW_OLD_CORRECTION_KEEP_BIGINT'));
-          const request = JSON.parse(freshRequests[2]!.body) as {
-            messages: { role: string; content: string }[];
-          };
-          const history = request.messages
-            .filter((message) => message.role === 'tool')
-            .map((message) => {
-              try {
-                return JSON.parse(message.content) as {
-                  history?: { records: { kind: string; isError?: boolean; text?: string }[] };
-                };
-              } catch {
-                return {};
-              }
-            })
-            .find((message) => message.history)?.history;
-          assert.ok(history);
-          const kinds = history.records.map((record) => record.kind);
-          assert.ok(kinds.includes('user'));
-          assert.ok(kinds.includes('tool_call'));
-          assert.ok(kinds.includes('tool_result'));
-          assert.ok(
-            history.records
-              .filter((record) => record.kind === 'tool_result')
-              .every((record) => record.isError === false),
-          );
-          assert.ok(
-            history.records.some(
-              (record) =>
-                record.kind === 'tool_result' &&
-                record.isError === false &&
-                record.text?.includes('OWNED_TOOL_EVIDENCE'),
-            ),
-          );
+        assert.ok(
+          historyRecords
+            .filter((record) => record.kind === 'tool_result')
+            .every((record) => record.isError === false),
+        );
+        assert.ok(
+          historyRecords.some(
+            (record) =>
+              record.kind === 'tool_result' &&
+              record.isError === false &&
+              record.text?.includes('OWNED_TOOL_EVIDENCE'),
+          ),
+        );
+        if (readMode === 'evidence') {
+          assert.ok(freshFinal.body.includes('SELECTED_OLD_EVIDENCE'));
+          assert.ok(freshFinal.body.includes('historical'));
         }
-        assert.ok(freshRequests[2]!.body.includes('historical'));
         const oldRequests = requests.filter(
           (request) => !request.coordinator && request.model === 'fake-model',
         );
-        assert.ok(
-          oldRequests
-            .find((request) => request.body.includes('REUSE_CHECK'))
-            ?.body.includes('COLD_FAR_SENTINEL'),
-        );
+        const reuseRequest = oldRequests.find((request) => request.body.includes('REUSE_CHECK'));
+        assert.ok(reuseRequest);
+        assert.ok(reuseRequest.url.startsWith('/old/'));
+        assert.ok(reuseRequest.body.includes('COLD_FAR_SENTINEL'));
         assert.equal(
           requests.filter(
             (request) =>
@@ -3718,7 +3795,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.ok(
           requests.findIndex(
             (request) => !request.coordinator && request.body.includes('INDEPENDENT_C'),
-          ) > requests.indexOf(freshRequests[2]!),
+          ) > requests.indexOf(freshFinal),
           'independent C keeps FIFO after fresh A',
         );
         assert.equal(
@@ -3726,14 +3803,14 @@ for (const readMode of ['evidence', 'native-history'] as const)
           1,
           'direct input does not wake a busy coordinator',
         );
-        const observedWorks = await composition.handlers['workhub.coordination.works']({}, context);
-        assert.ok(observedWorks.ok);
+        const observedTasks = await composition.handlers['workhub.tasks.find']({}, context);
+        assert.ok(observedTasks.ok, JSON.stringify(observedTasks));
         assert.deepEqual(
-          HOST_OPERATION_SPECS['workhub.coordination.works'].decodeOutput(observedWorks.result),
-          observedWorks.result,
+          HOST_OPERATION_SPECS['workhub.tasks.find'].decodeOutput(observedTasks.result),
+          observedTasks.result,
         );
-        const freshObservation = observedWorks.result.works.find(
-          (work) => work.workId === 'source-a',
+        const freshObservation = observedTasks.result.items.find(
+          (task) => task.kind === 'task' && task.id === 'source-a',
         )?.context;
         assert.equal(freshObservation?.configuredInputLimit, 128000);
         assert.equal(freshObservation?.lastRequest.status, 'observed');
@@ -3741,11 +3818,23 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.equal(
           freshObservation.lastRequest.inputTokens,
           600,
-          'last provider request, not the three-step aggregate',
+          'last provider request, not an aggregate across discovery and read steps',
         );
         assert.equal(freshObservation.lastRequest.connectionId, newId);
         assert.equal(freshObservation.lastRequest.modelId, 'new-model');
         assert.equal(freshObservation.lastRequest.matchesCurrentRoute, true);
+        const freshDetail = await composition.handlers['workhub.tasks.read'](
+          { workId: 'source-a' },
+          context,
+        );
+        assert.ok(freshDetail.ok, JSON.stringify(freshDetail));
+        assert.equal(freshDetail.result.task.actionId, current.actionId);
+        assert.equal(freshDetail.result.task.targetSessionId, current.targetSessionId);
+        assert.equal(freshDetail.result.task.status, 'pending_acceptance');
+        assert.deepEqual(
+          await stores.sessionStore.listTaskExecutionGrants(current.targetSessionId),
+          [],
+        );
         assert.equal(
           (await stores.runtimeEventStore.listSessionInvocations(a.targetSessionId)).length,
           3,
@@ -3761,9 +3850,8 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.equal(unchanged.model, 'new-model');
         assert.equal(unchanged.permissionMode, 'ask');
         assert.equal(unchanged.cwd, oldHeader.cwd);
-        const conflict = await act('stale-fresh', freshProposal, 'FRESH_CONTINUE', {
-          newWorkDefaults: defaults,
-        });
+        assert.deepEqual(await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh'), fresh);
+        const conflict = await continueTask('fresh-a', 'CHANGED_COMMITTED_INPUT', 'fresh');
         assert.ok(
           !conflict.ok && conflict.error.code === 'operation_conflict',
           JSON.stringify(conflict),
@@ -3796,36 +3884,39 @@ for (const readMode of ['evidence', 'native-history'] as const)
         stores = await openInteractiveExecutionStoresForWrite(activeOwner.lease);
         await composition.recover();
         await register();
-        const works = await composition.handlers['workhub.coordination.works']({}, context);
-        assert.ok(works.ok);
-        assert.equal(
-          works.result.works.find((work) => work.workId === 'source-a' && work.available)
-            ?.sourceActionId,
-          'fresh-a',
+        // No stale model-caller authority is reconstructed after restart. Native
+        // readonly APIs reconcile the current task, saved inputs and old segment.
+        const found = await composition.handlers['workhub.tasks.find']({}, context);
+        assert.ok(found.ok, JSON.stringify(found));
+        const foundTask = found.result.items.find(
+          (task) => task.kind === 'task' && task.id === 'source-a',
         );
+        assert.ok(foundTask?.available);
+        assert.equal(foundTask.state, 'ended');
+        assert.equal(foundTask.segments, 2);
+        const reopenedDetail = await composition.handlers['workhub.tasks.read'](
+          { workId: 'source-a' },
+          context,
+        );
+        assert.ok(reopenedDetail.ok, JSON.stringify(reopenedDetail));
+        assert.equal(reopenedDetail.result.task.actionId, current.actionId);
+        assert.equal(reopenedDetail.result.task.targetSessionId, current.targetSessionId);
+        assert.equal(reopenedDetail.result.task.status, 'pending_acceptance');
         const history = await composition.handlers['workhub.tasks.history'](
           { workId: 'source-a', actionId: 'source-a' },
           context,
         );
         assert.ok(history.ok);
         assert.equal(history.result.assignments[0]!.superseded, true);
-        const continued = await composition.handlers['workhub.tasks.send'](
-          {
-            inputId: 'after-restart-input',
-            workId: 'source-a',
-            generationId: 'fresh-a',
-            sourceActionId: current.actionId,
-            sourceDelegationId: current.delegationId,
-            text: 'AFTER_RESTART_CORRECTION',
-          },
-          context,
-        );
-        assert.ok(continued.ok, JSON.stringify(continued));
-        await wait(async () =>
-          requests.some(
-            (request) =>
-              request.model === 'new-model' && request.body.includes('AFTER_RESTART_CORRECTION'),
+        assert.equal(history.result.assignments[0]!.targetSessionId, a.targetSessionId);
+        assert.deepEqual(await inputReceipt('fresh-supplement'), consumed);
+        assert.deepEqual(
+          await Promise.all(
+            aRuns.map((run) =>
+              stores.runtimeEventStore.readImmutableRuntimeEvents(a.targetSessionId, run.runId),
+            ),
           ),
+          sourceEvents,
         );
         assert.equal(
           (await stores.runtimeEventStore.listSessionInvocations(a.targetSessionId)).length,
@@ -3865,6 +3956,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
         );
         failures.push(error);
       } finally {
+        releaseSourceCall.resolve();
         releaseSource.resolve();
         releaseB.resolve();
         server.closeAllConnections();
