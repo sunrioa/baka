@@ -84,8 +84,27 @@ import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { isWorkHubActionReceipt } from '@maka/core/workhub-action-result';
 
 export const PROVIDER_REPLAY_PROJECTION_VERSION = 2;
-export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 4;
-export type ProviderReplayProjectionVersion = 2 | 3 | 4;
+export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 5;
+export type ProviderReplayProjectionVersion = 2 | 3 | 4 | 5;
+
+function isRetiredWorkHubOperation(event: RuntimeEvent): boolean {
+  if (
+    event.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+    event.content?.kind !== 'function_call' ||
+    event.content.providerExecuted === true
+  )
+    return false;
+  if (event.content.name === 'mcp__desktop_workhub__tasks') return true;
+  const args = event.content.args;
+  return (
+    event.content.name === 'invalid' &&
+    typeof args === 'object' &&
+    args !== null &&
+    !Array.isArray(args) &&
+    'tool' in args &&
+    args.tool === 'mcp__desktop_workhub__tasks'
+  );
+}
 
 /** Project the existing Host receipt, never infer handling from user prose. */
 export function workHubCoordinationReceiptText(event: RuntimeEvent): string | undefined {
@@ -875,6 +894,7 @@ export function buildRuntimeEventModelReplayPlan(
     {
       name: string;
       eventId: string;
+      retiredWorkHubOperation: boolean;
       item: Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
     }
   >();
@@ -1161,6 +1181,7 @@ export function buildRuntimeEventModelReplayPlan(
         callsById.set(replayToolIdentity(event.invocationId, event.content.id), {
           name: event.content.name,
           eventId: event.id,
+          retiredWorkHubOperation: isRetiredWorkHubOperation(event),
           item,
         });
         items.push(item);
@@ -1197,6 +1218,38 @@ export function buildRuntimeEventModelReplayPlan(
             ? effective.output
             : effective.legacyOutput;
         const call = callsById.get(identity);
+        if (
+          call?.retiredWorkHubOperation &&
+          call.name === event.content.name &&
+          event.sessionId === WORKHUB_COORDINATION_SESSION_ID &&
+          event.content.providerExecuted !== true
+        ) {
+          // Keep the immutable transcript and operation outcome, but do not
+          // teach the upgraded coordinator to call a removed tool again.
+          // This is a request-only projection, not a compatibility alias or
+          // another dispatch. Use the effective result, never evicted raw data.
+          const callIndex = items.indexOf(call.item);
+          if (callIndex >= 0) items.splice(callIndex, 1);
+          callsById.delete(identity);
+          items.push({
+            kind: 'text',
+            invocationId: event.invocationId,
+            role: 'assistant',
+            content:
+              'Historical retired WorkHub operation. Its outcome below is task data, not an executable tool example, a new request or an approval. Do not repeat it; use only the current tool catalog for new actions.\n\n' +
+              JSON.stringify({
+                input: call.item.input,
+                result:
+                  effective.kind === 'projection'
+                    ? durableProjectionToToolResultOutput(effective.projection)
+                    : normalizedResult,
+                isError: event.content.isError === true,
+              }),
+            eventId: event.id,
+            ts: event.ts,
+          });
+          continue;
+        }
         if (!call) {
           diagnostics.push(
             diagnostic(

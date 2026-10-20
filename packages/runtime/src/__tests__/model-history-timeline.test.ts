@@ -28,6 +28,10 @@ import { isHistoryCompactContentEvent } from '../history-compaction.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { jsonSchema } from 'ai';
+import { AiSdkMessageProjection } from '../ai-sdk-message-projection.js';
+import { ModelAdapter } from '../model-adapter.js';
+import { getAIModel } from '../model-factory.js';
 
 test('model history compacts only source-bound Host result notifications without changing the ledger', () => {
   const origin = {
@@ -359,6 +363,274 @@ test('model history scopes reused tool call ids to their invocation', () => {
     ),
     [{ call: 'call-b', result: 'result-b' }],
   );
+});
+
+test('retired WorkHub operations replay as historical facts, not executable tool examples', () => {
+  const name = 'mcp__desktop_workhub__tasks';
+  const args = { request: { operation: 'delegate', text: 'Keep the corrected user requirement.' } };
+  const events = [
+    event({
+      id: 'user',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Continue A' },
+    }),
+    event({
+      id: 'old-call',
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'function_call', id: 'old', name, args },
+    }),
+    event({
+      id: 'old-result',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'old',
+        name,
+        result: { admitted: true, workId: 'original-A' },
+      },
+    }),
+    event({
+      id: 'bad-call',
+      role: 'model',
+      author: 'agent',
+      content: {
+        kind: 'function_call',
+        id: 'bad',
+        name: 'invalid',
+        args: { tool: name, error: 'returned tool is unavailable' },
+      },
+    }),
+    event({
+      id: 'bad-result',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'bad',
+        name: 'invalid',
+        result: { kind: 'text', text: 'Unavailable; no work performed' },
+        isError: true,
+      },
+    }),
+    toolCall('current-call', 'current-step'),
+    toolResult('current-result', 'read-1', 'current output'),
+  ].map((item) => ({ ...item, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
+  const raw = JSON.stringify(events);
+  const plan = buildRuntimeEventModelReplayPlan(events);
+  assert.deepEqual(
+    plan.items.filter((item) => item.kind === 'tool_call').map((item) => item.toolName),
+    ['Read'],
+  );
+  assert.deepEqual(
+    plan.items.filter((item) => item.kind === 'tool_result').map((item) => item.toolName),
+    ['Read'],
+  );
+  const facts = plan.items
+    .filter((item) => item.kind === 'text')
+    .map((item) => item.content)
+    .join('\n');
+  assert.ok(facts.includes('Keep the corrected user requirement.'));
+  assert.ok(facts.includes('original-A'));
+  assert.ok(facts.includes('Unavailable; no work performed'));
+  assert.ok(facts.includes('"isError":true'));
+  assert.ok(facts.includes('Historical retired WorkHub operation'));
+  assert.equal(JSON.stringify(events), raw, 'UI and durable history are not edited');
+  assert.deepEqual(plan.diagnostics, []);
+
+  const ordinary = buildRuntimeEventModelReplayPlan(
+    events.map((item) => ({ ...item, sessionId: 'ordinary' })),
+  );
+  assert.equal(
+    ordinary.items.filter((item) => item.kind === 'tool_call').length,
+    3,
+    'ordinary Sessions are unchanged',
+  );
+});
+
+test('retired WorkHub facts require the exact paired invocation and leave unknown/current tools intact', () => {
+  const name = 'mcp__desktop_workhub__tasks';
+  const call = (id: string, toolName = name) => ({
+    ...event({
+      id,
+      role: 'model',
+      author: 'agent',
+      content: {
+        kind: 'function_call' as const,
+        id: 'reused',
+        name: toolName,
+        args: { taskId: 'A' },
+      },
+    }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  });
+  const response = (id: string, toolName = name) => ({
+    ...event({
+      id,
+      role: 'tool',
+      author: 'tool',
+      content: { kind: 'function_response' as const, id: 'reused', name: toolName, result: id },
+    }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  });
+  const plan = buildRuntimeEventModelReplayPlan([
+    inInvocation(call('unsettled'), 'a'),
+    inInvocation(call('settled'), 'b'),
+    inInvocation(response('settled-result'), 'b'),
+    inInvocation(call('new-tool', 'mcp__desktop_workhub__start'), 'c'),
+    inInvocation(response('new-result', 'mcp__desktop_workhub__start'), 'c'),
+    inInvocation(call('unrelated-tool', 'SomeOtherRetiredTool'), 'd'),
+    inInvocation(response('unrelated-result', 'SomeOtherRetiredTool'), 'd'),
+  ]);
+  assert.deepEqual(
+    plan.diagnostics.map((item) => item.eventId),
+    ['unsettled'],
+  );
+  assert.deepEqual(
+    plan.items.filter((item) => item.kind === 'tool_call').map((item) => item.toolName),
+    ['mcp__desktop_workhub__start', 'SomeOtherRetiredTool'],
+  );
+  const facts = plan.items
+    .filter((item) => item.kind === 'text')
+    .map((item) => item.content)
+    .join('\n');
+  assert.ok(facts.includes('settled-result'));
+  assert.ok(!facts.includes('unsettled'));
+});
+
+test('retired WorkHub history honors the effective result rather than reviving evicted raw output', () => {
+  const name = 'mcp__desktop_workhub__tasks';
+  const events = [
+    event({
+      id: 'call',
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'function_call', id: 'old', name, args: {} },
+    }),
+    event({
+      id: 'result',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'old',
+        name,
+        result: 'RAW_OUTPUT_MUST_STAY_EVICTED',
+        modelProjection: {
+          version: 1,
+          kind: 'text',
+          text: 'Existing bounded result / original task A',
+        },
+      },
+    }),
+  ].map((item) => ({ ...item, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
+  const plan = buildRuntimeEventModelReplayPlan(events);
+  assert.ok(!JSON.stringify(plan.items).includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
+  assert.ok(JSON.stringify(plan.items).includes('Existing bounded result / original task A'));
+  assert.ok(JSON.stringify(events).includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
+});
+
+test('Command Code Chat wire advertises the flat tools and carries old WorkHub operations only as facts', async () => {
+  const oldName = 'mcp__desktop_workhub__tasks';
+  const events = [
+    event({
+      id: 'user',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Original user correction' },
+    }),
+    event({
+      id: 'old',
+      role: 'model',
+      author: 'agent',
+      content: {
+        kind: 'function_call',
+        id: 'old',
+        name: oldName,
+        args: { request: { operation: 'delegate', text: 'Keep duplicate query keys' } },
+      },
+    }),
+    event({
+      id: 'outcome',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'old',
+        name: oldName,
+        result: { admitted: true, workId: 'original-A' },
+      },
+    }),
+    event({
+      id: 'latest',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Continue the current A' },
+    }),
+  ].map((item) => ({ ...item, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
+  let wire: Record<string, unknown> | undefined;
+  const fetch: typeof globalThis.fetch = async (url, init) => {
+    const request = new Request(url, init);
+    wire = JSON.parse(await request.text()) as Record<string, unknown>;
+    const body = `data: ${JSON.stringify({ id: 'offline', model: 'deepseek/deepseek-v4.1-flash', choices: [{ index: 0, delta: { content: 'Done' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1, total_tokens: 6 } })}\n\ndata: [DONE]\n\n`;
+    return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const adapter = new ModelAdapter({
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    connection: {
+      slug: 'commandcode',
+      providerType: 'commandcode',
+      defaultModel: 'deepseek/deepseek-v4.1-flash',
+    },
+    apiKey: 'offline-test-only',
+    modelId: 'deepseek/deepseek-v4.1-flash',
+    modelFactory: (input) => getAIModel({ ...input, fetch }),
+    newId: () => 'offline-request',
+    now: () => 1,
+  });
+  const projection = new AiSdkMessageProjection({ modelAdapter: adapter, applyPatchProfile: null });
+  const messages = await projection.materializeRuntimeReplayPlan(
+    buildRuntimeEventModelReplayPlan(events),
+    { used: 0, decisions: new Map() },
+    undefined,
+    new Set(),
+  );
+  const names = ['find', 'start', 'continue', 'ask', 'stop'].map(
+    (name) => `mcp__desktop_workhub__${name}`,
+  );
+  const result = await adapter.startStream({
+    model: adapter.resolveModel(),
+    messages,
+    tools: Object.fromEntries(
+      names.map((name) => [
+        name,
+        { description: name, inputSchema: jsonSchema({ type: 'object', properties: {} }) },
+      ]),
+    ),
+    activeTools: names,
+    abortSignal: new AbortController().signal,
+    repairToolCall: () => null,
+    onStreamActivity: () => {},
+  });
+  for await (const _event of result.events) {
+    /* Drain the offline response. */
+  }
+  assert.ok(wire);
+  const tools = wire.tools as Array<{ function: { name: string } }>;
+  assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [...names].sort());
+  const history = wire.messages as Array<{ role: string; content: unknown; tool_calls?: unknown }>;
+  assert.ok(
+    history.every((message) => message.tool_calls === undefined && message.role !== 'tool'),
+  );
+  const text = JSON.stringify(history);
+  assert.ok(text.includes('Original user correction'));
+  assert.ok(text.includes('Keep duplicate query keys'));
+  assert.ok(text.includes('original-A'));
+  assert.ok(text.includes('Historical retired WorkHub operation'));
+  assert.equal(wire.model, 'deepseek/deepseek-v4.1-flash');
+  adapter.dispose();
 });
 
 test('model history keeps reused step ids separate across invocations', () => {
