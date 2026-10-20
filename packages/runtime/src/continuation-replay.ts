@@ -210,12 +210,7 @@ export function buildContinuationReplaySegment(input: {
     }
   }
 
-  const committedToolResultIds = new Set(
-    input.prefix.events
-      .filter((event) => event.role === 'tool' && event.content?.kind === 'function_response')
-      .map((event) => event.id),
-  );
-  const stableItemIndex = findLastStableProviderItem(modelPlan.items, committedToolResultIds);
+  const stableItemIndex = findLastStableProviderItem(modelPlan.items);
   const trimmedIds = new Set<string>();
   if (stableItemIndex >= 0) {
     for (const item of modelPlan.items.slice(stableItemIndex + 1)) {
@@ -260,18 +255,10 @@ export function buildContinuationReplaySegment(input: {
   };
 }
 
-function findLastStableProviderItem(
-  items: readonly RuntimeEventModelReplayItem[],
-  committedToolResultIds: ReadonlySet<string>,
-): number {
+function findLastStableProviderItem(items: readonly RuntimeEventModelReplayItem[]): number {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]!;
-    // A retired tool's settled outcome may project as assistant text. Its
-    // immutable source identity, not a text prefix, makes it a stable fact.
-    if (
-      item.kind === 'tool_result' ||
-      (item.kind === 'text' && (item.role === 'user' || committedToolResultIds.has(item.eventId)))
-    ) {
+    if (item.kind === 'tool_result' || (item.kind === 'text' && item.role === 'user')) {
       return index;
     }
   }

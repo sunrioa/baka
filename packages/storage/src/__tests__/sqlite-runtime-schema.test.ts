@@ -103,7 +103,7 @@ describe('SQLite runtime schema migration', () => {
     }
   });
 
-  it('preserves populated v1/v2 claims while admitting the compact-context v3 projection', () => {
+  it('preserves released v1/v2/v3 claims while admitting WorkHub v4/v5 projections', () => {
     const db = new DatabaseSync(':memory:');
     try {
       db.exec('PRAGMA foreign_keys = ON');
@@ -198,6 +198,24 @@ describe('SQLite runtime schema migration', () => {
                   .prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id')
                   .all();
               }
+              if (sql.includes('CREATE TABLE runtime_continuation_claims_v22')) {
+                assert.equal(
+                  (target.prepare('PRAGMA user_version').get() as { user_version: number })
+                    .user_version,
+                  21,
+                );
+                target.exec(`
+                  INSERT INTO runtime_continuation_claims VALUES (
+                    'claim-v3', 'session', 'source-invocation', 'source-run', 'source-turn', 3,
+                    'sha256:source-3', 'sha256:boundary-v3', '{}', 3, 'sha256:replay-v3',
+                    'session', 'target-invocation-v3', 'target-run-v3', 'target-turn-v3', '{}',
+                    3, NULL, NULL, 1
+                  );
+                `);
+                releasedRows = target
+                  .prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id')
+                  .all();
+              }
               return target.exec(sql);
             };
           const value = Reflect.get(target, property, target);
@@ -205,7 +223,7 @@ describe('SQLite runtime schema migration', () => {
         },
       });
       migrateSqliteRuntimeDatabase(migrating);
-      assert.equal(releasedRows.length, 2);
+      assert.equal(releasedRows.length, 3);
       assert.deepEqual(
         db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
         releasedRows,
@@ -243,18 +261,20 @@ describe('SQLite runtime schema migration', () => {
         'invocation_opened',
         'an open claim carries the opening it always implied, not a copy of the Run header',
       );
-      db.exec(`
-        INSERT INTO runtime_continuation_claims VALUES (
-          'claim-v3', 'session', 'source-invocation', 'source-run', 'source-turn', 3,
-          'sha256:source-3', 'sha256:boundary-v3', '{}', 3, 'sha256:replay-v3',
-          'session', 'target-invocation-v3', 'target-run-v3', 'target-turn-v3', '{}',
-          3, NULL, NULL, 1
-        );
-      `);
+      for (const version of [4, 5]) {
+        db.exec(`
+          INSERT INTO runtime_continuation_claims VALUES (
+            'claim-v${version}', 'session', 'source-invocation', 'source-run', 'source-turn', ${version},
+            'sha256:source-${version}', 'sha256:boundary-v${version}', '{}', ${version}, 'sha256:replay-v${version}',
+            'session', 'target-invocation-v${version}', 'target-run-v${version}', 'target-turn-v${version}', '{}',
+            ${version}, NULL, NULL, 1
+          );
+        `);
+      }
       assert.throws(() =>
         db.exec(`
           UPDATE runtime_continuation_claims
-          SET provider_projection_version = 4
+          SET provider_projection_version = 6
           WHERE claim_id = 'claim-v3'
         `),
       );

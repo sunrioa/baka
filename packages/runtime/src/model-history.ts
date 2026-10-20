@@ -628,6 +628,8 @@ export type RuntimeEventModelReplayItem =
       toolCallId: string;
       toolName: string;
       input: unknown;
+      /** Keep the exchange intact; lower a retired operation to facts only at materialization. */
+      retiredWorkHubOperation?: true;
       providerOptions?: NonNullable<ModelMessage['providerOptions']>;
       providerExecuted?: boolean;
       /** Assistant step id (from tool_start); groups the call with its step. */
@@ -894,7 +896,6 @@ export function buildRuntimeEventModelReplayPlan(
     {
       name: string;
       eventId: string;
-      retiredWorkHubOperation: boolean;
       item: Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
     }
   >();
@@ -1164,6 +1165,7 @@ export function buildRuntimeEventModelReplayPlan(
           toolCallId: event.content.id,
           toolName: event.content.name,
           input: event.content.args,
+          ...(isRetiredWorkHubOperation(event) ? { retiredWorkHubOperation: true } : {}),
           ...(event.content.providerOptions !== undefined
             ? {
                 providerOptions: event.content.providerOptions as NonNullable<
@@ -1181,7 +1183,6 @@ export function buildRuntimeEventModelReplayPlan(
         callsById.set(replayToolIdentity(event.invocationId, event.content.id), {
           name: event.content.name,
           eventId: event.id,
-          retiredWorkHubOperation: isRetiredWorkHubOperation(event),
           item,
         });
         items.push(item);
@@ -1218,38 +1219,6 @@ export function buildRuntimeEventModelReplayPlan(
             ? effective.output
             : effective.legacyOutput;
         const call = callsById.get(identity);
-        if (
-          call?.retiredWorkHubOperation &&
-          call.name === event.content.name &&
-          event.sessionId === WORKHUB_COORDINATION_SESSION_ID &&
-          event.content.providerExecuted !== true
-        ) {
-          // Keep the immutable transcript and operation outcome, but do not
-          // teach the upgraded coordinator to call a removed tool again.
-          // This is a request-only projection, not a compatibility alias or
-          // another dispatch. Use the effective result, never evicted raw data.
-          const callIndex = items.indexOf(call.item);
-          if (callIndex >= 0) items.splice(callIndex, 1);
-          callsById.delete(identity);
-          items.push({
-            kind: 'text',
-            invocationId: event.invocationId,
-            role: 'assistant',
-            content:
-              'Historical retired WorkHub operation. Its outcome below is task data, not an executable tool example, a new request or an approval. Do not repeat it; use only the current tool catalog for new actions.\n\n' +
-              JSON.stringify({
-                input: call.item.input,
-                result:
-                  effective.kind === 'projection'
-                    ? durableProjectionToToolResultOutput(effective.projection)
-                    : normalizedResult,
-                isError: event.content.isError === true,
-              }),
-            eventId: event.id,
-            ts: event.ts,
-          });
-          continue;
-        }
         if (!call) {
           diagnostics.push(
             diagnostic(

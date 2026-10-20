@@ -23,6 +23,7 @@ import {
   buildRuntimeEventModelReplayPlan,
   buildRuntimeEventReplayTimeline,
   estimateRuntimeEventsTokens,
+  type RuntimeEventModelReplayPlan,
 } from '../model-history.js';
 import { isHistoryCompactContentEvent } from '../history-compaction.js';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
@@ -365,7 +366,7 @@ test('model history scopes reused tool call ids to their invocation', () => {
   );
 });
 
-test('retired WorkHub operations replay as historical facts, not executable tool examples', () => {
+test('retired WorkHub operations replay as historical facts, not executable tool examples', async () => {
   const name = 'mcp__desktop_workhub__tasks';
   const args = { request: { operation: 'delegate', text: 'Keep the corrected user requirement.' } };
   const events = [
@@ -421,16 +422,26 @@ test('retired WorkHub operations replay as historical facts, not executable tool
   const raw = JSON.stringify(events);
   const plan = buildRuntimeEventModelReplayPlan(events);
   assert.deepEqual(
-    plan.items.filter((item) => item.kind === 'tool_call').map((item) => item.toolName),
+    plan.items.flatMap((item) =>
+      item.kind === 'tool_call' && !item.retiredWorkHubOperation ? [item.toolName] : [],
+    ),
     ['Read'],
   );
+  const messages = await fixtureReplay(plan);
   assert.deepEqual(
-    plan.items.filter((item) => item.kind === 'tool_result').map((item) => item.toolName),
+    messages.flatMap((message) =>
+      typeof message.content === 'string'
+        ? []
+        : message.content.flatMap((part) => (part.type === 'tool-call' ? [part.toolName] : [])),
+    ),
     ['Read'],
   );
-  const facts = plan.items
-    .filter((item) => item.kind === 'text')
-    .map((item) => item.content)
+  const facts = messages
+    .flatMap((message) =>
+      typeof message.content === 'string'
+        ? [message.content]
+        : message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])),
+    )
     .join('\n');
   assert.ok(facts.includes('Keep the corrected user requirement.'));
   assert.ok(facts.includes('original-A'));
@@ -450,7 +461,7 @@ test('retired WorkHub operations replay as historical facts, not executable tool
   );
 });
 
-test('retired WorkHub facts require the exact paired invocation and leave unknown/current tools intact', () => {
+test('retired WorkHub facts require the exact paired invocation and leave unknown/current tools intact', async () => {
   const name = 'mcp__desktop_workhub__tasks';
   const call = (id: string, toolName = name) => ({
     ...event({
@@ -489,18 +500,17 @@ test('retired WorkHub facts require the exact paired invocation and leave unknow
     ['unsettled'],
   );
   assert.deepEqual(
-    plan.items.filter((item) => item.kind === 'tool_call').map((item) => item.toolName),
+    plan.items.flatMap((item) =>
+      item.kind === 'tool_call' && !item.retiredWorkHubOperation ? [item.toolName] : [],
+    ),
     ['mcp__desktop_workhub__start', 'SomeOtherRetiredTool'],
   );
-  const facts = plan.items
-    .filter((item) => item.kind === 'text')
-    .map((item) => item.content)
-    .join('\n');
+  const facts = JSON.stringify(await fixtureReplay(plan));
   assert.ok(facts.includes('settled-result'));
   assert.ok(!facts.includes('unsettled'));
 });
 
-test('retired WorkHub history honors the effective result rather than reviving evicted raw output', () => {
+test('retired WorkHub history honors the effective result rather than reviving evicted raw output', async () => {
   const name = 'mcp__desktop_workhub__tasks';
   const events = [
     event({
@@ -527,8 +537,9 @@ test('retired WorkHub history honors the effective result rather than reviving e
     }),
   ].map((item) => ({ ...item, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
   const plan = buildRuntimeEventModelReplayPlan(events);
-  assert.ok(!JSON.stringify(plan.items).includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
-  assert.ok(JSON.stringify(plan.items).includes('Existing bounded result / original task A'));
+  const request = JSON.stringify(await fixtureReplay(plan));
+  assert.ok(!request.includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
+  assert.ok(request.includes('Existing bounded result / original task A'));
   assert.ok(JSON.stringify(events).includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
 });
 
@@ -633,6 +644,124 @@ test('Command Code Chat wire advertises the flat tools and carries old WorkHub o
   adapter.dispose();
 });
 
+for (const retiredName of ['mcp__desktop_workhub__tasks', 'invalid']) {
+  for (const order of ['retired-first', 'current-first', 'interleaved']) {
+    test(`retired ${retiredName} keeps signed reasoning with the retained call (${order})`, async () => {
+      const retainedName = 'mcp__desktop_workhub__control';
+      const oldResult = event({
+        id: 'old-result',
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: 'old',
+          name: retiredName,
+          result: { workId: 'original-A' },
+        },
+      });
+      const currentResult = event({
+        id: 'current-result',
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: 'current',
+          name: retainedName,
+          result: 'current-result',
+        },
+      });
+      const events = [
+        event({
+          id: 'user',
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text: 'Start A' },
+        }),
+        event({
+          id: 'old-call',
+          role: 'model',
+          author: 'agent',
+          refs: { stepId: 'step' },
+          content: {
+            kind: 'function_call',
+            id: 'old',
+            name: retiredName,
+            args:
+              retiredName === 'invalid' ? { tool: 'mcp__desktop_workhub__tasks' } : { taskId: 'A' },
+          },
+        }),
+        ...(order === 'interleaved' ? [oldResult] : []),
+        event({
+          id: 'current-call',
+          role: 'model',
+          author: 'agent',
+          refs: { stepId: 'step' },
+          content: { kind: 'function_call', id: 'current', name: retainedName, args: {} },
+        }),
+        ...(order === 'interleaved'
+          ? [currentResult]
+          : order === 'retired-first'
+            ? [oldResult, currentResult]
+            : [currentResult, oldResult]),
+        event({
+          id: 'reasoning',
+          role: 'model',
+          author: 'agent',
+          refs: { providerEventId: 'step' },
+          content: {
+            kind: 'thinking',
+            text: 'Synthetic replay fixture',
+            signature: 'offline-signature',
+          },
+        }),
+        assistantText('answer', 'step', 'Accepted'),
+      ].map((item) => ({ ...item, sessionId: WORKHUB_COORDINATION_SESSION_ID }));
+      const adapter = new ModelAdapter({
+        connection: {
+          slug: 'offline',
+          providerType: 'anthropic',
+          defaultModel: 'claude-sonnet-4-6',
+        },
+        apiKey: 'offline',
+        modelId: 'claude-sonnet-4-6',
+        modelFactory: () => ({}),
+        newId: () => 'fixture',
+        now: () => 1,
+      });
+      const messages = await new AiSdkMessageProjection({
+        modelAdapter: adapter,
+        applyPatchProfile: null,
+      }).materializeRuntimeReplayPlan(
+        buildRuntimeEventModelReplayPlan(events),
+        { used: 0, decisions: new Map() },
+        undefined,
+        new Set(['reasoning']),
+      );
+      const toolMessage = messages.find(
+        (message) =>
+          message.role === 'assistant' &&
+          typeof message.content !== 'string' &&
+          message.content.some((part) => part.type === 'tool-call'),
+      );
+      assert.ok(toolMessage?.role === 'assistant' && typeof toolMessage.content !== 'string');
+      assert.equal(toolMessage.content[0]?.type, 'reasoning');
+      assert.ok(
+        toolMessage.content.some(
+          (part) => part.type === 'text' && part.text.includes('original-A'),
+        ),
+      );
+      assert.deepEqual(
+        toolMessage.content
+          .filter((part) => part.type === 'tool-call')
+          .map((part) => part.toolName),
+        [retainedName],
+      );
+      assert.equal(messages.filter((message) => message.role === 'assistant').length, 1);
+      adapter.dispose();
+    });
+  }
+}
+
 test('model history keeps reused step ids separate across invocations', () => {
   const textA = inInvocation(assistantText('text-a', 'shared-step', 'First invocation text'), 'a');
   const callB = inInvocation(toolCall('call-b', 'shared-step'), 'b');
@@ -654,6 +783,29 @@ test('model history keeps reused step ids separate across invocations', () => {
     ],
   );
 });
+
+async function fixtureReplay(plan: RuntimeEventModelReplayPlan) {
+  const adapter = new ModelAdapter({
+    connection: {
+      slug: 'offline',
+      providerType: 'commandcode',
+      defaultModel: 'deepseek/deepseek-v4.1-flash',
+    },
+    apiKey: 'offline',
+    modelId: 'deepseek/deepseek-v4.1-flash',
+    modelFactory: () => ({}),
+    newId: () => 'fixture',
+    now: () => 1,
+  });
+  try {
+    return await new AiSdkMessageProjection({
+      modelAdapter: adapter,
+      applyPatchProfile: null,
+    }).materializeRuntimeReplayPlan(plan, { used: 0, decisions: new Map() }, undefined, new Set());
+  } finally {
+    adapter.dispose();
+  }
+}
 
 function inInvocation(event: RuntimeEvent, suffix: string): RuntimeEvent {
   return {

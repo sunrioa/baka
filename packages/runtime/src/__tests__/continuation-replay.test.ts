@@ -112,14 +112,11 @@ describe('continuation replay segment', () => {
         ['user', 'old-call', 'old-result'],
       );
       const fact = result.plan.providerItems.find((item) => item.eventId === 'old-result');
-      assert.ok(fact?.kind === 'text');
-      assert.ok(fact.content.includes('original-A'));
-      assert.ok(fact.content.includes(`"isError":${name === 'invalid'}`));
-      assert.ok(
-        result.plan.providerItems.every(
-          (item) => item.kind !== 'tool_call' && item.kind !== 'tool_result',
-        ),
-      );
+      assert.ok(fact?.kind === 'tool_result');
+      assert.deepEqual(fact.output, { admitted: name !== 'invalid', workId: 'original-A' });
+      assert.equal(fact.isError, name === 'invalid');
+      const call = result.plan.providerItems.find((item) => item.eventId === 'old-call');
+      assert.ok(call?.kind === 'tool_call' && call.retiredWorkHubOperation);
     });
   }
 
