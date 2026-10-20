@@ -760,7 +760,11 @@ test('task history extends only the current same-work native worker without broa
   assert.match(JSON.stringify(ordinary), /Changed/);
   assert.doesNotMatch(JSON.stringify(ordinary), /Correction: use cookies|Actual assertion failure/);
   f.headerOverrides.set('c', { backend: 'plugin-executor' });
-  assert.deepEqual(await f.runtime.tool.impl(request, f.caller('c')), { status: 'unavailable' });
+  const executorHistory = (await f.runtime.tool.impl(request, f.caller('c'))) as {
+    history?: unknown;
+  };
+  assert.ok('history' in executorHistory);
+  assert.match(JSON.stringify(executorHistory.history), /Correction: use cookies/);
   assert.deepEqual(f.deliveries, []);
   assert.equal(f.runs.size, 4);
   assert.equal(f.records.size, 0);

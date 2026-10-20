@@ -27,6 +27,7 @@ import { TOOL_RESULT_ARCHIVE_EVIDENCE_MAX_BYTES } from '@maka/core/tool-result-a
 import { createLedgerArchiveResourceReader } from '@maka/runtime/ledger-tool-result-archive-reader';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
+import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
 import type { ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admission-gate.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
@@ -415,6 +416,16 @@ export function createWorkHubTaskHistoryReader(options: {
           a.targetSessionId,
           execution.turnId,
         );
+        if (through === null) {
+          unavailableExecutions.push({
+            actionId: a.actionId,
+            reason: 'native_transcript_unavailable',
+          });
+          if (Buffer.byteLength(JSON.stringify(response('x'.repeat(32)))) > READ_PAGE_MAX_BYTES) {
+            unavailableExecutions.pop();
+            break;
+          }
+        }
         state.current.executionCursor = page.nextCursor ?? undefined;
         state.current.execution = {
           turnId: execution.turnId,
@@ -432,16 +443,26 @@ export function createWorkHubTaskHistoryReader(options: {
         } else state.current = undefined;
         continue;
       }
-      const page = await options.reader.readDurableRecords(
-        a.targetSessionId,
-        {
-          ...SCAN,
-          direction: 'older',
-          throughSequence: execution.through,
-          position: execution.position,
-        },
-        execution.turnId,
-      );
+      let page;
+      try {
+        page = await options.reader.readDurableRecords(
+          a.targetSessionId,
+          {
+            ...SCAN,
+            direction: 'older',
+            throughSequence: execution.through,
+            position: execution.position,
+          },
+          execution.turnId,
+        );
+      } catch (error) {
+        if (error instanceof RuntimeReadModelError)
+          return {
+            status: 'unsupported' as const,
+            reason: 'The recorded native execution cannot be projected as task history',
+          };
+        throw error;
+      }
       if (page.throughSequence !== execution.through)
         throw new Error('Task history snapshot changed');
       let full = false;

@@ -32,6 +32,7 @@ import {
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import { encodeDurableToolResultOutput } from '@maka/runtime/durable-tool-result-projection';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
+import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
 import { createWorkHubTaskHistoryReader } from '../server/workhub-task-history-reader.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
@@ -491,6 +492,51 @@ test('history revalidates all touched sources before returning data', async () =
   );
 });
 
+test('missing native transcripts stay explicit while canonical requirements remain readable', async () => {
+  const f = fixture();
+  const omissions: unknown[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const value = await f.reader(
+      {
+        operation: 'read',
+        view: 'task_history',
+        sourceActionId: 'work',
+        ...(cursor ? { cursor } : {}),
+      },
+      f.ctx,
+    );
+    assert.ok('history' in value);
+    if ('unavailableExecutions' in value.history)
+      omissions.push(...(value.history.unavailableExecutions as unknown[]));
+    cursor = value.history.nextCursor ?? undefined;
+    if (!cursor) break;
+  }
+  assert.equal(cursor, undefined);
+  assert.deepEqual(omissions, [
+    { actionId: 'followup', reason: 'native_transcript_unavailable' },
+    { actionId: 'work', reason: 'native_transcript_unavailable' },
+    { actionId: 'work', reason: 'native_transcript_unavailable' },
+  ]);
+});
+
+test('unsupported native projection returns a limit instead of fabricated or empty history', async () => {
+  const f = fixture();
+  f.options.reader.readDurableHighWater = async () => 1;
+  f.options.reader.readDurableRecords = async () => {
+    throw new RuntimeReadModelError('unsupported native event', []);
+  };
+  f.reader = f.restart();
+  const value = await f.reader(
+    { operation: 'read', view: 'task_history', sourceActionId: 'followup' },
+    f.ctx,
+  );
+  assert.deepEqual(value, {
+    status: 'unsupported',
+    reason: 'The recorded native execution cannot be projected as task history',
+  });
+});
+
 test('history recovers a matching ledger tool result but never follows a mismatched archive into another Turn', async () => {
   const f = fixture();
   f.rows.set('old', [
@@ -798,6 +844,7 @@ for (const state of ['cancelled', 'queued', 'shared', 'unavailable'] as const) {
     assert.ok(records.some((row) => row.text === input.originalUserText));
     assert.ok(records.some((row) => row.text === f.assignments[0]!.userText));
     assert.deepEqual(omissions, [
+      { actionId: 'followup', reason: 'native_transcript_unavailable' },
       { actionId: 'work', reason: state === 'cancelled' ? 'cancelled_before_start' : state },
     ]);
     assert.deepEqual(f.transcriptReads, []);

@@ -32,6 +32,7 @@ import type {
 } from '@maka/core/session';
 type TestReadResponse = {
   status: string;
+  reason?: string;
   nextCursor: string | null;
   transcript: { nextCursor?: string | null };
   history: { nextCursor?: string | null };
@@ -84,6 +85,7 @@ function fixture() {
   let latest: WorkHubDelegationAssignedMessage | undefined = source;
   let header: Partial<SessionHeader> = { backend: 'ai-sdk', labels: [] };
   let resultRun = 'result-run';
+  let historyLimit: { status: 'unsupported'; reason: string } | undefined;
   const tool = createWorkHubReadTool({
     sessions: {
       readWorkHubAssignment: async (actionId) => {
@@ -140,6 +142,7 @@ function fixture() {
     }),
     history: async (input) => {
       calls.push(['history', input]);
+      if (historyLimit) return historyLimit;
       return {
         status: 'ok',
         history: {
@@ -173,6 +176,9 @@ function fixture() {
     },
     setHeader: (value: Partial<SessionHeader>) => {
       header = value;
+    },
+    setHistoryLimit: (value: { status: 'unsupported'; reason: string }) => {
+      historyLimit = value;
     },
   };
 }
@@ -404,15 +410,19 @@ test('an explicit result source stays in its task and cannot change a paged curs
   ])
     await assert.rejects(f.read(input));
 });
-test('read distinguishes unsupported or ineligible history from empty success', async () => {
+test('read routes executor task history to the native reader and retains ineligible source checks', async () => {
   const f = fixture();
   f.setHeader({ backend: 'plugin-executor', labels: [] });
-  const unsupported = await f.read({ taskId: 'work-a', view: 'history' }, context('worker-a'));
-  assert.equal(unsupported.status, 'unsupported');
+  const executor = await f.read({ taskId: 'work-a', view: 'history' }, context('worker-a'));
+  assert.equal(executor.status, 'ok');
   assert.equal(
     f.calls.some((call) => call[0] === 'history'),
-    false,
+    true,
   );
+  f.setHistoryLimit({ status: 'unsupported', reason: 'Native records have an unsupported shape' });
+  const limited = await f.read({ taskId: 'work-a', view: 'history' }, context('worker-a'));
+  assert.equal(limited.status, 'unsupported');
+  assert.equal(limited.reason, 'Native records have an unsupported shape');
   const excluded: Partial<SessionHeader>[] = [
     { backend: 'ai-sdk', labels: [], isArchived: true },
     { backend: 'ai-sdk', labels: [], role: 'workhub_coordination' },

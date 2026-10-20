@@ -526,8 +526,6 @@ export function createWorkHubEvidenceRuntime(options: {
           (source.work?.id ?? source.actionId)
       )
         return undefined;
-      if ((await stores.sessionStore.readHeaderSnapshot(ctx.sessionId)).backend !== 'ai-sdk')
-        return undefined;
       return (await readable(source, ctx, lease)) ? actor.assignment : undefined;
     },
   });
