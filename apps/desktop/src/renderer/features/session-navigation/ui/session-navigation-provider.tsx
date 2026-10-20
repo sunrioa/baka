@@ -254,6 +254,7 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
       ),
     [props.projectScopes],
   );
+  const foldedGroups = useMemo(() => controller.selectors.groups.filter(group => group.defaultIsCollapsed !== undefined), [controller.selectors.groups]);
 
   const data = useMemo<SessionRailData>(
     () => ({
@@ -263,6 +264,7 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
       staleSessionIds,
       worktreeSessionIds: controller.selectors.worktreeSessionIds,
       groups: controller.layout.viewMode === 'project' ? controller.selectors.groups : undefined,
+      foldedGroups: controller.layout.viewMode === 'conversation' ? foldedGroups : undefined,
       groupVariant: controller.layout.viewMode,
       sessionProjectName: controller.selectors.sessionProjectName,
       sessionLocation: controller.selectors.sessionLocation,
@@ -279,6 +281,7 @@ export function SessionNavigationProvider(props: SessionNavigationProviderProps)
     [
       controller.layout.viewMode,
       controller.selectors.groups,
+      foldedGroups,
       controller.selectors.sessionLocation,
       controller.selectors.sessionMeta,
       controller.selectors.sessionProjectName,

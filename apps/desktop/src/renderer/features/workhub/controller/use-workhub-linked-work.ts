@@ -22,6 +22,7 @@ import type { WorkHubTask } from '@maka/runtime-host/protocol';
 import { useEffect, useRef, useState } from 'react';
 import { workHubLinkedWork, workHubTaskReceipts, type WorkHubLinkedTarget } from '../model/linked-work.js';
 import type { WorkHubServices } from '../ports.js';
+import { workHubTaskTitle } from '../model/task-presentation.js';
 
 type Services = Pick<WorkHubServices, 'readTask'>;
 interface Targets {
@@ -59,7 +60,7 @@ export function useWorkHubLinkedWork(
           const { task } = await services.readTask(owner, { workId });
           if (disposed) return;
           if ((task.workId ?? task.actionId) !== workId) continue;
-          current.items.set(workId, { signature, target: { workId, targetSessionId: task.targetSessionId, targetSessionName: task.targetSessionName, createdAt: task.createdAt } });
+          current.items.set(workId, { signature, target: { workId, targetSessionId: task.targetSessionId, targetSessionName: task.targetSessionName, title: workHubTaskTitle(task), createdAt: task.createdAt } });
           publish();
         } catch { /* An unavailable task never permits guessing a Session from model output. */ }
         if (disposed) return;

@@ -17,97 +17,45 @@
  * under the License.
  */
 
-import { useEffect, useId, useState } from 'react';
-import { Button, IconButton, TextArea, useUiLocale } from '@maka/ui';
+import { useState } from 'react';
+import { Button, IconButton, TextInput, useUiLocale } from '@maka/ui';
 import { PanelRightClose, RefreshCcw } from '@maka/ui/icons';
-import type { WorkHubTask, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
-import type { useWorkHubTaskOverview } from '../controller/use-workhub-task-overview.js';
+import type { WorkHubTaskFindItem } from '@maka/runtime-host/protocol';
+import type { useWorkHubTaskSearch } from '../controller/use-workhub-task-search.js';
+import { workHubTaskCategory } from '../model/task-presentation.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
-import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 
-type Overview = ReturnType<typeof useWorkHubTaskOverview>;
-export function WorkHubTaskOverview({ overview, onOpen, onView, onClose }: { overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void; onClose?(): void }) {
+export function WorkHubTaskOverview({ search, onView, onClose }: {
+  search: ReturnType<typeof useWorkHubTaskSearch>; onView(task: WorkHubTaskFindItem): Promise<void>; onClose?(): void;
+}) {
   const t = workHubTaskCopy[useUiLocale()];
-  const ended = (task: WorkHubTask) => ['pending_acceptance', 'failed', 'cancelled', 'stopped', 'unavailable'].includes(task.status);
-  const groups = [{ label: t.progress, tasks: overview.tasks.filter(task => !ended(task)) }, { label: t.delivery, tasks: overview.tasks.filter(ended) }];
-  return <section className="workHubTaskOverview" aria-label={t.title} aria-busy={!overview.ready} data-maka-assistant-exclude>
-    <header className="workHubTaskRailHeader"><h2>{t.title}{overview.ready && <span> · {overview.tasks.length}</span>}</h2>
-      <IconButton size="sm" variant="ghost" icon={<RefreshCcw size={14} />} label={t.refresh} onClick={() => { void overview.refresh(); }} />
+  const [error, setError] = useState<string>();
+  const label = (item: WorkHubTaskFindItem) => {
+    const category = workHubTaskCategory(item.state);
+    return category === 'attention' ? t.status.waiting_for_user : category === 'running' ? t.status.running
+      : category === 'queued' ? t.status.queued : category === 'ended' ? t.status.pending_acceptance : t.status.stopped;
+  };
+  return <section className="workHubTaskOverview" aria-label={t.title} aria-busy={!search.ready} data-maka-assistant-exclude>
+    <header className="workHubTaskRailHeader"><h2>{t.title}</h2>
+      <IconButton size="sm" variant="ghost" icon={<RefreshCcw size={14} />} label={t.refresh} onClick={() => { void search.refresh(); }} />
       {onClose && <IconButton size="sm" variant="ghost" icon={<PanelRightClose size={16} />} label={t.close} onClick={onClose} />}
     </header>
-    {!overview.ready && <p role={overview.error ? 'alert' : 'status'}>{overview.tasks.length ? t.stale : overview.error ? t.unavailable : t.loading}</p>}
-    <>
-      <p className="workHubTaskHint">{t.hint}</p>
-      {overview.ready && !overview.tasks.length && <p>{t.empty}</p>}
-      <div className="workHubTaskRows">
-        {groups.flatMap(group => group.tasks.map((task, index) => <div key={JSON.stringify([task.actionId, task.delegationId])}>
-          {index === 0 && <h3>{group.label}</h3>}
-          <TaskCard task={task} overview={overview} onOpen={onOpen} onView={onView} />
-        </div>))}
-      </div>
-      {overview.truncated && <p role="status">{t.truncated}</p>}
-    </>
+    <TextInput size="sm" label={t.search} value={search.query} onChange={search.setQuery} />
+    {!search.ready && <p role={search.error ? 'alert' : 'status'}>{search.items.length ? t.stale : search.error ? t.unavailable : t.loading}</p>}
+    {search.ready && search.error && <p role="alert">{t.unavailable}</p>}
+    {error && <p role="alert">{error}</p>}
+    {search.ready && !search.items.length && <p>{search.query ? t.noMatches : t.empty}</p>}
+    {search.match === 'any' && <p role="status">{t.searchRelaxed}</p>}
+    {search.match === 'unmatched' && <p role="status">{t.searchUnmatched}</p>}
+    <div className="workHubTaskRows">
+      {search.items.map(item => <article key={item.id} className="workHubTaskCard" data-status={workHubTaskCategory(item.state)}>
+        <Button variant="ghost" size="sm" width="100%" className="workHubTaskHeading" label={`${item.title} · ${label(item)}`} isDisabled={!search.ready}
+          onClick={() => { setError(undefined); void onView(item).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); }}>
+          <span className="workHubTaskHeadingContent"><span className="workHubTaskName">{item.title}</span><span className="workHubTaskStatus">{label(item)}</span></span>
+        </Button>
+        {item.summary && <p className="workHubTaskText">{item.summary}</p>}
+      </article>)}
+    </div>
+    {search.cursor && <Button size="sm" variant="ghost" label={t.loadMore} isDisabled={!search.ready || search.loadingMore} onClick={() => { void search.loadMore(); }} />}
   </section>;
-}
-function TaskCard({ task, overview, onOpen, onView }: { task: WorkHubTask; overview: Overview; onOpen(sessionId: string): void; onView?(task: WorkHubTask): void }) {
-  const locale = useUiLocale();
-  const t = workHubTaskCopy[locale];
-  const id = useId();
-  const [expanded, setExpanded] = useState(false);
-  const [detail, setDetail] = useState<WorkHubTaskDetail>();
-  const [readError, setReadError] = useState<string>();
-  const [sendError, setSendError] = useState<string>();
-  const text = overview.continuationDraft(task);
-  const [sending, setSending] = useState(false);
-  const [unknown, setUnknown] = useState(() => Boolean(overview.pendingContinuation(task)));
-  const [sent, setSent] = useState(false);
-  useEffect(() => {
-    let active = true;
-    setDetail(undefined); setReadError(undefined);
-    if (expanded && overview.ready) void overview.read(task).then(result => { if (active) setDetail(result); }, () => { if (active) setReadError(t.unavailable); });
-    return () => { active = false; };
-  }, [expanded, task, overview.ready, overview.generation, t.unavailable]);
-  const shown = detail?.task ?? task;
-  const error = sendError ?? readError;
-  const canContinue = !['stopping', 'stopped', 'cancelled', 'unavailable'].includes(shown.status) && !shown.execution?.sharedTurn;
-  return <article className="workHubTaskCard" data-status={shown.status}>
-    <Button variant="ghost" size="sm" width="100%" className="workHubTaskHeading" label={`${shown.targetSessionName} ${t.status[shown.status]}`} aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(!expanded)}>
-      <span className="workHubTaskHeadingContent"><span className="workHubTaskName">{shown.targetSessionName}</span><span className="workHubTaskStatus">{t.status[shown.status]}</span></span>
-    </Button>
-    <p className="workHubTaskText" data-expanded={expanded}>{shown.text}</p>
-    {shown.waitReason && <p className="workHubTaskHint">{t[shown.waitReason]}</p>}
-    {shown.dependency && <p className="workHubTaskHint">{t.dependency}: {shown.dependency.question}</p>}
-    {shown.failure && <p className="workHubTaskFailure">{shown.failure}</p>}
-    {onView && <Button size="sm" variant="ghost" label={workHubTaskViewCopy[locale].open} onClick={() => onView(shown)} />}
-    {expanded && <div id={id} className="workHubTaskDetails">
-      <h4>{t.source}</h4>
-      <dl>
-        <dt>Action / Delegation</dt><dd><code>{shown.actionId} / {shown.delegationId}</code></dd>
-        <dt>Message</dt><dd><code>{shown.targetMessageId}</code></dd>
-        {shown.execution && <><dt>Turn / Run</dt><dd><code>{shown.execution.turnId} / {shown.execution.runId}</code></dd></>}
-        {shown.dependency && <><dt>{t.dependency}</dt><dd><code>{shown.dependency.requestId}{shown.dependency.sourceActionId && ' → ' + shown.dependency.sourceActionId}</code></dd></>}
-      </dl>
-      {!detail && !error && <p role="status">{overview.ready ? t.loading : t.stale}</p>}
-      {detail?.delivery && <section aria-label={t.excerpt}>
-        <h4>{t.excerpt}</h4><p className="workHubTaskHint">{t.unverified}</p>
-        <pre>{detail.delivery.text}</pre>
-        <p><code>{detail.delivery.terminalEventId}</code></p>
-        {detail.delivery.truncated && <p>{t.deliveryTruncated}</p>}
-      </section>}
-      {error && <p role="alert">{error}</p>}
-      <Button size="sm" variant="ghost" label={t.open} isDisabled={!overview.ready} onClick={() => onOpen(shown.targetSessionId)} />
-      {canContinue && <form onSubmit={event => {
-        event.preventDefault(); if (sending || !text.trim()) return;
-        setSending(true); setSendError(undefined); setSent(false);
-        void overview.continue(shown, text).then(accepted => {
-          if (accepted) { setUnknown(false); setSent(true); }
-          else { setUnknown(true); setSendError(t.error); }
-        }, () => { setUnknown(true); setSendError(t.error); }).finally(() => setSending(false));
-      }}>
-        <TextArea label={t.continuation} value={text} isReadOnly={sending || unknown || !overview.ready} onChange={value => overview.setContinuationDraft(task, value.slice(0, 8000))} rows={2} />
-        <Button type="submit" size="sm" variant="ghost" label={unknown ? t.retry : t.submit} isDisabled={sending || !overview.ready || !text.trim()} />
-        {sent && <p role="status">{t.sent}</p>}
-      </form>}
-    </div>}
-  </article>;
 }

@@ -23,6 +23,8 @@ import { RuntimeHostOperationError, RuntimeHostRequestInterruptedError } from '@
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import { createDefaultRuntimePolicy, type RuntimePolicy } from '@maka/core/runtime-policy';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
 
 test('registers the WorkHub Session projection as a reconnectable read', () => {
   const ordinary = new Set<string>();
@@ -44,6 +46,8 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(ordinary.has('workhub:getSession'), false);
   assert.equal(reconnectable.has('workhub:queryInteractions'), true);
   assert.equal(reconnectable.has('workhub:queryTasks'), true);
+  assert.equal(reconnectable.has('workhub:findTasks'), true);
+  assert.equal(reconnectable.has('workhub:getNewWorkDefaults'), true);
   assert.equal(reconnectable.has('workhub:readTask'), true);
   assert.equal(reconnectable.has('workhub:taskHistory'), true);
   assert.equal(reconnectable.has('workhub:taskExecutions'), true);
@@ -90,9 +94,18 @@ test('native task input IPC preserves exact IDs and distinguishes rejected from 
   assert.ok(sends.every(value => value === input), 'all explicit retries preserve the original payload');
 });
 
-test('stores new-work execution defaults separately from the coordination Session', async () => {
+test('persists the shared native WorkHub model in coordinator configuration while retaining executor choices', async () => {
   const handlers = new Map<string, IpcHandler>();
-  const client = { hostId: 'host-defaults' } as Parameters<
+  let coordination = { id: WORKHUB_COORDINATION_SESSION_ID, revision: 1, llmConnectionId: 'first', llmConnectionSlug: 'provider', model: 'first-model' } as SessionCatalogProjection;
+  const changes: unknown[] = [];
+  const client = { hostId: 'host-defaults', getWorkHubSession: async () => coordination,
+    configureWorkHubModel: async (input: import('@maka/runtime-host/protocol').OperationInput<'workhub.coordination.configureModel'>) => {
+      changes.push(input);
+      coordination = { ...coordination, revision: coordination.revision + 1, llmConnectionId: input.modelTarget.connectionId,
+        model: input.modelTarget.model, ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}) };
+      return { kind: 'committed', session: coordination };
+    },
+  } as Parameters<
     typeof registerRuntimeHostWorkHubIpc
   >[0];
   registerRuntimeHostWorkHubIpc(
@@ -109,7 +122,7 @@ test('stores new-work execution defaults separately from the coordination Sessio
   const write = handlers.get('workhub:setNewWorkDefaults');
   assert.ok(read);
   assert.ok(write);
-  assert.deepEqual(await read(event), {});
+  assert.deepEqual(await read(event), { model: { llmConnectionId: 'first', llmConnectionSlug: 'provider', model: 'first-model' } });
   const defaults = {
     executorId: 'codex.app-server',
     executorModel: 'gpt-6-astra',
@@ -117,14 +130,14 @@ test('stores new-work execution defaults separately from the coordination Sessio
   };
   await write(event, defaults);
   assert.deepEqual(await read(event), defaults);
-  assert.throws(
-    () => write(event, { ...defaults, permissionMode: 'bypass' }),
+  await assert.rejects(
+    async () => write(event, { ...defaults, permissionMode: 'bypass' }),
     /Invalid WorkHub new-work defaults/u,
   );
 
   const replacementHandlers = new Map<string, IpcHandler>();
   registerRuntimeHostWorkHubIpc(
-    { hostId: client.hostId } as Parameters<typeof registerRuntimeHostWorkHubIpc>[0],
+    { ...client } as Parameters<typeof registerRuntimeHostWorkHubIpc>[0],
     {
       handle(channel, handler) {
         replacementHandlers.set(channel, handler);
@@ -139,6 +152,14 @@ test('stores new-work execution defaults separately from the coordination Sessio
     defaults,
     'replacement clients for the same Host retain the execution defaults',
   );
+  const native = { model: { llmConnectionId: 'selected', llmConnectionSlug: 'provider', model: 'selected-model' }, thinkingLevel: 'high' };
+  await write(event, native);
+  assert.deepEqual(changes, [{ expectedRevision: 1, modelTarget: { kind: 'explicit', connectionId: 'selected', connectionSlug: 'provider', model: 'selected-model' }, thinkingLevel: 'high' }]);
+  assert.deepEqual(await replacementRead(event), native, 'replacement Desktop clients read the native preference from persistent coordinator settings');
+  assert.equal(coordination.model, 'selected-model');
+  client.configureWorkHubModel = async () => ({ kind: 'revision_conflict', expectedRevision: coordination.revision, actualRevision: coordination.revision + 1 });
+  await assert.rejects(async () => write(event, { model: { ...native.model, model: 'conflicting-model' } }), /WorkHub changed/);
+  assert.deepEqual(await read(event), native, 'a conflicting save cannot replace the persisted visible preference');
 });
 
 test('new-work permissions use Host policy, preserve other defaults and reject invalid writes', async () => {

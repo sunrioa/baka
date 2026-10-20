@@ -89,7 +89,7 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
     };
   }, [services, sessionId]);
 
-  async function respond(item: WorkHubPendingInteraction, answer: InteractionAnswer, grantScope?: 'task') {
+  async function respond(item: WorkHubPendingInteraction, answer: InteractionAnswer) {
     const owner = sessionId;
     const contextGeneration = generation.current;
     const { interaction } = item;
@@ -103,7 +103,6 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
       await services.answerTaskInteraction(owner, {
         actionId: item.actionId, interactionId: interaction.interactionId,
         expectedTurnId: interaction.turnId, expectedRunId: interaction.runId, answer,
-        ...(grantScope ? {grantScope} : {}),
       });
     } finally {
       // A failed/lost receipt is not proof the answer failed. Rebuild from the
@@ -119,28 +118,7 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
   }
   return {
     ...displayed.data, ready: displayed.ready, error: displayed.error, respond,
-    revoke: async (item: NonNullable<WorkHubInteractionsQueryResult['grants']>[number]) => {
-      const owner = sessionId;
-      const contextGeneration = generation.current;
-      const key = JSON.stringify([owner, 'grant', item.grant.grantId]);
-      if (!owner || current.current !== owner || !displayed.ready || !displayed.data.grants?.includes(item))
-        throw new Error('The original task grant is unavailable');
-      if (inFlight.current.has(key)) return;
-      inFlight.current.add(key);
-      setAnswering(new Set(inFlight.current));
-      try {await services.revokeTaskGrant(owner, {actionId: item.actionId, grantId: item.grant.grantId});}
-      finally {
-        if (current.current === owner && generation.current === contextGeneration) {
-          await refresh.current();
-          if (current.current === owner && generation.current === contextGeneration) {
-            inFlight.current.delete(key);
-            setAnswering(new Set(inFlight.current));
-          }
-        }
-      }
-    },
     refresh: () => refresh.current(),
     isAnswering: (item: WorkHubPendingInteraction) => answering.has(JSON.stringify([sessionId, item.interaction.interactionId, item.interaction.runId])),
-    isRevoking: (item: NonNullable<WorkHubInteractionsQueryResult['grants']>[number]) => answering.has(JSON.stringify([sessionId, 'grant', item.grant.grantId])),
   };
 }

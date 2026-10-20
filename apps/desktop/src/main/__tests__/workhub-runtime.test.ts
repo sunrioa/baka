@@ -25,7 +25,7 @@ import type { ProjectCatalogProjectDetails } from '@maka/runtime-host/protocol';
 import { decodeWorkHubCoordinationActFromTurnInput, decodeWorkHubCoordinationSelectAndDelegateInput } from '@maka/runtime-host/protocol';
 import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { createWorkHubRuntime } from '../workhub-runtime.js';
-import { readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
+import { readWorkHubCreationDefaults } from '../workhub-new-work-defaults.js';
 
 const scope = { hostId: 'host', targetEpoch: 'epoch' };
 function fixture() {
@@ -61,7 +61,6 @@ test('empty new-work preferences dispatch the visible coordination model, not a 
     queryRuntimePolicy: async () => ({ revision: 1, policy: createDefaultRuntimePolicy() }),
     getWorkHubSession: async () => ({ id: WORKHUB_COORDINATION_SESSION_ID, ...visible, permissionMode: 'bypass', cwd: '/internal-coordination' }),
   };
-  writeWorkHubNewWorkDefaults(creationClient.hostId, {});
   f.deps.createDefaults = () => readWorkHubCreationDefaults(creationClient);
   await f.runtime.actTasks(scope, 'turn', 'fresh-without-explicit-selection', workHubTasksSchema.parse({ operation: 'continue_work', workId: 'original', sourceActionId: 'source', container: 'fresh', text: 'Continue settled work.' }));
   const sent = decodeWorkHubCoordinationActFromTurnInput(f.requests[0]);
@@ -74,20 +73,14 @@ test('empty new-work preferences dispatch the visible coordination model, not a 
   assert.equal('cwd' in (created.newWorkDefaults ?? {}), false);
 });
 
-test('explicit creation defaults stay Host-scoped and an unavailable displayed fallback never becomes another model', async () => {
-  const hostId = 'explicit-creation-defaults-host';
-  const client = { hostId, queryRuntimePolicy: async () => ({ revision: 1, policy: createDefaultRuntimePolicy() }),
-    getWorkHubSession: async (): Promise<null> => { throw new Error('must not query coordination for an explicit preference'); } };
-  for (const saved of [{ model: { llmConnectionId: 'selected', llmConnectionSlug: 'selected', model: 'selected-model' }, thinkingLevel: 'high' as const },
-    { executorId: 'selected-executor', executorModel: 'executor-model' }]) {
-    writeWorkHubNewWorkDefaults(hostId, saved);
-    assert.deepEqual(await readWorkHubCreationDefaults(client), { permissionMode: 'ask', ...saved });
-  }
-  writeWorkHubNewWorkDefaults(hostId, {});
+test('creation defaults use the durable coordinator configuration and never substitute another model', async () => {
+  const client = { hostId: 'shared-native-defaults-host', queryRuntimePolicy: async () => ({ revision: 1, policy: createDefaultRuntimePolicy() }),
+    getWorkHubSession: async () => ({ id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: 'selected', llmConnectionSlug: 'selected', model: 'selected-model', thinkingLevel: 'high' as const }) };
+  assert.deepEqual(await readWorkHubCreationDefaults(client), { permissionMode: 'ask', model: { llmConnectionId: 'selected', llmConnectionSlug: 'selected', model: 'selected-model' }, thinkingLevel: 'high' });
   for (const session of [null, { id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: null, llmConnectionSlug: 'unbound', model: 'unknown' },
     { id: 'foreign-session', llmConnectionId: 'foreign', llmConnectionSlug: 'foreign', model: 'foreign-model' }])
     await assert.rejects(readWorkHubCreationDefaults({ ...client, getWorkHubSession: async () => session }), /Select an available model/);
-  await assert.rejects(readWorkHubCreationDefaults(client), /must not query/);
+  await assert.rejects(readWorkHubCreationDefaults({ ...client, getWorkHubSession: async () => { throw new Error('Host unavailable'); } }), /Host unavailable/);
 });
 
 test('work discovery and continuation preserve exact objective references without target rediscovery', async () => {

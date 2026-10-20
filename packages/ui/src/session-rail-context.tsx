@@ -63,6 +63,8 @@ export interface SessionRailData {
   worktreeSessionIds?: ReadonlySet<string>;
   /** Pre-grouped rows. Absent means group by recency here. */
   groups?: ReadonlyArray<SessionHistoryGroup>;
+  /** Additional collapsed groups in the time view, excluded from its ordinary buckets. */
+  foldedGroups?: ReadonlyArray<SessionHistoryGroup>;
   groupVariant: SessionViewMode;
   /** Human-readable project identity for a session hover card. */
   sessionProjectName?(session: SessionSummary): string | undefined;

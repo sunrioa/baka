@@ -33,3 +33,8 @@ export { useWorkHubSessionView, useWorkHubTaskView } from './controller/use-work
 export { createWorkHubTaskInputModel, workHubTaskInputSource } from './model/task-input-model.js';
 export { useWorkHubTaskInput } from './controller/use-workhub-task-input.js';
 export { useWorkHubTaskSelection } from './controller/use-workhub-task-selection.js';
+export { workHubTaskCategory, workHubTaskTitle, workHubTaskSegments } from './model/task-presentation.js';
+export { createWorkHubTaskSearchModel } from './model/task-search-model.js';
+export { useWorkHubTaskSearch } from './controller/use-workhub-task-search.js';
+export { WorkHubTaskRequest } from './ui/workhub-task-inbox.js';
+export { workHubTaskCopy } from './locales/workhub-task-copy.js';

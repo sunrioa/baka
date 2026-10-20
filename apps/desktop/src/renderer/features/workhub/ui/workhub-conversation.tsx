@@ -28,6 +28,7 @@ import { useAppShellTurnPresentation } from '../../../application/contracts/turn
 import type { WorkHubTask } from '@maka/runtime-host/protocol';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { WorkHubDispatchCard } from './workhub-dispatch-card.js';
+import { workHubTaskTitle } from '../model/task-presentation.js';
 
 export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { workLinks: readonly WorkHubLinkedWork[]; taskFacts?: { tasks: readonly WorkHubTask[]; ready: boolean }; onOpenWork(sessionId: string): void }) {
   const { onOpenWork, workLinks: assignments, taskFacts, ...chat } = props;
@@ -41,13 +42,14 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
   // divide its rail evenly, keeping every segment linked to its own Session.
   const worksByTurn = useMemo(() => {
     const grouped = new Map<string, WorkHubLinkedWork[]>();
+    const titles = new Map((taskFacts?.tasks ?? []).map(task => [task.workId ?? task.actionId, workHubTaskTitle(task)]));
     for (const work of assignments) {
       const works = grouped.get(work.coordinationTurnId) ?? [];
-      if (!works.some((item) => (item.workId ?? item.targetSessionId) === (work.workId ?? work.targetSessionId))) works.push(work);
+      if (!works.some((item) => (item.workId ?? item.targetSessionId) === (work.workId ?? work.targetSessionId))) works.push({ ...work, targetSessionName: work.workId ? titles.get(work.workId) ?? work.targetSessionName : work.targetSessionName });
       grouped.set(work.coordinationTurnId, works);
     }
     return grouped;
-  }, [assignments]);
+  }, [assignments, taskFacts?.tasks]);
   const workByTurn = useMemo(() => new Map([...worksByTurn].flatMap(([turnId, works]) =>
     works.length === 1 ? [[turnId, works[0]!.targetSessionId] as const] : [])), [worksByTurn]);
   const promptRailDecorations = useMemo(() => new Map([...worksByTurn].map(([turnId, works]) => {
@@ -62,7 +64,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
   const turnDecorations = new Map<string, NonNullable<ComponentProps<typeof ChatView>['turnDecorations']> extends ReadonlyMap<string, infer V> ? V : never>([...worksByTurn].map(([turnId, works]) => [turnId, {
     assistantDetailsLabel: works.some(work => work.workId && work.operation !== 'stop') ? taskCopy.dispatchDetails : undefined,
     assistantSummary: works.some(work => work.workId && work.operation !== 'stop')
-      ? <WorkHubDispatchCard works={works.filter(work => work.workId && work.operation !== 'stop')} tasks={taskFacts?.tasks ?? []} ready={taskFacts?.ready ?? false} promptText={promptTextByTurn.get(turnId) ?? turnId} />
+      ? <WorkHubDispatchCard works={works.filter(work => work.workId && work.operation !== 'stop')} tasks={taskFacts?.tasks ?? []} ready={taskFacts?.ready ?? false} promptText={promptTextByTurn.get(turnId) ?? taskCopy.dispatchedTasks} />
       : undefined,
     accentColor: promptRailDecorations.get(turnId)?.accentColor ?? 'transparent',
     messageRail: <>{works.map((work, index) => <Button key={work.workId ?? work.targetSessionId}
@@ -71,7 +73,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
         '--maka-turn-accent': `oklch(var(--workhub-${highlight.sessionId === work.targetSessionId ? 'highlight' : 'tone'}) ${workHubIdentityHue(work.targetSessionId)})`,
       } as CSSProperties}
       data-work-session-id={work.targetSessionId}
-      label={`${copy.filterConversation}: ${work.targetSessionName} · ${promptTextByTurn.get(turnId) ?? turnId}${works.length > 1 ? ` · ${index + 1}/${works.length}` : ''}`}
+      label={`${copy.filterConversation}: ${work.targetSessionName}${promptTextByTurn.get(turnId) ? ` · ${promptTextByTurn.get(turnId)}` : ''}${works.length > 1 ? ` · ${index + 1}/${works.length}` : ''}`}
       tooltip={`${copy.filterConversation}: ${work.targetSessionName}`}
       aria-pressed={Boolean(highlight.selectedWork) && (highlight.selectedWork?.workId ?? highlight.selectedWork?.sessionId) === (work.workId ?? work.targetSessionId)}
       data-work-highlighted={highlight.sessionId === work.targetSessionId}
@@ -88,7 +90,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
         className="workhub-turn-label"
         data-work-session-id={work.targetSessionId}
         data-work-highlighted={highlight.sessionId === work.targetSessionId}
-        aria-label={`${work.workspaceName ? `${work.workspaceName} / ` : ''}${work.targetSessionName} · ${promptTextByTurn.get(turnId) ?? turnId}`}
+        aria-label={`${work.targetSessionName}${promptTextByTurn.get(turnId) ? ` · ${promptTextByTurn.get(turnId)}` : ''}`}
         onMouseEnter={() => highlight.highlight(work.targetSessionId)}
         onMouseLeave={() => highlight.highlight(undefined)}
         onFocus={() => highlight.highlight(work.targetSessionId)}
@@ -96,7 +98,7 @@ export function WorkHubConversation(props: ComponentProps<typeof ChatView> & { w
         onClick={() => work.workId
           ? highlight.selectWork({ sessionId: work.targetSessionId, name: work.targetSessionName, workId: work.workId })
           : onOpenWork(work.targetSessionId)}
-      >{work.workspaceName ? `${work.workspaceName} / ${work.targetSessionName}` : work.targetSessionName}</Link>)}
+      >{work.targetSessionName}</Link>)}
     </div>,
   }]));
   return <ChatView {...chat}

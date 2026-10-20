@@ -63,6 +63,7 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   listActiveInteractions(sessionId: string): Promise<import('@maka/core/events').ActiveInteractionRequestEvent[]>;
   queryTaskInteractions(sessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
   queryTasks(sessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
+  findTasks(sessionId: string, input: OperationInput<'workhub.tasks.find'>): Promise<OperationOutput<'workhub.tasks.find'>>;
   readTask(sessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
   taskHistory(sessionId: string, input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>>;
   taskExecutions(sessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;

@@ -89,6 +89,7 @@ export function useWorkHubController(
   const [newWorkDefaults, setNewWorkDefaults] = useState<
     Omit<WorkHubCreateDefaults, 'permissionMode'>
   >({});
+  const newWorkDefaultsRevision = useRef(0);
   const [permissionDefault, setPermissionDefault] = useState<{ sessionId: string; mode: ChatDefaultPermissionMode }>();
   const [savingPermission, setSavingPermission] = useState(false);
   const permissionChange = useRef<{ sessionId: string }>(undefined);
@@ -371,16 +372,21 @@ export function useWorkHubController(
   useEffect(() => {
     if (!sessionId) return;
     let disposed = false;
-    void services
-      .getNewWorkDefaults(sessionId)
-      .then((defaults) => {
-        if (!disposed && currentSessionId.current === sessionId) setNewWorkDefaults(defaults);
-      })
-      .catch((reason: unknown) => {
-        if (!disposed && currentSessionId.current === sessionId) report(reason);
+    const refresh = () => {
+      if (configuringModelRef.current) return;
+      const revision = ++newWorkDefaultsRevision.current;
+      void services.getNewWorkDefaults(sessionId).then(defaults => {
+        if (!disposed && revision === newWorkDefaultsRevision.current && currentSessionId.current === sessionId) setNewWorkDefaults(defaults);
+      }).catch((reason: unknown) => {
+        if (!disposed && revision === newWorkDefaultsRevision.current && currentSessionId.current === sessionId) report(reason);
       });
+    };
+    const unsubscribe = services.subscribeSessions(refresh);
+    refresh();
     return () => {
       disposed = true;
+      ++newWorkDefaultsRevision.current;
+      unsubscribe();
     };
   }, [services, sessionId]);
 
@@ -718,6 +724,7 @@ export function useWorkHubController(
     model: string;
   }, thinkingLevel: ThinkingLevel | null = null) {
     if (!sessionId || busy || configuringModelRef.current) return;
+    ++newWorkDefaultsRevision.current;
     configuringModelRef.current = true;
     setConfiguringModel(true);
     try {
@@ -732,6 +739,7 @@ export function useWorkHubController(
       await services.setNewWorkDefaults(sessionId, next);
       if (currentSessionId.current !== sessionId) return;
       setNewWorkDefaults(next);
+      refreshSessions.current();
       setError(undefined);
     } catch (reason) {
       if (currentSessionId.current !== sessionId) return;
@@ -747,6 +755,7 @@ export function useWorkHubController(
     thinkingLevel?: ThinkingLevel;
   }) {
     if (!sessionId || busy || configuringModelRef.current) return;
+    ++newWorkDefaultsRevision.current;
     configuringModelRef.current = true;
     setConfiguringModel(true);
     try {

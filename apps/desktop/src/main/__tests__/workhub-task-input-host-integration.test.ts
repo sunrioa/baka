@@ -31,7 +31,7 @@ import { DesktopRuntimeHostClient } from '../runtime-host-client.js';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { clientCapabilityEntityId } from '@maka/runtime-host/client-capability-entity-id';
 import { createWorkHubTaskModelRuntime } from '../workhub-task-model-runtime.js';
-import { readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
+import { readWorkHubCreationDefaults } from '../workhub-new-work-defaults.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import type { WorkHubTaskSendResult } from '../../shared/workhub-conversation.js';
@@ -106,7 +106,6 @@ for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task in
     await client.resolveWorkHubCoordinationSession();
     await client.answerWorkHubCoordination({ turnId: coordinationTurn, text: 'Coordinate these independent tasks and remain available.' });
     const scope = { hostId: client.hostId, targetEpoch: 'native-fixture-target' };
-    writeWorkHubNewWorkDefaults(client.hostId, {});
     const workhub = createWorkHubTaskModelRuntime({ client: () => client!, isCurrent: () => true,
       createDefaults: () => readWorkHubCreationDefaults(client!), changed() {} });
     const actionId = (id: string) => bridge === 'model' ? clientCapabilityEntityId(JSON.stringify(['workhub-task', coordinationTurn, id])) : id;
@@ -234,7 +233,6 @@ for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task in
     assert.equal((await connection.request('connection.catalog.set-default-target', { expectedCatalogRevision: other.catalogRevision, target: { connectionId: other.connection.connectionId, modelId: 'different-global-model' } })).kind, 'committed');
     const visibleFallback = await client.getWorkHubSession(); assert.equal(visibleFallback.id, WORKHUB_COORDINATION_SESSION_ID);
     assert.equal(visibleFallback.model, 'fake-model', 'the visible coordination fallback stays on its own route after the global default changes');
-    writeWorkHubNewWorkDefaults(client.hostId, {});
     const fresh = await workhub.actTask(scope, coordinationTurn, 'native-fresh-model', { kind: 'continue', input: {
       taskId: queuedA.workId, container: 'fresh', text: 'FRESH_MODEL_FALLBACK: continue in a fresh context.',
     } });

@@ -151,8 +151,8 @@ test('reused tool call IDs cannot attach another Turn’s result or classify a d
 test('flat task receipts restore links by exact task projection without exposing Session IDs in model output', () => {
   const target = desktopSession('host-a', 'current-segment');
   const coordination = desktopSession('host-a', 'maka_workhub_coordination');
-  const task: WorkHubTask = { actionId: 'assignment', workId: 'task-a', delegationId: 'delegation', targetSessionId: target,
-    targetSessionName: 'Current task title', targetMessageId: 'message', text: 'Exact requirement', createdAt: 2, status: 'running' };
+  const task: WorkHubTask & { title: string } = { actionId: 'assignment', workId: 'task-a', delegationId: 'delegation', targetSessionId: target,
+    title: 'Current task title', targetSessionName: 'Renamed underlying conversation', targetMessageId: 'message', text: 'Exact requirement', createdAt: 2, status: 'running' };
   const call: ToolCallMessage = { type: 'tool_call', id: 'opaque-call', turnId: 'current-turn', ts: 3, toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'task-a', text: 'Correct it' } };
   const result: ToolResultMessage = { type: 'tool_result', id: 'native-result', turnId: call.turnId, ts: 4, toolUseId: call.id, isError: false,
     content: { kind: 'json', value: { taskId: 'task-a', container: 'reuse', mode: 'steering', delivery: 'queued' } } };
@@ -304,8 +304,8 @@ test('invalid or failed native receipts never trigger exact-task lookup', async 
 
 function desktopSession(hostId: string, sessionId: string) { return JSON.stringify([hostId, sessionId]); }
 function taskFromAssignment(item: WorkHubTaskAssignment, status: WorkHubTask['status']): WorkHubTask {
-  return { workId: item.workId, actionId: item.actionId, delegationId: item.delegationId, targetSessionId: item.targetSessionId,
-    targetSessionName: item.targetSessionName, targetMessageId: item.targetMessageId, text: item.text, createdAt: item.createdAt, status };
+  return Object.assign({ workId: item.workId, actionId: item.actionId, delegationId: item.delegationId, targetSessionId: item.targetSessionId,
+    targetSessionName: item.targetSessionName, targetMessageId: item.targetMessageId, text: item.text, createdAt: item.createdAt, status }, { title: item.targetSessionName });
 }
 
 test('a shared coordination turn divides its clickable identity rail equally between Works', async () => {
@@ -317,8 +317,9 @@ test('a shared coordination turn divides its clickable identity rail equally bet
       workLinks: ['Alpha', 'Beta'].map((name) => ({ id: name, coordinationTurnId: 'shared', targetSessionId: name, targetSessionName: name, workspaceName: 'Workspace' })),
     })),
   ));
-  assert.match(markup, /Workspace \/ Alpha/);
-  assert.match(markup, /Workspace \/ Beta/);
+  const { document } = parseHTML(markup);
+  assert.deepEqual([...document.querySelectorAll('.workhub-turn-label')].map(item => item.textContent), ['Alpha', 'Beta']);
+  assert.doesNotMatch(markup, /Workspace \/ (Alpha|Beta)/, 'WorkHub task labels do not expose the project hierarchy');
   assert.match(markup, /data-turn-accent="true"/);
   assert.match(markup, /inset-block-start:0%;inset-block-end:auto;height:50%/);
   assert.match(markup, /inset-block-start:50%;inset-block-end:auto;height:50%/);

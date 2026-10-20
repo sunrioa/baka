@@ -38,16 +38,9 @@ import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import { useWorkHubLinkedWork } from '../controller/use-workhub-linked-work.js';
-import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 import { useWorkHubTaskSelection } from '../controller/use-workhub-task-selection.js';
-
-function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
-  if (!owner || !target) return false;
-  try { return parseDesktopSessionKey(owner).hostId === parseDesktopSessionKey(target).hostId; }
-  catch { return false; }
-}
 
 function cancelReveal(element: HTMLDivElement | null, content: HTMLDivElement | null) {
   for (const target of [element, content]) for (const animation of target?.getAnimations() ?? []) animation.cancel();
@@ -95,12 +88,11 @@ export function WorkHubRoot() {
   if (retainedTaskOwner.current.services !== services) retainedTaskOwner.current = { services, owner: controller.sessionId };
   else if (controller.sessionId) retainedTaskOwner.current.owner = controller.sessionId;
   const taskOwner = controller.sessionId ?? retainedTaskOwner.current.owner;
-  const taskSelection = useWorkHubTaskSelection(services, taskOwner);
+  const taskSelection = useWorkHubTaskSelection(services, taskOwner, Boolean(controller.sessionId));
   const highlight = { ...localHighlight, selectedWork: taskSelection.selected,
     selectWork: (work: typeof localHighlight.selectedWork) => taskSelection.select(work?.workId ? { ...work, workId: work.workId } : undefined),
     toggleWork: (work: NonNullable<typeof localHighlight.selectedWork>) => taskSelection.select(work.workId && work.workId !== taskSelection.selected?.workId ? { ...work, workId: work.workId } : undefined),
   };
-  const selectedTask = highlight.selectedWork && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
   const focusComposer = () => composer.current?.focus();
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
@@ -319,9 +311,8 @@ export function WorkHubRoot() {
               </div>
             )}
             <div className="workHubTaskPanels">
-              {selectedTask ? (!!controller.taskInbox.requests.length || !!controller.taskInbox.grants?.length || !!controller.taskInbox.error) && <details className="workHubTaskViewInbox"><summary>{taskCopy.pendingInteractions}<span>{controller.taskInbox.requests.length}</span></summary>
-                <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
-              </details> : <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />}
+              <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox}
+                onView={item => taskSelection.open({ actionId: item.actionId, delegationId: item.delegationId })} />
             </div>
             {(controller.activeForm || controller.activeQuestion) && <div>
             {controller.activeForm && (

@@ -168,6 +168,7 @@ export interface SessionHistoryGroup {
   label: string;
   sessions: SessionSummary[];
   project?: ProjectRecord;
+  defaultIsCollapsed?: boolean;
 }
 
 /**
@@ -386,20 +387,24 @@ export function SessionHistoryList() {
   // per-group memo below it — and this component re-renders on every session
   // switch, because `rail.activeId` is part of the value it reads.
   const groups = useMemo(
-    () =>
-      rail.groups
+    () => {
+      const folded = rail.foldedGroups ?? [];
+      const foldedIds = new Set(folded.flatMap(group => group.sessions.map(session => session.id)));
+      return rail.groups
         ? rail.groups.map((g) => ({
             key: g.id,
             label: g.label,
             sessions: g.sessions,
             project: g.project,
+            defaultIsCollapsed: g.defaultIsCollapsed,
           }))
-        : groupSessionsForHistory(rail.sessions, locale).map((g) => ({
+        : [...groupSessionsForHistory(rail.sessions.filter(session => !foldedIds.has(session.id)), locale).map((g) => ({
             key: g.id,
             label: g.label,
             sessions: g.sessions,
-          })),
-    [locale, rail.groups, rail.sessions],
+          })), ...folded.map(group => ({ key: group.id, label: group.label, sessions: group.sessions, defaultIsCollapsed: group.defaultIsCollapsed }))];
+    },
+    [locale, rail.groups, rail.foldedGroups, rail.sessions],
   );
 
   // Outer SideNav is the sole navigation landmark and it already carries this
@@ -426,6 +431,7 @@ function SessionListGroups(props: {
     label: string;
     sessions: SessionSummary[];
     project?: ProjectRecord;
+    defaultIsCollapsed?: boolean;
   }>;
 }) {
   const rail = useSessionRailData();
@@ -476,8 +482,9 @@ function SessionListGroups(props: {
   // folds its unpinned tasks without hiding its pins.
   const pinnedGroup = useMemo(() => {
     if (rail.groupVariant !== 'project') return undefined;
-    return groupSessionsForHistory(rail.sessions, locale).find((group) => group.id === 'pinned');
-  }, [locale, rail.groupVariant, rail.sessions]);
+    const folded = new Set(props.groups.filter(group => group.defaultIsCollapsed !== undefined).flatMap(group => group.sessions.map(session => session.id)));
+    return groupSessionsForHistory(rail.sessions.filter(session => !folded.has(session.id)), locale).find((group) => group.id === 'pinned');
+  }, [locale, rail.groupVariant, rail.sessions, props.groups]);
 
   const startRename = useCallback((target: SessionRenameTarget, opener: HTMLElement | null) => {
     renameOpenerRef.current = opener;
@@ -569,7 +576,7 @@ function SessionListGroups(props: {
 
     function renderProjectGroup(group: (typeof props.groups)[number]): ReactNode {
       const project = group.project;
-      const sessions = group.sessions.filter((session) => !session.isFlagged);
+      const sessions = group.defaultIsCollapsed !== undefined ? group.sessions : group.sessions.filter((session) => !session.isFlagged);
       const actions =
         project &&
         (rail.relinkableProjectIds === undefined ||
@@ -590,6 +597,7 @@ function SessionListGroups(props: {
           label={group.label}
           project={project}
           sessions={sessions}
+          defaultIsCollapsed={group.defaultIsCollapsed}
           streamingSessionIds={rail.streamingSessionIds}
           projectActions={actions}
           onDropSession={
@@ -679,6 +687,9 @@ function SessionListGroups(props: {
         // Once per group, never per row: a fresh array for each row would hand
         // every `SessionNavRow` a new prop identity and defeat its memo.
         const items = group.sessions.map((session) => renderSessionRow(session));
+        if (group.defaultIsCollapsed !== undefined) return <div key={group.key} className="maka-session-group">
+          <SideNavItem label={group.label} collapsible={{ defaultIsCollapsed: group.defaultIsCollapsed }}>{items}</SideNavItem>
+        </div>;
         if (!group.label) {
           return (
             <div key={group.key} className="maka-session-group">
@@ -701,6 +712,7 @@ function ProjectNavRow(props: {
   label: string;
   project?: ProjectRecord;
   sessions: SessionSummary[];
+  defaultIsCollapsed?: boolean;
   streamingSessionIds?: ReadonlySet<string>;
   projectActions?: ProjectRowActions;
   onStartRename(opener: HTMLElement | null): void;
@@ -772,7 +784,7 @@ function ProjectNavRow(props: {
         label={props.label}
         aria-describedby={hoverDescriptionId}
         icon={FolderOpen}
-        collapsible={hasSessions ? { defaultIsCollapsed: false } : undefined}
+        collapsible={hasSessions ? { defaultIsCollapsed: props.defaultIsCollapsed ?? false } : undefined}
         endContent={hasMeta ? (
           <ProjectItemMeta
             project={props.project}

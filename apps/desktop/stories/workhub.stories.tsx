@@ -30,7 +30,7 @@ import { createFakeWorkbarServices } from '../src/renderer/features/workbar/test
 import { WorkHubEnablementProvider } from '../src/renderer/application/contracts/workhub-workspace/workhub-enablement.js';
 import { SettingsNavigationProvider } from '../src/renderer/application/contracts/settings-presentation/settings-navigation.js';
 import { appShellFrameStyle } from '../src/renderer/shell/frame-style.js';
-import { WorkHubConversation, WorkHubHighlightContext } from '../src/renderer/features/workhub/testing.js';
+import { WorkHubConversation, WorkHubHighlightContext, workHubTaskCategory } from '../src/renderer/features/workhub/testing.js';
 import { desktopSessionKey } from '../src/shared/runtime-host-identity.js';
 import type { WorkHubPresentationSnapshot, WorkHubMainNavigation as MainNavigation } from '../src/shared/workhub-presentation.js';
 
@@ -128,7 +128,10 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
         request: { kind: 'client_capability', toolUseId: 'browser', target: { providerId: 'browser-provider', contractId: 'browser-contract', serverId: 'browser-server', toolName: 'navigate', capability: 'browser', scope: { kind: 'browser_origin', origin: 'https://example.com' } } } } },
   ] : [];
   let updateExecution: Parameters<WorkHubServices['observe']>[4];
-  let taskGrants: import('@maka/runtime-host/protocol').WorkHubTaskGrant[] = [];
+  if (taskInbox) tasks.push(...taskRequests.map((item, index): WorkHubTask => ({ actionId: item.actionId, delegationId: item.delegationId,
+    targetSessionId: item.interaction.sessionId, targetSessionName: item.targetSessionName, targetMessageId: `inbox-message-${index}`,
+    text: item.targetSessionName, createdAt: 8 + index, status: 'waiting_for_user', execution: { turnId: item.interaction.turnId, runId: item.interaction.runId, sharedTurn: false } })));
+  tasks = tasks.map(task => Object.assign(task, { title: task.targetSessionName }));
   let questionPending = question;
   let pendingForm: import('@maka/core/events').FormRequestEvent | undefined;
   let newWorkDefaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'> = {};
@@ -172,8 +175,13 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     readAttachmentBytes: async () => { throw new Error('Not an image'); },
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
-    queryTaskInteractions: async () => ({ requests: taskRequests, grants: taskGrants, truncated: false }),
+    queryTaskInteractions: async () => ({ requests: taskRequests, truncated: false }),
     queryTasks: async () => { if (disconnectedRead) throw new Error('Host disconnected'); return { tasks, truncated: taskOverview }; },
+    findTasks: async (_owner, input) => ({ items: tasks.filter(task => !input.query || `${task.targetSessionName} ${task.text}`.includes(input.query)).map(task => {
+      const category = workHubTaskCategory(task.status);
+      return { kind: 'task', id: task.workId ?? task.actionId, title: task.targetSessionName,
+        state: category === 'attention' ? 'waiting_for_user' : category, lastActivityAt: task.createdAt, location: null, available: true, summary: task.text, segments: 1 };
+    }), match: input.query ? 'all' : 'recent', nextCursor: null }),
     taskHistory: async (_owner, input) => {
       const task = tasks.find(item => item.actionId === input.workId);
       const link = messages.find(message => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned' && message.actionId === input.workId);
@@ -230,7 +238,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       updateSessions();
       return { disposition: 'delegate_existing', targetSessionId: task.targetSessionId };
     },
-    revokeTaskGrant: async (_id, input) => {taskGrants = taskGrants.filter((item) => item.grant.grantId !== input.grantId); updateSessions(); return {grantId: input.grantId};},
+    revokeTaskGrant: async () => { throw new Error('Task grants are retired'); },
     answerTaskInteraction: async (id, input) => {
       writes.taskAnswer(id, input);
       const item = taskRequests.find((item) => item.interaction.interactionId === input.interactionId)!;
@@ -246,14 +254,6 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
         return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'form_answer', ...answer, committedAt: 1 } };
       }
       if (input.answer.kind === 'client_capability' && request.kind === 'client_capability') {
-        if (input.answer.decision === 'allow' && input.grantScope === 'task') taskGrants.push({actionId: item.actionId, targetSessionName: item.targetSessionName, grant: {
-          version: 1, grantId: input.interactionId, delegationId: item.delegationId,
-          rootSessionId: item.interaction.sessionId, rootTurnId: item.interaction.turnId, rootRunId: item.interaction.runId,
-          sourceSessionId: item.interaction.sessionId, sourceRequestId: item.interaction.interactionId,
-          sourceTurnId: item.interaction.turnId, sourceRunId: item.interaction.runId,
-          rootBoundaryRevision: 0, sourceBoundaryRevision: 0, grantedAt: Date.now(), expiresAt: Date.now() + 3600000,
-          resource: {kind: 'client_capability', target: request.target},
-        }});
         settle();
         return { ...item.interaction, revision: 2, status: 'answered', outcome: { kind: 'client_capability_decision', decision: input.answer.decision, committedAt: 1 } };
       }
@@ -313,6 +313,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     setNewWorkDefaults: async (id, defaults) => {
       writes.defaults(id, defaults);
       newWorkDefaults = defaults;
+      if (defaults.model) { session = { ...session, ...defaults.model, thinkingLevel: defaults.thinkingLevel, revision: session.revision + 1 }; updateSessions(); }
     },
     getNewWorkPermissionMode: async () => newWorkPermissionMode,
     setNewWorkPermissionMode: async (id, mode) => { writes.permissions(id, mode); newWorkPermissionMode = mode; permissionChanged?.(); return mode; },
@@ -498,7 +499,7 @@ export const TaskExecutionView: Story = {
     await openTaskSidebar(canvasElement);
     const heading = await canvas.findByRole('button', { name: '发布检查清单 执行中' });
     await userEvent.click(within(heading.closest('article')!).getByRole('button', { name: '查看任务执行' }));
-    const view = await canvas.findByRole('region', { name: '任务实时执行' });
+    const view = await canvas.findByRole('region', { name: /^任务实时执行:/ });
     await waitFor(() => expect(within(view).getByText(/任务公开输出 running-turn/)).toBeVisible());
     const taskScroll = view.closest<HTMLElement>('[data-chat-scroll-container]')!;
     const taskSessions = view.querySelectorAll<HTMLElement>('[data-task-session-id]');
@@ -518,7 +519,7 @@ export const TaskExecutionView: Story = {
     expect(view.querySelector('.workHubTaskInstructions')).toBeNull();
     expect(within(view).queryByRole('button', { name: '刷新' })).toBeNull();
     expect(view.querySelectorAll('[data-task-session-id]')).toHaveLength(2);
-    expect(within(view).getByTitle(targetId)).toHaveTextContent('Session · payments');
+    expect(within(view).getByText('第 1 段')).toBeVisible();
     expect(view.querySelector('[role="status"][data-status]')).toHaveTextContent('执行中');
     const inboxToggle = canvasElement.querySelector('.workHubTaskViewInbox summary')!;
     expect(inboxToggle).toBeVisible();
@@ -705,153 +706,76 @@ export const TaskPreviewSwitchIsAtomic: Story = {
     }
   },
 };
-// Real path: Host task facts → WorkHubRoot's inbox/overview/composer; native
-// continuation retains unsent drafts across same-Host re-resolution and keeps
-// its exact submission after a lost receipt and reconnect.
+// Real path: WorkHub task index → search → selected task's native direct input.
 export const TaskOverviewAndContinuation: Story = {
   render: () => <Surface history="usage" taskInbox taskOverview />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await openTaskSidebar(canvasElement);
-    await waitFor(() => expect(canvas.getByRole('region', { name: '近期任务' })).toHaveAttribute('aria-busy', 'false'));
-    let overview = canvas.getByRole('region', { name: '近期任务' });
-    const inbox = await canvas.findByRole('region', { name: '待你处理' });
+    const overview = await canvas.findByRole('region', { name: '任务列表' });
+    await waitFor(() => expect(overview).toHaveAttribute('aria-busy', 'false'));
     expect(overview).toHaveAttribute('data-maka-assistant-exclude');
-    expect(within(overview).getByText('执行结束不代表目标或产物已验证完成。')).toBeVisible();
-    expect(within(overview).getByText('等待证据')).toBeInTheDocument();
-    expect(within(overview).getByText('等待直接 worker 名额')).toBeInTheDocument();
-    expect(within(overview).getByText('供应商连接中断；没有验证产物')).toBeInTheDocument();
-    let editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
-    await userEvent.click(editor);
-    expect(editor).toHaveFocus();
-    const rail = overview.closest<HTMLElement>('.workHubTaskPanel')!;
-    expect(rail).toBeVisible();
-    expect(rail.getBoundingClientRect().right).toBeLessThanOrEqual(window.innerWidth);
-    expect(canvasElement.querySelector('.workHubTaskPanels')).not.toContainElement(overview);
-    const main = canvasElement.querySelector<HTMLElement>('.mainColumn')!;
-    expect(rail.closest('.maka-session-workbar-panel')).toHaveAttribute('data-placement', 'right');
-    expect(main.getBoundingClientRect().right).toBeLessThanOrEqual(rail.getBoundingClientRect().left);
-    const float = canvas.getByRole('button', { name: '浮出工作台' }).getBoundingClientRect();
-    expect(canvas.getByRole('button', { name: '浮出工作台' }).contains(document.elementFromPoint(float.x + float.width / 2, float.y + float.height / 2))).toBe(true);
-    const panels = canvasElement.querySelector('.workHubTaskPanels')!;
-    expect(panels.getBoundingClientRect().bottom).toBeLessThanOrEqual(editor.getBoundingClientRect().top);
-    expect(editor.getBoundingClientRect().bottom).toBeLessThanOrEqual(window.innerHeight);
-    let done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
-    done.focus(); await userEvent.keyboard('{Enter}');
-    let card = done.closest('article')!;
-    await waitFor(() => expect(within(card).getByText(/done-turn \/ done-run/)).toBeVisible());
-    expect(within(card).getByText('下方路径和测试结论来自助手输出，不是独立核验的产物或测试证据。')).toBeVisible();
-    expect(within(card).getByText('报告路径：/projects/maka/report.md', { exact: false }).tagName).toBe('PRE');
-    expect(within(card).queryByRole('link', { name: /report.md/ })).toBeNull();
-    let instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
-    await userEvent.type(instruction, '请核验报告，不要改变原会话权限');
-    await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
-    expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
-    expect(writes.taskContinue).not.toHaveBeenCalled();
-    expect(overviewHostListeners.size).toBeGreaterThan(0);
-    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'unavailable' });
-    await waitFor(() => expect(overview).toHaveAttribute('aria-busy', 'true'));
-    expect(writes.taskContinue).not.toHaveBeenCalled();
-    for (const listener of overviewHostListeners) listener({ hostId: 'story-host', isDefault: true, readiness: 'ready' });
-    await waitFor(() => expect(canvas.getByRole('region', { name: '近期任务' })).toHaveAttribute('aria-busy', 'false'));
-    overview = canvas.getByRole('region', { name: '近期任务' });
-    done = within(overview).getByRole('button', { name: '支付回调幂等性 执行结束 · 待验收' });
-    await userEvent.click(done);
-    card = done.closest('article')!;
-    instruction = within(card).getByRole('textbox', { name: '给此任务的新指令' });
-    await waitFor(() => expect(instruction).toHaveValue('请核验报告，不要改变原会话权限'));
-    expect(writes.taskContinue).not.toHaveBeenCalled();
-    expect(instruction).not.toHaveAttribute('readonly');
-    editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
-    await userEvent.click(editor); await userEvent.type(editor, '另安排一个独立任务');
-    await userEvent.click(within(card).getByRole('button', { name: '发送到此任务' }));
-    await waitFor(() => expect(within(card).getByRole('alert')).toHaveTextContent('操作尚未确认'));
-    expect(instruction).toHaveValue('请核验报告，不要改变原会话权限');
-    expect(instruction).toHaveAttribute('readonly');
-    expect(within(card).getByRole('button', { name: '重试原续办' })).toBeDisabled();
-    // The shell and coordinator are independent readers. Recover the mocked
-    // transport explicitly; one reader must not consume the other's failure.
-    for (const recover of overviewReadRecovery) recover();
-    await userEvent.click(within(overview).getByRole('button', { name: '刷新任务' }));
-    await waitFor(() => expect(within(card).getByRole('button', { name: '重试原续办' })).toBeEnabled());
-    await userEvent.click(within(card).getByRole('button', { name: '重试原续办' }));
-    await waitFor(() => expect(within(card).getByText('续办已进入原任务会话的 FIFO 队列。')).toBeVisible());
-    expect(writes.taskContinue.mock.calls).toHaveLength(2);
-    expect(writes.taskContinue.mock.calls[1]).toEqual(writes.taskContinue.mock.calls[0]);
-    expect(writes.taskContinue.mock.calls[0]).toEqual([sessionId, expect.objectContaining({ actionId: 'overview-done', delegationId: 'overview-done-delegation', text: '请核验报告，不要改变原会话权限' })]);
+    expect(within(overview).queryByText(/待验收/)).toBeNull();
+    expect(within(overview).queryByText(/Action \/ Delegation/)).toBeNull();
+    const search = within(overview).getByRole('textbox', { name: '搜索任务' });
+    await userEvent.type(search, '文档');
+    await waitFor(() => expect(within(overview).getByRole('button', { name: '文档整理 · 失败 / 已停止' })).toBeVisible());
+    expect(within(overview).queryByRole('button', { name: '发布检查清单 · 执行中' })).toBeNull();
+    await userEvent.clear(search);
+    await waitFor(() => expect(within(overview).getByRole('button', { name: '支付回调幂等性 · 已结束' })).toBeVisible());
+    const mainEditor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.type(mainEditor, '另安排一个独立任务');
+    await userEvent.click(within(overview).getByRole('button', { name: '支付回调幂等性 · 已结束' }));
+    const composer = await canvas.findByRole('region', { name: '发送目标：支付回调幂等性' });
+    const editor = composer.querySelector('[contenteditable="true"]') as HTMLElement;
+    await userEvent.type(editor, '请核验报告，不要改变原会话权限');
+    await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(writes.taskInput).toHaveBeenCalledWith(sessionId, expect.objectContaining({
+      workId: 'overview-done', sourceActionId: 'overview-done', text: '请核验报告，不要改变原会话权限',
+    })));
+    expect(mainEditor).toHaveTextContent('另安排一个独立任务');
+    expect(writes.answer).not.toHaveBeenCalled();
     expect(writes.taskAnswer).not.toHaveBeenCalled();
-    expect(editor).toHaveTextContent('另安排一个独立任务');
-    await userEvent.click(within(card).getByRole('button', { name: '打开底层会话' }));
-    expect(writes.open).toHaveBeenCalledWith(desktopSessionKey({ hostId: 'story-host', sessionId: 'release' }));
-    await userEvent.click(done);
-    // Restore the reachable top-of-list view for the visual evidence.
-    rail.scrollTo({ top: 0 });
-    panels.scrollTo({ top: 0 });
-    await userEvent.click(canvas.getByRole('button', { name: '收起任务工作栏' }));
-    await waitFor(() => expect(rail).not.toBeVisible());
-    await openTaskSidebar(canvasElement);
-    await waitFor(() => expect(rail).toBeVisible());
   },
 };
-// Real path: delegated task roots wait on questions/forms/grants; WorkHub's
-// native task inbox and normal composer remain in the same production frame.
+// Real path: WorkHub's pending request list opens the corresponding task;
+// its original question, capability and form prompts answer in that task view.
 export const TaskInbox: Story = {
   render: () => <Surface taskInbox />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const inbox = await canvas.findByRole('region', { name: '待你处理' });
     expect(inbox).toHaveAttribute('data-maka-assistant-exclude');
-    const editor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
-    await userEvent.click(editor);
-    await userEvent.type(editor, '再检查文档。');
-    expect(editor).toHaveFocus();
+    expect(within(inbox).queryByRole('button', { name: '允许此任务' })).toBeNull();
+    const mainEditor = canvasElement.querySelector('.workHubComposerContent [contenteditable="true"]') as HTMLElement;
+    await userEvent.type(mainEditor, '再检查文档。');
     await userEvent.keyboard('{Enter}');
     await waitFor(() => expect(writes.answer).toHaveBeenCalledWith(sessionId, expect.objectContaining({ text: '再检查文档。' })));
-    expect(inbox).toBeVisible();
     await userEvent.click(within(inbox).getByRole('button', { name: '支付回调幂等性 · 问题' }));
-    expect(editor.closest('[hidden]')).toBeNull();
-    expect(within(inbox).queryByRole('button', { name: '停止' })).toBeNull();
-    const questionEditor = inbox.querySelector('[contenteditable="true"]') as HTMLElement;
-    await userEvent.type(questionEditor, '保留这段回答');
-    await userEvent.click(within(inbox).getByRole('button', { name: '重试' }));
-    await waitFor(() => expect(questionEditor).toHaveTextContent('保留这段回答'));
-    await userEvent.clear(questionEditor);
-    await userEvent.click(within(inbox).getByRole('option', { name: '公开测试' }));
-    const confirm = within(inbox).getByRole('button', { name: '提交答案' });
-    await userEvent.click(confirm);
+    let view = await canvas.findByRole('region', { name: '任务实时执行: 支付回调幂等性' });
+    await userEvent.click(within(view).getByRole('option', { name: '公开测试' }));
+    await userEvent.click(within(view).getByRole('button', { name: '提交答案' }));
     await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
       actionId: 'task-question-action', interactionId: 'task-question', expectedTurnId: 'task-turn', expectedRunId: 'task-run',
       answer: { kind: 'question', answers: ['公开测试'] },
     }));
-    await waitFor(() => expect(within(inbox).queryByRole('button', { name: '支付回调幂等性 · 问题' })).toBeNull());
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 权限' }));
-    expect(within(inbox).getByText(/Session 默认权限不变/)).toBeVisible();
-    expect(within(inbox).getByRole('button', { name: '允许此任务' })).toBeEnabled();
-    expect(within(inbox).getByRole('button', { name: '拒绝请求' })).toBeEnabled();
-    const composerBounds = editor.getBoundingClientRect();
-    const inboxBounds = inbox.getBoundingClientRect();
-    expect(inboxBounds.bottom).toBeLessThanOrEqual(composerBounds.top);
-    expect(composerBounds.bottom).toBeLessThanOrEqual(window.innerHeight);
-    await userEvent.click(within(inbox).getByRole('button', { name: '允许此任务' }));
+    view = await canvas.findByRole('region', { name: '任务实时执行: 发布检查清单' });
+    await userEvent.click(within(view).getByRole('button', { name: '本任务允许' }));
     await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
       actionId: 'task-capability-action', interactionId: 'task-capability', expectedTurnId: 'form-turn', expectedRunId: 'form-run',
-      answer: { kind: 'client_capability', decision: 'allow' }, grantScope: 'task',
+      answer: { kind: 'client_capability', decision: 'allow' },
     }));
-    await waitFor(() => expect(within(inbox).getByText('有效任务授权')).toBeVisible());
-    await userEvent.click(within(inbox).getByRole('button', {name: '撤销授权'}));
-    await waitFor(() => expect(within(inbox).queryByText('有效任务授权')).toBeNull());
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 表单' }));
-    await userEvent.type(within(inbox).getByRole('textbox'), '发布说明已确认');
-    await userEvent.click(within(inbox).getByRole('button', { name: '提交' }));
+    view = await canvas.findByRole('region', { name: '任务实时执行: 发布检查清单' });
+    await userEvent.type(within(view).getByRole('textbox', { name: '发布说明' }), '发布说明已确认');
+    await userEvent.click(within(view).getByRole('button', { name: '提交' }));
     await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
       actionId: 'task-form-action', interactionId: 'task-form', expectedTurnId: 'form-turn', expectedRunId: 'form-run',
       answer: { kind: 'form', action: 'accept', values: { notes: '发布说明已确认' } },
     }));
     await waitFor(() => expect(canvas.queryByRole('region', { name: '待你处理' })).toBeNull());
-    await userEvent.click(editor);
-    await userEvent.type(editor, '还可以继续输入');
-    expect(editor).toHaveFocus();
-    expect(editor).toHaveTextContent('还可以继续输入');
+    expect(mainEditor.closest('[hidden]')).toBeNull();
   },
 };
 // Real path: WorkHub composer usage → the same Workbar used by ordinary sessions.

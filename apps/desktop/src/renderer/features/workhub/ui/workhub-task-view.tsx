@@ -23,31 +23,23 @@ import type { WorkHubServices } from '../ports.js';
 import { useWorkHubSessionView, type useWorkHubTaskView } from '../controller/use-workhub-task-view.js';
 import { useAppShellTurnPresentation } from '../../../application/contracts/turn-presentation.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
-import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
+import { workHubTaskSegments } from '../model/task-presentation.js';
+import { WorkHubTaskRequest, type WorkHubTaskInboxState } from './workhub-task-inbox.js';
 
-export function WorkHubTaskView({ services, workId, name, view, onReady }: {
-  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; onReady?(): void;
+export function WorkHubTaskView({ services, workId, name, view, inbox, onReady }: {
+  services: WorkHubServices; owner: string; workId: string; name: string; view: ReturnType<typeof useWorkHubTaskView>; inbox?: WorkHubTaskInboxState; onReady?(): void;
 }) {
   const copy = workHubTaskViewCopy[useUiLocale()];
-  const sessions = useMemo(() => {
-    const result = new Map<string, string>();
-    // Canonical assignments are newest first. Keep each Session's complete
-    // conversation once, including intervening work. Its most recent
-    // assignment determines section order, so the current target is the tail.
-    for (const assignment of [...view.assignments].reverse()) {
-      result.delete(assignment.targetSessionId);
-      result.set(assignment.targetSessionId, assignment.targetSessionName);
-    }
-    return [...result];
-  }, [view.assignments]);
+  const sessions = useMemo(() => workHubTaskSegments(view.assignments, !view.historyCursor), [view.assignments, view.historyCursor]);
   const [placed, setPlaced] = useState<ReadonlySet<string>>(() => new Set());
   const sessionPlaced = useCallback((id: string) => setPlaced(previous => previous.has(id) ? previous : new Set([...previous, id])), []);
   useEffect(() => {
-    if (view.error || (view.ready && sessions.every(([id]) => placed.has(id)))) onReady?.();
+    if (view.error || (view.ready && sessions.every(({ sessionId }) => placed.has(sessionId)))) onReady?.();
   }, [view.error, view.ready, sessions, placed, onReady]);
   const execution = view.executions.find(item => item.turnId === view.execution?.turnId && item.runId === view.execution.runId);
   const status = execution?.status ?? view.assignment?.state;
-  return <section className="workHubTaskView" aria-label={copy.title} data-work-id={workId}>
+  const requests = inbox?.requests.filter(item => view.assignments.some(assignment => assignment.actionId === item.actionId && assignment.delegationId === item.delegationId)) ?? [];
+  return <section className="workHubTaskView" aria-label={`${copy.title}: ${name}`} data-work-id={workId}>
     <span className="maka-visually-hidden" data-status={status} role="status">
       {execution ? copy.status[execution.status] : view.assignment ? copy.state[view.assignment.state] : copy.loading}
     </span>
@@ -55,8 +47,9 @@ export function WorkHubTaskView({ services, workId, name, view, onReady }: {
     {!view.ready && <p role="status">{copy.loading}</p>}
     {view.ready && !view.assignments.length && <p role="status">{copy.noAssignments}</p>}
     {view.historyCursor && <Button size="sm" variant="ghost" label={copy.loadEarlier} isDisabled={view.loadingEarlier} onClick={() => { void view.loadEarlier(); }} />}
-    {sessions.map(([sessionId, sessionName], index) => <WorkHubSessionTranscript key={sessionId}
-      services={services} sessionId={sessionId} name={sessionName} scrollOwner={index === sessions.length - 1} onReady={sessionPlaced} />)}
+    {sessions.map(({ sessionId, number }, index) => <WorkHubSessionTranscript key={sessionId}
+      services={services} sessionId={sessionId} name={number ? copy.segment.replace('{number}', String(number)) : copy.segmentPending} scrollOwner={index === sessions.length - 1} onReady={sessionPlaced} />)}
+    {inbox && requests.map(item => <WorkHubTaskRequest key={JSON.stringify([item.interaction.sessionId, item.interaction.interactionId, item.interaction.runId])} item={item} inbox={inbox} />)}
   </section>;
 }
 
@@ -71,7 +64,7 @@ function WorkHubSessionTranscript({ services, sessionId, name, scrollOwner, onRe
   useEffect(() => { if (ready) setInitialized(true); }, [ready]);
   useEffect(() => { if (view.error || (ready && !view.session)) positioned(); }, [view.error, ready, view.session, positioned]);
   return <section className="workHubExecutionTranscript" data-task-session-id={sessionId} aria-label={name}>
-    <div className="workHubTaskSessionLabel"><span>{name}</span><code title={sessionId}>Session · {parseDesktopSessionKey(sessionId).sessionId.slice(-8)}</code></div>
+    <div className="workHubTaskSessionLabel"><span>{name}</span></div>
     {view.error && <p role="alert">{view.error}</p>}
     {!ready && !initialized && <p role="status">{copy.livePending}</p>}
     {/* Settle the first scroll position from real history, not an empty reader

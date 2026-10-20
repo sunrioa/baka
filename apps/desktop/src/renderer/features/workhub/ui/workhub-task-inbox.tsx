@@ -19,120 +19,92 @@
 
 import { useEffect, useState } from 'react';
 import { Button } from '@astryxdesign/core';
-import { FormInteractionPrompt, UserQuestionPrompt, useUiLocale } from '@maka/ui';
+import { ClientCapabilityPrompt, FormInteractionPrompt, SandboxBoundaryPrompt, UserQuestionPrompt, useUiLocale } from '@maka/ui';
 import type { ChatModelChoice } from '@maka/core/chat-model-choice';
-import type { WorkHubPendingInteraction } from '@maka/runtime-host/protocol';
+import type { InteractionAnswer, WorkHubPendingInteraction } from '@maka/runtime-host/protocol';
 import type { useWorkHubTaskInbox } from '../controller/use-workhub-task-inbox.js';
 import { useWorkHubServices } from '../services.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 
-type Inbox = ReturnType<typeof useWorkHubTaskInbox>;
+export type WorkHubTaskInboxState = ReturnType<typeof useWorkHubTaskInbox>;
 
-export function WorkHubTaskInbox({ inbox }: { inbox: Inbox }) {
-  const services = useWorkHubServices();
+/** The coordinator lists requests; the corresponding task renders the original prompt. */
+export function WorkHubTaskInbox({ inbox, onView }: { inbox: WorkHubTaskInboxState; onView(item: WorkHubPendingInteraction): Promise<void> }) {
   const copy = workHubLiveCopy[useUiLocale()];
-  const [expanded, setExpanded] = useState<string>();
-  const [openError, setOpenError] = useState<string>();
-  if (!inbox.requests.length && !inbox.grants?.length && !inbox.error) return null;
+  const [error, setError] = useState<string>();
+  if (!inbox.requests.length && !inbox.error) return null;
   return <section className="workHubTaskInbox" data-maka-assistant-exclude aria-label={copy.taskInbox}>
     <header><strong>{copy.taskInbox} · {inbox.requests.length}</strong>
       <Button variant="ghost" size="sm" label={copy.retry} onClick={() => { void inbox.refresh(); }} />
     </header>
-    {inbox.error && <p role="alert">{inbox.error}</p>}
-    {openError && <p role="alert">{openError}</p>}
+    {(error || inbox.error) && <p role="alert">{error ?? inbox.error}</p>}
     <div className="workHubTaskInboxItems">
-      {inbox.requests.map((item) => {
-        const key = JSON.stringify([item.interaction.sessionId, item.interaction.interactionId, item.interaction.runId]);
-        const open = expanded === key;
-        return <article key={key}>
-          <div className="workHubTaskInboxHeading">
-            <Button className="workHubTaskInboxExpand" variant="ghost" size="sm" aria-expanded={open}
-              onClick={() => setExpanded(open ? undefined : key)}
-              label={`${item.targetSessionName} · ${item.interaction.request.kind === 'question' ? copy.taskQuestion
-                : item.interaction.request.kind === 'form' ? copy.taskForm : copy.taskPermission}`} />
-            <Button variant="ghost" size="sm" label={copy.openWork} onClick={() => { setOpenError(undefined); void services.presentation.openSession(item.interaction.sessionId).catch((reason) => setOpenError(reason instanceof Error ? reason.message : String(reason))); }} />
-          </div>
-          {open && <TaskRequest item={item} inbox={inbox} />}
-        </article>;
-      })}
-    </div>
-    {!!inbox.grants?.length && <div className="workHubTaskInboxItems">
-      <strong>{copy.taskGrants}</strong>
-      {inbox.grants.map((item) => <article key={item.grant.grantId}>
-        <p>{item.targetSessionName} · {copy.taskGrantExpires} {new Date(item.grant.expiresAt).toLocaleString()}</p>
-        <pre>{JSON.stringify(item.grant.resource, null, 2)}</pre>
-        <Button variant="ghost" size="sm" label={copy.taskRevoke} isDisabled={!inbox.ready || inbox.isRevoking(item)}
-          onClick={async () => {setOpenError(undefined); try {await inbox.revoke(item);} catch (reason) {setOpenError(reason instanceof Error ? reason.message : String(reason));}}} />
+      {inbox.requests.map(item => <article key={JSON.stringify([item.interaction.sessionId, item.interaction.interactionId, item.interaction.runId])}>
+        <Button variant="ghost" size="sm" isDisabled={!inbox.ready}
+          label={`${item.targetSessionName} · ${item.interaction.request.kind === 'question' ? copy.taskQuestion : item.interaction.request.kind === 'form' ? copy.taskForm : copy.taskPermission}`}
+          onClick={() => { setError(undefined); void onView(item).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); }} />
       </article>)}
-    </div>}
+    </div>
     {inbox.truncated && <p>{copy.taskInboxTruncated}</p>}
   </section>;
 }
 
-function TaskRequest({ item, inbox }: { item: WorkHubPendingInteraction; inbox: Inbox }) {
+export function WorkHubTaskRequest({ item, inbox }: { item: WorkHubPendingInteraction; inbox: WorkHubTaskInboxState }) {
   const services = useWorkHubServices();
   const copy = workHubLiveCopy[useUiLocale()];
   const { interaction } = item;
   const request = interaction.request;
-  // A published Interaction request is immutable. Keep its question event
-  // stable across inbox refresh/busy changes so the shared prompt keeps drafts.
+  // The immutable original request identity owns both drafts and the answer.
   const [questionEvent] = useState(() => request.kind === 'question' ? {
     id: interaction.interactionId, requestId: interaction.interactionId, turnId: interaction.turnId, ts: 0,
     type: 'user_question_request' as const, toolUseId: request.toolUseId,
-    questions: request.questions.map((q) => ({ ...q, options: [...q.options] })),
+    questions: request.questions.map(q => ({ ...q, options: [...q.options] })),
   } : undefined);
   const [error, setError] = useState<string>();
   const [choices, setChoices] = useState<ChatModelChoice[]>();
   const [choiceRevision, setChoiceRevision] = useState(0);
-  const needsModels = request.kind === 'form' && request.fields.some((field) => field.kind === 'string' && field.presentation === 'model_picker');
+  const needsModels = request.kind === 'form' && request.fields.some(field => field.kind === 'string' && field.presentation === 'model_picker');
   useEffect(() => {
     if (!needsModels) return;
     let disposed = false;
     setError(undefined);
-    void services.modelChoices(interaction.sessionId).then((result) => {
-      if (!disposed) setChoices(result);
-    }).catch((reason) => {
+    void services.modelChoices(interaction.sessionId).then(result => { if (!disposed) setChoices(result); }, reason => {
       if (!disposed) setError(reason instanceof Error ? reason.message : String(reason));
     });
     return () => { disposed = true; };
   }, [services, interaction.sessionId, needsModels, choiceRevision]);
   const disabled = !inbox.ready || inbox.isAnswering(item);
   const base = { id: interaction.interactionId, requestId: interaction.interactionId, turnId: interaction.turnId, ts: 0 };
-  if (request.kind === 'question' && questionEvent) return <UserQuestionPrompt
-    request={questionEvent}
-    stopPending={disabled}
-    onRespond={(response) => inbox.respond(item, { kind: 'question', answers: response.answers })}
-  />;
-  if (request.kind === 'form') return <>
+  async function respond(answer: InteractionAnswer) {
+    setError(undefined);
+    try { await inbox.respond(item, answer); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); throw reason; }
+  }
+  return <section className="workHubTaskPermission" aria-busy={disabled} data-maka-assistant-exclude>
     {error && <p role="alert">{error}</p>}
-    {needsModels && !choices && error && <Button variant="ghost" label={copy.retry} onClick={() => setChoiceRevision((value) => value + 1)} />}
-    {(!needsModels || choices) && <FormInteractionPrompt
-      request={{ ...base, type: 'form_request', toolUseId: request.toolUseId, message: request.message, requester: request.requester, fields: request.fields }}
-      modelChoices={choices}
-      stopPending={disabled}
-      onRespond={(response) => {
-        const { requestId: _requestId, ...answer } = response;
-        return inbox.respond(item, { kind: 'form', ...answer });
-      }}
-    />}
-  </>;
-  // Only explicit sandbox/client requests may receive supplemental task authority.
-  // Ordinary tool decisions keep their existing reviewer authority.
-  return <div className="workHubTaskPermission">
-    <p>{request.kind === 'permission' ? copy.taskOriginalAuthority : copy.taskGrantScope}</p>
-    <pre>{JSON.stringify(request, null, 2)}</pre>
-    {error && <p role="alert">{error}</p>}
-    {(request.kind === 'sandbox_boundary' || request.kind === 'client_capability') &&
-      <Button label={copy.taskAllow} isDisabled={disabled} onClick={async () => {
-        setError(undefined);
-        try {await inbox.respond(item, {kind: request.kind, decision: 'allow'}, 'task');}
-        catch (reason) {setError(reason instanceof Error ? reason.message : String(reason));}
-      }} />}
-    {(request.kind === 'sandbox_boundary' || request.kind === 'client_capability') &&
-      <Button variant="ghost" label={copy.taskDeny} isDisabled={disabled} onClick={async () => {
-        setError(undefined);
-        try { await inbox.respond(item, { kind: request.kind, decision: 'deny' }); }
-        catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-      }} />}
-  </div>;
+    <fieldset disabled={disabled} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+      {request.kind === 'question' && questionEvent && <UserQuestionPrompt request={questionEvent} stopPending={disabled}
+        onRespond={response => respond({ kind: 'question', answers: response.answers })} />}
+      {request.kind === 'form' && <>
+        {needsModels && !choices && error && <Button variant="ghost" label={copy.retry} onClick={() => setChoiceRevision(value => value + 1)} />}
+        {(!needsModels || choices) && <FormInteractionPrompt
+          request={{ ...base, type: 'form_request', toolUseId: request.toolUseId, message: request.message, requester: request.requester, fields: request.fields }}
+          modelChoices={choices} stopPending={disabled}
+          onRespond={response => { const { requestId: _requestId, ...answer } = response; return respond({ kind: 'form', ...answer }); }} />}
+      </>}
+      {request.kind === 'permission' && <>
+        <h3>{request.prompt.toolName}</h3>
+        <pre>{JSON.stringify(request.prompt.review, null, 2)}</pre>
+        {request.prompt.kind !== 'tool_permission' && <pre>{JSON.stringify(request.prompt.risk, null, 2)}</pre>}
+        <Button label={copy.taskAllowOnce} isDisabled={disabled} onClick={() => { void respond({ kind: 'permission', decision: 'allow', rememberForTurn: false }).catch(() => {}); }} />
+        {request.prompt.kind === 'tool_permission' && request.prompt.rememberForTurnAllowed &&
+          <Button label={copy.taskAllowTurn} isDisabled={disabled} onClick={() => { void respond({ kind: 'permission', decision: 'allow', rememberForTurn: true }).catch(() => {}); }} />}
+        <Button variant="ghost" label={copy.taskDeny} isDisabled={disabled} onClick={() => { void respond({ kind: 'permission', decision: 'deny', rememberForTurn: false }).catch(() => {}); }} />
+      </>}
+      {request.kind === 'sandbox_boundary' && <SandboxBoundaryPrompt request={{ ...base, type: 'sandbox_boundary_request', toolUseId: interaction.interactionId, expansion: request.expansion, justification: request.justification }}
+        onRespond={response => respond({ kind: 'sandbox_boundary', decision: response.decision })} />}
+      {request.kind === 'client_capability' && <ClientCapabilityPrompt request={{ ...base, type: 'client_capability_request', toolUseId: request.toolUseId, ...request.target }}
+        onRespond={response => respond({ kind: 'client_capability', decision: response.decision })} />}
+    </fieldset>
+  </section>;
 }

@@ -102,6 +102,7 @@ export function createDesktopWorkHubServices(
     listActiveInteractions: (sessionId) => bridge.sessions.listActiveInteractions(sessionId),
     queryTaskInteractions: (sessionId) => bridge.workHub.queryInteractions(sessionId),
     queryTasks: (sessionId) => bridge.workHub.queryTasks(sessionId),
+    findTasks: (sessionId, input) => bridge.workHub.findTasks(sessionId, input),
     readTask: (sessionId, input) => bridge.workHub.readTask(sessionId, input),
     taskHistory: (sessionId, input) => bridge.workHub.taskHistory(sessionId, input),
     taskExecutions: (sessionId, input) => bridge.workHub.taskExecutions(sessionId, input),

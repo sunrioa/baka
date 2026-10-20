@@ -20,10 +20,15 @@ import type { UiCatalog } from '@maka/core/ui-locale';
 import type { WorkHubTaskStatus } from '@maka/runtime-host/protocol';
 export const workHubTaskCopy = {
   "en": {
-    "title": "Recent tasks",
+    "title": "Tasks",
+    "search": "Search tasks",
+    "noMatches": "No matching tasks.",
+    "loadMore": "Load more tasks",
+    "searchRelaxed": "Showing tasks matching any search term.",
+    "searchUnmatched": "No match. Showing recent tasks.",
     "close": "Close task sidebar",
     "progress": "In progress",
-    "delivery": "Recent deliveries",
+    "delivery": "Recently ended",
     "hint": "Execution ending is not verified goal or artifact completion.",
     "empty": "No delegated tasks yet.",
     "loading": "Loading task facts…",
@@ -48,23 +53,28 @@ export const workHubTaskCopy = {
     "sent": "Continuation admitted to the original task's FIFO.",
     "status": {
       "queued": "Queued",
-      "waiting_resource": "Waiting for resources",
+      "waiting_resource": "Queued",
       "running": "Running",
-      "waiting_for_dependency": "Waiting for evidence",
+      "waiting_for_dependency": "Needs your input",
       "waiting_for_user": "Needs your input",
-      "pending_acceptance": "Execution ended · Pending acceptance",
-      "failed": "Failed",
-      "cancelled": "Cancelled",
-      "stopping": "Stop requested · Awaiting confirmation",
-      "stopped": "Stopped",
-      "unavailable": "Execution unavailable"
+      "pending_acceptance": "Ended",
+      "failed": "Failed / stopped",
+      "cancelled": "Failed / stopped",
+      "stopping": "Running",
+      "stopped": "Failed / stopped",
+      "unavailable": "Failed / stopped"
     }
   },
   "zh-CN": {
-    "title": "近期任务",
+    "title": "任务列表",
+    "search": "搜索任务",
+    "noMatches": "没有匹配的任务。",
+    "loadMore": "加载更多任务",
+    "searchRelaxed": "正在显示匹配任一搜索词的任务。",
+    "searchUnmatched": "未找到匹配，显示近期任务。",
     "close": "收起任务侧栏",
     "progress": "执行进度",
-    "delivery": "最新交付",
+    "delivery": "最近结束",
     "hint": "执行结束不代表目标或产物已验证完成。",
     "empty": "尚无已派发任务。",
     "loading": "正在读取任务事实…",
@@ -89,23 +99,28 @@ export const workHubTaskCopy = {
     "sent": "续办已进入原任务会话的 FIFO 队列。",
     "status": {
       "queued": "排队中",
-      "waiting_resource": "等待资源",
+      "waiting_resource": "排队中",
       "running": "执行中",
-      "waiting_for_dependency": "等待证据",
+      "waiting_for_dependency": "待你处理",
       "waiting_for_user": "待你处理",
-      "pending_acceptance": "执行结束 · 待验收",
-      "failed": "失败",
-      "cancelled": "已取消",
-      "stopping": "停止处理中 · 等待确认",
-      "stopped": "已停止",
-      "unavailable": "执行信息不可用"
+      "pending_acceptance": "已结束",
+      "failed": "失败 / 已停止",
+      "cancelled": "失败 / 已停止",
+      "stopping": "执行中",
+      "stopped": "失败 / 已停止",
+      "unavailable": "失败 / 已停止"
     }
   },
   "zh-TW": {
-    "title": "近期任務",
+    "title": "任務列表",
+    "search": "搜尋任務",
+    "noMatches": "沒有相符的任務。",
+    "loadMore": "載入更多任務",
+    "searchRelaxed": "正在顯示符合任一搜尋詞的任務。",
+    "searchUnmatched": "未找到相符項目，顯示近期任務。",
     "close": "收起任務側欄",
     "progress": "執行進度",
-    "delivery": "最新交付",
+    "delivery": "最近結束",
     "hint": "執行結束不代表目標或產物已驗證完成。",
     "empty": "尚無已派發任務。",
     "loading": "正在讀取任務事實…",
@@ -130,16 +145,16 @@ export const workHubTaskCopy = {
     "sent": "續辦已進入原任務對話的 FIFO 佇列。",
     "status": {
       "queued": "排隊中",
-      "waiting_resource": "等待資源",
+      "waiting_resource": "排隊中",
       "running": "執行中",
-      "waiting_for_dependency": "等待證據",
+      "waiting_for_dependency": "待你處理",
       "waiting_for_user": "待你處理",
-      "pending_acceptance": "執行結束 · 待驗收",
-      "failed": "失敗",
-      "cancelled": "已取消",
-      "stopping": "停止處理中 · 等待確認",
-      "stopped": "已停止",
-      "unavailable": "執行資訊不可用"
+      "pending_acceptance": "已結束",
+      "failed": "失敗 / 已停止",
+      "cancelled": "失敗 / 已停止",
+      "stopping": "執行中",
+      "stopped": "失敗 / 已停止",
+      "unavailable": "失敗 / 已停止"
     }
   }
-} satisfies UiCatalog<{title: string; close: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;
+} satisfies UiCatalog<{title: string; search: string; noMatches: string; loadMore: string; searchRelaxed: string; searchUnmatched: string; close: string; progress: string; delivery: string; hint: string; empty: string; loading: string; unavailable: string; stale: string; refresh: string; details: string; open: string; continue: string; continuation: string; submit: string; retry: string; source: string; excerpt: string; unverified: string; truncated: string; deliveryTruncated: string; concurrency: string; workspace: string; dependency: string; error: string; sent: string; status: Record<WorkHubTaskStatus, string>}>;

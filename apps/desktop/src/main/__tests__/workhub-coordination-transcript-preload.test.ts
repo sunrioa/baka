@@ -68,6 +68,11 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
           }], truncated: false };
           if (channel === 'workhub:answerInteraction') return { sessionId: 'original-task', interactionId: 'question', turnId: 'turn', runId: 'run', status: 'answered' };
           if (channel === 'workhub:queryTasks') return { tasks: [{ actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' }], truncated: false };
+          if (channel === 'workhub:findTasks') {
+            assert.equal(scope.hostId, 'host-b');
+            assert.deepEqual(JSON.parse(JSON.stringify(mode)), { query: '登录 限流', cursor: 'host-cursor' });
+            return { items: [{ kind: 'task', id: 'older-than-recent-task', title: '登录限流', state: 'ended', lastActivityAt: 1, location: null, available: true, summary: 'Saved task title', segments: 2 }], match: 'all', nextCursor: 'next-page' };
+          }
           if (channel === 'workhub:readTask' && typeof mode === 'object' && 'workId' in mode) {
             assert.deepEqual(JSON.parse(JSON.stringify(mode)), { workId: 'older-than-recent-task' });
             assert.equal(scope.hostId, 'host-b');
@@ -108,6 +113,10 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   assert.equal(answered.sessionId, session('host-b', 'original-task'));
   const taskPage = await bridge.workHub.queryTasks(session('host-b'));
   assert.equal(taskPage.tasks[0]!.targetSessionId, session('host-b', 'original-task'));
+  const found = await bridge.workHub.findTasks(session('host-b'), { query: '登录 限流', cursor: 'host-cursor' });
+  assert.equal(found.items[0]!.title, '登录限流');
+  assert.equal(found.items[0]!.id, 'older-than-recent-task');
+  assert.equal(found.nextCursor, 'next-page');
   const taskRef = { actionId: 'task-action', delegationId: 'task-delegation' };
   const taskDetail = await bridge.workHub.readTask(session('host-b'), taskRef);
   assert.equal(taskDetail.task.targetSessionId, session('host-b', 'original-task'));
@@ -131,6 +140,8 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   await assert.rejects(bridge.workHub.getExecutionConcurrency(session('unknown-host')));
   await assert.rejects(bridge.workHub.queryInteractions(session('host-b', 'ordinary-session')));
   await assert.rejects(bridge.workHub.queryTasks(session('host-b', 'ordinary-session')));
+  await assert.rejects(bridge.workHub.findTasks(session('host-b', 'ordinary-session'), { query: '登录' }));
+  await assert.rejects(bridge.workHub.findTasks(session('unknown-host'), {}));
   await assert.rejects(bridge.workHub.readTask(session('unknown-host'), taskRef));
   await assert.rejects(bridge.workHub.continueTask(session('host-b', 'ordinary-session'), { ...taskRef, turnId: 'new-turn', text: 'Continue' }));
   await assert.rejects(bridge.workHub.sendTaskInput(session('host-b', 'ordinary-session'), taskInput));

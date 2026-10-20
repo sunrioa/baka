@@ -53,6 +53,7 @@ type RuntimeHostWorkHubClient = Pick<
   | 'getWorkHubSession'
   | 'queryWorkHubInteractions'
   | 'queryWorkHubTasks'
+  | 'findWorkHubTasks'
   | 'readWorkHubTaskHistory'
   | 'readWorkHubTaskExecutions'
   | 'sendWorkHubTaskInput'
@@ -147,6 +148,7 @@ export function registerRuntimeHostWorkHubIpc(
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
   handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
   handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
+  handleReconnectableRead(ipcMain, 'workhub:findTasks', (_event, input) => client.findWorkHubTasks(input));
   handleReconnectableRead(ipcMain, 'workhub:taskHistory', (_event, input) => client.readWorkHubTaskHistory(input));
   handleReconnectableRead(ipcMain, 'workhub:taskExecutions', (_event, input) => client.readWorkHubTaskExecutions(input));
   handleReconnectableRead(ipcMain, 'workhub:readTaskInput', (_event, input) => client.readWorkHubTaskInput(input));
@@ -176,13 +178,13 @@ export function registerRuntimeHostWorkHubIpc(
   // refreshes canonical pending requests before the user can try again.
   ipcMain.handle('workhub:answerInteraction', (_event, input) => client.answerWorkHubInteraction(input));
   ipcMain.handle('workhub:revokeTaskGrant', (_event, input) => client.revokeWorkHubTaskGrant(input));
-  ipcMain.handle('workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client.hostId));
-  ipcMain.handle('workhub:setNewWorkDefaults', (_event, value: unknown) => {
+  handleReconnectableRead(ipcMain, 'workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client));
+  ipcMain.handle('workhub:setNewWorkDefaults', async (_event, value: unknown) => {
     if (!isWorkHubCreateDefaults(value) || value.permissionMode !== undefined) {
       throw new Error('Invalid WorkHub new-work defaults');
     }
-    writeWorkHubNewWorkDefaults(
-      client.hostId,
+    await writeWorkHubNewWorkDefaults(
+      client,
       value as Omit<WorkHubCreateDefaults, 'permissionMode'>,
     );
   });

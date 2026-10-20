@@ -20,11 +20,12 @@
 
 import { desktopSessionKey, parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
 import { workspaceNameFromCwd } from './workspace-name.js';
+import { workHubTaskTitle } from './task-presentation.js';
 
 import type { StoredMessage } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 
-export type WorkHubLinkedTarget = Pick<WorkHubTaskAssignment, 'workId' | 'targetSessionId' | 'targetSessionName' | 'createdAt'>;
+export type WorkHubLinkedTarget = Pick<WorkHubTaskAssignment, 'workId' | 'targetSessionId' | 'targetSessionName' | 'createdAt'> & { readonly title?: string };
 
 export interface WorkHubLinkedWork {
   readonly workId?: string;
@@ -99,24 +100,24 @@ export function workHubLinkedWork(
   // Model receipts contain task IDs, not Session IDs. Resolve their display
   // targets only through this Host's task projection or exact task lookup.
   // Control-plane session_messages are not part of the RuntimeEvent transcript.
-  const targets = new Map<string, { targetSessionId: string; targetSessionName: string; at: number }>();
-  const remember = (workId: string, targetSessionId: string, targetSessionName: string | undefined, at: number) => {
+  const targets = new Map<string, { targetSessionId: string; targetSessionName: string; title?: string; at: number }>();
+  const remember = (workId: string, targetSessionId: string, targetSessionName: string | undefined, at: number, title?: string) => {
     if (!coordinationSessionKey) return;
     try {
       if (parseDesktopSessionKey(targetSessionId).hostId !== parseDesktopSessionKey(coordinationSessionKey).hostId) return;
     } catch { return; }
     const previous = targets.get(workId);
-    if ((previous?.at ?? -1) <= at) targets.set(workId, { targetSessionId,
-      targetSessionName: sessionById.get(targetSessionId)?.name ?? targetSessionName ??
+    if ((previous?.at ?? -1) <= at) targets.set(workId, { targetSessionId, title: title ?? previous?.title,
+      targetSessionName: title ?? previous?.title ?? sessionById.get(targetSessionId)?.name ?? targetSessionName ??
         (previous?.targetSessionId === targetSessionId ? previous.targetSessionName : undefined) ?? fallbackName, at });
   };
   for (const message of messages) {
     if (message.type !== 'workhub_coordination') continue;
     if (message.kind === 'delegation_assigned')
-      remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts);
+      remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts, message.taskTitle ?? message.create?.title);
   }
-  for (const item of taskTargets) remember(item.workId, item.targetSessionId, item.targetSessionName, item.createdAt);
-  for (const task of tasks) remember(task.workId ?? task.actionId, task.targetSessionId, task.targetSessionName, task.createdAt);
+  for (const item of taskTargets) remember(item.workId, item.targetSessionId, item.targetSessionName, item.createdAt, item.title);
+  for (const task of tasks) remember(task.workId ?? task.actionId, task.targetSessionId, task.targetSessionName, task.createdAt, workHubTaskTitle(task));
   const results = new Map(messages.flatMap((message) => message.type === 'tool_result' ? [[callKey(message.turnId, message.toolUseId), message] as const] : []));
   return messages.flatMap((message): WorkHubLinkedWork[] => {
     if (message.type === 'tool_result' && !message.isError) {
@@ -155,7 +156,7 @@ export function workHubLinkedWork(
       id: message.id,
       coordinationTurnId: message.coordinationTurnId,
       targetSessionId: message.targetSessionId,
-      targetSessionName: sessionById.get(message.targetSessionId)?.name ?? message.targetSessionName,
+      targetSessionName: targets.get(message.work?.id ?? message.actionId)?.targetSessionName ?? message.taskTitle ?? sessionById.get(message.targetSessionId)?.name ?? message.targetSessionName,
       workspaceName: workspaceName(message.targetSessionId),
     }];
     if (message.type !== 'tool_result' || message.isError || !taskCalls.has(callKey(message.turnId, message.toolUseId))) return [];

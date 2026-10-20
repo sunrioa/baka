@@ -61,7 +61,14 @@ export function deriveSessionNavigationGroups(
   }
 
   const ungroupedByHost = new Map<string, SessionNavigationSession[]>();
+  const workHubByHost = new Map<string, SessionNavigationSession[]>();
   for (const session of sessions) {
+    if ('workHubCreated' in session && session.workHubCreated === true) {
+      const bucket = workHubByHost.get(session.runtimeHostId) ?? [];
+      bucket.push(session);
+      workHubByHost.set(session.runtimeHostId, bucket);
+      continue;
+    }
     if (!session.projectId) {
       const bucket = ungroupedByHost.get(session.runtimeHostId) ?? [];
       bucket.push(session);
@@ -118,6 +125,9 @@ export function deriveSessionNavigationGroups(
       ),
       sessions: ungrouped,
     });
+  }
+  for (const [hostId, workHub] of workHubByHost) {
+    groups.push({ id: `workhub:${hostId}`, label: scopedProjectLabel('WorkHub', workHub[0]!.profileName), sessions: workHub, defaultIsCollapsed: true });
   }
   return groups;
 }

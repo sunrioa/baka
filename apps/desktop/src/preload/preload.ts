@@ -2193,6 +2193,10 @@ const makaBridge = {
     },
   },
   workHub: {
+    async findTasks(coordinationSessionId: string, input: OperationInput<'workhub.tasks.find'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:findTasks', scope, input) as Promise<OperationOutput<'workhub.tasks.find'>>;
+    },
     async queryTasks(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       const result = await invokeWhenReady('workhub:queryTasks', scope) as OperationOutput<'workhub.tasks.query'>;
@@ -2282,11 +2286,11 @@ const makaBridge = {
     },
     async getNewWorkDefaults(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      return ipcRenderer.invoke('workhub:getNewWorkDefaults', scope) as Promise<Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>>;
+      return invokeWhenReady('workhub:getNewWorkDefaults', scope) as Promise<Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>>;
     },
     async setNewWorkDefaults(coordinationSessionId: string, defaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      await ipcRenderer.invoke('workhub:setNewWorkDefaults', scope, defaults);
+      await invokeWhenReady('workhub:setNewWorkDefaults', scope, defaults);
     },
     async getNewWorkPermissionMode(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
