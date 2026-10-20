@@ -3444,12 +3444,14 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.ok(a);
         await withTimeout(sourceCallEntered.promise, 10000, 'source model call entered');
         await wait(async () => requests.filter((request) => request.coordinator).length === 1);
+        // Result reconciliation may briefly hold its own hosted-execution lease.
+        await wait(async () => hostedRoots() === 2);
         assert.equal(hostedRoots(), 2, 'the held coordinator and source each own a live root');
         const beforeBlocked = (await stores.sessionStore.listHeaders()).map(({ id }) => id).sort();
         const beforeBlockedRequests = requests.length;
-        const blocked = await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh');
+        const blocked = await continueTask('busy-fresh-a', 'FRESH_CONTINUE', 'fresh');
         assert.ok(!blocked.ok && blocked.error.code === 'session_busy', JSON.stringify(blocked));
-        assert.equal(await stores.sessionStore.readWorkHubAssignment('fresh-a'), undefined);
+        assert.equal(await stores.sessionStore.readWorkHubAssignment('busy-fresh-a'), undefined);
         assert.deepEqual(
           (await stores.sessionStore.listHeaders()).map(({ id }) => id).sort(),
           beforeBlocked,
