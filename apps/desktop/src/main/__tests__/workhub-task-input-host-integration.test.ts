@@ -241,6 +241,10 @@ for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task in
     assert.ok(fresh && 'taskId' in fresh && 'container' in fresh);
     assert.equal(fresh.taskId, queuedA.workId); assert.equal(fresh.container, 'fresh');
     const freshSource = (await client.readWorkHubTaskHistory({ workId: queuedA.workId })).assignments[0]!;
+    const latestDetail = await client.readWorkHubTask({ workId: queuedA.workId });
+    assert.equal(latestDetail.task.workId, queuedA.workId);
+    assert.equal(latestDetail.task.actionId, freshSource.actionId, 'logical task lookup follows the fresh assignment, not the original segment');
+    assert.equal(latestDetail.task.targetSessionId, freshSource.targetSessionId);
     await waitFor(() => requests.some(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK')), { timeoutMs: 10000, pollMs: 10 });
     assert.equal(requests.find(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK'))!.model, visibleFallback.model, 'the actual HTTP request uses the displayed fallback, not the different global model');
     const freshHeader = await client.getSession(freshSource.targetSessionId); assert.ok(freshHeader);

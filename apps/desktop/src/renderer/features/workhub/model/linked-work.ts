@@ -24,6 +24,8 @@ import { workspaceNameFromCwd } from './workspace-name.js';
 import type { StoredMessage } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 
+export type WorkHubLinkedTarget = Pick<WorkHubTaskAssignment, 'workId' | 'targetSessionId' | 'targetSessionName' | 'createdAt'>;
+
 export interface WorkHubLinkedWork {
   readonly workId?: string;
   readonly id: string;
@@ -79,7 +81,7 @@ export function workHubLinkedWork(
   fallbackName: string,
   coordinationSessionKey?: string,
   tasks: readonly WorkHubTask[] = [],
-  assignments: readonly WorkHubTaskAssignment[] = [],
+  taskTargets: readonly WorkHubLinkedTarget[] = [],
 ): WorkHubLinkedWork[] {
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const workspaceName = (id: string) => workspaceNameFromCwd(sessionById.get(id)?.cwd);
@@ -95,7 +97,7 @@ export function workHubLinkedWork(
     group.push(item); nativeReceipts.set(key, group);
   }
   // Model receipts contain task IDs, not Session IDs. Resolve their display
-  // targets only through this Host's task projection or bounded task history.
+  // targets only through this Host's task projection or exact task lookup.
   // Control-plane session_messages are not part of the RuntimeEvent transcript.
   const targets = new Map<string, { targetSessionId: string; targetSessionName: string; at: number }>();
   const remember = (workId: string, targetSessionId: string, targetSessionName: string | undefined, at: number) => {
@@ -113,7 +115,7 @@ export function workHubLinkedWork(
     if (message.kind === 'delegation_assigned')
       remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts);
   }
-  for (const item of assignments) remember(item.workId, item.targetSessionId, item.targetSessionName, item.createdAt);
+  for (const item of taskTargets) remember(item.workId, item.targetSessionId, item.targetSessionName, item.createdAt);
   for (const task of tasks) remember(task.workId ?? task.actionId, task.targetSessionId, task.targetSessionName, task.createdAt);
   const results = new Map(messages.flatMap((message) => message.type === 'tool_result' ? [[callKey(message.turnId, message.toolUseId), message] as const] : []));
   return messages.flatMap((message): WorkHubLinkedWork[] => {

@@ -194,7 +194,7 @@ test('flat stop links keep each requested task and do not present stopping as a 
   assert.equal(document.querySelectorAll('[data-work-session-id]').length > 0, true, 'the task remains navigable');
 });
 
-test('flat continuation links load bounded task history when the actual transcript has no control-plane facts', async () => {
+test('flat continuation links use exact task lookup when the actual transcript has no control-plane facts', async () => {
   const target = desktopSession('host-a', 'old-segment');
   const coordination = desktopSession('host-a', 'maka_workhub_coordination');
   const call: ToolCallMessage = { type: 'tool_call', id: 'continue-old', turnId: 'current-turn', ts: 3,
@@ -206,8 +206,8 @@ test('flat continuation links load bounded task history when the actual transcri
     const result: ToolResultMessage = { type: 'tool_result', id: 'continued', turnId: call.turnId, ts: 5,
       toolUseId: call.id, isError: false, content: { kind: 'json', value: { taskId: 'old-task', container: 'reuse', mode, delivery: 'queued' } } };
     const reads: unknown[] = [];
-    const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner, input) => {
-      reads.push({ owner, input }); return { workId: input.workId, assignments: [assignment], nextCursor: 'older-page-not-needed' };
+    const services: Pick<WorkHubServices, 'readTask'> = { readTask: async (owner, input) => {
+      assert.ok('workId' in input); reads.push({ owner, input }); return { task: taskFromAssignment(assignment, 'pending_acceptance') };
     } };
     function Probe() {
       const links = useWorkHubLinkedWork(services, coordination, [call, result], [], 'Work', [], 1);
@@ -215,8 +215,8 @@ test('flat continuation links load bounded task history when the actual transcri
     }
     const { document } = parseHTML(await renderTranscriptMarkup(createElement(Probe)));
     assert.equal(document.querySelector('output span')?.getAttribute('data-target'), target, mode);
-    assert.equal(document.querySelector('output span')?.textContent, 'Original task', 'canonical history works without a loaded Session catalog');
-    assert.deepEqual(reads, [{ owner: coordination, input: { workId: 'old-task' } }], 'one bounded history page, not all tasks or all old transcript pages');
+    assert.equal(document.querySelector('output span')?.textContent, 'Original task', 'canonical lookup works without a loaded Session catalog');
+    assert.deepEqual(reads, [{ owner: coordination, input: { workId: 'old-task' } }], 'one exact task read, not the recent overview or global history pages');
     for (const changed of [
       { ...assignment, targetSessionId: desktopSession('other-host', 'old-segment') },
       { ...assignment, targetSessionId: 'unscoped-model-session' },
@@ -227,7 +227,7 @@ test('flat continuation links load bounded task history when the actual transcri
   }
 });
 
-test('flat stop links recover every requested old task through task history without transcript stop claims', async () => {
+test('flat stop links recover every requested old task by exact identity without transcript stop claims', async () => {
   const coordination = desktopSession('host-a', 'maka_workhub_coordination');
   const call: ToolCallMessage = { type: 'tool_call', id: 'stop-old', turnId: 'stop-turn', ts: 3,
     toolName: 'mcp__desktop_workhub__stop', args: { taskIds: ['old-a', 'old-b'] } };
@@ -237,9 +237,10 @@ test('flat stop links recover every requested old task through task history with
   const result: ToolResultMessage = { type: 'tool_result', id: 'stopped', turnId: call.turnId, ts: 5, toolUseId: call.id, isError: false,
     content: { kind: 'json', value: { kind: 'result', targets: ['old-a', 'old-b', 'not-requested'].map(taskId => ({ taskId, outcome: 'already_terminal' })) } } };
   const reads: string[] = [];
-  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner, input) => {
-    assert.equal(owner, coordination); reads.push(input.workId);
-    return { workId: input.workId, assignments: assignments.filter(item => item.workId === input.workId), nextCursor: null };
+  const services: Pick<WorkHubServices, 'readTask'> = { readTask: async (owner, input) => {
+    assert.ok('workId' in input); assert.equal(owner, coordination); reads.push(input.workId);
+    const assignment = assignments.find(item => item.workId === input.workId); assert.ok(assignment);
+    return { task: taskFromAssignment(assignment, 'stopped') };
   } };
   function Probe() {
     const links = useWorkHubLinkedWork(services, coordination, [call, result], [], 'Work', [], 1);
@@ -253,14 +254,14 @@ test('flat stop links recover every requested old task through task history with
   assert.deepEqual(workHubLinkedWork([call, { ...result, isError: true }], [], 'Work', coordination, [], assignments), []);
 });
 
-test('late task-history reads cannot publish another Host target after an owner switch', async () => {
+test('late exact-task reads cannot publish another Host target after an owner switch', async () => {
   const owners = ['host-a', 'host-b'].map(host => desktopSession(host, 'maka_workhub_coordination'));
   const assignment = (host: string): WorkHubTaskAssignment => ({ workId: 'old-task', generationId: 'generation', actionId: 'action', delegationId: 'delegation',
     targetSessionId: desktopSession(host, 'task'), targetSessionName: host, targetMessageId: 'message', text: 'Requirement', createdAt: 1, state: 'unavailable', superseded: false });
-  const first = deferred<Awaited<ReturnType<WorkHubServices['taskHistory']>>>();
+  const first = deferred<Awaited<ReturnType<WorkHubServices['readTask']>>>();
   const reads: string[] = [], displayed: Array<{ owner: string; targets: string[] }> = [];
-  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner) => {
-    reads.push(owner); return owner === owners[0] ? first.promise : { workId: 'old-task', assignments: [assignment('host-b')], nextCursor: null };
+  const services: Pick<WorkHubServices, 'readTask'> = { readTask: async (owner) => {
+    reads.push(owner); return owner === owners[0] ? first.promise : { task: taskFromAssignment(assignment('host-b'), 'stopped') };
   } };
   const call: ToolCallMessage = { type: 'tool_call', id: 'continue', turnId: 'turn', ts: 1, toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue' } };
   const result: ToolResultMessage = { type: 'tool_result', id: 'receipt', turnId: call.turnId, ts: 2, toolUseId: call.id, isError: false,
@@ -271,7 +272,7 @@ test('late task-history reads cannot publish another Host target after an owner 
     displayed.push({ owner, targets: links.map(link => link.targetSessionId) });
     useEffect(() => {
       setOwner(owners[1]!);
-      first.resolve({ workId: 'old-task', assignments: [assignment('host-a')], nextCursor: null });
+      first.resolve({ task: taskFromAssignment(assignment('host-a'), 'stopped') });
     }, []);
     return createElement('output', null, links.map(link => createElement('span', { key: link.id, 'data-target': link.targetSessionId }, link.targetSessionName)));
   }
@@ -281,12 +282,12 @@ test('late task-history reads cannot publish another Host target after an owner 
   assert.ok(displayed.every(value => value.owner !== owners[1] || value.targets.every(target => target === desktopSession('host-b', 'task'))));
 });
 
-test('invalid or failed native receipts never trigger task-history lookup', async () => {
+test('invalid or failed native receipts never trigger exact-task lookup', async () => {
   const call: ToolCallMessage = { type: 'tool_call', id: 'continue', turnId: 'turn', ts: 1, toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue' } };
   const result: ToolResultMessage = { type: 'tool_result', id: 'receipt', turnId: call.turnId, ts: 2, toolUseId: call.id, isError: false,
     content: { kind: 'json', value: { taskId: 'old-task', mode: 'steering' } } };
   let reads = 0;
-  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async () => { reads++; return assert.fail('No accepted exact task receipt exists'); } };
+  const services: Pick<WorkHubServices, 'readTask'> = { readTask: async () => { reads++; return assert.fail('No accepted exact task receipt exists'); } };
   for (const [input, output] of [
     [call, { ...result, isError: true }], [call, { ...result, turnId: 'other-turn' }],
     [{ ...call, args: { taskId: 'unrelated' } }, result], [{ ...call, toolName: 'Read' }, result],
@@ -302,6 +303,10 @@ test('invalid or failed native receipts never trigger task-history lookup', asyn
 });
 
 function desktopSession(hostId: string, sessionId: string) { return JSON.stringify([hostId, sessionId]); }
+function taskFromAssignment(item: WorkHubTaskAssignment, status: WorkHubTask['status']): WorkHubTask {
+  return { workId: item.workId, actionId: item.actionId, delegationId: item.delegationId, targetSessionId: item.targetSessionId,
+    targetSessionName: item.targetSessionName, targetMessageId: item.targetMessageId, text: item.text, createdAt: item.createdAt, status };
+}
 
 test('a shared coordination turn divides its clickable identity rail equally between Works', async () => {
   const markup = await renderTranscriptMarkup(createElement(LocaleProvider, { locale: 'en', children: null },

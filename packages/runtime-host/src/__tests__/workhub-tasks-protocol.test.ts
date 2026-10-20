@@ -77,6 +77,27 @@ const task = {
   status: 'pending_acceptance',
   execution: { turnId: 'turn', runId: 'run', sharedTurn: false },
 };
+test('task-id detail reads correlate the exact logical task without model-selected execution fields', () => {
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
+  const input = spec.decodeInput({ workId: 'work' });
+  assert.deepEqual(input, { workId: 'work' });
+  const detail = spec.decodeOutput({ task: { ...task, workId: 'work' } });
+  spec.assertOutputForInput!(input, detail);
+  assert.throws(() =>
+    spec.assertOutputForInput!(input, { task: { ...detail.task, workId: 'different' } }),
+  );
+  const legacyInput = spec.decodeInput({ workId: 'action' });
+  spec.assertOutputForInput!(legacyInput, spec.decodeOutput({ task }));
+  for (const extra of [
+    { actionId: 'action', delegationId: 'delegation' },
+    { targetSessionId: 'session' },
+    { generationId: 'generation' },
+    { confirmed: true },
+    { actor: 'user' },
+  ])
+    assert.throws(() => spec.decodeInput({ workId: 'work', ...extra }));
+  assert.throws(() => spec.decodeInput({ workId: '' }));
+});
 test('task history and execution pages enforce bounded, exact work/assignment ownership', () => {
   const history = HOST_OPERATION_SPECS['workhub.tasks.history'];
   const assignment = {

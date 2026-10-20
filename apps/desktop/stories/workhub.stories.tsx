@@ -210,7 +210,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       return receipt;
     },
     readTask: async (_id, ref) => {
-      const task = tasks.find(task => task.actionId === ref.actionId && task.delegationId === ref.delegationId);
+      const task = tasks.find(task => 'workId' in ref
+        ? (task.workId ?? task.actionId) === ref.workId
+        : task.actionId === ref.actionId && task.delegationId === ref.delegationId);
       if (!task) throw new Error('Original task unavailable');
       return { task, ...(task.status === 'pending_acceptance' ? { delivery: { text: '报告路径：/projects/maka/report.md\n助手声称测试通过；此处没有独立验证证据。', truncated: false, terminalEventId: 'done-terminal' } } : {}) };
     },
