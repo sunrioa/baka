@@ -65,10 +65,64 @@ export interface WorkHubTaskBrief {
   limits: string[];
 }
 
+/** Ephemeral preparation evidence only; never formatted, persisted or used as action authority. */
+export interface WorkHubTaskBriefWitness {
+  readonly taskId: string;
+  readonly throughSequence: number;
+}
+
 const workId = (a: Assignment) => a.work?.id ?? a.actionId;
 const generation = (a: Assignment) => a.work?.generationId ?? a.actionId;
 const SCAN = { maxMessages: 64, maxStoredBytes: 256 * 1024 } as const;
+const CANONICAL_PAGE_BUDGET = 32;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+
+/**
+ * Pure bounded revalidation under the caller's existing coordination admission.
+ * No admission is acquired here. False means requirements changed OR the single
+ * tail page cannot prove freshness: retry preparation with the current task.
+ * Unrelated tasks do not invalidate a covered snapshot. Store failures propagate.
+ * This is not a replacement for the final source/settings/busy/queue checks.
+ */
+export async function isWorkHubTaskBriefCurrent(
+  sessions: Pick<ExecutionSessionWriter, 'readWorkHubTaskFactsPage'>,
+  witness: WorkHubTaskBriefWitness,
+): Promise<boolean> {
+  if (!Number.isSafeInteger(witness.throughSequence) || witness.throughSequence < 0) return false;
+  const page = await sessions.readWorkHubTaskFactsPage({
+    ...SCAN,
+    beforeSequence: Number.MAX_SAFE_INTEGER,
+  });
+  if (
+    page.highWaterSequence === null ||
+    !Number.isSafeInteger(page.highWaterSequence) ||
+    page.highWaterSequence < witness.throughSequence ||
+    page.records.length > SCAN.maxMessages
+  )
+    return false;
+  if (page.highWaterSequence === witness.throughSequence) return true;
+  let previous = Number.MAX_SAFE_INTEGER;
+  for (const { sequence, message } of page.records) {
+    if (
+      !Number.isSafeInteger(sequence) ||
+      sequence < 0 ||
+      sequence >= previous ||
+      sequence > page.highWaterSequence
+    )
+      return false;
+    previous = sequence;
+    if (sequence <= witness.throughSequence) return true;
+    if (
+      message.type === 'workhub_coordination' &&
+      ((message.kind === 'delegation_assigned' && workId(message) === witness.taskId) ||
+        (message.kind === 'task_input' && message.workId === witness.taskId))
+    )
+      return false;
+  }
+  // A byte/count-limited page which never reached the old boundary leaves an
+  // unknown gap. Never infer that the omitted newer facts belong to other work.
+  return false;
+}
 
 function bounded(text: string, maxChars: number) {
   const chars = Array.from(text);
@@ -112,7 +166,8 @@ export function readWorkHubWorkerStatus(text: string): string | undefined {
  * Read projection only. The caller owns its existing admission/authorization
  * boundary; no input admission, summarizer, durable brief or provider call occurs.
  * Call before the final fresh-admission lock: history readers acquire their own
- * lanes. The fresh commit must still revalidate the prepared source/generation.
+ * lanes. The fresh commit must still revalidate source/generation/settings and
+ * check the returned ephemeral witness under its existing coordination lane.
  */
 export function createWorkHubTaskBriefReader(options: {
   sessions: Pick<
@@ -161,8 +216,9 @@ export function createWorkHubTaskBriefReader(options: {
     let before = Number.MAX_SAFE_INTEGER;
     let through: number | null | undefined;
     let foundSource = false;
+    let foundOrigin = false;
     let unknownRequirements = 0;
-    for (;;) {
+    for (let pageIndex = 0; pageIndex < CANONICAL_PAGE_BUDGET; pageIndex++) {
       abortSignal?.throwIfAborted();
       const page = await options.sessions.readWorkHubTaskFactsPage({
         ...SCAN,
@@ -186,6 +242,10 @@ export function createWorkHubTaskBriefReader(options: {
           if (assignments.length < 64) assignments.push(fact);
           else if (!brief.limits.includes('部分较早执行未扫描；文件列表不是完整改动清单。'))
             brief.limits.push('部分较早执行未扫描；文件列表不是完整改动清单。');
+        }
+        if (fact.kind === 'delegation_assigned' && fact.actionId === origin.actionId) {
+          foundOrigin = true;
+          break;
         }
         const own =
           fact.kind === 'delegation_assigned'
@@ -227,10 +287,14 @@ export function createWorkHubTaskBriefReader(options: {
           at: fact.ts,
         });
       }
-      if (!page.records.length || before === 0) break;
+      if (foundOrigin || !page.records.length || before === 0) break;
     }
-    if (!foundSource)
-      return { status: 'unavailable' as const, reason: 'Canonical task boundary is missing' };
+    if (!foundSource || !foundOrigin || through === undefined || through === null)
+      return {
+        status: 'unavailable' as const,
+        reason:
+          'Canonical task source/origin boundary is missing or beyond the bounded preparation window; retry with current task requirements',
+      };
     if (unknownRequirements)
       brief.limits.push(
         `${unknownRequirements} 条输入缺少可确认的用户原文来源或任务归属，详见历史。`,
@@ -371,7 +435,7 @@ export function createWorkHubTaskBriefReader(options: {
     const checked = await options.sessions.readWorkHubAssignment(source.actionId);
     if (!checked || checked.delegationId !== source.delegationId || workId(checked) !== taskId)
       return { status: 'unavailable' as const, reason: 'Task source changed while reading' };
-    return { status: 'ok' as const, brief };
+    return { status: 'ok' as const, brief, witness: { taskId, throughSequence: through } };
 
     async function latestTodoWriteMatches(
       sessionId: string,
