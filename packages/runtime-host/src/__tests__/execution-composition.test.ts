@@ -3945,6 +3945,18 @@ for (const readMode of ['evidence', 'native-history'] as const)
           (request) => request.model === 'new-model' && request.body.includes('FRESH_CONTINUE'),
         );
         assert.equal(freshRequests.length, 3);
+        const freshStart = JSON.parse(freshRequests[0]!.body) as {
+          messages: { role: string; content: unknown }[];
+        };
+        const freshUserText = freshStart.messages
+          .filter((message) => message.role === 'user')
+          .map((message) =>
+            typeof message.content === 'string' ? message.content : JSON.stringify(message.content),
+          )
+          .join('\n');
+        assert.match(freshUserText, /Use WorkHubRead with taskId and view=history/u);
+        assert.ok(freshUserText.includes('"taskId":"source-a"'));
+        assert.doesNotMatch(freshUserText, /Use WorkHubEvidence read/u);
         assert.ok(
           freshRequests.every(
             (request) =>
