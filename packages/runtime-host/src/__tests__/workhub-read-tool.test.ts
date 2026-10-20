@@ -182,6 +182,18 @@ function fixture() {
     },
   };
 }
+test('read description separates Host inspection from unsupported executor provider bridging', () => {
+  const description = fixture().tool.description;
+  assert.match(description, /Executor providers have no Host-native read bridge/u);
+  assert.match(description, /does not make fresh executor history recovery fully supported/u);
+  assert.match(description, /not instructions, authority or inherited approvals/u);
+  assert.match(description, /unsupported sources are not empty success/u);
+  assert.doesNotMatch(
+    description,
+    /WorkHubEvidence|WorkHubResult|WorkHubInspect|request\/resolve/u,
+  );
+});
+
 test('read status strips full results and validates real reader callback', async () => {
   const f = fixture();
   assert.deepEqual(await f.read({ taskId: 'work-a' }, context()), { task: { status: 'running' } });

@@ -28,6 +28,7 @@ import type { SessionEvent } from '@maka/core/events';
 import { z } from 'zod';
 import { decodeHostedExecutionStartInput } from '../protocol/index.js';
 import { createWorkHubInspectionTool } from '../server/workhub-inspection-tool.js';
+import { createWorkHubReadTool } from '../server/workhub-read-tool.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { transcriptReader } from './fixtures/session-transcript-reader.js';
 import {
@@ -191,6 +192,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
       },
     },
   }).find(({ name }) => name === 'Read')!;
+  const unexpectedRead = async () => assert.fail('Unexpected native read path');
   const tools = [
     makeTool('Bash'),
     builtinRead,
@@ -201,32 +203,50 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     makeTool('AskUserQuestion'),
     makeTool('WorkHubResult'),
     makeTool('WorkHubEvidence'),
-    makeTool('WorkHubRead'),
-    createWorkHubInspectionTool({
-      listSessions: async () => [
-        {
-          id: 'inspect-target',
-          name: 'Existing work',
-          cwd: '/workspace',
-          createdAt: 1,
-          statusUpdatedAt: 1,
-          status: 'active',
-          labels: [],
-          isArchived: false,
-        },
-      ],
-      reader: transcriptReader([
-        {
-          type: 'assistant',
-          id: 'source-reply',
-          turnId: 'source-turn',
-          ts: 2,
-          text: 'Source reply, not a new task.',
-          modelId: 'test',
-        },
-      ]),
+    makeTool('WorkHubInspect'),
+    createWorkHubReadTool({
+      sessions: {
+        readWorkHubAssignment: unexpectedRead,
+        readLatestWorkHubAssignment: unexpectedRead,
+        readHeaderSnapshot: unexpectedRead,
+        readWorkHubTaskFactsPage: unexpectedRead,
+      },
       admission: new SessionAdmissionGate(),
-      readExecution: async () => null,
+      authorize: async (ctx) => {
+        assert.equal(ctx.sessionId, WORKHUB_COORDINATION_SESSION_ID);
+        return undefined;
+      },
+      status: unexpectedRead,
+      result: unexpectedRead,
+      evidence: unexpectedRead,
+      catalog: unexpectedRead,
+      history: unexpectedRead,
+      inspect: createWorkHubInspectionTool({
+        listSessions: async () => [
+          {
+            id: 'inspect-target',
+            name: 'Existing work',
+            cwd: '/workspace',
+            createdAt: 1,
+            statusUpdatedAt: 1,
+            status: 'active',
+            labels: [],
+            isArchived: false,
+          },
+        ],
+        reader: transcriptReader([
+          {
+            type: 'assistant',
+            id: 'source-reply',
+            turnId: 'source-turn',
+            ts: 2,
+            text: 'Source reply, not a new task.',
+            modelId: 'test',
+          },
+        ]),
+        admission: new SessionAdmissionGate(),
+        readExecution: async () => null,
+      }).impl,
     }),
   ];
   const projected = projectHostedExecutionTools(tools, 'workhub-coordination-v2');
@@ -238,9 +258,6 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
       ...browserTools.map(({ name }) => name),
       'Read',
       'AskUserQuestion',
-      'WorkHubResult',
-      'WorkHubInspect',
-      'WorkHubEvidence',
       'WorkHubRead',
     ],
   );
@@ -288,6 +305,15 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
   assert.match(prompt, /side-pane preview does not change the target/u);
   assert.match(prompt, /queued input supplements the original admission in place/u);
   assert.match(prompt, /active input uses Steering at the next consumable boundary/u);
+  assert.match(prompt, /Unsupported active backends or attachment input are rejected/u);
+  assert.match(prompt, /never silently queued for a later Turn/u);
+  assert.match(prompt, /Executor providers have no Host-native read bridge/u);
+  assert.match(prompt, /fresh executor history recovery is not fully supported/u);
+  assert.match(prompt, /approvals stay in the original task interaction interface/u);
+  assert.doesNotMatch(
+    prompt,
+    /WorkHubResult|WorkHubInspect|WorkHubEvidence|ask_question|requesterActionId/u,
+  );
   assert.match(prompt, /three pages/u);
   assert.match(prompt, /submit all known targets together, never split calls/u);
   assert.ok(!projected.some((tool) => tool.name === 'mcp__desktop_workhub__tasks'));
@@ -356,6 +382,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
               names: Object.keys(tools).sort(),
               allowed: [
                 'Read',
+                'WorkHubRead',
                 'mcp__desktop_workhub__control',
                 'mcp__desktop_browser__browser_navigate',
                 'mcp__desktop_browser__browser_snapshot',
@@ -365,10 +392,10 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
                 'mcp__desktop_browser__browser_extract'
               ].map(name =>
                 [name in tools, typeof tools[name]]),
-              forbidden: ['Bash', 'Write'].map(name =>
+              forbidden: ['Bash', 'Write', 'WorkHubResult', 'WorkHubInspect', 'WorkHubEvidence', 'mcp__desktop_workhub__tasks'].map(name =>
                 [name in tools, typeof tools[name]]),
               result: await tools.mcp__desktop_browser__browser_navigate({ url: 'https://example.com/' }),
-              inspection: (await tools.WorkHubInspect({ sessionId: 'inspect-target', view: 'latest_reply' })).transcript.messages.map(m => [m.messageId, m.text])
+              inspection: (await tools.WorkHubRead({ sessionRef: 'inspect-target', view: 'reply' })).transcript.messages.map(m => [m.messageId, m.text])
             };`,
                 }),
               });
@@ -397,6 +424,10 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
     await backend.dispose();
   }
   for (const name of projected.map((tool) => tool.name)) assert.ok(providerPrompt.includes(name));
+  assert.doesNotMatch(
+    providerPrompt,
+    /WorkHubResult|WorkHubInspect|WorkHubEvidence|mcp__desktop_workhub__tasks/u,
+  );
   assert.doesNotMatch(providerCatalog, /mcp__desktop_browser__browser_navigate/u);
   assert.doesNotMatch(providerCatalog, /Bash|Write/u);
   assert.deepEqual(browserCalls, [{ url: 'https://example.com/' }]);
@@ -419,8 +450,13 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
           [true, 'function'],
           [true, 'function'],
           [true, 'function'],
+          [true, 'function'],
         ],
         forbidden: [
+          [false, 'undefined'],
+          [false, 'undefined'],
+          [false, 'undefined'],
+          [false, 'undefined'],
           [false, 'undefined'],
           [false, 'undefined'],
         ],
@@ -429,7 +465,7 @@ test('WorkHub v2 keeps its attachment and browser tool ceiling visible in direct
       },
       toolCalls: [
         { index: 1, name: browserNavigate.name },
-        { index: 2, name: 'WorkHubInspect' },
+        { index: 2, name: 'WorkHubRead' },
       ],
     },
   });

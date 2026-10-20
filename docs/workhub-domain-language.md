@@ -6,7 +6,7 @@ source_language: en
 implementation_status: current
 document_status: current
 translation_status: source-only
-last_verified: 2026-09-13
+last_verified: 2026-10-20
 owners:
   - maka-backend
 ---
@@ -41,19 +41,23 @@ answers questions, clarifies requests, coordinates ordinary tasks, and operates
 Maka through restricted Desktop capabilities. Docked and floating presentations
 share one live renderer and the same Host-owned conversation.
 
-The staged task-input bridge addresses a task generation, not the historical
+The task-input bridge addresses a task generation, not the historical
 assignment currently inspected. The Host resolves its exact current source
 under admission: pending input supplements in place; owned active work uses
 Steering at a consumable boundary; settled work admits an ordinary new Turn.
-It does not approve an interaction or resume interrupted tools. Saved legacy
-six-field attempts retain their old source and replay identity. The formal
-model `workhub.tasks.continue` bridge shares this path and authenticates original
-user/feedback provenance. The Desktop publishes five flat actions: `find`,
+Unsupported active backends or attachment input are rejected, never silently
+queued for a later Turn. It does not approve an interaction or resume interrupted
+tools. Saved historical facts retain their original identities without reviving
+retired operations. The formal model `workhub.tasks.continue` bridge shares this
+path and authenticates original user/feedback provenance. The Desktop publishes
+five flat actions: `find`,
 `start`, `continue`, `ask`, and `stop`; `WorkHubRead` supplies the unified native
 read entry. The old multi-operation `tasks` model tool is no longer published.
-Legacy Evidence, Result and Inspect tools remain temporarily while their worker
-protocols and saved pending operations still exist. Their retirement and executor
-history bridging are not complete; see the
+`WorkHubEvidence`, `WorkHubResult` and `WorkHubInspect` are not published either.
+Legacy evidence readers remain internal read-only projections, not request/resolve
+or peer communication tools. The Host lifecycle retires obsolete relays and waits;
+the coordinator model does not answer or resume them. Executor provider history
+bridging is not complete; see the
 [implementation record](workhub-task-centric-implementation.zh-CN.md).
 
 ## Ownership
@@ -105,8 +109,7 @@ always offers a new-task option. It records a selection only: answering the Form
 does not delegate, steer, stop or approve anything. The model subsequently uses
 `start` or `continue` within the original request, and the Host rechecks current
 ownership and admission. Display names and model-written answers are not target
-proof. The old internal select-and-delegate path is retained until the legacy
-Gate retirement, but is not a published model tool.
+proof.
 
 The generic interaction store owns pending/answered/closed state. Renderer reloads
 read that state; they do not restart submission or retain a separate waiting
@@ -146,10 +149,13 @@ The source configuration is rechecked under admission before committing the new
 segment. Old assignments without a settings fact remain readable and are not
 backfilled with invented creation settings. One-Turn approvals are not copied.
 
-A replacement first durably claims its source delegation, retires only work owned
-by that delegation, and records the replacement link and supersession. If the new
-target becomes unavailable after retirement, a terminal replacement-aborted fact
-preserves that outcome. A retry cannot redirect an already claimed replacement.
+Executor providers have no Host-native read bridge. Host inspection of recorded
+executor events is not provider access to `WorkHubRead`; fresh executor history
+recovery is not fully supported. It must not be reported as an end-to-end pass.
+
+Historical replacement records retain the source claim, replacement link and
+supersession. A replacement-aborted fact preserves an unavailable target; these
+records do not restore a model replacement command or admit new work.
 
 Stop resolves exactly one active delegation that still holds work on the named
 Session. The Host rechecks ownership under the Coordination and target admission
@@ -173,16 +179,15 @@ binds the exact task and execution and is checked again before any effect; bypas
 permission does not bypass it. Direct task-view stop remains explicitly bound to
 that task, without adding a model decision.
 
-Resume is admitted by the target's existing Turn authority and reports
-`resume_started` or `already_running`. It does not create another coordination
-resume ledger.
+Ordinary `continue` uses the target's existing Turn authority, not interrupted-tool
+resume. Historical resume receipts remain readable, not a model command surface.
 
 New WorkHub conversations persist across application and Host restarts. Migration
 of pre-cutover beta WorkHub history is not part of this cutover contract.
 
 ## Same-task historical input
 
-Native `WorkHubEvidence` task-history pages include canonical accepted task-input
+Native `WorkHubRead` history pages include canonical accepted task-input
 facts as well as original assignment requests and owned execution records. An
 accepted fact returns `originalUserText` when present, otherwise the legacy input
 text. It is explicitly not consumption or compliance proof. Automatic feedback
@@ -203,18 +208,27 @@ same-task workers can page original user text, corrections and visible tools.
 Other tasks remain limited to existing result evidence. Unsupported executors
 return an explicit limitation instead of empty history.
 
+## Original task interactions
+
+`workhub.interactions.query` and `answer` address the original request with its
+task action, Turn and Run ownership. Short notifications link that request; they
+do not copy a question or approval into a new coordinator interaction. Questions,
+Forms, sandbox boundaries and client capabilities use the original Desktop answer
+path and options, without task-level grants. Ordinary `permission` is a historical
+schema with no current live continuation; a pending legacy request conflicts
+instead of manufacturing a successful answer. Host retirement closes only proven
+legacy coordinator relays, never the original worker questions or approvals.
+
 ## Read-only Session inspection
 
-`WorkHubInspect` is a retained legacy Host-native tool available only to the Coordination Session.
-It reads an ordinary Session in the same current bounded discovery scope without
-admitting a Message or Turn, changing configuration, or requiring a previous
-WorkHub delegation. New explicit manual inspection through `WorkHubRead` no longer
-depends on recent-32 discovery; its existing archive/role/child eligibility still
-applies and viewing does not adopt a Session. The legacy candidate eligibility rules are checked on every
-page; a cursor does not grant access to a Session that has left that scope.
+`WorkHubRead` with an explicit `sessionRef` is coordinator-only inspection of an
+eligible ordinary Session. It does not admit a Message or Turn, change settings,
+or require a previous delegation. It does not depend on recent-32 discovery;
+archive/role/child eligibility is rechecked on every page, and viewing does not
+adopt the Session. A cursor does not grant access to an ineligible Session.
 
-`recent` returns user-facing user text and assistant text in newest-first order.
-`latest_reply` finds the latest nonempty durable assistant text. In-flight
+`view=history` returns user-facing user text and assistant text newest first.
+`view=reply` finds the latest nonempty durable assistant text. In-flight
 streaming chunks are not part of this committed transcript projection. Both
 preserve exact text, message/Turn identities, timestamps and transcript sequences.
 Thinking, raw tool outputs, attachment bodies and non-conversation records are not
@@ -275,8 +289,8 @@ WorkHub does not scan or rewrite that content for secrets.
 
 | Responsibility | Module |
 | --- | --- |
-| Task tool bridge | [workhub-runtime.ts](../apps/desktop/src/main/workhub-runtime.ts) |
-| Active-Turn protocol | [workhub-coordination.ts](../packages/runtime-host/src/protocol/workhub-coordination.ts) |
+| Task tool bridge | [workhub-task-model-runtime.ts](../apps/desktop/src/main/workhub-task-model-runtime.ts) |
+| Task commands and read protocol | [workhub-tasks.ts](../packages/runtime-host/src/protocol/workhub-tasks.ts) |
 | Coordination Session and active request | [workhub-coordination-coordinator.ts](../packages/runtime-host/src/server/workhub-coordination-coordinator.ts) |
 | Task-centric implementation rules and rollout | [workhub-task-centric-adr.zh-CN.md](architecture/workhub-task-centric-adr.zh-CN.md) |
 | Delegation admission and recovery | [workhub-coordination-action-gate.ts](../packages/runtime-host/src/server/workhub-coordination-action-gate.ts) |

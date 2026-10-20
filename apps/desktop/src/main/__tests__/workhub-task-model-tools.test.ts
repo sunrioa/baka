@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { z } from 'zod';
 import { WORKHUB_TASK_INPUT_TEXT_MAX_BYTES } from '@maka/core/workhub-task-input';
-import { parseWorkHubTaskToolRequest, workHubTaskToolSchemas, type WorkHubTaskToolRequest } from '../../shared/workhub-task-tool-schema.js';
+import { parseWorkHubTaskToolRequest, workHubTaskToolSchemas, workHubTaskToolDescriptions, type WorkHubTaskToolRequest } from '../../shared/workhub-task-tool-schema.js';
 import { createWorkHubTaskModelRuntime } from '../workhub-task-model-runtime.js';
 
 const scope = { hostId: 'host', targetEpoch: 'epoch' };
@@ -77,6 +77,16 @@ test('six-tool model contracts have flat strict object roots and never accept au
   assert.equal(workHubTaskToolSchemas.stop.safeParse({ taskIds: ['task', 'task'] }).success, false);
   assert.equal(workHubTaskToolSchemas.ask.safeParse({ question: 'Which?', choices: [{ kind: 'task', id: 'task' }, { kind: 'task', id: 'task' }] }).success, false);
   assert.equal(workHubTaskToolSchemas.continue.safeParse({ taskId: 'task', text: '中'.repeat(Math.ceil(WORKHUB_TASK_INPUT_TEXT_MAX_BYTES / 3) + 1) }).success, false);
+});
+
+test('task descriptions retain original approvals and state backend limits without advertising retired tools', () => {
+  const description = workHubTaskToolDescriptions.continue;
+  assert.match(description, /Unsupported active backends or attachment input are rejected/u);
+  assert.match(description, /never silently queued for a later Turn/u);
+  assert.match(description, /Executor providers have no Host-native read bridge/u);
+  assert.match(description, /fresh executor history recovery is not fully supported/u);
+  assert.match(workHubTaskToolDescriptions.ask, /task approval interface for permissions/u);
+  assert.doesNotMatch(Object.values(workHubTaskToolDescriptions).join(' '), /WorkHubEvidence|WorkHubResult|WorkHubInspect|ask_question|request\/resolve/u);
 });
 
 test('flat fields retain the native UTF-8 and Unicode character limits', () => {
