@@ -30,7 +30,7 @@
 |---|---|---|---|
 | 1 | 删除 Jev / 预路由，兼容旧策略、凭据、准入与用量，修正工具描述 | 已实现，待人工审阅 | [PR #35](https://github.com/sunrioa/baka/pull/35)，未合并 |
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
-| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史、新建 / 选择、Root 停止及停止集合运行时已验证；统一 Read 接入中，六工具整体未发布 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)；停止运行时最终完整 Host 2,519 通过 / 12 原有跳过 / 0 失败 |
+| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史、新建 / 选择、Root 停止及统一 Read 的 ai-sdk 底座已验证；六工具整体未发布 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)；统一 Read 最终完整 Host 2,536 通过 / 12 原有跳过 / 0 失败，已做真实 DS coding 复测 |
 | 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 未开始 | — |
 | 5 | 有界任务说明、历史入口和可选状态块 | 未开始 | — |
 | 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 未开始 | — |
@@ -263,4 +263,5 @@
 - 查证实际请求：协调者原样转达了 `WorkHubRead` 要求，工具搜索也实际提供两个入口；冲突来自 Host 换段引用仍明确推荐旧 `WorkHubEvidence`。仅修正该旧说明、补充 `taskId` 读取引用，不改变授权或调度。两个生产 Host 场景新增断言在补修前都真实失败，补修后 2/2；读取相关完整文件 88/88、typecheck、lint、format 通过。已正常退出闲置 App 后沿原配置重启，下一步对最终源码重跑完整 Host 并复测新段实际使用统一入口；真实用量和 AI 自主换窗质量尚未据此下结论。
 - R2 新段实际先调用统一 `WorkHubRead`，用户要求跨两页取回，工具页取回旧段成功测试输出；没有读取 B 的工具历史。首条持久输入为 2,981 UTF-8 字节，不含口令；口令由原 A 的用户纠正记录返回，不在源文件中。两组历史读取均在代码读取或修改前完成；期间四次 `Read` 属于历史工具结果资源，其中两次错误续读被原校验拒绝，不能当作代码文件读取或隐藏掉失败。实际新 coding 测试独立复跑为 303/303，B 仍为 18/18；从成功 Edit 记录重建的前轮 302 项测试源码保持精确前缀，模块未变，B 两个文件的 SHA-256 未变。
 - 新独立审查对 `953a31231..680291f78` 发现一个 P2：换段说明误用旧的 `history.nextCursor`，而统一工具返回顶层 `nextCursor`。已仅对本轮独立测试进程组正常 SIGINT，取消尚未完成的冻结运行并保留日志，未记为通过。新增提示断言在补修前 2/2 失败；修正为将顶层 `nextCursor` 传入下一请求的 `cursor` 后，生产 Host 2/2、原生读取 / SQLite 分页 13/13 通过；既有双页读取测试未放宽。最终冻结完整 Host 与新独立复审仍需完成。
-- 本轮 70 个已报告用量的实际请求均使用 Command Code DeepSeek：累计输入 4,651,743、输出 46,102、缓存读 4,299,904、缓存未命中输入 351,839 token；这些字段覆盖均为 70/70，报告缓存写入为零。输入包含缓存部分，不再相加；这是跨请求合计，不是某一个 Session 的上下文长度。未核实连接价格，不换算费用，也不是供应商账单。以上换段均为明确要求的功能测试，不能冒充 AI 在接近模型窗口时自主选择、发生压缩或冷热方案成本对照的证据。
+- 本轮 70 个已报告用量的实际请求均使用 Command Code DeepSeek：归一化累计输入 4,651,743、输出 46,102、缓存读 4,299,904、缓存未命中输入 351,839 token；账本字段覆盖均为 70/70，归一化缓存写入为零。这不证明供应商显式报告了每个缓存子字段，未命中可为推算、写入零可为归一化默认值；不将它们表述为原始供应商观测。输入包含缓存部分，不再相加；这是跨请求合计，不是某一个 Session 的上下文长度。未核实连接价格，不换算费用，也不是供应商账单。以上换段均为明确要求的功能测试，不能冒充 AI 在接近模型窗口时自主选择、发生压缩或冷热方案成本对照的证据。
+- `99b358c8e` 最终冻结完整 Host：2,536 通过、12 原有跳过、0 失败，493.8 秒；源码与构建产物在整个运行中保持冻结。其他工作区自 `e76ea76f1` 后未变，沿用其完整通过证据。最终游标增量的新独立只读静态复审未发现可确认的新问题，不替代人类批准。原配置单一开发 App 已在最终源码上重启，原数据、Command Code DeepSeek、bypass、并发 1 保留；未启动其他实例。3h 底座与明确 fresh 的真实 coding 功能验证完成，剩余五工具入口、旧协议退役、executor 桥接及完整 ADR 评测仍未完成。
