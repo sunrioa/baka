@@ -30,7 +30,7 @@
 |---|---|---|---|
 | 1 | 删除 Jev / 预路由，兼容旧策略、凭据、准入与用量，修正工具描述 | 已实现，待人工审阅 | [PR #35](https://github.com/sunrioa/baka/pull/35)，未合并 |
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
-| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史、新建 / 选择、Root 停止及统一 Read 的 ai-sdk 底座已验证；六工具整体未发布 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)；统一 Read 最终完整 Host 2,536 通过 / 12 原有跳过 / 0 失败，已做真实 DS coding 复测 |
+| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史、新建 / 选择、Root 停止及统一 Read 的 ai-sdk 底座已验证；五个扁平模型动作接入中，旧协议尚未退役 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)；统一 Read 最终完整 Host 2,536 通过 / 12 原有跳过 / 0 失败，已做真实 DS coding 复测 |
 | 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 未开始 | — |
 | 5 | 有界任务说明、历史入口和可选状态块 | 未开始 | — |
 | 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 未开始 | — |
@@ -265,3 +265,12 @@
 - 新独立审查对 `953a31231..680291f78` 发现一个 P2：换段说明误用旧的 `history.nextCursor`，而统一工具返回顶层 `nextCursor`。已仅对本轮独立测试进程组正常 SIGINT，取消尚未完成的冻结运行并保留日志，未记为通过。新增提示断言在补修前 2/2 失败；修正为将顶层 `nextCursor` 传入下一请求的 `cursor` 后，生产 Host 2/2、原生读取 / SQLite 分页 13/13 通过；既有双页读取测试未放宽。最终冻结完整 Host 与新独立复审仍需完成。
 - 本轮 70 个已报告用量的实际请求均使用 Command Code DeepSeek：归一化累计输入 4,651,743、输出 46,102、缓存读 4,299,904、缓存未命中输入 351,839 token；账本字段覆盖均为 70/70，归一化缓存写入为零。这不证明供应商显式报告了每个缓存子字段，未命中可为推算、写入零可为归一化默认值；不将它们表述为原始供应商观测。输入包含缓存部分，不再相加；这是跨请求合计，不是某一个 Session 的上下文长度。未核实连接价格，不换算费用，也不是供应商账单。以上换段均为明确要求的功能测试，不能冒充 AI 在接近模型窗口时自主选择、发生压缩或冷热方案成本对照的证据。
 - `99b358c8e` 最终冻结完整 Host：2,536 通过、12 原有跳过、0 失败，493.8 秒；源码与构建产物在整个运行中保持冻结。其他工作区自 `e76ea76f1` 后未变，沿用其完整通过证据。最终游标增量的新独立只读静态复审未发现可确认的新问题，不替代人类批准。原配置单一开发 App 已在最终源码上重启，原数据、Command Code DeepSeek、bypass、并发 1 保留；未启动其他实例。3h 底座与明确 fresh 的真实 coding 功能验证完成，剩余五工具入口、旧协议退役、executor 桥接及完整 ADR 评测仍未完成。
+
+## 阶段 3i：扁平任务模型入口（接入中）
+
+- Desktop 将原多操作 `tasks` 模型入口替换为 `find` / `start` / `continue` / `ask` / `stop` 五个严格扁平 schema，读取沿用 3h 的原生 `WorkHubRead`。真实当前 Turn 与工具调用共同派生动作身份；模型不能提交来源、代次、权限或确认。实际编译后的旧 Desktop 工具清单对照确实失败（仍为 control/tasks），新实现通过 control 加五个入口的相同断言。
+- 五个适配只调用既有任务 Host 命令，不修改 Root 准入、权限、目录串行、FIFO 或压缩。续作不再调用旧 `coordination.actFromTurn`：执行中进本轮 Steering，排队中原位补充，已结束则普通新轮；fresh 仍由 AI 选择，仅空闲源可受理，并继承当前段持久设置。新建读取现有 WorkHub 默认值，手动接入与 fresh 都不读新任务默认值。
+- 原界面控制的实际 Turn / Host 校验、共享 busy、取消、用户接管及不聚焦窗口的规则保留。动作回执仅返回任务标识与真实受理 / 投递 / 停止状态，不把受理当消费；任务卡通过当前 Host 的权威任务事实恢复链接，不能从标题、模型参数或其他 Host 猜 Session。停止仍可导航，但不展示成新派发。
+- 这一步只替换动作入口，不先藏掉旧等待的接收端：Evidence / Result / Inspect 兼容工具与旧内部适配、测试暂留到阶段 4，避免 worker 仍产生等待却无人可处理。协议 epoch 为 235。没有声称旧协议退役、executor 历史桥接或整个 ADR 已完成。
+- 新 schema / 适配、client 映射、控制与任务链接完整文件，以及侧栏与模型两种输入的真实 Host + 本地 HTTP 场景合计 63/63；Host 组合与 Code Mode 完整文件 17/17 通过。两种输入均核对同轮纠正、原位补充 / 重放、B → A → C FIFO、原配置继承和 fresh；模型 ask 的新任务选择不派活，stop 已结束结果按原动作重放。补测覆盖读取默认值时切换 Host、已提交后切换 Host 与忙碌 fresh 拒绝，均不重试或改投。全仓 build、typecheck、lint、format、ASF、Desktop / UI knip 与 renderer architecture 165/165 通过。无删除测试、无放宽断言、无延长超时或增加重试；编译夹具类型 / 必需 UI 属性错误及格式检查失败已修正，失败事实保留。
+- 当前原实例仍为已验证的 3h 代码并保持打开。正常退出该已恢复实例的操作最初被审批拦住，未绕过；现已取得用户明确批准，待本阶段代码和测试完成后正常重启同一实例，保留数据与配置且不启动其他实例。3i 尚需完整冻结回归、新独立审查及 Command Code DeepSeek 实测，不把本地 HTTP 夹具记作真实模型用量。

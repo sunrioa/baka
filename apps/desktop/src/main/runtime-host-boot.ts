@@ -80,6 +80,7 @@ import { createMcpOAuthController } from "./mcp-oauth-controller.js";
 import { createWorkHubControl } from './workhub-control.js';
 import { createWorkHubPresentation } from './workhub-presentation.js';
 import { createWorkHubRuntime } from './workhub-runtime.js';
+import { createWorkHubTaskModelRuntime } from './workhub-task-model-runtime.js';
 import { readWorkHubCreationDefaults } from './workhub-new-work-defaults.js';
 import { createWindowsAppTray } from './windows-app-tray.js';
 import { readableAppIconPath } from './app-icon-surface.js';
@@ -755,6 +756,12 @@ const workHubRuntime = createWorkHubRuntime({
   },
   changed: emitSessionsChanged,
 });
+const workHubTaskModelRuntime = createWorkHubTaskModelRuntime({
+  client: (scope) => requireWorkHubTarget(scope).client,
+  isCurrent: isCurrentWorkHubTarget,
+  createDefaults: async (scope) => readWorkHubCreationDefaults(requireWorkHubTarget(scope).client),
+  changed: emitSessionsChanged,
+});
 const workHubControl = createWorkHubControl({
   ipcMain,
   prepareWindow: (turnId) => workHubPresentation.prepareControl(turnId),
@@ -771,6 +778,7 @@ const workHubControl = createWorkHubControl({
   client: (scope) => requireWorkHubTarget(scope).client,
   isCurrent: isCurrentWorkHubTarget,
   ...workHubRuntime,
+  ...workHubTaskModelRuntime,
 });
 const browserIpc = registerBrowserIpc({
   mainWindowController,

@@ -127,6 +127,24 @@ test('sends native task input and reads its exact durable receipt without a coor
   ]);
 });
 
+test('flat WorkHub model adapters use native task operations, not the legacy coordination union', async () => {
+  const entries = [
+    ['workhub.tasks.find', { query: '登录', cwd: '/code', cursor: 'page' }],
+    ['workhub.tasks.start', { turnId: 'turn', actionId: 'start', title: 'Task', text: 'Exact request', sessionRef: 'manual' }],
+    ['workhub.tasks.continue', { turnId: 'turn', actionId: 'continue', taskId: 'task', text: 'Same task correction', container: 'reuse' }],
+    ['workhub.tasks.ask', { turnId: 'turn', actionId: 'ask', question: 'Which?', choices: [{ kind: 'task', id: 'task' }] }],
+    ['workhub.tasks.stop', { turnId: 'turn', actionId: 'stop', taskIds: ['task'] }],
+  ] as const;
+  const outputs = entries.map(([operation]) => ({ operation }));
+  const { client, requests } = clientWithResponses([...outputs]);
+  assert.deepEqual(await client.findWorkHubTasks(entries[0][1]), outputs[0]);
+  assert.deepEqual(await client.startWorkHubTask(entries[1][1]), outputs[1]);
+  assert.deepEqual(await client.continueWorkHubTaskFromTurn(entries[2][1]), outputs[2]);
+  assert.deepEqual(await client.askWorkHubTask(entries[3][1]), outputs[3]);
+  assert.deepEqual(await client.stopWorkHubTasks(entries[4][1]), outputs[4]);
+  assert.deepEqual(requests, entries.map(([operation, input]) => ({ operation, input })));
+});
+
 test('re-reads the Session revision before retrying a product update', async () => {
   const { client, requests } = clientWithResponses([
     { kind: 'session', session: session('session-1', 4) },

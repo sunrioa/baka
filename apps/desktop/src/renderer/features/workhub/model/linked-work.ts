@@ -22,6 +22,7 @@ import { desktopSessionKey, parseDesktopSessionKey } from '../../../../shared/ru
 import { workspaceNameFromCwd } from './workspace-name.js';
 
 import type { StoredMessage } from '@maka/core/session';
+import type { WorkHubTask } from '@maka/runtime-host/protocol';
 
 export interface WorkHubLinkedWork {
   readonly workId?: string;
@@ -30,6 +31,7 @@ export interface WorkHubLinkedWork {
   readonly targetSessionId: string;
   readonly targetSessionName: string;
   readonly workspaceName?: string;
+  readonly operation?: 'start' | 'continue' | 'stop';
 }
 
 /** Links come from successful tool results in the same durable conversation. */
@@ -38,6 +40,7 @@ export function workHubLinkedWork(
   sessions: readonly { id: string; name: string; cwd?: string }[],
   fallbackName: string,
   coordinationSessionKey?: string,
+  tasks: readonly WorkHubTask[] = [],
 ): WorkHubLinkedWork[] {
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
   const workspaceName = (id: string) => workspaceNameFromCwd(sessionById.get(id)?.cwd);
@@ -47,6 +50,22 @@ export function workHubLinkedWork(
   const taskCalls = new Set(messages.flatMap((message) =>
     message.type === 'tool_call' && message.toolName === 'mcp__desktop_workhub__tasks' ? [callKey(message.turnId, message.id)] : [],
   ));
+  const nativeCalls = new Map(messages.flatMap(message => message.type === 'tool_call' &&
+    ['mcp__desktop_workhub__start', 'mcp__desktop_workhub__continue', 'mcp__desktop_workhub__stop'].includes(message.toolName)
+      ? [[callKey(message.turnId, message.id), message] as const] : []));
+  // Model receipts contain task IDs, not Session IDs. Resolve their display
+  // targets only through this Host's durable assignment or task projection.
+  const targets = new Map<string, { targetSessionId: string; targetSessionName: string; at: number }>();
+  const remember = (workId: string, targetSessionId: string, targetSessionName: string, at: number) => {
+    if (!coordinationSessionKey) return;
+    try {
+      if (parseDesktopSessionKey(targetSessionId).hostId !== parseDesktopSessionKey(coordinationSessionKey).hostId) return;
+    } catch { return; }
+    if ((targets.get(workId)?.at ?? -1) <= at) targets.set(workId, { targetSessionId, targetSessionName, at });
+  };
+  for (const message of messages) if (message.type === 'workhub_coordination' && message.kind === 'delegation_assigned')
+    remember(message.work?.id ?? message.actionId, message.targetSessionId, message.targetSessionName, message.ts);
+  for (const task of tasks) remember(task.workId ?? task.actionId, task.targetSessionId, task.targetSessionName, task.createdAt);
   const readResult = (message: StoredMessage | undefined): Record<string, unknown> | undefined => {
     if (message?.type !== 'tool_result') return undefined;
     let value: unknown;
@@ -59,6 +78,31 @@ export function workHubLinkedWork(
   };
   const results = new Map(messages.flatMap((message) => message.type === 'tool_result' ? [[callKey(message.turnId, message.toolUseId), message] as const] : []));
   return messages.flatMap((message): WorkHubLinkedWork[] => {
+    if (message.type === 'tool_result' && !message.isError) {
+      const call = nativeCalls.get(callKey(message.turnId, message.toolUseId));
+      if (call) {
+        const result = readResult(message);
+        const args = call.args;
+        const operation = call.toolName === 'mcp__desktop_workhub__start' ? 'start'
+          : call.toolName === 'mcp__desktop_workhub__continue' ? 'continue' : 'stop';
+        let ids: string[] = [];
+        if (operation === 'stop' && result?.kind === 'result' && Array.isArray(result.targets) &&
+            args && typeof args === 'object' && 'taskIds' in args && Array.isArray(args.taskIds)) {
+          const requested = new Set(args.taskIds);
+          ids = result.targets.flatMap(target => target && typeof target === 'object' && typeof target.taskId === 'string' && requested.has(target.taskId) ? [target.taskId] : []);
+        } else if (operation !== 'stop' && typeof result?.taskId === 'string') {
+          if (operation === 'start' && result.admission === 'admitted') ids = [result.taskId];
+          if (operation === 'continue' && args && typeof args === 'object' && 'taskId' in args && args.taskId === result.taskId &&
+              (result.admission === 'admitted' || ['steering', 'queued_supplement', 'continuation'].includes(String(result.mode)))) ids = [result.taskId];
+        }
+        return [...new Set(ids)].flatMap(workId => {
+          const target = targets.get(workId);
+          return target ? [{ workId, operation, id: message.id, coordinationTurnId: message.turnId,
+            targetSessionId: target.targetSessionId, targetSessionName: target.targetSessionName,
+            workspaceName: workspaceName(target.targetSessionId) }] : [];
+        });
+      }
+    }
     if (message.type === 'tool_call' && taskCalls.has(callKey(message.turnId, message.id))) {
       const args = message.args;
       const request = args && typeof args === 'object' && 'request' in args ? args.request : undefined;

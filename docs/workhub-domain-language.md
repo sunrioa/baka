@@ -48,8 +48,13 @@ Steering at a consumable boundary; settled work admits an ordinary new Turn.
 It does not approve an interaction or resume interrupted tools. Saved legacy
 six-field attempts retain their old source and replay identity. The formal
 model `workhub.tasks.continue` bridge shares this path and authenticates original
-user/feedback provenance. The six model tools and unified on-demand read surface
-are not yet published; see the [implementation record](workhub-task-centric-implementation.zh-CN.md).
+user/feedback provenance. The Desktop publishes five flat actions: `find`,
+`start`, `continue`, `ask`, and `stop`; `WorkHubRead` supplies the unified native
+read entry. The old multi-operation `tasks` model tool is no longer published.
+Legacy Evidence, Result and Inspect tools remain temporarily while their worker
+protocols and saved pending operations still exist. Their retirement and executor
+history bridging are not complete; see the
+[implementation record](workhub-task-centric-implementation.zh-CN.md).
 
 ## Ownership
 
@@ -63,9 +68,9 @@ its state without copying its execution transcript or acquiring ownership of
 unrelated user work.
 
 **Coordination model** interprets the admitted user request. Local answers and
-clarifications are normal model output. Its task actions produce advisory routing
-or linked-operation proposals; there is no parallel renderer classifier,
-exact-name resolver, or synthetic-summary writer.
+clarifications are normal model output. Its flat tools address stable tasks; the
+Host proves the actual Root, target generation and final admission. There is no
+parallel renderer classifier, exact-name resolver, or synthetic-summary writer.
 
 **Routing intent** begins a new coordination decision, such as discussing,
 executing, creating, or continuing work. _Avoid_: linked intent, disposition.
@@ -80,40 +85,34 @@ resume, correction.
 **Linked operation** changes an existing delegation relationship: `correct`,
 `stop`, or `resume`. It is not a routing disposition.
 
-**Session Resolver** recalls and ranks bounded existing ordinary Sessions for a
-routing intent. It returns target evidence, never creation or execution authority.
+**Task discovery** searches the rebuildable task index and eligible manual
+Sessions. It returns one bounded page and observations, never execution authority.
+An explicit manual reference can be adopted by `start`; a follow-up uses the task
+identity with `continue` rather than a similar title or path.
 
 **Linked-target resolution** starts from a bounded WorkHub-owned delegation and
 follows its Session, Message, Turn, and continuation lineage. It does not infer an
 operation target from a similar display name.
 
-**Coordination policy** combines intent and resolved evidence into either a routing
-disposition or a linked-operation proposal. Its output remains advisory.
-
-**Bound routing decision** is the Policy result stored with one Coordination root
-Turn. Recovery reuses it. The main coordination model may explain it or form a
-matching proposal, but cannot replace its candidate or operation. The binding is
-not Action Gate authorization.
+The routing/linked-operation terms above describe the retained internal legacy
+Gate, not a second model or the current model tool contract. Old bound routing
+advice is accepted and discarded on read; it no longer controls recovery or model
+selection.
 
 **Target choice** is a Host-owned interaction inside an admitted Coordination
-Turn. The production `tasks.select_and_delegate` operation accepts a bounded
-candidate offer and delegated task text, publishes a durable single-select Form,
-and submits the exact accepted target to the Action Gate. Its opaque option binds
-the candidate reference, Session identity and workspace fingerprint; display names
-and model-written question answers never supply this binding. The request identity
-includes the originating Turn, Run, operation input and admitted user content.
+Turn. The native `ask` action accepts returned task/manual-Session references and
+always offers a new-task option. It records a selection only: answering the Form
+does not delegate, steer, stop or approve anything. The model subsequently uses
+`start` or `continue` within the original request, and the Host rechecks current
+ownership and admission. Display names and model-written answers are not target
+proof. The old internal select-and-delegate path is retained until the legacy
+Gate retirement, but is not a published model tool.
 
 The generic interaction store owns pending/answered/closed state. Renderer reloads
 read that state; they do not restart submission or retain a separate waiting
-Promise. Cancellation and Run closure perform no delegation. A Host restart closes
-orphaned interactions through existing recovery; it cannot resurrect their local
-continuations. An unanswered offer expires for execution after ten minutes. An
-already assigned action replays its durable result rather than executing twice.
-
-A selected Session may be rebound against fresh candidate state in the same
-workspace. Changes to other candidates do not choose another Session. Removal,
-archival or workspace movement requires a new selection. The Gate repeats this
-validation under target admission before a fresh assignment.
+Promise. Cancellation and Run closure perform no delegation. Existing recovery
+settles orphaned requests without resurrecting local continuations. Replaying an
+answered native selection returns its durable outcome, not a second assignment.
 
 Coordination admission permits asking and waiting; it does not admit target
 execution. The coordination model chooses through the normal task tools; there
@@ -197,15 +196,21 @@ and per-source authorization still apply. Cursors retain references and offsets,
 not transcript bodies. Missing exclusive executions are listed explicitly in
 `history.unavailableExecutions`; cancellation before execution does not erase
 accepted requirements or manufacture tool output. This adds no message admission,
-context import, handoff summary or cross-task transcript authority. The six-tool
-unified read entry remains a separate rollout step.
+context import, handoff summary or cross-task transcript authority. The native
+`WorkHubRead` entry now exposes these reads by task identity under the same actor
+and lineage checks. Coordinator history is limited to accepted requirements;
+same-task workers can page original user text, corrections and visible tools.
+Other tasks remain limited to existing result evidence. Unsupported executors
+return an explicit limitation instead of empty history.
 
 ## Read-only Session inspection
 
-`WorkHubInspect` is a Host-native tool available only to the Coordination Session.
+`WorkHubInspect` is a retained legacy Host-native tool available only to the Coordination Session.
 It reads an ordinary Session in the same current bounded discovery scope without
 admitting a Message or Turn, changing configuration, or requiring a previous
-WorkHub delegation. The existing candidate eligibility rules are checked on every
+WorkHub delegation. New explicit manual inspection through `WorkHubRead` no longer
+depends on recent-32 discovery; its existing archive/role/child eligibility still
+applies and viewing does not adopt a Session. The legacy candidate eligibility rules are checked on every
 page; a cursor does not grant access to a Session that has left that scope.
 
 `recent` returns user-facing user text and assistant text in newest-first order.

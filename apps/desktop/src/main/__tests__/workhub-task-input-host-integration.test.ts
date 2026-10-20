@@ -29,9 +29,9 @@ import { startExecutionRuntimeHostService } from '@maka/runtime-host/server';
 import { RUNTIME_HOST_PROTOCOL_VERSION, type OperationInput, type WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import { DesktopRuntimeHostClient } from '../runtime-host-client.js';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
-import { createWorkHubRuntime } from '../workhub-runtime.js';
+import { clientCapabilityEntityId } from '@maka/runtime-host/client-capability-entity-id';
+import { createWorkHubTaskModelRuntime } from '../workhub-task-model-runtime.js';
 import { readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
-import { workHubTasksSchema } from '../../shared/workhub-tool-schema.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
 import type { IpcHandler } from '../ipc-reconnect-policy.js';
 import type { WorkHubTaskSendResult } from '../../shared/workhub-conversation.js';
@@ -39,7 +39,7 @@ import { RuntimeHostSessionObserver } from '../runtime-host-session-observer.js'
 import { DesktopTranscriptRangeStore } from '../../renderer/platform/desktop/desktop-transcript-range-store.js';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 
-test('Desktop task start and input reach the native provider, supplement queued A in FIFO, and continue ended work while the coordinator is busy', { timeout: 30_000 }, async (t) => {
+for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task input reaches the native provider, supplements queued A in FIFO, and continues ended work while the coordinator is busy`, { timeout: 30_000 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'maka-desktop-task-input-'));
   const root = join(base, 'root');
   const firstWorker = deferred<void>(), releaseFirst = deferred<void>(), releaseB = deferred<void>();
@@ -100,24 +100,43 @@ test('Desktop task start and input reach the native provider, supplement queued 
     assert.equal(created.kind, 'committed'); if (created.kind !== 'committed') assert.fail('No fixture connection');
     assert.equal((await connection.request('connection.catalog.set-default-target', { expectedCatalogRevision: created.catalogRevision, target: { connectionId: created.connection.connectionId, modelId: 'fake-model' } })).kind, 'committed');
     await client.replaceClientCapabilities({ offers: () => [
-      { offerId: 'desktop-workhub', label: 'Desktop WorkHub', version: '0', affinity: 'session', hostPathAccess: 'none', tools: ['control', 'tasks'].map(name => ({ serverId: 'desktop_workhub', name, inputSchema: { type: 'object', additionalProperties: false } })) },
+      { offerId: 'desktop-workhub', label: 'Desktop WorkHub', version: '0', affinity: 'session', hostPathAccess: 'none', tools: ['control', 'find', 'start', 'continue', 'ask', 'stop'].map(name => ({ serverId: 'desktop_workhub', name, inputSchema: { type: 'object', additionalProperties: false } })) },
       { offerId: 'desktop-browser', label: 'Browser', version: '0', affinity: 'session', hostPathAccess: 'none', tools: ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_wait', 'browser_extract'].map(name => ({ serverId: 'desktop_browser', name, inputSchema: { type: 'object', additionalProperties: false } })) },
     ], call: async () => assert.fail('This journey does not invoke a Desktop UI tool') });
     await client.resolveWorkHubCoordinationSession();
     await client.answerWorkHubCoordination({ turnId: coordinationTurn, text: 'Coordinate these independent tasks and remain available.' });
-    const started = await connection.request('workhub.tasks.start', { turnId: coordinationTurn, actionId: 'native-input-action', title: 'Native input task',
+    const scope = { hostId: client.hostId, targetEpoch: 'native-fixture-target' };
+    writeWorkHubNewWorkDefaults(client.hostId, {});
+    const workhub = createWorkHubTaskModelRuntime({ client: () => client!, isCurrent: () => true,
+      createDefaults: () => readWorkHubCreationDefaults(client!), changed() {} });
+    const actionId = (id: string) => bridge === 'model' ? clientCapabilityEntityId(JSON.stringify(['workhub-task', coordinationTurn, id])) : id;
+    const started = bridge === 'model'
+      ? await workhub.actTask(scope, coordinationTurn, 'native-input-action', { kind: 'start', input: { title: 'Native input task', text: 'NATIVE_TASK_INPUT' } })
+      : await connection.request('workhub.tasks.start', { turnId: coordinationTurn, actionId: 'native-input-action', title: 'Native input task',
       text: 'NATIVE_TASK_INPUT', create: { workspace: { kind: 'isolated' } }, newWorkDefaults: {
         model: { llmConnectionId: created.connection.connectionId, llmConnectionSlug: 'desktop-native-input', model: 'fake-model' }, permissionMode: 'ask',
       } });
-    assert.equal(started.workId, 'native-input-action');
-    const firstTask = (await client.queryWorkHubTasks()).tasks.find(task => task.actionId === 'native-input-action'); assert.ok(firstTask?.workId);
+    assert.ok(started && ('workId' in started || 'taskId' in started));
+    const startedId = 'taskId' in started ? started.taskId : 'workId' in started ? started.workId : undefined;
+    assert.equal(startedId, actionId('native-input-action'));
+    const firstTask = (await client.queryWorkHubTasks()).tasks.find(task => task.actionId === actionId('native-input-action')); assert.ok(firstTask?.workId);
+    const found = await workhub.actTask(scope, coordinationTurn, 'native-find', { kind: 'find', input: { query: 'Native input task' } });
+    assert.ok(found && 'items' in found);
+    assert.equal(found.items[0]?.id, firstTask.workId);
     const source = (await client.readWorkHubTaskHistory({ workId: firstTask.workId })).assignments[0]!;
     const before = await client.getSession(source.targetSessionId); assert.ok(before);
     const handlers = new Map<string, IpcHandler>();
     registerRuntimeHostWorkHubIpc(client, { handle: (channel, handler) => handlers.set(channel, handler) }, {});
     const event = {} as Parameters<IpcHandler>[0];
-    const send = async (input: OperationInput<'workhub.tasks.send'>) => await handlers.get('workhub:sendTaskInput')!(event, input) as WorkHubTaskSendResult;
-    const read = async (inputId: string, workId: string) => await handlers.get('workhub:readTaskInput')!(event, { inputId, workId }) as Awaited<ReturnType<DesktopRuntimeHostClient['readWorkHubTaskInput']>>;
+    const send = async (input: OperationInput<'workhub.tasks.send'>): Promise<WorkHubTaskSendResult> => {
+      if (bridge === 'pane') return await handlers.get('workhub:sendTaskInput')!(event, input) as WorkHubTaskSendResult;
+      const result = await workhub.actTask(scope, coordinationTurn, input.inputId, { kind: 'continue', input: { taskId: input.workId, text: input.text } });
+      assert.ok(result && 'mode' in result);
+      const receipt = await client!.readWorkHubTaskInput({ workId: input.workId, inputId: actionId(input.inputId) });
+      assert.equal(result.mode, receipt.mode); assert.equal(result.delivery, receipt.delivery);
+      return { kind: 'accepted', receipt };
+    };
+    const read = async (inputId: string, workId: string) => await handlers.get('workhub:readTaskInput')!(event, { inputId: actionId(inputId), workId }) as Awaited<ReturnType<DesktopRuntimeHostClient['readWorkHubTaskInput']>>;
     const input = (a: WorkHubTaskAssignment, inputId: string, text: string): OperationInput<'workhub.tasks.send'> => ({ workId: a.workId, generationId: a.generationId, sourceActionId: a.actionId, sourceDelegationId: a.delegationId, inputId, text });
     await withTimeout(firstWorker.promise, 10_000, 'Native worker did not request its first step');
     const selectionInput = { turnId: coordinationTurn, actionId: 'native-selection', question: 'Which task should continue?',
@@ -172,9 +191,12 @@ test('Desktop task start and input reach the native provider, supplement queued 
     await client.startTurn({ sessionId: source.targetSessionId, turnId: 'unrelated-b', content: { text: 'UNRELATED_B' } });
     await waitFor(() => queueOrder.includes('UNRELATED_B'), { timeoutMs: 10000, pollMs: 10, message: 'The unrelated B request was not observed' });
     const delegate = async (actionId: string, text: string) => {
-      await connection!.request('workhub.tasks.start', { turnId: coordinationTurn, actionId,
-        title: text, sessionRef: source.targetSessionId, text });
-      const task = (await client!.queryWorkHubTasks()).tasks.find(item => item.actionId === actionId); assert.ok(task?.workId);
+      const started = bridge === 'model'
+        ? await workhub.actTask(scope, coordinationTurn, actionId, { kind: 'start', input: { title: text, sessionRef: source.targetSessionId, text } })
+        : await connection!.request('workhub.tasks.start', { turnId: coordinationTurn, actionId, title: text, sessionRef: source.targetSessionId, text });
+      assert.ok(started && ('workId' in started || 'taskId' in started));
+      const workId = 'taskId' in started ? started.taskId : 'workId' in started ? started.workId : undefined;
+      const task = (await client!.queryWorkHubTasks()).tasks.find(item => item.workId === workId); assert.ok(task?.workId);
       return (await client!.readWorkHubTaskHistory({ workId: task.workId })).assignments[0]!;
     };
     const queuedA = await delegate('queued-a-action', 'QUEUED_A'); await delegate('independent-c-action', 'INDEPENDENT_C');
@@ -213,20 +235,40 @@ test('Desktop task start and input reach the native provider, supplement queued 
     const visibleFallback = await client.getWorkHubSession(); assert.equal(visibleFallback.id, WORKHUB_COORDINATION_SESSION_ID);
     assert.equal(visibleFallback.model, 'fake-model', 'the visible coordination fallback stays on its own route after the global default changes');
     writeWorkHubNewWorkDefaults(client.hostId, {});
-    const workhub = createWorkHubRuntime({ client: () => client!, isCurrent: () => true,
-      createDefaults: () => readWorkHubCreationDefaults(client!), changed() {} });
-    const fresh = await workhub.actTasks({ hostId: client.hostId, targetEpoch: 'native-fixture-target' }, coordinationTurn, 'native-fresh-model', workHubTasksSchema.parse({
-      operation: 'continue_work', workId: queuedA.workId, sourceActionId: currentSource.actionId, container: 'fresh', text: 'FRESH_MODEL_FALLBACK: continue in a fresh context.',
-    }));
-    assert.ok('targetSessionId' in fresh && typeof fresh.targetSessionId === 'string');
+    const fresh = await workhub.actTask(scope, coordinationTurn, 'native-fresh-model', { kind: 'continue', input: {
+      taskId: queuedA.workId, container: 'fresh', text: 'FRESH_MODEL_FALLBACK: continue in a fresh context.',
+    } });
+    assert.ok(fresh && 'taskId' in fresh && 'container' in fresh);
+    assert.equal(fresh.taskId, queuedA.workId); assert.equal(fresh.container, 'fresh');
+    const freshSource = (await client.readWorkHubTaskHistory({ workId: queuedA.workId })).assignments[0]!;
     await waitFor(() => requests.some(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK')), { timeoutMs: 10000, pollMs: 10 });
     assert.equal(requests.find(request => goalText(request).startsWith('FRESH_MODEL_FALLBACK'))!.model, visibleFallback.model, 'the actual HTTP request uses the displayed fallback, not the different global model');
-    const freshHeader = await client.getSession(fresh.targetSessionId); assert.ok(freshHeader);
+    const freshHeader = await client.getSession(freshSource.targetSessionId); assert.ok(freshHeader);
     assert.equal(freshHeader.llmConnectionId, visibleFallback.llmConnectionId);
     assert.equal(freshHeader.permissionMode, 'ask', 'new work never inherits the coordinator bypass');
     assert.notEqual(freshHeader.id, source.targetSessionId);
     const retained = await client.getSession(source.targetSessionId); assert.ok(retained);
     assert.deepEqual({ model: retained.model, workspace: retained.workspace, permission: retained.permissionMode }, { model: after.model, workspace: after.workspace, permission: after.permissionMode }, 'fresh creation does not reconfigure the old worker');
+    const freshExecution = (await client.readWorkHubTaskExecutions({ actionId: freshSource.actionId, delegationId: freshSource.delegationId })).executions.at(-1)!;
+    await waitFor(async () => (await client!.queryTurn({ sessionId: freshSource.targetSessionId, turnId: freshExecution.turnId })).status === 'completed', { timeoutMs: 10000, pollMs: 10 });
+    const stop = await workhub.actTask(scope, coordinationTurn, 'native-stop-model', { kind: 'stop', input: { taskIds: [queuedA.workId] } });
+    assert.deepEqual(stop, { kind: 'result', targets: [{ taskId: queuedA.workId, outcome: 'already_terminal' }] });
+    assert.deepEqual(await workhub.actTask(scope, coordinationTurn, 'native-stop-model', { kind: 'stop', input: { taskIds: [queuedA.workId] } }), stop);
+    const countBeforeChoice = (await client.queryWorkHubTasks()).tasks.length;
+    const chooseNew = workhub.actTask(scope, coordinationTurn, 'native-new-task-choice', { kind: 'ask', input: { question: 'Start a separate task instead?', choices: [] } });
+    void chooseNew.catch(() => undefined);
+    const choiceToolId = clientCapabilityEntityId(JSON.stringify(['workhub-task', coordinationTurn, 'native-new-task-choice']));
+    let newChoice: import('@maka/runtime-host/protocol').InteractionPendingSnapshot | undefined;
+    await waitFor(async () => {
+      const opened = await client!.openSession(WORKHUB_COORDINATION_SESSION_ID);
+      try { newChoice = opened.snapshot.interactions.pending.find(item => item.request.kind === 'form' && item.request.toolUseId === choiceToolId); return newChoice !== undefined; }
+      finally { await opened.close(); }
+    }, { timeoutMs: 10000, pollMs: 10 });
+    assert.ok(newChoice);
+    await client.answerInteraction({ sessionId: WORKHUB_COORDINATION_SESSION_ID, interactionId: newChoice.interactionId,
+      answer: { kind: 'form', action: 'accept', values: { target: 'new_task' } } });
+    assert.deepEqual(await chooseNew, { kind: 'new_task' });
+    assert.equal((await client.queryWorkHubTasks()).tasks.length, countBeforeChoice, 'new-task selection alone does not start work');
     assert.equal(coordinatorRequests, 1, 'default inspection does not call or restart the coordinator model');
     assert.deepEqual(errors, []);
   } finally {

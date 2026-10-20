@@ -30,7 +30,7 @@ export const WORKHUB_BROWSER_TOOL_NAMES = [
 
 /** The Desktop capability shape required by the WorkHub v2 tool profile. */
 export function workHubDesktopCapabilityOffers(
-  workHubToolNames: readonly string[] = ['control', 'tasks'],
+  workHubToolNames: readonly string[] = ['control', 'find', 'start', 'continue', 'ask', 'stop'],
 ): readonly ClientCapabilityOffer[] {
   return [
     {

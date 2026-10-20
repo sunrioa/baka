@@ -1402,6 +1402,11 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.interactions.query", {});
   }
   queryWorkHubTasks(): Promise<OperationOutput<'workhub.tasks.query'>> { return this.request('workhub.tasks.query', {}); }
+  findWorkHubTasks(input: OperationInput<'workhub.tasks.find'>): Promise<OperationOutput<'workhub.tasks.find'>> { return this.request('workhub.tasks.find', input); }
+  startWorkHubTask(input: OperationInput<'workhub.tasks.start'>): Promise<OperationOutput<'workhub.tasks.start'>> { return this.request('workhub.tasks.start', input); }
+  askWorkHubTask(input: OperationInput<'workhub.tasks.ask'>): Promise<OperationOutput<'workhub.tasks.ask'>> { return this.request('workhub.tasks.ask', input); }
+  continueWorkHubTaskFromTurn(input: OperationInput<'workhub.tasks.continue'>): Promise<OperationOutput<'workhub.tasks.continue'>> { return this.request('workhub.tasks.continue', input); }
+  stopWorkHubTasks(input: OperationInput<'workhub.tasks.stop'>): Promise<OperationOutput<'workhub.tasks.stop'>> { return this.request('workhub.tasks.stop', input); }
   readWorkHubTaskHistory(input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>> { return this.request('workhub.tasks.history', input); }
   readWorkHubTaskExecutions(input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>> { return this.request('workhub.tasks.executions', input); }
   sendWorkHubTaskInput(input: OperationInput<'workhub.tasks.send'>): Promise<OperationOutput<'workhub.tasks.send'>> { return this.request('workhub.tasks.send', input); }
