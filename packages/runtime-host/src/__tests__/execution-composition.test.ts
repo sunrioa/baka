@@ -3489,6 +3489,14 @@ for (const readMode of ['evidence', 'native-history'] as const)
         await wait(async () => (await inputReceipt('reuse-a')).delivery === 'delivered');
         const reuse = await inputReceipt('reuse-a');
         assert.ok(reuse.execution);
+        const reuseAssignment = await stores.sessionStore.readWorkHubAssignmentByMessage(
+          reuse.targetMessageId,
+        );
+        assert.ok(reuseAssignment, 'native reuse commits its own canonical assignment');
+        assert.equal(reuseAssignment.work?.id, 'source-a');
+        assert.equal(reuseAssignment.work?.generationId, 'source-a');
+        assert.equal(reuseAssignment.work?.continuesActionId, 'source-a');
+        assert.equal(reuseAssignment.targetSessionId, a.targetSessionId);
         await wait(
           async () =>
             (await done(a.targetSessionId, reuse.execution!.turnId)) && hostedRoots() === 1,
@@ -3592,7 +3600,11 @@ for (const readMode of ['evidence', 'native-history'] as const)
             generationId: current.work.generationId,
             continuesActionId: current.work.continuesActionId,
           },
-          { id: 'source-a', generationId: 'fresh-a', continuesActionId: 'source-a' },
+          {
+            id: 'source-a',
+            generationId: 'fresh-a',
+            continuesActionId: reuseAssignment.actionId,
+          },
         );
         assert.equal(
           (await stores.sessionStore.readHeaderSnapshot(current.targetSessionId)).cwd,
