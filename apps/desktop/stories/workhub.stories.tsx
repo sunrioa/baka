@@ -760,6 +760,7 @@ export const TaskInbox: Story = {
       answer: { kind: 'question', answers: ['公开测试'] },
     }));
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 权限' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskScreen:not([data-staged]) .workHubTaskView')).toHaveAttribute('data-work-id', 'task-capability-action'));
     view = await canvas.findByRole('region', { name: '任务实时执行: 发布检查清单' });
     await userEvent.click(within(view).getByRole('button', { name: '本任务允许' }));
     await waitFor(() => expect(writes.taskAnswer).toHaveBeenCalledWith(sessionId, {
@@ -767,6 +768,7 @@ export const TaskInbox: Story = {
       answer: { kind: 'client_capability', decision: 'allow' },
     }));
     await userEvent.click(within(inbox).getByRole('button', { name: '发布检查清单 · 表单' }));
+    await waitFor(() => expect(canvasElement.querySelector('.workHubTaskScreen:not([data-staged]) .workHubTaskView')).toHaveAttribute('data-work-id', 'task-form-action'));
     view = await canvas.findByRole('region', { name: '任务实时执行: 发布检查清单' });
     await userEvent.type(within(view).getByRole('textbox', { name: '发布说明' }), '发布说明已确认');
     await userEvent.click(within(view).getByRole('button', { name: '提交' }));
