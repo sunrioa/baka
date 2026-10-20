@@ -82,6 +82,28 @@ test('task overview follows the owned continuation and separates queue, resource
     question: 'Need proof',
     sourceActionId: 'producer',
   });
+  f.setDependency({
+    turnId: 'evidence-turn',
+    runId: 'evidence-run',
+    sharedTurn: false,
+    eventKey: 'legacy-retirement',
+    status: 'cancelled',
+    result: 'Legacy wait retired by Host',
+    details: { requestId: 'request', origin: 'legacy_protocol_retirement' },
+  });
+  const retired = await query();
+  assert.equal(retired.status, 'cancelled');
+  assert.equal(retired.dependency, undefined, 'a retired wait is not an active dependency');
+  f.setDependency({
+    turnId: 'evidence-turn',
+    runId: 'evidence-run',
+    sharedTurn: false,
+    eventKey: 'legacy-wait',
+    status: 'waiting_for_dependency',
+    result: 'Legacy wait awaits Host retirement',
+    details: { requestId: 'request', origin: 'legacy_wait' },
+  });
+  assert.equal((await query()).dependency?.question, 'Legacy wait awaits Host retirement');
   f.setDependency(undefined);
   f.setCompleted();
   const ended = await query();

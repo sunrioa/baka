@@ -556,10 +556,12 @@ export function createWorkHubResultRuntime(options: {
     };
     const waiting = await options.evidence?.waitingObservation(assignment, identity);
     if (waiting) {
+      if (waiting.status === 'cancelled')
+        return { task: { ...task, execution, status: 'cancelled' } };
       const data = waiting.details as {
         requestId: string;
-        question: string;
-        sourceActionId: string | null;
+        question?: string;
+        sourceActionId?: string | null;
       };
       return {
         task: {
@@ -568,7 +570,7 @@ export function createWorkHubResultRuntime(options: {
           status: 'waiting_for_dependency',
           dependency: {
             requestId: data.requestId,
-            question: truncateUtf8(data.question, 2048, '…'),
+            question: truncateUtf8(data.question ?? waiting.result, 2048, '…'),
             ...(data.sourceActionId ? { sourceActionId: data.sourceActionId } : {}),
           },
         },

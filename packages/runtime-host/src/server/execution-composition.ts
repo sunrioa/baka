@@ -26,6 +26,7 @@ import { createWorkHubTaskIndexProjection } from './workhub-task-index-projectio
 import { createWorkHubTaskDiscoveryRuntime } from './workhub-task-discovery-runtime.js';
 import {
   createWorkHubTaskBriefReader,
+  createWorkHubWorkerStatusContext,
   formatWorkHubTaskBrief,
   isWorkHubTaskBriefCurrent,
   type WorkHubTaskBriefWitness,
@@ -70,7 +71,6 @@ import {
   type WorkHubDelegationStopRequestedMessage,
   snapshotWorkHubTaskSettings,
   WORKHUB_COORDINATION_SESSION_ID,
-  WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
 } from '@maka/core/session';
 import {
   AgentGraphClientOperationError,
@@ -295,7 +295,6 @@ import {
   type WorkHubDelegationAssignmentInput,
   type WorkHubDelegationRetirementClaim,
   type WorkHubRetirementResult,
-  workHubResumedTurnId,
 } from './workhub-coordination-action-gate.js';
 
 type ExecutionConnectionRef = Parameters<
@@ -1215,6 +1214,15 @@ export async function createExecutionRuntimeHostComposition(
               ],
         resolvePluginTools: (sessionId, coreTools) =>
           pluginTools.resolveContributions(sessionId, coreTools),
+        resolveExecutionContexts: (scope) =>
+          workHubEvidence
+            ? createWorkHubWorkerStatusContext({
+                stores,
+                messages,
+                evidence: workHubEvidence,
+                admission: sessionAdmission,
+              })(scope)
+            : Promise.resolve([]),
         resolvePluginSystemPrompt: async (sessionId, promptContext, baseText) => {
           const assembly = await pluginSystemPrompt.assemble(
             {
@@ -2385,10 +2393,6 @@ export async function createExecutionRuntimeHostComposition(
         }),
       };
     }
-    const replacementCapacity = new Map<
-      string,
-      Awaited<ReturnType<typeof prepareWorkHubMessage>> & { release(): void }
-    >();
     const readStopTarget = async (
       source: WorkHubDelegationAssignedMessage,
       lease?: SessionAdmissionLease,
@@ -2455,197 +2459,6 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       executions: coordinator,
       sessionActions: {
-        withReplacementCapacity: async (input, _context, operation) => {
-          if (input.create) return operation();
-          const prepared = await prepareWorkHubMessage(input);
-          const reserved = await messages.reserveFollowupCapacity(
-            input.targetSessionId,
-            prepared.messageId,
-            prepared.content,
-          );
-          if (!reserved.ok)
-            throw new WorkHubActionEffectFailure(
-              reserved.error.code === 'outcome_unknown'
-                ? 'commit_outcome_unknown'
-                : reserved.error.code,
-              reserved.error.message,
-            );
-          replacementCapacity.set(input.actionId, { ...prepared, release: reserved.result });
-          try {
-            return await operation();
-          } finally {
-            reserved.result();
-            replacementCapacity.delete(input.actionId);
-          }
-        },
-        readDelegationRetirement: async (assignment, admission) => {
-          const disposition = admission
-            ? await messages.readMessageExecutionDispositionAdmitted(
-                assignment.targetSessionId,
-                assignment.targetMessageId,
-                admission,
-              )
-            : await messages.readMessageExecutionDisposition(
-                assignment.targetSessionId,
-                assignment.targetMessageId,
-              );
-          if (disposition.kind === 'recovering') return 'recovering';
-          if (disposition.kind === 'pending') return 'not_retired';
-          if (disposition.kind === 'cancelled' || disposition.kind === 'shared_turn') {
-            return 'retired';
-          }
-          const identity = {
-            sessionId: assignment.targetSessionId,
-            turnId: disposition.turnId,
-            runId: disposition.runId,
-          };
-          const latest = workHubEvidence
-            ? await workHubEvidence.taskExecution(assignment, identity)
-            : await coordinator.readLatestRootTurnLineage(identity);
-          if ('request' in latest && latest.request) return 'not_retired';
-          if (isActiveWorkHubRoot(coordinator, latest)) return 'not_retired';
-          // The same restart window as `stopOwnedWorkHubRoot`: an unregistered
-          // root is not evidence that its work ended.
-          const snapshot = await coordinator.read(latest);
-          return isHostedExecutionTerminal(snapshot) ? 'retired' : 'recovering';
-        },
-        // Resolve and resume only the execution lineage owned by this
-        // delegation. A Session-wide latest-failure query could otherwise
-        // continue unrelated work started directly in the same Session.
-        resumeDelegation: async (
-          assignment,
-          context,
-          actionId,
-          validateFreshTarget,
-          prepareTargetExecution,
-          assertTargetExecutionReady,
-        ) => {
-          const targetTurnId = workHubResumedTurnId(actionId);
-          const admitted = await stores.agentRunStore.readRootTurnAdmission(
-            assignment.targetSessionId,
-            targetTurnId,
-          );
-          if (admitted) {
-            if (admitted.execution.kind !== 'safe_boundary_continuation') {
-              throw new WorkHubActionEffectFailure(
-                'operation_conflict',
-                'WorkHub resume identity is not a continuation',
-              );
-            }
-            return { outcome: 'resume_started' as const, targetTurnId };
-          }
-          if (!safeBoundaryResumePolicy.automated) {
-            throw new WorkHubActionEffectFailure(
-              'operation_unavailable',
-              'Safe-boundary resume is disabled for this Runtime Host',
-            );
-          }
-          await validateFreshTarget();
-          await prepareTargetExecution?.();
-          // A model-repair form can remain open while another action changes
-          // the delegated target. Recheck freshness before reading its
-          // terminal lineage so the resumed action never uses a stale target.
-          await validateFreshTarget();
-          const disposition = await messages.readMessageExecutionDisposition(
-            assignment.targetSessionId,
-            assignment.targetMessageId,
-          );
-          if (disposition.kind === 'recovering') {
-            throw new WorkHubActionEffectFailure(
-              'host_not_ready',
-              'WorkHub is still recovering the delegated execution',
-            );
-          }
-          if (disposition.kind !== 'owned_root') {
-            throw new WorkHubActionEffectFailure(
-              'operation_conflict',
-              'WorkHub delegated execution is not resumable',
-            );
-          }
-          const original = {
-            sessionId: assignment.targetSessionId,
-            turnId: disposition.turnId,
-            runId: disposition.runId,
-          };
-          const source = workHubEvidence
-            ? await workHubEvidence.taskExecution(assignment, original)
-            : await coordinator.readLatestRootTurnLineage(original);
-          if (isActiveWorkHubRoot(coordinator, source)) {
-            return { outcome: 'already_running' as const };
-          }
-          const snapshot = await coordinator.read(source);
-          if (!isHostedExecutionTerminal(snapshot)) {
-            throw new WorkHubActionEffectFailure(
-              'host_not_ready',
-              'WorkHub is still recovering the delegated execution',
-            );
-          }
-          if (snapshot.status !== 'failed' && snapshot.status !== 'cancelled') {
-            throw new WorkHubActionEffectFailure(
-              'operation_conflict',
-              'WorkHub delegated execution is not resumable',
-            );
-          }
-          const plan = await coordinator.handlers['turn.resume.query'](
-            { sessionId: assignment.targetSessionId, sourceRunId: source.runId },
-            context,
-          );
-          if (!plan.ok) throw new WorkHubActionEffectFailure(plan.error.code, plan.error.message);
-          if (plan.result.disposition === 'parked') {
-            throw new WorkHubActionEffectFailure(
-              plan.result.reason === 'resume_feature_disabled'
-                ? 'operation_unavailable'
-                : 'operation_conflict',
-              plan.result.reason === 'resume_feature_disabled'
-                ? 'Safe-boundary resume is disabled for this Runtime Host'
-                : `WorkHub delegated execution is not resumable (${plan.result.reason})`,
-            );
-          }
-          // Root planning authenticates handoff membership. Its source may be
-          // a physical successor of this same logical Turn, never another Turn.
-          if (plan.result.sourceTurnId !== source.turnId) {
-            throw new WorkHubActionEffectFailure(
-              'operation_conflict',
-              'WorkHub resume source lineage changed during planning',
-            );
-          }
-          const started = await coordinator.startTurnResumeWithValidation(
-            {
-              sessionId: assignment.targetSessionId,
-              turnId: targetTurnId,
-              sourceRunId: plan.result.sourceRunId,
-              sourceRuntimeEventHighWater: plan.result.sourceRuntimeEventHighWater,
-            },
-            context,
-            async (lease) => {
-              await validateFreshTarget(lease);
-              await assertTargetExecutionReady?.();
-            },
-          );
-          if (!started.ok) {
-            throw new WorkHubActionEffectFailure(started.error.code, started.error.message);
-          }
-          if (started.result.kind === 'parked') {
-            throw new WorkHubActionEffectFailure(
-              started.result.plan.reason === 'resume_feature_disabled'
-                ? 'operation_unavailable'
-                : 'operation_conflict',
-              started.result.plan.reason === 'resume_feature_disabled'
-                ? 'Safe-boundary resume is disabled for this Runtime Host'
-                : `WorkHub delegated execution is not resumable (${started.result.plan.reason})`,
-            );
-          }
-          return {
-            outcome: 'resume_started' as const,
-            targetTurnId: started.result.turn.turnId,
-          };
-        },
-        retireDelegation: (assignment, retirement) =>
-          retireWorkHubDelegation(assignment, retirement, {
-            messages,
-            coordinator,
-            readStopTarget,
-          }),
         assign: async (input) => {
           const durable = await stores.sessionStore.readWorkHubAssignment(input.actionId);
           if (durable) {
@@ -2715,7 +2528,7 @@ export async function createExecutionRuntimeHostComposition(
                 })
               : undefined;
           const { suffix, messageId, targetAttachments, content, delegationText, briefWitness } =
-            replacementCapacity.get(input.actionId) ?? (await prepareWorkHubMessage(input));
+            await prepareWorkHubMessage(input);
           const persisted =
             durable ??
             (await sessionAdmission.runMany(
@@ -2803,26 +2616,6 @@ export async function createExecutionRuntimeHostComposition(
                     'operation_unavailable',
                     'Created task has no effective model or permission configuration',
                   );
-                const supersession =
-                  input.replacesActionId && input.replacesDelegationId
-                    ? {
-                        type: 'workhub_coordination' as const,
-                        id: `whx_${createHash('sha256')
-                          .update(input.replacesDelegationId, 'utf8')
-                          .digest('hex')
-                          .slice(0, 48)}`,
-                        turnId: input.coordinationTurnId ?? input.actionId,
-                        ts: assignedAt,
-                        schemaVersion: WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION,
-                        kind: 'delegation_superseded' as const,
-                        actionId: input.actionId,
-                        actionFingerprint: input.actionFingerprint,
-                        coordinationTurnId: input.coordinationTurnId ?? input.actionId,
-                        supersededActionId: input.replacesActionId,
-                        supersededDelegationId: input.replacesDelegationId,
-                        replacementDelegationId: delegationId,
-                      }
-                    : undefined;
                 let taskInput: WorkHubTaskInputMessage | undefined;
                 if (input.taskInput) {
                   const source = await stores.sessionStore.readWorkHubAssignment(
@@ -2855,11 +2648,7 @@ export async function createExecutionRuntimeHostComposition(
                     id: `wha_${suffix}`,
                     turnId: input.coordinationTurnId ?? input.actionId,
                     ts: assignedAt,
-                    schemaVersion: input.work
-                      ? 4
-                      : supersession
-                        ? WORKHUB_COORDINATION_REPLACEMENT_SCHEMA_VERSION
-                        : 1,
+                    schemaVersion: input.work ? 4 : 1,
                     kind: 'delegation_assigned',
                     returnResults: true,
                     actionId: input.actionId,
@@ -2908,19 +2697,11 @@ export async function createExecutionRuntimeHostComposition(
                             : input.create,
                         }
                       : {}),
-                    ...(input.replacesActionId && input.replacesDelegationId
-                      ? {
-                          replacesActionId: input.replacesActionId,
-                          replacesDelegationId: input.replacesDelegationId,
-                        }
-                      : {}),
                   },
                   admission,
                   ...(taskInput ? { taskInput } : {}),
                   ...(create ? { create } : {}),
-                  ...(supersession ? { supersession } : {}),
                 });
-                replacementCapacity.get(input.actionId)?.release();
                 // Keep the durable Message identity and its live queue owner
                 // under one Session admission. A terminal transition must not
                 // observe the committed Message before the queue does.
@@ -3890,10 +3671,6 @@ export async function retireWorkHubDelegation(
     turnId: disposition.turnId,
     runId: disposition.runId,
   };
-  if (retirement.cause === 'replacement') {
-    const current = (await deps.readStopTarget(assignment)).execution;
-    return stopReplacedWorkHubRoot(deps.coordinator, current ?? original);
-  }
   // Old claims have no confirmed binding. They may cancel their original
   // Message/root, but cannot acquire authority over a later resumed execution.
   if (retirement.executionBinding === undefined) {
@@ -3958,27 +3735,6 @@ export async function stopOwnedWorkHubRoot(
   return isHostedExecutionTerminal(terminal)
     ? { outcome: 'already_terminal', targetTurnId: identity.turnId }
     : { outcome: 'recovering', targetTurnId: identity.turnId };
-}
-
-/**
- * Route correction retiring the root it is replacing. It carries its own
- * cancellation claim, but it is not a direct stop: recording direct-stop
- * provenance here would let replay mistake a correction for one, so the
- * retirement keeps the neutral Stop source ordinary supersession has always
- * used.
- */
-export async function stopReplacedWorkHubRoot(
-  coordinator: Pick<RootTurnCoordinator, 'readRootState' | 'read' | 'stopRoot'>,
-  identity: { readonly sessionId: string; readonly turnId: string; readonly runId: string },
-): Promise<{
-  readonly outcome: 'stop_delivered' | 'already_terminal';
-  readonly targetTurnId: string;
-}> {
-  if (!isActiveWorkHubRoot(coordinator, identity)) {
-    return { outcome: 'already_terminal', targetTurnId: identity.turnId };
-  }
-  await coordinator.stopRoot(identity);
-  return { outcome: 'stop_delivered', targetTurnId: identity.turnId };
 }
 
 function isActiveWorkHubRoot(
