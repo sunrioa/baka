@@ -47,7 +47,6 @@ test('WorkHub inbox is bounded, closed, pending-only and deduplicated by origina
   assert.throws(() => spec.decodeInput({ hostId: 'injected' }));
   assert.deepEqual(spec.decodeOutput({ requests: [item], truncated: false }), {
     requests: [item],
-    grants: [],
     truncated: false,
   });
   for (const requests of [
@@ -91,7 +90,7 @@ test('WorkHub answers cannot retarget a Session and receipts must match the exac
     answer: { kind: 'sandbox_boundary', decision: 'allow' },
     grantScope: 'task',
   };
-  assert.deepEqual(spec.decodeInput(grantAnswer), grantAnswer);
+  assert.throws(() => spec.decodeInput(grantAnswer));
   assert.throws(() => spec.decodeInput({ ...grantAnswer, grantScope: 'session' }));
   assert.throws(() =>
     spec.decodeInput({ ...grantAnswer, answer: { kind: 'sandbox_boundary', decision: 'deny' } }),
@@ -105,4 +104,28 @@ test('WorkHub answers cannot retarget a Session and receipts must match the exac
   spec.assertOutputForInput!(decoded, output);
   for (const patch of [{ runId: 'old' }, { turnId: 'manual' }, { interactionId: 'other' }])
     assert.throws(() => spec.assertOutputForInput!(decoded, { ...output, ...patch }));
+});
+
+test('native approval answers retain original options and reject retired task-grant fields', () => {
+  const spec = HOST_OPERATION_SPECS['workhub.interactions.answer'];
+  for (const answer of [
+    { kind: 'permission', decision: 'allow', rememberForTurn: false },
+    { kind: 'permission', decision: 'allow', rememberForTurn: true },
+    { kind: 'permission', decision: 'deny', rememberForTurn: false },
+    { kind: 'sandbox_boundary', decision: 'allow' },
+    { kind: 'sandbox_boundary', decision: 'deny' },
+    { kind: 'client_capability', decision: 'allow' },
+    { kind: 'client_capability', decision: 'deny' },
+  ]) {
+    const input = {
+      actionId: 'action',
+      interactionId: 'original',
+      expectedTurnId: 'turn',
+      expectedRunId: 'run',
+      answer,
+    };
+    assert.deepEqual(spec.decodeInput(input), input);
+    assert.throws(() => spec.decodeInput({ ...input, grantScope: 'task' }));
+  }
+  assert.equal(Object.hasOwn(HOST_OPERATION_SPECS, 'workhub.interactions.revoke'), false);
 });

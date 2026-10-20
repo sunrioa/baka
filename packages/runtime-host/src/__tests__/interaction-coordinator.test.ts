@@ -219,7 +219,7 @@ describe('HostInteractionCoordinator', () => {
     });
   });
 
-  test('WorkHub forwards a collected answer under the target admission exactly once', async () => {
+  test('native task answers use the original target admission exactly once', async () => {
     await withStore(async ({ store }) => {
       const gate = new SessionAdmissionGate();
       const answers: (readonly (string | null)[])[] = [];
@@ -240,13 +240,13 @@ describe('HostInteractionCoordinator', () => {
           answer: { kind: 'question' as const, answers: ['Yes'] },
         };
         const forward = () =>
-          gate.run(RUN.sessionId, (lease) => coordinator.answerDelegatedQuestion(input, lease));
+          gate.run(RUN.sessionId, (lease) => coordinator.answerAdmitted(input, lease));
         assert.equal((await forward()).ok, true);
         assert.equal((await forward()).ok, true);
         assert.deepEqual(answers, [['Yes']]);
         assert.equal(await coordinator.hasPendingSession(RUN.sessionId), false);
         const wrongSession = await gate.run('other-session', (lease) =>
-          coordinator.answerDelegatedQuestion({ ...input, sessionId: 'other-session' }, lease),
+          coordinator.answerAdmitted({ ...input, sessionId: 'other-session' }, lease),
         );
         assert.equal(wrongSession.ok, false);
       } finally {
@@ -257,7 +257,7 @@ describe('HostInteractionCoordinator', () => {
     });
   });
 
-  test('settled target question closes only its copied WorkHub relay', async () => {
+  test('exact legacy coordinator relay closure persists before applying its live continuation', async () => {
     await withStore(async ({ store }) => {
       const coordinator = createCoordinator(store);
       const run = { ...RUN, sessionId: WORKHUB_COORDINATION_SESSION_ID };
@@ -277,10 +277,14 @@ describe('HostInteractionCoordinator', () => {
             },
           },
         });
-        assert.equal(await coordinator.closeRelayedQuestion(run.turnId, 'wrong-tool'), false);
+        const identity = { ...run, requestId: 'copied-question', toolUseId: 'relay-tool' };
+        assert.equal(
+          await coordinator.closeLegacyWorkHubRelay({ ...identity, toolUseId: 'wrong-tool' }),
+          false,
+        );
         assert.equal((await store.listPending(run)).length, 1);
-        assert.equal(await coordinator.closeRelayedQuestion(run.turnId, 'relay-tool'), true);
-        assert.equal(await coordinator.closeRelayedQuestion(run.turnId, 'relay-tool'), false);
+        assert.equal(await coordinator.closeLegacyWorkHubRelay(identity), true);
+        assert.equal(await coordinator.closeLegacyWorkHubRelay(identity), false);
         assert.deepEqual(closures, ['producer_cancelled']);
         assert.equal((await store.listPending(run)).length, 0);
         assert.equal(
@@ -292,6 +296,127 @@ describe('HostInteractionCoordinator', () => {
         owner.release();
         await coordinator.close();
       }
+    });
+  });
+
+  test('startup legacy closure is exact and idempotent without closing original questions or approvals', async () => {
+    await withStore(async ({ store }) => {
+      const run = { ...RUN, sessionId: WORKHUB_COORDINATION_SESSION_ID };
+      const relay = storedQuestion('legacy-relay', run, 10);
+      const original = storedQuestion('worker-question', RUN, 11);
+      const ordinary = storedQuestion('coordinator-question', run, 12);
+      const permission = storedPermission('worker-permission', RUN);
+      const coordinatorPermission = storedPermission('coordinator-permission', run);
+      const capability: StoredInteractionRequest = {
+        ...RUN,
+        requestId: 'worker-capability',
+        createdAt: 13,
+        request: {
+          kind: 'client_capability',
+          toolUseId: 'browser-call',
+          target: {
+            providerId: 'provider-1',
+            contractId: 'contract-1',
+            serverId: 'desktop_browser',
+            toolName: 'browser_snapshot',
+            capability: 'browser',
+            scope: { kind: 'browser_origin', origin: 'https://example.com' },
+          },
+        },
+      };
+      for (const request of [
+        relay,
+        original,
+        ordinary,
+        permission,
+        coordinatorPermission,
+        capability,
+      ])
+        assert.equal((await store.establishRequest(request)).status, 'stable');
+      const refreshed: string[] = [];
+      const coordinator = createCoordinator(store, {
+        refreshCanonicalContinuity: async (sessionId) => {
+          const outcome = (await store.readInteraction(relay.requestId))?.outcome?.outcome;
+          assert.equal(outcome?.kind, 'closure');
+          if (outcome?.kind === 'closure') assert.equal(outcome.reason, 'producer_cancelled');
+          refreshed.push(sessionId);
+        },
+      });
+      const identity = { ...run, requestId: relay.requestId, toolUseId: 'tool_legacy-relay' };
+      for (const patch of [
+        { sessionId: RUN.sessionId },
+        { turnId: 'another-turn' },
+        { runId: 'another-run' },
+        { requestId: 'missing' },
+        { toolUseId: 'another-call' },
+        { requestId: original.requestId, toolUseId: 'tool_worker-question' },
+        { requestId: coordinatorPermission.requestId, toolUseId: 'tool_coordinator-permission' },
+      ])
+        assert.equal(
+          await coordinator.closeLegacyWorkHubRelay({ ...identity, ...patch } as Parameters<
+            HostInteractionCoordinator['closeLegacyWorkHubRelay']
+          >[0]),
+          false,
+        );
+      assert.equal(await coordinator.closeLegacyWorkHubRelay(identity), true);
+      const committed = await store.readInteraction(relay.requestId);
+      assert.equal(await coordinator.closeLegacyWorkHubRelay(identity), false);
+      assert.deepEqual(await store.readInteraction(relay.requestId), committed);
+      assert.deepEqual(refreshed, [WORKHUB_COORDINATION_SESSION_ID]);
+      for (const request of [original, ordinary, permission, coordinatorPermission, capability])
+        assert.deepEqual(await store.readInteraction(request.requestId), { request });
+      assert.equal(coordinator.isPoisoned(), false);
+      // Untouched originals remain pending; retiring a relay cannot authorize
+      // a clean shutdown that silently drops those durable requests.
+      await assert.rejects(coordinator.close(), RuntimeInteractionFailStopError);
+      for (const request of [original, ordinary, permission, coordinatorPermission, capability])
+        assert.deepEqual(await store.readInteraction(request.requestId), { request });
+    });
+  });
+
+  test('unbound legacy closure fails closed after Runtime Runs have bound', async () => {
+    await withStore(async ({ store }) => {
+      const run = { ...RUN, sessionId: WORKHUB_COORDINATION_SESSION_ID };
+      const relay = storedQuestion('late-relay', run, 10);
+      assert.equal((await store.establishRequest(relay)).status, 'stable');
+      const coordinator = createCoordinator(store);
+      coordinator.bindRun(RUN);
+      await assert.rejects(
+        coordinator.closeLegacyWorkHubRelay({
+          ...run,
+          requestId: relay.requestId,
+          toolUseId: 'tool_late-relay',
+        }),
+        RuntimeInteractionFailStopError,
+      );
+      assert.deepEqual(await store.readInteraction(relay.requestId), { request: relay });
+      await assert.rejects(coordinator.close(), RuntimeInteractionFailStopError);
+    });
+  });
+
+  test('historical permission schema has no native live answer authority or supplemental grant', async () => {
+    await withStore(async ({ store }) => {
+      const permission = storedPermission('historical-permission', RUN);
+      assert.equal((await store.establishRequest(permission)).status, 'stable');
+      const coordinator = createCoordinator(store);
+      for (const answer of [
+        { kind: 'permission', decision: 'allow', rememberForTurn: false },
+        { kind: 'permission', decision: 'allow', rememberForTurn: true },
+        { kind: 'permission', decision: 'deny', rememberForTurn: false },
+      ] as const) {
+        const result = await coordinator.handlers['interaction.answer'](
+          { sessionId: RUN.sessionId, interactionId: permission.requestId, answer },
+          connection(),
+        );
+        assert.equal(result.ok, false);
+        if (!result.ok) assert.equal(result.error.code, 'operation_conflict');
+        assert.deepEqual(await store.readInteraction(permission.requestId), {
+          request: permission,
+        });
+      }
+      assert.equal(coordinator.isPoisoned(), false);
+      await assert.rejects(coordinator.close(), RuntimeInteractionFailStopError);
+      assert.deepEqual(await store.readInteraction(permission.requestId), { request: permission });
     });
   });
 
@@ -1449,6 +1574,29 @@ function storedQuestion(
           options: [{ label: 'Yes' }, { label: 'No' }],
         },
       ],
+    },
+  };
+}
+
+function storedPermission(
+  requestId: string,
+  identity: RuntimeInteractionRunIdentity,
+): StoredInteractionRequest {
+  return {
+    ...identity,
+    requestId,
+    createdAt: 10,
+    request: {
+      kind: 'permission',
+      toolUseId: `tool_${requestId}`,
+      prompt: {
+        kind: 'tool_permission',
+        toolName: 'Bash',
+        category: 'shell_unsafe',
+        reason: 'shell_dangerous',
+        review: { kind: 'command', command: 'echo okay', cwd: '/repo' },
+        rememberForTurnAllowed: true,
+      },
     },
   };
 }

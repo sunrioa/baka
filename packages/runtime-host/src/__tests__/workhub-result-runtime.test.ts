@@ -19,9 +19,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { deferred, withTimeout } from '@maka/core/test-only/async-primitives';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
-import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import { createWorkHubResultRuntime } from '../server/workhub-result-runtime.js';
 import {
   SessionAdmissionGate,
@@ -280,12 +278,15 @@ function fixture(childRequest = false) {
   let dependency:
     | import('../server/workhub-result-coordinator.js').WorkHubResultObservation
     | undefined;
-  let rejectRelay: ((reason: Error) => void) | undefined;
   const closedRelays: unknown[] = [];
+  const coordinatorPending: import('@maka/storage/interaction-store').StoredInteractionRequest[] =
+    [];
+  const relayEvents: import('@maka/core/runtime-event').RuntimeEvent[] = [];
   const assignment = {
     ts: 1,
     userText: 'Release task',
     targetSessionName: 'Release',
+    taskTitle: 'Shipping checklist',
     targetTurnId: 'target-turn',
     actionId: 'action',
     delegationId: 'delegation',
@@ -305,8 +306,8 @@ function fixture(childRequest = false) {
   const record = {
     requestId: 'question',
     sessionId: childRequest ? 'child' : 'target',
-    turnId: 'target-turn',
-    runId: 'target-run',
+    turnId: childRequest ? 'child-turn' : 'target-turn',
+    runId: childRequest ? 'child-run' : 'target-run',
     request: { kind: 'question', toolUseId: 'question-tool', questions },
     createdAt: 1,
   };
@@ -321,14 +322,6 @@ function fixture(childRequest = false) {
     return 'delivered';
   };
   const runtime = createWorkHubResultRuntime({
-    ...(childRequest
-      ? {
-          taskGrants: {
-            belongsToRoot: async (identity: { sessionId: string }) =>
-              childOwned && identity.sessionId === 'child',
-          } as unknown as NonNullable<Options['taskGrants']>,
-        }
-      : {}),
     evidence: {
       taskExecution: async () => ({ ...tip, round: 0 }),
       waitingObservation: async () => dependency,
@@ -359,7 +352,29 @@ function fixture(childRequest = false) {
         },
         readWorkHubAssignmentsPage: async () =>
           assert.fail('Exact task lookup must not scan global assignment history'),
-        readHeaderSnapshot: async () => ({ id: 'target', name: 'Release', isArchived: false }),
+        readHeaderSnapshot: async (id: string) =>
+          id === 'child'
+            ? {
+                id: 'child',
+                name: 'Child',
+                isArchived: false,
+                subagentSpawn: {
+                  schemaVersion: 1,
+                  requestFingerprint: 'spawn',
+                  initialTurnId: 'child-turn',
+                  initialRunId: 'child-run',
+                },
+                subagentParent: {
+                  kind: 'subagent',
+                  parentSessionId: 'target',
+                  spawnedBy: {
+                    parentTurnId: 'target-turn',
+                    parentRunId: 'target-run',
+                    toolCallId: 'spawn',
+                  },
+                },
+              }
+            : { id: 'target', name: 'Release', isArchived: false },
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async () => undefined,
         readWorkHubStopRequest: async (_delegationId: string, actionId?: string, latest?: true) =>
@@ -375,17 +390,42 @@ function fixture(childRequest = false) {
       },
       interactionStore: {
         listSessionPending: async (sessionId: string) =>
-          requests && record.sessionId === sessionId ? [record] : [],
+          sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? coordinatorPending
+            : requests && record.sessionId === sessionId
+              ? [record]
+              : [],
+      },
+      runtimeEventStore: {
+        readRunInvocation: async (sessionId: string, runId: string) => ({
+          sessionId,
+          runId,
+          turnId: sessionId === 'child' ? 'child-turn' : 'target-turn',
+          invocationId: 'inv-' + runId,
+          opening: { source: { kind: 'fresh' } },
+        }),
+        readImmutableRuntimeEvents: async (sessionId: string, runId: string) =>
+          sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? relayEvents.filter((event) => event.runId === runId)
+            : [],
+      },
+      agentRunStore: {
+        readRootTurnAdmission: async (sessionId: string, turnId: string) => ({
+          sessionId,
+          turnId,
+          runId: 'child-run',
+          execution: { kind: childOwned ? 'linked_child_initial' : 'external_message' },
+        }),
       },
     } as unknown as Options['stores'],
     executions: {
       readWorkHubDispatchWait: () => waitReason,
       startWorkHubResult,
-      readLatestRootTurnLineage: async () => ({
-        sessionId: 'target',
-        turnId: 'target-turn',
-        runId: 'target-run',
-      }),
+      readLatestRootTurnLineage: async (identity: {
+        sessionId: string;
+        turnId: string;
+        runId: string;
+      }) => identity,
       read: async () => ({ status, terminalEventId: 'terminal' }),
     } as unknown as Options['executions'],
     messages: {
@@ -395,22 +435,33 @@ function fixture(childRequest = false) {
           : { kind: disposition, turnId: 'target-turn', runId: 'target-run' },
     } as unknown as Options['messages'],
     interactions: {
-      answerAdmitted: async (input, lease) =>
-        admission.runAdmitted('target', lease, async () => {
+      answerAdmitted: async (input, lease, ...extra) =>
+        admission.runAdmitted(input.sessionId, lease, async () => {
+          assert.equal(extra.length, 0, 'No task-level grant is created or attached');
           forwarded.push(input);
+          if (input.answer.kind === 'permission')
+            return {
+              ok: false,
+              error: { code: 'operation_conflict', message: 'No live permission continuation' },
+            };
           requests = false;
           return { ok: true, result: { status: 'answered' } };
         }),
-      closeRelayedQuestion: async (turnId, toolCallId) => {
-        closedRelays.push({ turnId, toolCallId });
-        rejectRelay?.(new Error('Relay closed after original question settled'));
+      closeLegacyWorkHubRelay: async (identity) => {
+        closedRelays.push(identity);
+        const index = coordinatorPending.findIndex(
+          (request) =>
+            request.requestId === identity.requestId &&
+            request.sessionId === identity.sessionId &&
+            request.turnId === identity.turnId &&
+            request.runId === identity.runId &&
+            request.request.kind === 'question' &&
+            request.request.toolUseId === identity.toolUseId,
+        );
+        if (index < 0) return false;
+        coordinatorPending.splice(index, 1);
         return true;
       },
-      answerDelegatedQuestion: async (input, lease) =>
-        admission.runAdmitted('target', lease, async () => {
-          forwarded.push(input);
-          return { ok: true, result: { status: 'answered' } };
-        }),
     } as Options['interactions'],
     readTurnResult: async (sessionId, turnId) => {
       assert.equal(sessionId, 'target');
@@ -430,17 +481,6 @@ function fixture(childRequest = false) {
       throw error;
     },
   });
-  const context: MakaToolContext = {
-    sessionId: WORKHUB_COORDINATION_SESSION_ID,
-    turnId: 'feedback-turn',
-    runId: 'feedback-run',
-    cwd: '/tmp',
-    toolCallId: 'relay',
-    abortSignal: new AbortController().signal,
-    emitOutput() {},
-  };
-  const call = (input: Record<string, unknown>, ctx = context) =>
-    runtime.tool.impl(input as never, ctx);
   return {
     latestLookups,
     hideFromOverview: () => {
@@ -458,9 +498,10 @@ function fixture(childRequest = false) {
     setDependency: (value: typeof dependency) => {
       dependency = value;
     },
-    call,
     handlers: runtime.handlers,
-    context,
+    coordinatorPending,
+    relayEvents,
+    retireLegacy: runtime.retireLegacy,
     questions,
     forwarded,
     closedRelays,
@@ -472,9 +513,6 @@ function fixture(childRequest = false) {
     },
     notify: runtime.notify,
     reconcile: () => runtime.coordinator.reconcile(),
-    setRelayReject: (reject: (reason: Error) => void) => {
-      rejectRelay = reject;
-    },
     setOriginalAnswered: () => {
       requests = false;
       status = 'completed';
@@ -514,168 +552,6 @@ function fixture(childRequest = false) {
   };
 }
 
-test('WorkHubResult presents the exact question and forwards only the actual collected answer', async () => {
-  const f = fixture();
-  let shown: unknown;
-  const result = await f.call(
-    { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
-    {
-      ...f.context,
-      askUserQuestion: async (questions) => {
-        shown = questions;
-        return { answers: [{ question: questions[0]!.question, answer: 'Monday' }] };
-      },
-    },
-  );
-  assert.deepEqual(shown, f.questions);
-  assert.deepEqual(f.forwarded, [
-    {
-      sessionId: 'target',
-      interactionId: 'question',
-      answer: { kind: 'question', answers: ['Monday'] },
-    },
-  ]);
-  assert.deepEqual(result, { status: 'answered', targetSessionId: 'target' });
-});
-
-test('WorkHubResult refuses model-supplied answers and access from other Sessions', async () => {
-  const f = fixture();
-  await assert.rejects(
-    Promise.resolve().then(() =>
-      f.call({
-        actionId: 'action',
-        operation: 'ask_question',
-        interactionId: 'question',
-        answers: ['Friday'],
-      }),
-    ),
-  );
-  await assert.rejects(
-    Promise.resolve().then(() =>
-      f.call({ actionId: 'action' }, { ...f.context, sessionId: 'another-session' }),
-    ),
-    /coordination Session/u,
-  );
-  assert.equal(f.forwarded.length, 0);
-});
-
-for (const retire of ['replace', 'stop'] as const) {
-  test(`a ${retire} while the human answers prevents relaying to the old task`, async () => {
-    const f = fixture();
-    const result = await f.call(
-      { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
-      {
-        ...f.context,
-        askUserQuestion: async () => {
-          if (retire === 'replace') f.setActive(false);
-          else f.setStopped();
-          return { answers: [{ question: 'When?', answer: 'Friday' }] };
-        },
-      },
-    );
-    assert.deepEqual(result, { status: 'obsolete' });
-    assert.equal(f.forwarded.length, 0);
-  });
-}
-
-test('WorkHubResult reads complete results in Unicode-safe pages', async () => {
-  const f = fixture();
-  f.setCompleted();
-  const first = (await f.call({ actionId: 'action' })) as { result: string; nextOffset: number };
-  const last = (await f.call({ actionId: 'action', offset: first.nextOffset })) as {
-    result: string;
-    nextOffset: null;
-  };
-  assert.equal(Array.from(first.result).length, 16000);
-  assert.equal(first.nextOffset, 16000);
-  assert.equal(last.result, '😀');
-  assert.equal(last.nextOffset, null);
-});
-
-test('WorkHubResult cannot relay a permission decision', async () => {
-  const f = fixture();
-  f.record.request.kind = 'permission';
-  await assert.rejects(
-    Promise.resolve().then(() =>
-      f.call(
-        { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
-        {
-          ...f.context,
-          askUserQuestion: async () => {
-            throw new Error('Must not ask for permission through this tool');
-          },
-        },
-      ),
-    ),
-    /Only pending user questions/u,
-  );
-  assert.equal(f.forwarded.length, 0);
-});
-
-test('WorkHubResult ignores a pending question from an older Run of the same Turn', async () => {
-  const f = fixture();
-  f.record.runId = 'previous-run';
-  assert.deepEqual(await f.call({ actionId: 'action' }), {
-    status: 'pending',
-    targetSessionId: 'target',
-    message:
-      'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
-  });
-});
-
-test('a stopped WorkHub turn cannot forward an answer after cancellation', async () => {
-  const f = fixture();
-  const abort = new AbortController();
-  await assert.rejects(
-    Promise.resolve().then(() =>
-      f.call(
-        { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
-        {
-          ...f.context,
-          abortSignal: abort.signal,
-          askUserQuestion: async () => {
-            abort.abort();
-            return { answers: [{ question: 'When?', answer: 'Friday' }] };
-          },
-        },
-      ),
-    ),
-    /abort/u,
-  );
-  assert.equal(f.forwarded.length, 0);
-});
-
-for (const status of ['completed', 'failed', 'cancelled']) {
-  test(`WorkHubResult ${status} result survives lossless JSON persistence`, async () => {
-    const f = fixture();
-    f.setStatus(status);
-    const result = await f.call({ actionId: 'action' });
-    assert.deepEqual(JSON.parse(JSON.stringify(result)), result);
-  });
-}
-
-test('a still-running delegation reports pending and asks the model to yield', async () => {
-  const f = fixture();
-  f.setRunning();
-  const result = (await f.call({ actionId: 'action' })) as { status: string; message: string };
-  assert.equal(result.status, 'pending');
-  assert.match(result.message, /automatically notify/u);
-  f.setActive(false);
-  assert.deepEqual(await f.call({ actionId: 'action' }), {
-    status: 'obsolete',
-    targetSessionId: 'target',
-  });
-});
-
-test('a message cancelled before execution returns a durable cancellation result', async () => {
-  const f = fixture();
-  f.setDisposition('cancelled');
-  const result = (await f.call({ actionId: 'action' })) as { status: string; details: unknown };
-  assert.equal(result.status, 'cancelled');
-  assert.deepEqual(result.details, { abortSource: 'message_cancelled_before_execution' });
-  assert.equal(f.resultReads(), 0);
-});
-
 test('delivered terminal events do not reread the target transcript on reconciliation', async () => {
   const f = fixture();
   f.setCompleted();
@@ -684,31 +560,14 @@ test('delivered terminal events do not reread the target transcript on reconcili
   assert.equal(f.resultReads(), 1);
 });
 
-test('answering the original task closes the copied WorkHub question', async () => {
+test('a message cancelled before execution remains cancelled without reading a delivery', async () => {
   const f = fixture();
-  const presented = deferred();
-  const relayed = f.call(
-    { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
-    {
-      ...f.context,
-      askUserQuestion: async () =>
-        new Promise((_, reject) => {
-          f.setRelayReject(reject);
-          presented.resolve();
-        }),
-    },
-  );
-  await withTimeout(presented.promise, 1000, 'Question was not presented');
-  f.setOriginalAnswered();
-  f.notify('target');
-  assert.deepEqual(await withTimeout(Promise.resolve(relayed), 1000, 'Relay remained blocked'), {
-    status: 'question_settled_in_target',
-    targetSessionId: 'target',
-    message:
-      'The original task question has settled. Wait for the automatic task result; do not ask again.',
-  });
-  assert.deepEqual(f.closedRelays, [{ turnId: 'feedback-turn', toolCallId: 'relay' }]);
-  assert.equal(f.forwarded.length, 0);
+  f.setDisposition('cancelled');
+  const result = await f.handlers['workhub.tasks.read']({ workId: 'action' }, {} as never);
+  assert.ok(result.ok);
+  assert.equal(result.result.task.status, 'cancelled');
+  assert.equal(result.result.delivery, undefined);
+  assert.equal(f.resultReads(), 0);
 });
 const inboxContext = {} as import('../server/operation-dispatcher.js').ConnectionContext;
 const inboxAnswer = {
@@ -784,22 +643,179 @@ test('WorkHub inbox rechecks the exact execution and kind instead of trusting a 
   );
   assert.equal(f.forwarded.length, 0);
 });
-test('WorkHub inbox cannot widen Session grants or replace the permission reviewer', async () => {
-  for (const kind of ['sandbox_boundary', 'client_capability', 'permission'] as const) {
+test('WorkHub inbox sends original sandbox and capability answers without supplemental grants', async () => {
+  const answers: import('../protocol/interaction.js').InteractionAnswer[] = [
+    { kind: 'sandbox_boundary', decision: 'allow' },
+    { kind: 'sandbox_boundary', decision: 'deny' },
+    { kind: 'client_capability', decision: 'allow' },
+    { kind: 'client_capability', decision: 'deny' },
+  ];
+  for (const answer of answers) {
     const f = fixture();
-    f.record.request.kind = kind;
-    const answer: import('../protocol/interaction.js').InteractionAnswer =
-      kind === 'permission'
-        ? { kind, decision: 'allow', rememberForTurn: false }
-        : kind === 'sandbox_boundary'
-          ? { kind, decision: 'allow' }
-          : { kind, decision: 'allow' };
+    f.record.request.kind = answer.kind;
+    const outcome = await f.handlers['workhub.interactions.answer'](
+      { ...inboxAnswer, answer },
+      inboxContext,
+    );
+    assert.ok(outcome.ok);
+    assert.deepEqual(f.forwarded, [{ sessionId: 'target', interactionId: 'question', answer }]);
+  }
+});
+
+test('historical permission payloads keep their options and propagate the original native conflict', async () => {
+  const answers: import('../protocol/interaction.js').InteractionAnswer[] = [
+    { kind: 'permission', decision: 'allow', rememberForTurn: false },
+    { kind: 'permission', decision: 'allow', rememberForTurn: true },
+    { kind: 'permission', decision: 'deny', rememberForTurn: false },
+  ];
+  for (const answer of answers) {
+    const f = fixture();
+    f.record.request.kind = answer.kind;
     const outcome = await f.handlers['workhub.interactions.answer'](
       { ...inboxAnswer, answer },
       inboxContext,
     );
     assert.equal(outcome.ok, false);
     if (!outcome.ok) assert.equal(outcome.error.code, 'operation_conflict');
-    assert.equal(f.forwarded.length, 0);
+    assert.deepEqual(f.forwarded, [{ sessionId: 'target', interactionId: 'question', answer }]);
+    assert.equal(f.notifications.length, 0);
   }
+});
+
+test('linked-child inbox answers stay bound to the original child request and exact root ancestry', async () => {
+  const f = fixture(true);
+  const queried = await f.handlers['workhub.interactions.query']({}, inboxContext);
+  assert.ok(queried.ok);
+  assert.equal(queried.result.requests[0]!.interaction.sessionId, 'child');
+  const answer = { ...inboxAnswer, expectedTurnId: 'child-turn', expectedRunId: 'child-run' };
+  assert.ok((await f.handlers['workhub.interactions.answer'](answer, inboxContext)).ok);
+  assert.deepEqual(f.forwarded, [
+    { sessionId: 'child', interactionId: 'question', answer: answer.answer },
+  ]);
+  const manual = fixture(true);
+  manual.setChildOwned(false);
+  assert.equal(
+    (await manual.handlers['workhub.interactions.answer'](answer, inboxContext)).ok,
+    false,
+  );
+  assert.deepEqual(manual.forwarded, []);
+});
+
+test('canonical task title is independent of the target Session display name', async () => {
+  const f = fixture();
+  const result = await f.handlers['workhub.tasks.read']({ workId: 'action' }, inboxContext);
+  assert.ok(result.ok);
+  assert.equal(result.result.task.title, 'Shipping checklist');
+  assert.equal(result.result.task.targetSessionName, 'Release');
+});
+
+test('waiting notifications identify originals without copying question or approval bodies', async () => {
+  const f = fixture();
+  await f.reconcile();
+  assert.equal(f.notifications.length, 1);
+  assert(!f.notifications[0]!.includes('When should the release go out?'));
+  assert(!f.notifications[0]!.includes('Friday'));
+  assert.deepEqual(f.forwarded, []);
+});
+
+function addLegacyRelay(f: ReturnType<typeof fixture>) {
+  const pending: import('@maka/storage/interaction-store').StoredInteractionRequest = {
+    requestId: 'relay-question',
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    turnId: 'coordinator-turn',
+    runId: 'coordinator-run',
+    createdAt: 2,
+    request: { kind: 'question', toolUseId: 'relay-tool', questions: f.questions },
+  };
+  const event: import('@maka/core/runtime-event').RuntimeEvent = {
+    id: 'relay-call',
+    invocationId: 'coordinator-invocation',
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    turnId: pending.turnId,
+    runId: pending.runId,
+    ts: 1,
+    role: 'model',
+    author: 'agent',
+    partial: false,
+    content: {
+      kind: 'function_call',
+      id: 'relay-tool',
+      name: 'WorkHubResult',
+      args: { actionId: 'action', operation: 'ask_question', interactionId: 'question' },
+    },
+  };
+  f.coordinatorPending.push(pending);
+  f.relayEvents.push(event);
+  return { pending, event };
+}
+
+test('relay retirement delegates only proven coordinator identities to the lifecycle closure, idempotently', async () => {
+  const f = fixture();
+  addLegacyRelay(f);
+  f.coordinatorPending.push({
+    ...f.coordinatorPending[0]!,
+    requestId: 'ordinary-question',
+    request: { kind: 'question', toolUseId: 'ordinary-question-tool', questions: f.questions },
+  });
+  assert.deepEqual(await f.retireLegacy(), { closed: 1 });
+  assert.deepEqual(await f.retireLegacy(), { closed: 0 });
+  assert.deepEqual(f.closedRelays, [
+    {
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      turnId: 'coordinator-turn',
+      runId: 'coordinator-run',
+      requestId: 'relay-question',
+      toolUseId: 'relay-tool',
+    },
+  ]);
+  assert.equal(f.coordinatorPending[0]!.requestId, 'ordinary-question');
+  const originals = await f.handlers['workhub.interactions.query']({}, inboxContext);
+  assert.ok(originals.ok);
+  assert.equal(originals.result.requests[0]!.interaction.interactionId, 'question');
+  assert.deepEqual(f.forwarded, []);
+});
+
+test('relay retirement requires the exact persisted producer Session, Turn, Run, call and ask operation', async () => {
+  const patches: Partial<import('@maka/core/runtime-event').RuntimeEvent>[] = [
+    { sessionId: 'worker' },
+    { turnId: 'another-turn' },
+    { runId: 'another-run' },
+    { partial: true },
+    { role: 'tool' },
+    {
+      content: {
+        kind: 'function_call',
+        id: 'other-call',
+        name: 'WorkHubResult',
+        args: { operation: 'ask_question' },
+      },
+    },
+    { content: { kind: 'function_call', id: 'relay-tool', name: 'AskUserQuestion', args: {} } },
+    {
+      content: {
+        kind: 'function_call',
+        id: 'relay-tool',
+        name: 'WorkHubResult',
+        args: { operation: 'read' },
+      },
+    },
+  ];
+  for (const patch of patches) {
+    const f = fixture(),
+      { event } = addLegacyRelay(f);
+    Object.assign(event, patch);
+    assert.deepEqual(await f.retireLegacy(), { closed: 0 });
+    assert.deepEqual(f.closedRelays, []);
+    assert.deepEqual(f.forwarded, []);
+  }
+});
+
+test('ambiguous persisted legacy producers fail closed without answering or closing any request', async () => {
+  const f = fixture();
+  const { event } = addLegacyRelay(f);
+  f.relayEvents.push({ ...event, id: 'duplicate-producer' });
+  await assert.rejects(f.retireLegacy(), /Ambiguous legacy WorkHub question producer/);
+  assert.deepEqual(f.closedRelays, []);
+  assert.deepEqual(f.forwarded, []);
+  assert.equal(f.coordinatorPending.length, 1);
 });

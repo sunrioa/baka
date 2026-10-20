@@ -52,6 +52,7 @@ export interface WorkHubTaskRef {
 }
 export type WorkHubTaskReadInput = WorkHubTaskRef | { readonly workId: string };
 export interface WorkHubTask extends WorkHubTaskRef {
+  readonly title?: string;
   readonly workId?: string;
   readonly targetSessionId: string;
   readonly targetSessionName: string;
@@ -190,7 +191,7 @@ function decodeTask(value: unknown): WorkHubTask {
       'createdAt',
       'status',
     ],
-    ['workId', 'execution', 'waitReason', 'dependency', 'failure'],
+    ['workId', 'title', 'execution', 'waitReason', 'dependency', 'failure'],
   );
   if (
     !WORKHUB_TASK_STATUSES.includes(item.status as WorkHubTaskStatus) ||
@@ -241,6 +242,9 @@ function decodeTask(value: unknown): WorkHubTask {
   return {
     actionId: requireEntityId(item.actionId, 'WorkHub action'),
     ...(item.workId === undefined ? {} : { workId: requireEntityId(item.workId, 'WorkHub work') }),
+    ...(item.title === undefined
+      ? {}
+      : { title: requireUtf8String(item.title, 'WorkHub task title', 2048) }),
     delegationId: requireEntityId(item.delegationId, 'WorkHub delegation'),
     targetSessionId: requireEntityId(item.targetSessionId, 'WorkHub Session'),
     targetMessageId: requireEntityId(item.targetMessageId, 'WorkHub Message'),

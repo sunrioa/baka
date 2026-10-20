@@ -77,6 +77,13 @@ const task = {
   status: 'pending_acceptance',
   execution: { turnId: 'turn', runId: 'run', sharedTurn: false },
 };
+test('task title is optional for legacy facts and independent of the Session name', () => {
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
+  assert.equal(spec.decodeOutput({ task }).task.title, undefined);
+  const titled = { ...task, title: 'Canonical task title', targetSessionName: 'Renamed Session' };
+  assert.deepEqual(spec.decodeOutput({ task: titled }).task, titled);
+  assert.throws(() => spec.decodeOutput({ task: { ...task, title: '中'.repeat(683) } }));
+});
 test('task-id detail reads correlate the exact logical task without model-selected execution fields', () => {
   const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
   const input = spec.decodeInput({ workId: 'work' });
