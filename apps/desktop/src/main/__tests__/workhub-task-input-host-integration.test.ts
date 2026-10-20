@@ -63,7 +63,10 @@ for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task in
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta: unknown, finish: string | null) => `data: ${JSON.stringify({ id: 'desktop-input-step', object: 'chat.completion.chunk', created: 1,
         model: 'fake-model', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-      if (input.tools?.some((tool: { function: { name: string } }) => tool.function.name === 'WorkHubResult')) {
+      // The retired result tool is no longer published; WorkHubRead also exists
+      // on workers. Distinguish the actual coordinator profile, not a read tool.
+      if (input.messages.some((message: { role: string; content: unknown }) => message.role === 'system' &&
+          typeof message.content === 'string' && message.content.includes('You are Maka, the WorkHub assistant for this Desktop window.'))) {
         coordinatorRequests++; response.write(chunk({ role: 'assistant', content: 'Coordinating unrelated user input.' }, null));
         await new Promise<void>(resolve => response.on('close', resolve)); return;
       }
