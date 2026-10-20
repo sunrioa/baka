@@ -17,14 +17,24 @@
  * under the License.
  */
 
-import type { StoredMessage, WorkHubDelegationAssignedMessage } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  type StoredMessage,
+  type WorkHubDelegationAssignedMessage,
+} from '@maka/core/session';
 import { normalizeSessionTodoItems, type SessionTodoSnapshot } from '@maka/core/session-todo';
 import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
+import type { SystemPromptContext } from '@maka/runtime/ai-sdk-backend';
 import {
   isSessionNotFoundError,
   type ExecutionSessionWriter,
+  type ExecutionStoresWriter,
 } from '@maka/storage/execution-stores';
+import { readHostedExecutionMembership } from './hosted-execution-membership.js';
+import type { HostMessageCoordinator } from './message-coordinator.js';
+import type { SessionAdmissionGate } from './session-admission-gate.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
+import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import type { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
 
 // A byte budget keeps this deterministic across model/provider changes. It is
@@ -38,6 +48,64 @@ export const WORKHUB_WORKER_STATUS_INSTRUCTION =
   '<task-status>\n完成：…\n未完成 / 下一步：…\n已验证：…\n</task-status>\n' +
   'You may add 需要用户决定：… before the closing tag when needed. ' +
   'Never make a separate report, summary request or model call to supply it.';
+
+/** Optional output-format hint only; this context grants no tools, permissions or user authority. */
+export function createWorkHubWorkerStatusContext(options: {
+  stores: {
+    sessionStore: Pick<ExecutionSessionWriter, 'readActiveWorkHubAssignmentsByTarget'>;
+    runtimeEventStore: ExecutionStoresWriter<'interactive'>['runtimeEventStore'];
+  };
+  messages: Pick<HostMessageCoordinator, 'readMessageExecutionDispositionAdmitted'>;
+  evidence: Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'taskExecution'>;
+  admission: Pick<SessionAdmissionGate, 'runMany'>;
+}) {
+  return async (scope: SystemPromptContext): Promise<{ name: string; text: string }[]> => {
+    if (scope.sessionId === WORKHUB_COORDINATION_SESSION_ID || !scope.runId || !scope.invocationId)
+      return [];
+    return options.admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, scope.sessionId],
+      async (lease) => {
+        for (const assignment of await options.stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+          [scope.sessionId],
+        )) {
+          if (!assignment.returnResults || assignment.targetSessionId !== scope.sessionId) continue;
+          const owned = await options.messages.readMessageExecutionDispositionAdmitted(
+            scope.sessionId,
+            assignment.targetMessageId,
+            lease,
+          );
+          if (owned.kind !== 'owned_root') continue;
+          const task = await options.evidence.taskExecution(assignment, {
+            sessionId: scope.sessionId,
+            turnId: owned.turnId,
+            runId: owned.runId,
+          });
+          if (task.sessionId !== scope.sessionId || task.turnId !== scope.turnId) continue;
+          // Reuse immutable physical membership: a Host handoff keeps the same
+          // logical Turn but only its newest nonterminal invocation is live.
+          const logical = await readHostedExecutionMembership(
+            options.stores.runtimeEventStore,
+            task,
+          );
+          const tip = logical?.tip;
+          if (
+            !tip ||
+            logical.pendingHandoff ||
+            tip.sessionId !== scope.sessionId ||
+            tip.turnId !== scope.turnId ||
+            tip.runId !== scope.runId ||
+            tip.invocationId !== scope.invocationId ||
+            tip.opening.root.kind !== 'user' ||
+            tip.terminalEvent
+          )
+            continue;
+          return [{ name: 'workhub_worker_status', text: WORKHUB_WORKER_STATUS_INSTRUCTION }];
+        }
+        return [];
+      },
+    );
+  };
+}
 
 type Assignment = WorkHubDelegationAssignedMessage;
 type TextFact = {

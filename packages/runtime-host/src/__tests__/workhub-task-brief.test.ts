@@ -26,8 +26,11 @@ import {
 } from '@maka/core/session';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
 import type { SessionTodoSnapshot } from '@maka/core/session-todo';
+import { testInvocationRecord } from '@maka/runtime/test-only/invocation-fixture';
+import type { SystemPromptContext } from '@maka/runtime/ai-sdk-backend';
 import {
   createWorkHubTaskBriefReader,
+  createWorkHubWorkerStatusContext,
   isWorkHubTaskBriefCurrent,
   formatWorkHubTaskBrief,
   readWorkHubWorkerStatus,
@@ -36,6 +39,7 @@ import {
   type WorkHubTaskBrief,
 } from '../server/workhub-task-brief.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import type { HostMessageExecutionDisposition } from '../server/message-coordinator.js';
 
 type Options = Parameters<typeof createWorkHubTaskBriefReader>[0];
 function assignment(actionId: string, taskId = 'task'): WorkHubDelegationAssignedMessage {
@@ -61,6 +65,184 @@ function assignment(actionId: string, taskId = 'task'): WorkHubDelegationAssigne
     work: { id: taskId, generationId: 'segment', sourceMessageId: `user-${actionId}` },
   };
 }
+
+function workerStatusFixture() {
+  const lane = new SessionAdmissionGate();
+  const source: WorkHubDelegationAssignedMessage = { ...assignment('task'), returnResults: true };
+  const active = [source];
+  const original = { sessionId: 'worker', turnId: 'turn-task', runId: 'run-task' };
+  const scope: SystemPromptContext = {
+    ...original,
+    invocationId: 'invocation-task',
+    cwd: '/unused',
+  };
+  const runs = new Map([
+    [original.runId, testInvocationRecord({ ...original, invocationId: scope.invocationId })],
+  ]);
+  const calls: { assignment: WorkHubDelegationAssignedMessage; root: typeof original }[] = [];
+  let disposition: HostMessageExecutionDisposition = {
+    kind: 'owned_root',
+    turnId: original.turnId,
+    runId: original.runId,
+  };
+  let current = original;
+  const options: Parameters<typeof createWorkHubWorkerStatusContext>[0] = {
+    admission: lane,
+    stores: {
+      sessionStore: { readActiveWorkHubAssignmentsByTarget: async () => active },
+      runtimeEventStore: {
+        readRunInvocation: async (sid: string, rid: string) => {
+          const run = runs.get(rid);
+          return run?.sessionId === sid ? run : undefined;
+        },
+      } as never,
+    },
+    messages: {
+      readMessageExecutionDispositionAdmitted: async (sid, messageId, lease) =>
+        lane.runAdmitted(sid, lease, () => {
+          assert.equal(messageId, source.targetMessageId);
+          return disposition;
+        }),
+    },
+    evidence: {
+      taskExecution: async (assigned, root) => {
+        calls.push({ assignment: assigned, root });
+        return { ...current, round: 0 };
+      },
+    },
+  };
+  return {
+    options,
+    scope,
+    source,
+    active,
+    original,
+    runs,
+    calls,
+    read: createWorkHubWorkerStatusContext(options),
+    setDisposition(value: HostMessageExecutionDisposition) {
+      disposition = value;
+    },
+    setCurrent(value: typeof original) {
+      current = value;
+    },
+  };
+}
+
+test('worker status is optional execution context only for its live, exclusively owned WorkHub Root', async () => {
+  const f = workerStatusFixture();
+  const before = structuredClone({ source: f.source, scope: f.scope, runs: [...f.runs] });
+  assert.deepEqual(await f.read(f.scope), [
+    {
+      name: 'workhub_worker_status',
+      text: WORKHUB_WORKER_STATUS_INSTRUCTION,
+    },
+  ]);
+  assert.deepEqual(f.calls, [{ assignment: f.source, root: f.original }]);
+  assert.deepEqual(
+    { source: f.source, scope: f.scope, runs: [...f.runs] },
+    before,
+    'the hint cannot rewrite user records, settings or invocation facts',
+  );
+  assert.deepEqual(Object.keys((await f.read(f.scope))[0]!).sort(), ['name', 'text']);
+  assert.match(WORKHUB_WORKER_STATUS_INSTRUCTION, /Pure JSON, a single line.*takes priority/);
+  assert.match(WORKHUB_WORKER_STATUS_INSTRUCTION, /Never make a separate report.*model call/);
+});
+
+test('worker status rejects manual, shared, queued, cancelled, foreign and non-live prompt scopes', async () => {
+  for (const mode of [
+    'manual',
+    'shared',
+    'pending',
+    'cancelled',
+    'recovering',
+    'no-run',
+    'no-invocation',
+    'coordinator',
+    'foreign-session',
+    'foreign-turn',
+    'foreign-run',
+    'foreign-invocation',
+    'no-return-results',
+    'foreign-assignment',
+  ] as const) {
+    const f = workerStatusFixture();
+    let scope = { ...f.scope };
+    if (mode === 'manual') f.active.length = 0;
+    if (mode === 'shared')
+      f.setDisposition({ kind: 'shared_turn', turnId: f.original.turnId, runId: f.original.runId });
+    if (mode === 'pending' || mode === 'cancelled' || mode === 'recovering')
+      f.setDisposition({ kind: mode });
+    if (mode === 'no-run') scope.runId = undefined;
+    if (mode === 'no-invocation') scope.invocationId = undefined;
+    if (mode === 'coordinator') scope.sessionId = WORKHUB_COORDINATION_SESSION_ID;
+    if (mode === 'foreign-session') scope.sessionId = 'manual-with-workhub-looking-name';
+    if (mode === 'foreign-turn') scope.turnId = 'different-turn';
+    if (mode === 'foreign-run') scope.runId = 'different-run';
+    if (mode === 'foreign-invocation') scope.invocationId = 'different-invocation';
+    if (mode === 'no-return-results') f.source.returnResults = undefined;
+    if (mode === 'foreign-assignment') f.source.targetSessionId = 'another-worker';
+    assert.deepEqual(await f.read(scope), [], mode);
+  }
+});
+
+test('worker status follows the authenticated current task continuation, not its old Root or another same-Session execution', async () => {
+  const f = workerStatusFixture();
+  const next = { sessionId: 'worker', turnId: 'continued-task-turn', runId: 'continued-task-run' };
+  f.setCurrent(next);
+  f.runs.set(next.runId, testInvocationRecord({ ...next, invocationId: 'continued-invocation' }));
+  f.runs.set(f.original.runId, testInvocationRecord({ ...f.original, outcome: 'completed' }));
+  assert.deepEqual(await f.read(f.scope), []);
+  assert.deepEqual(
+    await f.read({ ...next, invocationId: 'continued-invocation', cwd: '/unused' }),
+    [
+      {
+        name: 'workhub_worker_status',
+        text: WORKHUB_WORKER_STATUS_INSTRUCTION,
+      },
+    ],
+  );
+  const unrelated = { sessionId: 'worker', turnId: 'manual-turn', runId: 'manual-run' };
+  f.runs.set(unrelated.runId, testInvocationRecord(unrelated));
+  assert.deepEqual(
+    await f.read({ ...unrelated, invocationId: unrelated.runId, cwd: '/unused' }),
+    [],
+  );
+  f.setCurrent({ ...next, sessionId: 'another-worker' });
+  assert.deepEqual(
+    await f.read({ ...next, invocationId: 'continued-invocation', cwd: '/unused' }),
+    [],
+  );
+});
+
+test('worker status requires the immutable matching invocation to exist, stay nonterminal and retain user-root provenance', async () => {
+  for (const mode of [
+    'missing',
+    'completed',
+    'failed',
+    'aborted',
+    'wrong-invocation',
+    'non-user-root',
+  ] as const) {
+    const f = workerStatusFixture();
+    if (mode === 'missing') f.runs.clear();
+    else
+      f.runs.set(
+        f.original.runId,
+        testInvocationRecord({
+          ...f.original,
+          invocationId: mode === 'wrong-invocation' ? 'not-the-scope' : f.scope.invocationId,
+          ...(mode === 'completed' || mode === 'failed' || mode === 'aborted'
+            ? { outcome: mode }
+            : {}),
+          ...(mode === 'non-user-root'
+            ? { opening: { root: { kind: 'context_compact' as const } } }
+            : {}),
+        }),
+      );
+    assert.deepEqual(await f.read(f.scope), [], mode);
+  }
+});
 function accepted(owner: WorkHubDelegationAssignedMessage, id: string): WorkHubTaskInputMessage {
   return {
     type: 'workhub_coordination',
