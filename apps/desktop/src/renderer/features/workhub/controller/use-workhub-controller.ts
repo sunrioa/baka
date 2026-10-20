@@ -382,11 +382,13 @@ export function useWorkHubController(
       });
     };
     const unsubscribe = services.subscribeSessions(refresh);
+    const unsubscribeDefaults = services.subscribeNewWorkPermissionMode(sessionId, refresh);
     refresh();
     return () => {
       disposed = true;
       ++newWorkDefaultsRevision.current;
       unsubscribe();
+      unsubscribeDefaults();
     };
   }, [services, sessionId]);
 

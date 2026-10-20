@@ -29,6 +29,7 @@ import type { ModelOverride } from './model-thinking.js';
 import {
   networkProxyCredentialTarget,
   type ChatDefaultPermissionMode,
+  type WorkHubExecutorDefaults,
   type NetworkProxyCredentialTarget,
   type ProxyProtocol,
   type ShellSettings,
@@ -159,6 +160,8 @@ export interface RuntimePolicy {
     readonly workHubPermissionMode?: ChatDefaultPermissionMode;
     /** Direct WorkHub root executions on this Host; absent means 3. */
     readonly workHubMaxConcurrentSessions?: number;
+    /** New-task executor selection only; omission retains the shared native model. */
+    readonly workHubExecutor?: WorkHubExecutorDefaults;
     /** @deprecated Wire compatibility only; task creation ignores this field. */
     readonly thinkingLevel?: ThinkingLevel;
     readonly codeModeEnabled?: boolean;

@@ -18,7 +18,11 @@
  */
 
 import { isThinkingLevel } from '../model-thinking.js';
-import { CHAT_DEFAULT_PERMISSION_MODES, isWorkHubMaxConcurrentSessions } from '../settings.js';
+import {
+  CHAT_DEFAULT_PERMISSION_MODES,
+  isWorkHubMaxConcurrentSessions,
+  isWorkHubExecutorDefaults,
+} from '../settings.js';
 import { normalizeSubagentSettings } from '../subagent-settings.js';
 import type {
   AgentRuntimeSettingsPatch,
@@ -432,6 +436,7 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
       'permissionMode',
       'workHubPermissionMode',
       'workHubMaxConcurrentSessions',
+      'workHubExecutor',
       'thinkingLevel',
       'codeModeEnabled',
     ],
@@ -458,8 +463,12 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   if (item.codeModeEnabled !== undefined && typeof item.codeModeEnabled !== 'boolean') {
     throw domainError('chat default code mode is invalid');
   }
+  if (item.workHubExecutor !== undefined && !isWorkHubExecutorDefaults(item.workHubExecutor)) {
+    throw domainError('WorkHub executor creation defaults are invalid');
+  }
   return {
     permissionMode: item.permissionMode as RuntimePolicy['chatDefaults']['permissionMode'],
+    ...(item.workHubExecutor === undefined ? {} : { workHubExecutor: { ...item.workHubExecutor } }),
     ...(item.workHubMaxConcurrentSessions === undefined
       ? {}
       : { workHubMaxConcurrentSessions: item.workHubMaxConcurrentSessions as number }),

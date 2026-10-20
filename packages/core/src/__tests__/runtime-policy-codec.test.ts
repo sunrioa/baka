@@ -90,6 +90,49 @@ test('WorkHub permission defaults survive canonical policy decoding and reject u
   }
 });
 
+test('WorkHub executor creation choices are optional, strict and independent of permissions', () => {
+  const policy = createDefaultRuntimePolicy();
+  for (const workHubExecutor of [
+    { executorId: 'codex.app-server' },
+    { executorId: 'codex.app-server', executorModel: 'gpt-6-astra', thinkingLevel: 'high' },
+  ]) {
+    const chatDefaults = { ...policy.chatDefaults, workHubExecutor };
+    assert.deepEqual(
+      decodeCanonicalRuntimePolicy({ ...policy, chatDefaults }).chatDefaults,
+      chatDefaults,
+    );
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value: chatDefaults },
+      }).operation,
+      { kind: 'set_chat_defaults', value: chatDefaults },
+    );
+  }
+  for (const workHubExecutor of [
+    null,
+    {},
+    { executorId: '../outside' },
+    { executorId: 'codex.app-server', executorModel: '' },
+    { executorId: 'codex.app-server', executorModel: '中'.repeat(171) },
+    { executorId: 'codex.app-server', thinkingLevel: 'invalid' },
+    { executorId: 'codex.app-server', permissionMode: 'bypass' },
+    {
+      executorId: 'codex.app-server',
+      model: { llmConnectionId: 'foreign', llmConnectionSlug: 'foreign', model: 'foreign' },
+    },
+    { executorId: 'codex.app-server', sourceActionId: 'forged' },
+  ])
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubExecutor },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
+});
+
 test('WorkHub concurrency is an optional bounded integer in policy and mutations', () => {
   const policy = createDefaultRuntimePolicy();
   assert.equal(

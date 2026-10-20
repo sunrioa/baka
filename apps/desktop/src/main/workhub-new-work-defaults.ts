@@ -19,22 +19,20 @@
 
 import { isWorkHubCreateDefaults, WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
 import type { SessionCatalogProjection } from '@maka/runtime-host/protocol';
-import { isChatDefaultPermissionMode, isWorkHubMaxConcurrentSessions, WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS, type ChatDefaultPermissionMode } from '@maka/core/settings';
+import { isChatDefaultPermissionMode, isWorkHubMaxConcurrentSessions, isWorkHubExecutorDefaults, WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS, type ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 
 type WorkHubExecutionDefaults = Omit<WorkHubCreateDefaults, 'permissionMode'>;
 
-type WorkHubModelClient = Pick<DesktopRuntimeHostClient, 'hostId' | 'getWorkHubSession' | 'configureWorkHubModel'>;
+type WorkHubModelClient = Pick<DesktopRuntimeHostClient, 'hostId' | 'getWorkHubSession' | 'configureWorkHubModel' | 'queryRuntimePolicy' | 'updateRuntimePolicy'>;
 type WorkHubModelSession = Pick<SessionCatalogProjection, 'id' | 'llmConnectionId' | 'llmConnectionSlug' | 'model' | 'thinkingLevel'>;
-// Existing executor creation choices remain available pending the shared-model
-// product decision. Only these overrides remain process-local; native defaults
-// always come from the coordinator's durable configuration.
-const executorDefaultsByHost = new Map<string, WorkHubExecutionDefaults>();
-
-/** The coordinator's existing persistent configuration is the shared WorkHub model preference. */
-export async function readWorkHubNewWorkDefaults(client: { readonly hostId: string; getWorkHubSession(): Promise<WorkHubModelSession | null> }): Promise<WorkHubExecutionDefaults> {
-  const executor = executorDefaultsByHost.get(client.hostId);
-  if (executor) return { ...executor };
+async function readExecutionDefaults(client: { getWorkHubSession(): Promise<WorkHubModelSession | null> }, executor: unknown): Promise<WorkHubExecutionDefaults> {
+  if (executor !== undefined) {
+    if (!isWorkHubExecutorDefaults(executor)) throw new Error('Saved WorkHub executor defaults are unavailable');
+    // Preserve the user's exact selection even if its provider is unavailable.
+    // Catalog presentation and native Host admission report that; never fall back.
+    return { ...executor };
+  }
   const session = await client.getWorkHubSession();
   if (session?.id !== WORKHUB_COORDINATION_SESSION_ID || !session.llmConnectionId || !session.llmConnectionSlug || !session.model)
     throw new Error('Select an available model for newly created WorkHub tasks');
@@ -42,18 +40,34 @@ export async function readWorkHubNewWorkDefaults(client: { readonly hostId: stri
     ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}) };
 }
 
+/** Native configuration stays on the coordinator; executor choice uses the same Host policy as permissions. */
+export async function readWorkHubNewWorkDefaults(client: Pick<WorkHubModelClient, 'hostId' | 'queryRuntimePolicy'> & { getWorkHubSession(): Promise<WorkHubModelSession | null> }): Promise<WorkHubExecutionDefaults> {
+  const { policy } = await client.queryRuntimePolicy();
+  return readExecutionDefaults(client, policy.chatDefaults.workHubExecutor);
+}
+
 export async function writeWorkHubNewWorkDefaults(client: WorkHubModelClient, defaults: WorkHubExecutionDefaults): Promise<void> {
   if (!isWorkHubCreateDefaults(defaults) || defaults.permissionMode !== undefined)
     throw new Error('Invalid WorkHub new-work defaults');
-  if (defaults.executorId) { executorDefaultsByHost.set(client.hostId, Object.freeze({ ...defaults })); return; }
-  if (!defaults.model) { executorDefaultsByHost.delete(client.hostId); return; }
-  const current = await client.getWorkHubSession();
-  if (current.id !== WORKHUB_COORDINATION_SESSION_ID) throw new Error('WorkHub model configuration is unavailable');
-  const result = await client.configureWorkHubModel({ expectedRevision: current.revision,
-    modelTarget: { kind: 'explicit', connectionId: defaults.model.llmConnectionId, connectionSlug: defaults.model.llmConnectionSlug, model: defaults.model.model },
-    thinkingLevel: defaults.thinkingLevel ?? null });
-  if (result.kind !== 'committed') throw new Error('WorkHub changed. Try selecting the model again.');
-  executorDefaultsByHost.delete(client.hostId);
+  if (defaults.executorId) {
+    const executor = { executorId: defaults.executorId, ...(defaults.executorModel ? { executorModel: defaults.executorModel } : {}), ...(defaults.thinkingLevel ? { thinkingLevel: defaults.thinkingLevel } : {}) };
+    await client.updateRuntimePolicy(policy => ({ kind: 'set_chat_defaults', value: { ...policy.chatDefaults, workHubExecutor: executor } }));
+    return;
+  }
+  if (defaults.model) {
+    const current = await client.getWorkHubSession();
+    if (current.id !== WORKHUB_COORDINATION_SESSION_ID) throw new Error('WorkHub model configuration is unavailable');
+    const result = await client.configureWorkHubModel({ expectedRevision: current.revision,
+      modelTarget: { kind: 'explicit', connectionId: defaults.model.llmConnectionId, connectionSlug: defaults.model.llmConnectionSlug, model: defaults.model.model },
+      thinkingLevel: defaults.thinkingLevel ?? null });
+    if (result.kind !== 'committed') throw new Error('WorkHub changed. Try selecting the model again.');
+  }
+  if ((await client.queryRuntimePolicy()).policy.chatDefaults.workHubExecutor !== undefined) {
+    await client.updateRuntimePolicy(policy => {
+      const { workHubExecutor: _executor, ...chatDefaults } = policy.chatDefaults;
+      return { kind: 'set_chat_defaults', value: chatDefaults };
+    });
+  }
 }
 
 type WorkHubPermissionClient = Pick<DesktopRuntimeHostClient, 'queryRuntimePolicy' | 'updateRuntimePolicy'>;
@@ -61,8 +75,8 @@ type WorkHubPermissionClient = Pick<DesktopRuntimeHostClient, 'queryRuntimePolic
 export async function readWorkHubCreationDefaults(client: Pick<DesktopRuntimeHostClient, 'hostId' | 'queryRuntimePolicy'> & {
   getWorkHubSession(): Promise<WorkHubModelSession | null>;
 }): Promise<WorkHubCreateDefaults> {
-  const permissionMode = await readWorkHubNewWorkPermissionMode(client);
-  return { permissionMode, ...await readWorkHubNewWorkDefaults(client) };
+  const { policy } = await client.queryRuntimePolicy();
+  return { permissionMode: policy.chatDefaults.workHubPermissionMode ?? 'ask', ...await readExecutionDefaults(client, policy.chatDefaults.workHubExecutor) };
 }
 
 // Permission defaults belong to the selected Host's durable policy, not the

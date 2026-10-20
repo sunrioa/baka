@@ -97,8 +97,15 @@ test('native task input IPC preserves exact IDs and distinguishes rejected from 
 test('persists the shared native WorkHub model in coordinator configuration while retaining executor choices', async () => {
   const handlers = new Map<string, IpcHandler>();
   let coordination = { id: WORKHUB_COORDINATION_SESSION_ID, revision: 1, llmConnectionId: 'first', llmConnectionSlug: 'provider', model: 'first-model' } as SessionCatalogProjection;
+  let policy = createDefaultRuntimePolicy();
   const changes: unknown[] = [];
   const client = { hostId: 'host-defaults', getWorkHubSession: async () => coordination,
+    queryRuntimePolicy: async () => ({ revision: 1, policy }),
+    updateRuntimePolicy: async (build: Parameters<Parameters<typeof registerRuntimeHostWorkHubIpc>[0]['updateRuntimePolicy']>[0]) => {
+      const operation = build(policy); assert.equal(operation.kind, 'set_chat_defaults');
+      if (operation.kind === 'set_chat_defaults') policy = { ...policy, chatDefaults: operation.value };
+      return { revision: 1, policy };
+    },
     configureWorkHubModel: async (input: import('@maka/runtime-host/protocol').OperationInput<'workhub.coordination.configureModel'>) => {
       changes.push(input);
       coordination = { ...coordination, revision: coordination.revision + 1, llmConnectionId: input.modelTarget.connectionId,
@@ -129,6 +136,8 @@ test('persists the shared native WorkHub model in coordinator configuration whil
     thinkingLevel: 'high',
   };
   await write(event, defaults);
+  assert.deepEqual(policy.chatDefaults.workHubExecutor, defaults);
+  assert.deepEqual(changes, [], 'executor choice never changes the native coordinator route');
   assert.deepEqual(await read(event), defaults);
   await assert.rejects(
     async () => write(event, { ...defaults, permissionMode: 'bypass' }),
@@ -154,6 +163,7 @@ test('persists the shared native WorkHub model in coordinator configuration whil
   );
   const native = { model: { llmConnectionId: 'selected', llmConnectionSlug: 'provider', model: 'selected-model' }, thinkingLevel: 'high' };
   await write(event, native);
+  assert.equal(policy.chatDefaults.workHubExecutor, undefined);
   assert.deepEqual(changes, [{ expectedRevision: 1, modelTarget: { kind: 'explicit', connectionId: 'selected', connectionSlug: 'provider', model: 'selected-model' }, thinkingLevel: 'high' }]);
   assert.deepEqual(await replacementRead(event), native, 'replacement Desktop clients read the native preference from persistent coordinator settings');
   assert.equal(coordination.model, 'selected-model');

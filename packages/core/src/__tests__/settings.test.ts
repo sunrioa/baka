@@ -75,6 +75,34 @@ test('WorkHub permission defaults are independent, persisted and fail closed', (
   }
 });
 
+test('legacy settings preserve the closed WorkHub executor creation choice independently', () => {
+  const workHubExecutor = {
+    executorId: 'codex.app-server',
+    executorModel: 'gpt-6-astra',
+    thinkingLevel: 'high' as const,
+  };
+  const settings = mergeSettings(createDefaultSettings(), {
+    chatDefaults: { workHubExecutor, workHubPermissionMode: 'ask' },
+  });
+  assert.deepEqual(
+    normalizeSettings(JSON.parse(JSON.stringify(settings))).chatDefaults.workHubExecutor,
+    workHubExecutor,
+  );
+  assert.equal(settings.chatDefaults.permissionMode, 'bypass');
+  assert.equal(settings.chatDefaults.workHubPermissionMode, 'ask');
+  assert.equal(normalizeSettings({}).chatDefaults.workHubExecutor, undefined);
+  for (const invalid of [
+    {},
+    { executorId: '../outside' },
+    { ...workHubExecutor, permissionMode: 'bypass' },
+  ])
+    assert.equal(
+      normalizeSettings({ chatDefaults: { workHubExecutor: invalid as never } }).chatDefaults
+        .workHubExecutor,
+      undefined,
+    );
+});
+
 test('legacy settings preserve valid WorkHub concurrency and normalize invalid values', () => {
   assert.equal(normalizeSettings({}).chatDefaults.workHubMaxConcurrentSessions, undefined);
   for (const workHubMaxConcurrentSessions of [1, 2, 3, 8]) {

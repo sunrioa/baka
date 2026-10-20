@@ -22,6 +22,9 @@ import { afterEach, test } from 'node:test';
 import { act, createElement } from 'react';
 import { LocaleProvider } from '@maka/ui';
 import { deferred } from '@maka/core/test-only/async-primitives';
+import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
+import { readWorkHubNewWorkDefaults, writeWorkHubNewWorkDefaults } from '../workhub-new-work-defaults.js';
 import { RuntimeHostRequestInterruptedError, RuntimeHostOperationError } from '@maka/runtime-host/client';
 import { registerRuntimeHostSessionExecutionIpc, type RuntimeHostSessionExecutionIpcDeps } from '../runtime-host-session-execution-ipc-main.js';
 import { registerRuntimeHostWorkHubIpc } from '../runtime-host-workhub-ipc-main.js';
@@ -323,6 +326,48 @@ test('WorkHub shares native model settings with coordination and retains executo
   await act(async () => { h.admit('busy-turn'); });
   await act(async () => { await h.controller.changeThinkingLevel('high'); });
   assert.equal(requests.length, count, 'running coordination turns freeze new-work defaults');
+});
+
+test('WorkHub executor UI selection reloads persisted defaults and Host policy notifications without rerouting coordination', async () => {
+  let policy = createDefaultRuntimePolicy();
+  const notifications = new Set<() => void>();
+  const client = { hostId: 'host-1',
+    queryRuntimePolicy: async () => ({ revision: 1, policy }),
+    updateRuntimePolicy: async (build: Parameters<Parameters<typeof writeWorkHubNewWorkDefaults>[0]['updateRuntimePolicy']>[0]) => {
+      const operation = build(policy); assert.equal(operation.kind, 'set_chat_defaults');
+      if (operation.kind === 'set_chat_defaults') policy = { ...policy, chatDefaults: operation.value };
+      return { revision: 1, policy };
+    },
+    getWorkHubSession: async () => ({ id: WORKHUB_COORDINATION_SESSION_ID, llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'original-native' }),
+    configureWorkHubModel: async () => assert.fail('Executor choice must not reconfigure native coordination'),
+  } as unknown as Parameters<typeof writeWorkHubNewWorkDefaults>[0];
+  const overrides: Partial<WorkHubServices> = {
+    getSession: async () => ({ id: JSON.stringify(['host-1', 'workhub-coordination']), model: 'original-native', runningTurnIds: [] }) as unknown as Awaited<ReturnType<WorkHubServices['getSession']>>,
+    getNewWorkDefaults: () => readWorkHubNewWorkDefaults(client),
+    setNewWorkDefaults: (_id, value) => writeWorkHubNewWorkDefaults(client, value),
+    subscribeNewWorkPermissionMode: (_id, handler) => { notifications.add(handler); return () => { notifications.delete(handler); }; },
+  };
+  const first = await mountController(false, overrides);
+  await act(async () => { await first.controller.changeExecutor({ executorId: 'codex.app-server', model: 'gpt-6-astra', thinkingLevel: 'high' }); });
+  const saved = { executorId: 'codex.app-server', executorModel: 'gpt-6-astra', thinkingLevel: 'high' as const };
+  assert.deepEqual(policy.chatDefaults.workHubExecutor, saved);
+  assert.equal(first.controller.session?.model, 'original-native');
+  cleanupFakeDom();
+  const reopened = await mountController(false, overrides);
+  assert.deepEqual(reopened.controller.newWorkDefaults, saved);
+  assert.equal(reopened.controller.newWorkPermissionMode, 'ask');
+  assert.equal(reopened.controller.session?.model, 'original-native');
+  policy = { ...policy, chatDefaults: { ...policy.chatDefaults, workHubExecutor: { ...saved, executorModel: 'updated-on-host' } } };
+  await act(async () => { for (const notify of notifications) notify(); });
+  assert.equal(reopened.controller.newWorkDefaults.executorModel, 'updated-on-host');
+  assert.equal(reopened.controller.session?.model, 'original-native');
+  client.configureWorkHubModel = async () => ({ kind: 'committed', session: await client.getWorkHubSession() });
+  client.updateRuntimePolicy = async () => { throw new Error('Policy unavailable after native configuration'); };
+  await act(async () => { await reopened.controller.changeModel({ llmConnectionId: 'native', llmConnectionSlug: 'native', model: 'replacement-native' }); });
+  assert.equal(reopened.controller.newWorkDefaults.executorModel, 'updated-on-host', 'failed clearing cannot claim that native creation defaults were persisted');
+  assert.equal(reopened.controller.error, 'Policy unavailable after native configuration');
+  assert.equal(reopened.controller.configuringModel, false);
+  assert.equal(policy.chatDefaults.workHubExecutor?.executorModel, 'updated-on-host');
 });
 
 test('WorkHub concurrency saves Host policy and ignores stale reads and invalid controls', async () => {

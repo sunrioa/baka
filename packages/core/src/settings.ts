@@ -18,6 +18,7 @@
  */
 
 import { isThinkingLevel, type ThinkingLevel } from './model-thinking.js';
+import { isWorkHubCreateDefaults, type WorkHubCreateDefaults } from './session.js';
 import type { OnboardingMilestone } from './onboarding.js';
 import { sanitizeOnboardingMilestones } from './onboarding.js';
 import type { WebSearchSettingsPatch, WebSearchSettings } from './web-search.js';
@@ -549,6 +550,22 @@ export function isWorkHubMaxConcurrentSessions(value: unknown): value is number 
   );
 }
 
+/** Only a new WorkHub task's executor choice; never permissions or coordinator routing. */
+export type WorkHubExecutorDefaults = Pick<
+  WorkHubCreateDefaults,
+  'executorId' | 'executorModel' | 'thinkingLevel'
+> & { readonly executorId: string };
+
+export function isWorkHubExecutorDefaults(value: unknown): value is WorkHubExecutorDefaults {
+  return (
+    isWorkHubCreateDefaults(value) &&
+    value.executorId !== undefined &&
+    Object.keys(value).every(
+      (key) => key === 'executorId' || key === 'executorModel' || key === 'thinkingLevel',
+    )
+  );
+}
+
 /** Seeds new Sessions and contains Host-local WorkHub preferences. */
 export interface ChatDefaultsSettings {
   permissionMode: ChatDefaultPermissionMode;
@@ -556,6 +573,8 @@ export interface ChatDefaultsSettings {
   workHubPermissionMode?: ChatDefaultPermissionMode;
   /** Direct WorkHub root executions on this Host; absent means 3, not unlimited. */
   workHubMaxConcurrentSessions?: number;
+  /** Absent selects the coordinator's persistent native model for new WorkHub tasks. */
+  workHubExecutor?: WorkHubExecutorDefaults;
   /** Applies only when a new task is created. */
   codeModeEnabled?: boolean;
   /** @deprecated Read-only compatibility for older settings; new tasks ignore it. */
@@ -1186,6 +1205,9 @@ function defaultChatDefaultsSettings(): ChatDefaultsSettings {
 // doesn't recognize -- fall back to the safest default instead.
 function normalizeChatDefaultsSettings(settings: ChatDefaultsSettings): ChatDefaultsSettings {
   return {
+    ...(isWorkHubExecutorDefaults(settings.workHubExecutor)
+      ? { workHubExecutor: { ...settings.workHubExecutor } }
+      : {}),
     ...(isWorkHubMaxConcurrentSessions(settings.workHubMaxConcurrentSessions)
       ? { workHubMaxConcurrentSessions: settings.workHubMaxConcurrentSessions }
       : {}),
