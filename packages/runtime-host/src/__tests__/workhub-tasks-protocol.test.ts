@@ -212,21 +212,3 @@ test('WorkHub deliveries belong to an exact owned terminal task, not a shared or
     }),
   );
 });
-test('native task continuation accepts only the exact source and new user text, not permissions or a target override', () => {
-  const spec = HOST_OPERATION_SPECS['workhub.coordination.continue'];
-  const input = {
-    turnId: 'continuation',
-    actionId: 'action',
-    delegationId: 'delegation',
-    text: 'Continue tests',
-  };
-  assert.deepEqual(spec.decodeInput(input), input);
-  for (const patch of [
-    { targetSessionId: 'manual' },
-    { permissionMode: 'bypass' },
-    { grantId: 'old' },
-    { delegationId: '' },
-    { text: '' },
-  ])
-    assert.throws(() => spec.decodeInput({ ...input, ...patch }));
-});

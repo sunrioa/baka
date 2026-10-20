@@ -80,7 +80,6 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
               targetSessionName: 'Older task', targetMessageId: 'old-message', text: 'Original requirement', createdAt: 1, status: 'stopped' } };
           }
           if (channel === 'workhub:readTask') return { task: { actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' } };
-          if (channel === 'workhub:continueTask') return { disposition: 'delegate_existing', targetSessionId: 'original-task' };
           if (channel === 'workhub:sendTaskInput' || channel === 'workhub:readTaskInput') {
             const request = mode as OperationInput<'workhub.tasks.send'>;
             assert.equal(scope.hostId, 'host-b', 'task input stays on its non-default owning Host');
@@ -123,8 +122,6 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   const olderTask = await bridge.workHub.readTask(session('host-b'), { workId: 'older-than-recent-task' });
   assert.equal(olderTask.task.workId, 'older-than-recent-task');
   assert.equal(olderTask.task.targetSessionId, session('host-b', 'original-task'), 'exact task lookup uses the owning Host even when it is not default');
-  const continuation = await bridge.workHub.continueTask(session('host-b'), { ...taskRef, turnId: 'new-turn', text: 'Continue' });
-  assert.equal(continuation.targetSessionId, session('host-b', 'original-task'));
   const taskInput = { inputId: 'task-input', workId: 'task-work', generationId: 'task-generation', sourceActionId: 'task-action', sourceDelegationId: 'task-delegation', text: 'Correction' };
   const accepted = await bridge.workHub.sendTaskInput(session('host-b'), taskInput);
   assert.equal(accepted.kind, 'accepted');
@@ -143,7 +140,6 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   await assert.rejects(bridge.workHub.findTasks(session('host-b', 'ordinary-session'), { query: '登录' }));
   await assert.rejects(bridge.workHub.findTasks(session('unknown-host'), {}));
   await assert.rejects(bridge.workHub.readTask(session('unknown-host'), taskRef));
-  await assert.rejects(bridge.workHub.continueTask(session('host-b', 'ordinary-session'), { ...taskRef, turnId: 'new-turn', text: 'Continue' }));
   await assert.rejects(bridge.workHub.sendTaskInput(session('host-b', 'ordinary-session'), taskInput));
   await assert.rejects(bridge.workHub.sendTaskInput(session('unknown-host'), taskInput));
   await assert.rejects(bridge.workHub.readTaskInput(session('host-b', 'ordinary-session'), { workId: taskInput.workId, inputId: taskInput.inputId }));

@@ -750,11 +750,6 @@ const isCurrentWorkHubTarget = (scope: DesktopTargetScope): boolean => {
 const workHubRuntime = createWorkHubRuntime({
   client: (scope) => requireWorkHubTarget(scope).client,
   isCurrent: isCurrentWorkHubTarget,
-  createDefaults: async (scope) => {
-    const target = requireWorkHubTarget(scope);
-    return readWorkHubCreationDefaults(target.client);
-  },
-  changed: emitSessionsChanged,
 });
 const workHubTaskModelRuntime = createWorkHubTaskModelRuntime({
   client: (scope) => requireWorkHubTarget(scope).client,

@@ -54,12 +54,12 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(reconnectable.has('workhub:readTaskInput'), true);
   assert.equal(ordinary.has('workhub:sendTaskInput'), true);
   assert.equal(reconnectable.has('workhub:sendTaskInput'), false, 'a lost task input is reconciled by ID, not blindly replayed');
-  assert.equal(ordinary.has('workhub:continueTask'), true);
-  assert.equal(reconnectable.has('workhub:continueTask'), false, 'a lost task continuation is not automatically replayed');
+  assert.equal(ordinary.has('workhub:continueTask'), false, 'the legacy continuation endpoint is retired');
+  assert.equal(reconnectable.has('workhub:continueTask'), false);
   assert.equal(ordinary.has('workhub:answerInteraction'), true);
   assert.equal(reconnectable.has('workhub:answerInteraction'), false, 'lost approvals are not automatically replayed');
-  assert.equal(ordinary.has('workhub:revokeTaskGrant'), true);
-  assert.equal(reconnectable.has('workhub:revokeTaskGrant'), false, 'revocation receipts are rebuilt, never replayed');
+  assert.equal(ordinary.has('workhub:revokeTaskGrant'), false, 'task grants have no Desktop producer');
+  assert.equal(reconnectable.has('workhub:revokeTaskGrant'), false);
 });
 
 test('native task input IPC preserves exact IDs and distinguishes rejected from unknown without another command', async () => {

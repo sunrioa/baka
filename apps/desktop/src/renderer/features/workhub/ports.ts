@@ -69,9 +69,7 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   taskExecutions(sessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;
   sendTaskInput(sessionId: string, input: OperationInput<'workhub.tasks.send'>): Promise<WorkHubTaskSendResult>;
   readTaskInput(sessionId: string, input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>>;
-  continueTask(sessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
   answerTaskInteraction(sessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
-  revokeTaskGrant(sessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
   subscribeActiveInteractions(handler: (event: { sessionId: string; interactions: import('@maka/core/events').ActiveInteractionRequestEvent[] }) => void): () => void;
   respondToUserForm(sessionId: string, response: import('@maka/core/interaction').InteractionFormResponse): Promise<void>;
   respondToUserQuestion(sessionId: string, response: import('@maka/core/user-question').UserQuestionResponse): Promise<void>;

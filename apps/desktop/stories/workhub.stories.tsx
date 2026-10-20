@@ -37,9 +37,8 @@ import type { WorkHubPresentationSnapshot, WorkHubMainNavigation as MainNavigati
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskContinue: fn(), taskInput: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskInput: fn() };
 const overviewHostListeners = new Set<Parameters<WorkHubServices['subscribeHosts']>[0]>();
-const overviewReadRecovery = new Set<() => void>();
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
   providerLabel: 'OpenAI', model, label: model, contextWindow: 100_000, isDefault: index === 0, thinkingLevels: ['low', 'high'] as ThinkingLevel[],
@@ -80,7 +79,6 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     { actionId: 'overview-failed', delegationId: 'overview-failed-delegation', targetSessionId: targetId, targetSessionName: '文档整理', targetMessageId: 'overview-failed-message', text: '整理联调记录', createdAt: 2, status: 'failed', failure: '供应商连接中断；没有验证产物', execution: { turnId: 'failed-turn', runId: 'failed-run', sharedTurn: false } },
   ] : [];
   const availabilityListeners = new Set<() => void>();
-  let disconnectedRead = false;
   const inputReceipts = new Map<string, WorkHubTaskInputResult>();
   if (coloredHistory) {
     const link = messages.find((message) => message.type === 'workhub_coordination' && message.kind === 'delegation_assigned')!;
@@ -176,7 +174,7 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     prepareAttachments: async (id, items) => { writes.upload(id, items); return [{ name: 'requirements.txt', kind: 'other', mimeType: 'text/plain', bytes: 12, ref: { kind: 'session_file', sessionId: 'maka_workhub_coordination', relativePath: 'artifact-1' } }]; },
     listActiveInteractions: async () => pendingForm ? [pendingForm] : questionPending ? [questionRequest] : [],
     queryTaskInteractions: async () => ({ requests: taskRequests, truncated: false }),
-    queryTasks: async () => { if (disconnectedRead) throw new Error('Host disconnected'); return { tasks, truncated: taskOverview }; },
+    queryTasks: async () => ({ tasks, truncated: taskOverview }),
     findTasks: async (_owner, input) => ({ items: tasks.filter(task => !input.query || `${task.targetSessionName} ${task.text}`.includes(input.query)).map(task => {
       const category = workHubTaskCategory(task.status);
       return { kind: 'task', id: task.workId ?? task.actionId, title: task.targetSessionName,
@@ -224,21 +222,6 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
       if (!task) throw new Error('Original task unavailable');
       return { task, ...(task.status === 'pending_acceptance' ? { delivery: { text: '报告路径：/projects/maka/report.md\n助手声称测试通过；此处没有独立验证证据。', truncated: false, terminalEventId: 'done-terminal' } } : {}) };
     },
-    continueTask: async (id, input) => {
-      writes.taskContinue(id, input);
-      const task = tasks.find(task => task.actionId === input.actionId && task.delegationId === input.delegationId);
-      if (!task) throw new Error('Original task unavailable');
-      if (writes.taskContinue.mock.calls.length === 1) {
-        disconnectedRead = true;
-        overviewReadRecovery.add(() => { disconnectedRead = false; });
-        for (const listener of availabilityListeners) listener();
-        throw new Error('Lost continuation receipt');
-      }
-      tasks = [...tasks, { ...task, actionId: 'overview-followup', delegationId: 'overview-followup-delegation', targetMessageId: 'followup-message', text: input.text, createdAt: 8, status: 'queued', execution: undefined }];
-      updateSessions();
-      return { disposition: 'delegate_existing', targetSessionId: task.targetSessionId };
-    },
-    revokeTaskGrant: async () => { throw new Error('Task grants are retired'); },
     answerTaskInteraction: async (id, input) => {
       writes.taskAnswer(id, input);
       const item = taskRequests.find((item) => item.interaction.interactionId === input.interactionId)!;
@@ -393,7 +376,6 @@ function Surface({ failFirst = false, history = false, colors = false, selectTar
 const meta = { title: 'Product/WorkHub', parameters: { layout: 'fullscreen' }, beforeEach: () => {
   Object.values(writes).forEach((spy) => spy.mockClear());
   overviewHostListeners.clear();
-  overviewReadRecovery.clear();
 } } satisfies Meta;
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -574,7 +556,6 @@ export const TaskExecutionView: Story = {
     expect(currentView.getBoundingClientRect().left).toBeGreaterThanOrEqual(rail.getBoundingClientRect().left);
     expect(canvasElement.querySelector('.workHubTaskRail')).toBeNull();
     expect(writes.answer).not.toHaveBeenCalled();
-    expect(writes.taskContinue).not.toHaveBeenCalled();
     expect(writes.permissions).not.toHaveBeenCalled();
     expect(writes.defaults).not.toHaveBeenCalled();
     expect(writes.question).not.toHaveBeenCalled(); expect(writes.form).not.toHaveBeenCalled();

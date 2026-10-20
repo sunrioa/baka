@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ConnectionCatalogSnapshot } from '@maka/core/runtime-policy';
 import { createWorkHubContextObserver } from '../server/workhub-context-observation.js';
-import { HOST_OPERATION_SPECS } from '../protocol/index.js';
+import { decodeWorkHubContextObservation } from '../protocol/index.js';
 
 test('work context keeps the latest request on its own route and never presents it as current remaining capacity', async () => {
   const header = {
@@ -70,26 +70,7 @@ test('work context keeps the latest request on its own route and never presents 
   assert.equal(context.estimates?.compaction.status, 'unknown');
   assert.equal(context.estimates?.compaction.reason, 'route_changed');
   assert.equal(context.estimates?.costs.reuseInputBaseline.uncachedUsd, null);
-  const work = {
-    workId: 'work',
-    sourceActionId: 'source',
-    sourceDelegationId: 'delegation',
-    targetSessionId: 'session',
-    targetSessionName: 'Task',
-    coordinationTurnId: 'turn',
-    createdAt: 1,
-    originalRequest: 'Original objective',
-    requestTruncated: false,
-    objective: 'Objective',
-    objectiveTruncated: false,
-    available: true,
-    context,
-  };
-  const spec = HOST_OPERATION_SPECS['workhub.coordination.works'];
-  assert.deepEqual(spec.decodeOutput({ works: [work], nextCursor: null }), {
-    works: [work],
-    nextCursor: null,
-  });
+  assert.deepEqual(decodeWorkHubContextObservation(context), context);
   for (const invalid of [
     { ...context, configuredInputLimit: 0 },
     { ...context, lastRequest: { ...observed, matchesCurrentRoute: 'yes' } },
@@ -97,9 +78,7 @@ test('work context keeps the latest request on its own route and never presents 
     { ...context, lastRequest: { ...observed, matchesCurrentRoute: true, inputTokens: -1 } },
     { ...context, remainingTokens: 0 },
   ])
-    assert.throws(() =>
-      spec.decodeOutput({ works: [{ ...work, context: invalid }], nextCursor: null }),
-    );
+    assert.throws(() => decodeWorkHubContextObservation(invalid));
   const unknown = await createWorkHubContextObserver({
     sessions: {
       readHeaderSnapshot: async () => ({

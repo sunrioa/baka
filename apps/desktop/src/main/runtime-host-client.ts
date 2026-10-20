@@ -1031,22 +1031,6 @@ export class DesktopRuntimeHostClient {
     return this.request('workhub.coordination.configureModel', input);
   }
 
-  listWorkHubCoordinationCandidates() {
-    return this.request("workhub.coordination.candidates", {});
-  }
-
-  queryWorkHubWorks(input: OperationInput<'workhub.coordination.works'>) {
-    return this.request('workhub.coordination.works', input);
-  }
-
-  selectAndDelegateWorkHubTarget(input: OperationInput<'workhub.coordination.selectAndDelegate'>) {
-    return this.request('workhub.coordination.selectAndDelegate', input);
-  }
-
-  actWorkHubCoordinationFromTurn(input: OperationInput<'workhub.coordination.actFromTurn'>) {
-    return this.request('workhub.coordination.actFromTurn', input);
-  }
-
   listExternalSessionSources(): Promise<ExternalSessionSourceQueryResult> {
     return this.request("external-session.source.query", {});
   }
@@ -1412,13 +1396,9 @@ export class DesktopRuntimeHostClient {
   sendWorkHubTaskInput(input: OperationInput<'workhub.tasks.send'>): Promise<OperationOutput<'workhub.tasks.send'>> { return this.request('workhub.tasks.send', input); }
   readWorkHubTaskInput(input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>> { return this.request('workhub.tasks.input.read', input); }
   readWorkHubTask(input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>> { return this.request('workhub.tasks.read', input); }
-  continueWorkHubTask(input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>> { return this.request('workhub.coordination.continue', input); }
 
   answerWorkHubInteraction(input: OperationInput<"workhub.interactions.answer">): Promise<OperationOutput<"workhub.interactions.answer">> {
     return this.request("workhub.interactions.answer", input);
-  }
-  revokeWorkHubTaskGrant(input: OperationInput<"workhub.interactions.revoke">): Promise<OperationOutput<"workhub.interactions.revoke">> {
-    return this.request("workhub.interactions.revoke", input);
   }
 
   testNetworkProxy(

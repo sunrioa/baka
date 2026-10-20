@@ -393,10 +393,6 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'usage.query',
   'web-search.execute',
   'workhub.coordination.answer',
-  'workhub.coordination.actFromTurn',
-  'workhub.coordination.selectAndDelegate',
-  'workhub.coordination.candidates',
-  'workhub.coordination.works',
   'workhub.coordination.configureModel',
   'workhub.coordination.query',
   'workhub.coordination.resolve',
@@ -408,7 +404,6 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'workhub.tasks.executions',
   'workhub.tasks.send',
   'workhub.tasks.input.read',
-  'workhub.coordination.continue',
 ] as const satisfies readonly OperationKey[]);
 
 const REMOTE_OWNER_OPERATION_GRANT_SET = new Set<OperationKey>(REMOTE_OWNER_OPERATION_GRANTS);

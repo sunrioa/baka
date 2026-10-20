@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import type { WorkHubCreateDefaults } from '@maka/core/session';
+import { isWorkHubCreateDefaults, type WorkHubCreateDefaults } from '@maka/core/session';
 import { defineHostPathOperation, defineOperation } from './operation-spec.js';
 import { invalidProtocolFrame } from './errors.js';
 import {
@@ -27,7 +27,7 @@ import {
   requireUtf8String,
 } from './codec.js';
 import {
-  decodeWorkHubCoordinationActFromTurnInput,
+  decodeWorkHubCoordinationCreateContext,
   decodeWorkHubCoordinationActResult,
   decodeWorkHubContextObservation,
   WORKHUB_COORDINATION_TEXT_MAX_BYTES,
@@ -133,22 +133,20 @@ export const WORKHUB_TASK_ACTION_OPERATION_SPECS = {
         }
         if (item.newWorkDefaults === undefined)
           throw invalidProtocolFrame('Task start requires effective new-task settings');
-        const decoded = decodeWorkHubCoordinationActFromTurnInput({
-          turnId: base.turnId,
-          actionId: base.actionId,
-          proposal: { disposition: 'create_new', title: Array.from(title).slice(0, 64).join('') },
-          create: item.create ?? { workspace: { kind: 'isolated' } },
-          newWorkDefaults: item.newWorkDefaults,
-          delegationText: base.text,
-        });
-        if (
-          !decoded.newWorkDefaults?.permissionMode ||
-          (!decoded.newWorkDefaults.model && !decoded.newWorkDefaults.executorId)
-        )
+        const defaults = item.newWorkDefaults;
+        if (!isWorkHubCreateDefaults(defaults))
+          throw invalidProtocolFrame('Invalid WorkHub creation defaults');
+        if (!defaults.permissionMode || (!defaults.model && !defaults.executorId))
           throw invalidProtocolFrame(
             'Task start needs an explicit execution target and permission mode',
           );
-        return { ...base, create: decoded.create!, newWorkDefaults: decoded.newWorkDefaults! };
+        return {
+          ...base,
+          create: decodeWorkHubCoordinationCreateContext(
+            item.create ?? { workspace: { kind: 'isolated' } },
+          ),
+          newWorkDefaults: defaults,
+        };
       },
       decodeOutput(value: unknown): WorkHubTaskStartResult {
         const result = decodeWorkHubCoordinationActResult(value);

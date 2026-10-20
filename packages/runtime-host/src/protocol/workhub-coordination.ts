@@ -22,11 +22,7 @@ import { z } from 'zod';
 import type { AttachmentRef } from '@maka/core/events';
 import { isWorkHubActionResult, type WorkHubActionResult } from '@maka/core/workhub-action-result';
 import { decodeMessageContent } from './turn.js';
-import {
-  WORKHUB_COORDINATION_SESSION_ID,
-  isWorkHubCreateDefaults,
-  type WorkHubCreateDefaults,
-} from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
 import {
   requireCount,
   requireEntityId,
@@ -38,7 +34,6 @@ import {
 import { invalidProtocolFrame } from './errors.js';
 import { defineOperation } from './operation-spec.js';
 import {
-  decodeWorkspaceProjection,
   decodeWorkspaceTarget,
   type WorkspaceProjection,
   type WorkspaceTarget,
@@ -88,8 +83,6 @@ export function decodeWorkHubCoordinationConfigureModelInput(
 }
 
 export const WORKHUB_COORDINATION_TEXT_MAX_BYTES = 48 * 1024;
-const COORDINATION_TITLE_MAX_BYTES = 512;
-const CANDIDATE_SET_ID_MAX_BYTES = 96;
 export const WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS = 32;
 export const WORKHUB_COORDINATION_DEFAULT_MODEL_REQUIRED_MESSAGE =
   'WorkHub Coordination Session requires an available default model';
@@ -115,14 +108,6 @@ const TURN_ERRORS = [
   'operation_conflict',
   'persistence_failed',
   'commit_outcome_unknown',
-  'internal_failure',
-] as const;
-
-const CANDIDATE_ERRORS = [
-  'host_not_ready',
-  'host_draining',
-  'operation_unavailable',
-  'persistence_failed',
   'internal_failure',
 ] as const;
 
@@ -383,119 +368,6 @@ export type WorkHubCoordinationActResult = Exclude<
 >;
 
 export const WORKHUB_COORDINATION_OPERATION_SPECS = {
-  'workhub.coordination.works': defineOperation({
-    mode: 'query',
-    availability: 'ready',
-    errors: [...CANDIDATE_ERRORS, 'operation_conflict'],
-    decodeInput(value: unknown): WorkHubWorksQueryInput {
-      const input = requireShapedRecord(
-        value,
-        'WorkHub work index',
-        [],
-        ['query', 'cursor', 'limit'],
-      );
-      const limit =
-        input.limit === undefined ? undefined : requireCount(input.limit, 'WorkHub work limit');
-      if (limit !== undefined && (limit < 1 || limit > 8))
-        throw invalidProtocolFrame('Invalid WorkHub work limit');
-      return {
-        ...(input.query === undefined
-          ? {}
-          : { query: requireUtf8String(input.query, 'WorkHub work query', 1024) }),
-        ...(input.cursor === undefined
-          ? {}
-          : { cursor: requireUtf8String(input.cursor, 'WorkHub work cursor', 2048) }),
-        ...(limit === undefined ? {} : { limit }),
-      };
-    },
-    decodeOutput(value: unknown): WorkHubWorksQueryResult {
-      const result = requireExactRecord(value, 'WorkHub work index', ['works', 'nextCursor']);
-      if (!Array.isArray(result.works) || result.works.length > 8)
-        throw invalidProtocolFrame('Invalid WorkHub works');
-      const works = result.works.map((raw): WorkHubWorkSummary => {
-        const work = requireShapedRecord(
-          raw,
-          'WorkHub work',
-          [
-            'workId',
-            'sourceActionId',
-            'sourceDelegationId',
-            'targetSessionId',
-            'targetSessionName',
-            'coordinationTurnId',
-            'createdAt',
-            'originalRequest',
-            'requestTruncated',
-            'objective',
-            'objectiveTruncated',
-            'available',
-          ],
-          ['sourceMessageId', 'context'],
-        );
-        if (
-          typeof work.requestTruncated !== 'boolean' ||
-          typeof work.objectiveTruncated !== 'boolean' ||
-          typeof work.available !== 'boolean'
-        )
-          throw invalidProtocolFrame('Invalid WorkHub work state');
-        return {
-          workId: requireEntityId(work.workId, 'WorkHub work ID'),
-          sourceActionId: requireEntityId(work.sourceActionId, 'WorkHub source action'),
-          sourceDelegationId: requireEntityId(work.sourceDelegationId, 'WorkHub source delegation'),
-          targetSessionId: requireEntityId(work.targetSessionId, 'WorkHub target Session'),
-          targetSessionName: requireUtf8String(work.targetSessionName, 'WorkHub task name', 512),
-          coordinationTurnId: requireEntityId(work.coordinationTurnId, 'WorkHub source Turn'),
-          ...(work.sourceMessageId === undefined
-            ? {}
-            : { sourceMessageId: requireEntityId(work.sourceMessageId, 'WorkHub source Message') }),
-          createdAt: requireCount(work.createdAt, 'WorkHub creation time'),
-          originalRequest: requireUtf8String(
-            work.originalRequest,
-            'WorkHub original request',
-            8192,
-          ),
-          requestTruncated: work.requestTruncated,
-          objective: requireUtf8String(work.objective, 'WorkHub original objective', 8192),
-          objectiveTruncated: work.objectiveTruncated,
-          available: work.available,
-          ...(work.context === undefined
-            ? {}
-            : { context: decodeWorkHubContextObservation(work.context) }),
-        };
-      });
-      return {
-        works,
-        nextCursor:
-          result.nextCursor === null
-            ? null
-            : requireUtf8String(result.nextCursor, 'WorkHub work cursor', 2048),
-      };
-    },
-  }),
-  'workhub.coordination.continue': defineOperation({
-    mode: 'command',
-    availability: 'ready',
-    errors: [...TURN_ERRORS, 'candidate_set_stale'],
-    decodeInput(value: unknown): WorkHubTaskContinueInput {
-      const input = requireExactRecord(value, 'WorkHub task continuation', [
-        'turnId',
-        'actionId',
-        'delegationId',
-        'text',
-      ]);
-      return {
-        turnId: requireEntityId(input.turnId, 'WorkHub continuation Turn'),
-        actionId: requireEntityId(input.actionId, 'WorkHub source action'),
-        delegationId: requireEntityId(input.delegationId, 'WorkHub source delegation'),
-        text: requireUtf8String(
-          input.text,
-          'WorkHub continuation text',
-          WORKHUB_COORDINATION_TEXT_MAX_BYTES,
-        ),
-      };
-    },
-    decodeOutput: decodeWorkHubCoordinationActResult,
-  }),
   'workhub.coordination.configureModel': defineOperation<
     WorkHubCoordinationConfigureModelInput,
     SessionUpdateResult,
@@ -552,48 +424,6 @@ export const WORKHUB_COORDINATION_OPERATION_SPECS = {
     decodeInput: decodeWorkHubCoordinationAnswerInput,
     decodeOutput: decodeWorkHubCoordinationTurnResult,
   }),
-
-  'workhub.coordination.candidates': defineOperation<
-    WorkHubCoordinationCandidatesInput,
-    WorkHubCoordinationCandidatesResult,
-    (typeof CANDIDATE_ERRORS)[number]
-  >({
-    mode: 'query',
-    availability: 'ready',
-    errors: CANDIDATE_ERRORS,
-    decodeInput: decodeWorkHubCoordinationCandidatesInput,
-    decodeOutput: decodeWorkHubCoordinationCandidatesResult,
-  }),
-
-  'workhub.coordination.selectAndDelegate': defineOperation<
-    WorkHubCoordinationSelectAndDelegateInput,
-    WorkHubCoordinationSelectAndDelegateResult,
-    (typeof TURN_ERRORS)[number] | 'candidate_set_stale'
-  >({
-    mode: 'command',
-    availability: 'ready',
-    errors: [...TURN_ERRORS, 'candidate_set_stale'],
-    decodeInput: decodeWorkHubCoordinationSelectAndDelegateInput,
-    decodeOutput: (value) => {
-      const result = requireShapedRecord(value, 'WorkHub selection result', ['kind'], ['result']);
-      if (result.kind === 'cancelled' && result.result === undefined) return { kind: 'cancelled' };
-      if (result.kind === 'delegated')
-        return { kind: 'delegated', result: decodeWorkHubCoordinationActResult(result.result) };
-      throw invalidProtocolFrame('Invalid WorkHub selection result');
-    },
-  }),
-
-  'workhub.coordination.actFromTurn': defineOperation<
-    WorkHubCoordinationActFromTurnInput,
-    WorkHubCoordinationActResult,
-    (typeof TURN_ERRORS)[number] | 'candidate_set_stale'
-  >({
-    mode: 'command',
-    availability: 'ready',
-    errors: [...TURN_ERRORS, 'candidate_set_stale'],
-    decodeInput: decodeWorkHubCoordinationActFromTurnInput,
-    decodeOutput: decodeWorkHubCoordinationActResult,
-  }),
 } as const;
 
 export function decodeWorkHubCoordinationResolveInput(
@@ -644,173 +474,6 @@ export function decodeWorkHubCoordinationTurnResult(value: unknown): WorkHubCoor
   };
 }
 
-export function decodeWorkHubCoordinationCandidatesInput(
-  value: unknown,
-): WorkHubCoordinationCandidatesInput {
-  requireExactRecord(value, 'WorkHub Coordination candidates input', []);
-  return {};
-}
-
-export function decodeWorkHubCoordinationCandidatesResult(
-  value: unknown,
-): WorkHubCoordinationCandidatesResult {
-  const result = requireExactRecord(value, 'WorkHub Coordination candidates result', [
-    'candidateSetId',
-    'candidates',
-  ]);
-  if (!Array.isArray(result.candidates)) {
-    throw invalidProtocolFrame('Invalid WorkHub Coordination candidates');
-  }
-  if (result.candidates.length > WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS) {
-    throw invalidProtocolFrame('Too many WorkHub Coordination candidates');
-  }
-  return {
-    candidateSetId: candidateSetId(result.candidateSetId),
-    candidates: result.candidates.map(decodeWorkHubCoordinationCandidate),
-  };
-}
-
-export function decodeWorkHubCoordinationSelectAndDelegateInput(
-  value: unknown,
-): WorkHubCoordinationSelectAndDelegateInput {
-  const input = requireExactRecord(value, 'WorkHub selection input', [
-    'turnId',
-    'actionId',
-    'candidateSetId',
-    'candidateRefs',
-    'delegationText',
-  ]);
-  if (
-    !Array.isArray(input.candidateRefs) ||
-    input.candidateRefs.length < 1 ||
-    input.candidateRefs.length > WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS
-  ) {
-    throw invalidProtocolFrame('Invalid WorkHub selection candidates');
-  }
-  const candidateRefs = input.candidateRefs.map((ref) =>
-    requireEntityId(ref, 'WorkHub candidate reference'),
-  );
-  if (new Set(candidateRefs).size !== candidateRefs.length)
-    throw invalidProtocolFrame('Duplicate WorkHub selection candidates');
-  return {
-    turnId: requireEntityId(input.turnId, 'WorkHub Coordination Turn id'),
-    actionId: requireEntityId(input.actionId, 'WorkHub action id'),
-    candidateSetId: requireUtf8String(input.candidateSetId, 'WorkHub candidate set', 256),
-    candidateRefs,
-    delegationText: requireUtf8String(
-      input.delegationText,
-      'WorkHub delegation text',
-      WORKHUB_COORDINATION_TEXT_MAX_BYTES,
-    ),
-  };
-}
-
-export function decodeWorkHubCoordinationActFromTurnInput(
-  value: unknown,
-): WorkHubCoordinationActFromTurnInput {
-  const input = requireShapedRecord(
-    value,
-    'WorkHub active Turn action input',
-    ['turnId', 'actionId', 'proposal'],
-    ['candidateSetId', 'create', 'newWorkDefaults', 'delegationText'],
-  );
-  const fields = decodeWorkHubCoordinationActionFields(input);
-
-  return {
-    ...fields,
-    proposal: fields.proposal,
-    turnId: requireEntityId(input.turnId, 'WorkHub Coordination Turn id'),
-  };
-}
-
-function decodeWorkHubCoordinationActionFields(
-  input: Record<string, unknown>,
-): Omit<WorkHubCoordinationActFromTurnInput, 'turnId'> {
-  const proposal = decodeWorkHubCoordinationProposal(input.proposal);
-  if (
-    input.newWorkDefaults !== undefined &&
-    (!isWorkHubCreateDefaults(input.newWorkDefaults) ||
-      !(
-        ('disposition' in proposal &&
-          (proposal.disposition === 'create_new' ||
-            (proposal.disposition === 'continue_work' && proposal.container === 'fresh'))) ||
-        ('operation' in proposal &&
-          proposal.operation === 'correct' &&
-          proposal.target.disposition === 'create_new')
-      ))
-  ) {
-    throw invalidProtocolFrame('Invalid WorkHub creation defaults');
-  }
-  const delegationText =
-    input.delegationText === undefined
-      ? undefined
-      : requireUtf8String(
-          input.delegationText,
-          'WorkHub delegation text',
-          WORKHUB_COORDINATION_TEXT_MAX_BYTES,
-        );
-  if (
-    delegationText !== undefined &&
-    (!delegationText.trim() ||
-      !('disposition' in proposal || ('operation' in proposal && proposal.operation === 'correct')))
-  ) {
-    throw invalidProtocolFrame('Invalid WorkHub delegation text');
-  }
-  const base = {
-    actionId: requireEntityId(input.actionId, 'WorkHub Coordination action id'),
-    proposal,
-    ...(input.newWorkDefaults !== undefined
-      ? { newWorkDefaults: input.newWorkDefaults as WorkHubCreateDefaults }
-      : {}),
-    ...(delegationText === undefined ? {} : { delegationText }),
-  };
-  if ('disposition' in proposal && proposal.disposition === 'delegate_existing') {
-    if (input.create !== undefined || input.candidateSetId === undefined) {
-      throw invalidProtocolFrame('Invalid WorkHub delegation context');
-    }
-    return { ...base, candidateSetId: candidateSetId(input.candidateSetId) };
-  }
-  if ('disposition' in proposal && proposal.disposition === 'continue_work') {
-    if (
-      input.create !== undefined ||
-      input.candidateSetId !== undefined ||
-      (input.newWorkDefaults !== undefined && proposal.container !== 'fresh')
-    )
-      throw invalidProtocolFrame(
-        'A work continuation cannot select a target Session/workspace or change reuse defaults',
-      );
-    return base;
-  }
-  if ('disposition' in proposal && proposal.disposition === 'create_new') {
-    if (input.candidateSetId !== undefined || input.create === undefined) {
-      throw invalidProtocolFrame('Invalid WorkHub creation context');
-    }
-    return { ...base, create: decodeWorkHubCoordinationCreateContext(input.create) };
-  }
-  if ('operation' in proposal && proposal.operation === 'correct') {
-    if (proposal.target.disposition === 'delegate_existing') {
-      if (input.candidateSetId === undefined || input.create !== undefined) {
-        throw invalidProtocolFrame('Invalid WorkHub replacement context');
-      }
-      return {
-        ...base,
-        candidateSetId: candidateSetId(input.candidateSetId),
-      };
-    }
-    if (input.candidateSetId !== undefined || input.create === undefined) {
-      throw invalidProtocolFrame('Invalid WorkHub replacement creation context');
-    }
-    return {
-      ...base,
-      create: decodeWorkHubCoordinationCreateContext(input.create),
-    };
-  }
-  if (input.candidateSetId !== undefined || input.create !== undefined) {
-    throw invalidProtocolFrame('Unexpected WorkHub action context');
-  }
-  return base;
-}
-
 export function decodeWorkHubCoordinationActResult(value: unknown): WorkHubCoordinationActResult {
   if (
     !isWorkHubActionResult(value) ||
@@ -824,146 +487,9 @@ export function decodeWorkHubCoordinationActResult(value: unknown): WorkHubCoord
   ) as WorkHubCoordinationActResult;
 }
 
-function decodeWorkHubCoordinationCandidate(value: unknown): WorkHubCoordinationCandidate {
-  const candidate = requireShapedRecord(
-    value,
-    'WorkHub Coordination candidate',
-    ['candidateRef', 'sessionId', 'sessionName', 'workspace', 'state', 'updatedAt'],
-    ['latestDelegationActionId'],
-  );
-  return {
-    candidateRef: requireEntityId(candidate.candidateRef, 'WorkHub candidate ref'),
-    sessionId: requireEntityId(candidate.sessionId, 'WorkHub candidate Session id'),
-    sessionName: requireUtf8String(candidate.sessionName, 'WorkHub candidate name', 512),
-    workspace: decodeWorkspaceProjection(candidate.workspace),
-    state: candidateState(candidate.state),
-    updatedAt: requireCount(candidate.updatedAt, 'WorkHub candidate update time'),
-    ...(candidate.latestDelegationActionId === undefined
-      ? {}
-      : {
-          latestDelegationActionId: requireEntityId(
-            candidate.latestDelegationActionId,
-            'WorkHub latest delegation action id',
-          ),
-        }),
-  };
-}
-
-function decodeWorkHubCoordinationProposal(value: unknown): WorkHubCoordinationProposal {
-  const proposal = requireRecord(value, 'WorkHub Coordination proposal');
-
-  if (proposal.disposition === 'continue_work') {
-    const exact = requireShapedRecord(
-      proposal,
-      'WorkHub work continuation',
-      ['disposition', 'workId', 'sourceActionId'],
-      ['container'],
-    );
-    if (exact.container !== undefined && exact.container !== 'reuse' && exact.container !== 'fresh')
-      throw invalidProtocolFrame('Invalid WorkHub execution container');
-    return {
-      disposition: 'continue_work',
-      workId: requireEntityId(exact.workId, 'WorkHub work ID'),
-      sourceActionId: requireEntityId(exact.sourceActionId, 'WorkHub source action'),
-      ...(exact.container === undefined ? {} : { container: exact.container }),
-    };
-  }
-
-  if (proposal.disposition === 'delegate_existing') {
-    const exact = requireExactRecord(proposal, 'WorkHub delegation proposal', [
-      'disposition',
-      'candidateRef',
-    ]);
-    return {
-      disposition: 'delegate_existing',
-      candidateRef: requireEntityId(exact.candidateRef, 'WorkHub candidate ref'),
-    };
-  }
-  if (proposal.disposition === 'create_new') {
-    const exact = requireExactRecord(proposal, 'WorkHub creation proposal', [
-      'disposition',
-      'title',
-    ]);
-    return {
-      disposition: 'create_new',
-      title: requireUtf8String(exact.title, 'WorkHub Session title', COORDINATION_TITLE_MAX_BYTES),
-    };
-  }
-  if (proposal.operation === 'correct') {
-    const exact = requireExactRecord(proposal, 'WorkHub replacement proposal', [
-      'operation',
-      'replacesActionId',
-      'target',
-    ]);
-    const target = requireRecord(exact.target, 'WorkHub replacement target');
-    if (target.disposition === 'delegate_existing') {
-      const targetExact = requireExactRecord(target, 'WorkHub replacement delegation target', [
-        'disposition',
-        'candidateRef',
-      ]);
-      return {
-        operation: 'correct',
-        replacesActionId: requireEntityId(exact.replacesActionId, 'WorkHub replaced action id'),
-        target: {
-          disposition: 'delegate_existing',
-          candidateRef: requireEntityId(targetExact.candidateRef, 'WorkHub candidate ref'),
-        },
-      };
-    }
-    if (target.disposition === 'create_new') {
-      const targetExact = requireExactRecord(target, 'WorkHub replacement creation target', [
-        'disposition',
-        'title',
-      ]);
-      return {
-        operation: 'correct',
-        replacesActionId: requireEntityId(exact.replacesActionId, 'WorkHub replaced action id'),
-        target: {
-          disposition: 'create_new',
-          title: requireUtf8String(
-            targetExact.title,
-            'WorkHub Session title',
-            COORDINATION_TITLE_MAX_BYTES,
-          ),
-        },
-      };
-    }
-    throw invalidProtocolFrame('Invalid WorkHub replacement target');
-  }
-  if (proposal.operation === 'stop') {
-    const exact = requireExactRecord(proposal, 'WorkHub stop proposal', ['operation', 'expects']);
-    return {
-      operation: 'stop',
-      expects: decodeWorkHubCoordinationLinkedTargetPreconditions(exact.expects),
-    };
-  }
-  if (proposal.operation === 'resume') {
-    const exact = requireExactRecord(proposal, 'WorkHub resume proposal', [
-      'operation',
-      'expects',
-      'resumesActionId',
-    ]);
-    return {
-      operation: 'resume',
-      resumesActionId: requireEntityId(exact.resumesActionId, 'WorkHub resume assignment'),
-      expects: decodeWorkHubCoordinationLinkedTargetPreconditions(exact.expects),
-    };
-  }
-  throw invalidProtocolFrame('Invalid WorkHub Coordination proposal');
-}
-
-function decodeWorkHubCoordinationLinkedTargetPreconditions(
+export function decodeWorkHubCoordinationCreateContext(
   value: unknown,
-): WorkHubCoordinationLinkedTargetPreconditions {
-  const expects = requireExactRecord(value, 'WorkHub linked-target preconditions', [
-    'targetSessionId',
-  ]);
-  return {
-    targetSessionId: requireEntityId(expects.targetSessionId, 'WorkHub target Session id'),
-  };
-}
-
-function decodeWorkHubCoordinationCreateContext(value: unknown): WorkHubCoordinationCreateContext {
+): WorkHubCoordinationCreateContext {
   const context = requireExactRecord(value, 'WorkHub creation context', ['workspace']);
   if (requireRecord(context.workspace, 'WorkHub creation workspace').kind === 'isolated') {
     requireExactRecord(context.workspace, 'Isolated WorkHub workspace', ['kind']);
@@ -1119,25 +645,4 @@ export function decodeWorkHubContextObservation(value: unknown): WorkHubContextO
     lastRequest,
     ...(estimates?.success ? { estimates: estimates.data } : {}),
   };
-}
-
-function candidateSetId(value: unknown): string {
-  const id = requireUtf8String(value, 'WorkHub candidate set id', CANDIDATE_SET_ID_MAX_BYTES);
-  if (!/^sha256:[a-f0-9]{64}$/u.test(id)) {
-    throw invalidProtocolFrame('Invalid WorkHub candidate set id');
-  }
-  return id;
-}
-
-function candidateState(value: unknown): WorkHubCoordinationCandidateState {
-  if (
-    value === 'active' ||
-    value === 'running' ||
-    value === 'waiting_for_user' ||
-    value === 'blocked' ||
-    value === 'aborted'
-  ) {
-    return value;
-  }
-  throw invalidProtocolFrame('Invalid WorkHub candidate state');
 }
