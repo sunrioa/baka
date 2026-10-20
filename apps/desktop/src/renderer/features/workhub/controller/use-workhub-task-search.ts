@@ -45,7 +45,12 @@ export function useWorkHubTaskSearch(services: WorkHubServices, owner: string, a
   const value = state.services === services && state.owner === owner && state.query === query ? state.value : undefined;
   // These are presentation rows, not fabricated indexed hits. Recent records
   // retain their original exact assignment reference for the native task read.
-  const rows = value?.recent ? value.recent.tasks.map(task => ({ id: task.workId ?? task.actionId, title: workHubTaskTitle(task),
+  const seen = new Set<string>();
+  const rows = value?.recent ? value.recent.tasks.filter(task => {
+    const workId = task.workId ?? task.actionId;
+    if (seen.has(workId)) return false;
+    seen.add(workId); return true; // Keep the first fact in the Host's original priority order.
+  }).map(task => ({ id: task.workId ?? task.actionId, title: workHubTaskTitle(task),
     status: task.status, summary: task.text, ref: { actionId: task.actionId, delegationId: task.delegationId } }))
     : (value?.items ?? []).map(item => ({ id: item.id, title: item.title, status: item.state, summary: item.summary, ref: { workId: item.id } }));
   return { items: value?.items ?? [], rows, mode: value?.mode ?? 'indexed', recent: value?.recent, cursor: value?.cursor ?? null, match: value?.match, error: value?.error,

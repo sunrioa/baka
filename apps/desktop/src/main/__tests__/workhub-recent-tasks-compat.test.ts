@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { afterEach, test } from 'node:test';
 import { build } from 'esbuild';
+import { parseHTML } from 'linkedom';
 import { act, createElement, StrictMode, useState } from 'react';
 import { LocaleProvider } from '@maka/ui';
 import { deferred } from '@maka/core/test-only/async-primitives';
@@ -31,7 +32,7 @@ import { RuntimeHostOperationError } from '@maka/runtime-host/client';
 import type { OperationInput, OperationKey, RequestFrame, WorkHubTasksQueryResult } from '@maka/runtime-host/protocol';
 import type { MakaBridge } from '../../preload/bridge-contract.js';
 import { createDesktopWorkHubServices } from '../../renderer/platform/desktop/create-workhub-services.js';
-import { createWorkHubTaskSearchModel, useWorkHubTaskSearch, WorkHubTaskOverview } from '../../renderer/features/workhub/testing.js';
+import { createWorkHubTaskSearchModel, useWorkHubTaskSearch, useWorkHubTaskSelection, WorkHubTaskOverview } from '../../renderer/features/workhub/testing.js';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
 import type { WorkHubTaskListResult } from '../../shared/workhub-conversation.js';
 import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
@@ -111,6 +112,56 @@ test('recent-only records stay distinct from indexed hits, have no cursor and do
   await model.loadMore();
   assert.equal(reads, 1);
   model.close();
+});
+
+test('recent rows and selector choices retain the first prioritized assignment per logical work without changing query order', async () => {
+  const rootTask = recent.tasks[0]!;
+  const independent = { ...rootTask, workId: 'independent-work', actionId: 'independent-action', delegationId: 'independent-link', title: 'Independent task', status: 'running' as const, createdAt: 10 };
+  const queued = { ...rootTask, actionId: 'later-queued', delegationId: 'queued-link', title: 'Later queued continuation', status: 'queued' as const, createdAt: 20 };
+  const cancelled = { ...rootTask, actionId: 'later-cancelled', delegationId: 'cancelled-link', title: 'Later cancelled continuation', status: 'cancelled' as const, createdAt: 30 };
+  const result = Object.freeze({ tasks: Object.freeze([rootTask, independent, queued, cancelled]), truncated: true });
+  const originalOrder = result.tasks.map(task => task.actionId);
+  const reads: Array<OperationInput<'workhub.tasks.read'>> = [];
+  const selections: Array<Parameters<WorkHubServices['presentation']['selectTask']>[0]> = [];
+  let findReads = 0;
+  const services = {
+    findTasks: async () => { findReads++; return { kind: 'recent_only', result }; },
+    readTask: async (_owner: string, ref: OperationInput<'workhub.tasks.read'>) => {
+      reads.push(ref); assert.deepEqual(ref, { actionId: rootTask.actionId, delegationId: rootTask.delegationId }); return { task: rootTask };
+    },
+    taskHistory: async () => assert.fail('Recent list presentation must not read task history'),
+    presentation: { getSnapshot: async () => ({}), subscribe: () => () => {}, selectTask: async (value: Parameters<WorkHubServices['presentation']['selectTask']>[0]) => { selections.push(value); } },
+    subscribeSessions: () => () => {}, subscribeActiveInteractions: () => () => {}, subscribeAvailability: () => () => {},
+  } as unknown as WorkHubServices;
+  let search!: ReturnType<typeof useWorkHubTaskSearch>;
+  let selection!: ReturnType<typeof useWorkHubTaskSelection>;
+  function Probe() { search = useWorkHubTaskSearch(services, 'owner', true); selection = useWorkHubTaskSelection(services, 'owner', true); return null; }
+  const { root } = installReactRenderer();
+  await act(async () => { root.render(createElement(Probe)); });
+  assert.deepEqual(search.rows.map(row => [row.id, row.title, row.status]), [
+    ['original-work', 'Original recent task', 'waiting_for_user'], ['independent-work', 'Independent task', 'running'],
+  ]);
+  // The panel derives one selector entry from each row. Its Map must not
+  // overwrite a waiting root's exact reference with a later continuation.
+  const choices = new Map(search.rows.map(row => [row.id, { title: row.title, ref: row.ref }]));
+  assert.equal(choices.size, 2);
+  assert.deepEqual([...choices.keys()], ['original-work', 'independent-work']);
+  const choice = choices.get('original-work')!;
+  assert.deepEqual(choice.ref, { actionId: 'original-action', delegationId: 'original-link' });
+  await act(async () => { await selection.open(choice.ref, choice.title); });
+  assert.deepEqual(reads, [{ actionId: 'original-action', delegationId: 'original-link' }]);
+  assert.equal(selections[0]!.work?.workId, 'original-work');
+  assert.equal(selections[0]!.work?.name, 'Original recent task');
+  const markup = await renderTranscriptMarkup(createElement(LocaleProvider, { locale: 'en', children: null },
+    createElement(WorkHubTaskOverview, { search, onView: row => selection.open(row.ref, row.title) })));
+  const document = parseHTML(markup).document;
+  assert.equal(document.querySelectorAll('.workHubTaskCard').length, 2);
+  assert.deepEqual([...document.querySelectorAll('.workHubTaskName')].map(row => row.textContent), ['Original recent task', 'Independent task']);
+  assert.equal(document.querySelectorAll('.workHubTaskCard[data-status="attention"]').length, 1);
+  assert.doesNotMatch(markup, /Later queued continuation|Later cancelled continuation/u);
+  assert.equal(search.recent, result, 'the raw query result remains intact, not an indexed replacement');
+  assert.deepEqual(result.tasks.map(task => task.actionId), originalOrder, 'the Host priority order is neither sorted nor mutated');
+  assert.equal(findReads, 1, 'deduplication performs no additional discovery or history reads');
 });
 
 test('an unauthorized index search or page cannot silently display unfiltered recent tasks', async () => {
