@@ -2242,7 +2242,9 @@ export function deriveTurnRecords(messages: readonly StoredMessage[]): TurnRecor
     if (
       message.type === 'workhub_peer_question' ||
       message.type === 'workhub_peer_inbox' ||
-      message.type === 'workhub_peer_settlement'
+      message.type === 'workhub_peer_settlement' ||
+      (message.type === 'workhub_evidence_resolution' &&
+        message.origin === 'legacy_protocol_retirement')
     )
       continue;
     const turnId = (message as { turnId?: string }).turnId;

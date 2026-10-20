@@ -18,8 +18,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
-import { z } from 'zod';
 import type {
   StoredMessage,
   WorkHubDelegationAssignedMessage,
@@ -35,16 +35,19 @@ import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
 import {
   workHubPeerInboxId,
   workHubPeerSettlementId,
-  type WorkHubEvidenceOrigin,
+  workHubPeerQuestionIdentity,
+  type WorkHubEvidenceRequestMessage,
+  type WorkHubEvidenceResolutionMessage,
   type WorkHubPeerQuestionMessage,
   type WorkHubPeerSettlementMessage,
 } from '@maka/core/workhub-evidence';
 import { isDeepStrictEqual } from 'node:util';
-import { normalizeRootTurnAdmissionPayload } from '@maka/storage/agent-run-store';
 import { SessionNotFoundError } from '@maka/storage/session-store';
 import {
   createWorkHubEvidenceRuntime,
   workHubEvidenceRequestId,
+  workHubEvidenceResolutionId,
+  workHubEvidenceRetirementId,
   workHubEvidenceTurnId,
 } from '../server/workhub-evidence-runtime.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
@@ -83,6 +86,8 @@ function fixture() {
   const deleted = new Set<string>();
   const headerOverrides = new Map<string, Partial<SessionHeader>>();
   const resources = new Set<string>();
+  const stopCalls: unknown[][] = [];
+  const errors: unknown[] = [];
   const peerPending = new Set<string>();
   const queuedInputs: string[] = [];
   const stopped = new Set<string>();
@@ -172,6 +177,21 @@ function fixture() {
               .slice(0, input.maxMessages),
           };
         },
+        readMessagesAfter: async (
+          sid: string,
+          input: { beforeSequence?: number; maxMessages: number },
+        ) => {
+          const all = [...records.entries()]
+            .filter(([key]) => key.startsWith(sid + '/'))
+            .map(([, message], sequence) => ({ message, sequence }));
+          return {
+            highWaterSequence: all.at(-1)?.sequence ?? null,
+            records: all
+              .filter((row) => row.sequence < (input.beforeSequence ?? Infinity))
+              .reverse()
+              .slice(0, input.maxMessages),
+          };
+        },
         readWorkHubTaskFactsPage: async (input: (typeof catalogReads)[number]) => {
           catalogReads.push(input);
           const all = assignments.map((message, sequence) => ({ sequence, message }));
@@ -192,6 +212,7 @@ function fixture() {
           ),
         readWorkHubTaskInputSuccessors: async () => [],
         listMessageAdmissions: async () => queuedInputs.map((messageId) => ({ messageId })),
+        listPendingSandboxBoundaryRequests: async () => [],
         readWorkHubTaskInputByMessage: async (id: string) =>
           [...records.values()].find(
             (message) =>
@@ -287,6 +308,7 @@ function fixture() {
         readRootTurnContinuationAdmission: async () => undefined,
       },
       runtimeEventStore: { readRunInvocation: async (_sid: string, rid: string) => runs.get(rid) },
+      interactionStore: { listSessionPending: async () => [] },
     } as unknown as Options['stores'],
     executions: {
       readLatestRootTurnLineage: async (identity: object) => identity,
@@ -294,33 +316,16 @@ function fixture() {
         ...runs.get(ref.runId),
         status: runs.get(ref.runId)?.terminalEvent?.status ?? 'running',
       }),
-      startWorkHubEvidence: async (
-        sid: string,
-        origin: WorkHubEvidenceOrigin,
-        source: string | undefined,
-        prepare: Parameters<Options['executions']['startWorkHubEvidence']>[3],
-      ) =>
-        lane.runMany(
-          [WORKHUB_COORDINATION_SESSION_ID, sid, ...(source ? [source] : [])],
-          async (lease) => {
-            const tid = workHubEvidenceTurnId(origin.requestId);
-            if (roots.has(tid)) return 'delivered';
-            const content = await prepare(lease);
-            if (!content) return 'obsolete';
-            roots.set(tid, {
-              sessionId: sid,
-              turnId: tid,
-              runId: 'run-' + tid,
-              execution: { kind: 'external_message', origin },
-            });
-            runs.set(
-              'run-' + tid,
-              testInvocationRecord({ sessionId: sid, turnId: tid, runId: 'run-' + tid }),
-            );
-            deliveries.push({ sessionId: sid, text: content.text });
-            return 'delivered';
-          },
-        ),
+      stopRootPreservingFollowups: async (
+        ...args: [{ sessionId: string; turnId: string; runId: string }]
+      ) => {
+        const [ref] = args;
+        const run = runs.get(ref.runId);
+        assert.equal(run?.turnId, ref.turnId);
+        assert.equal(run?.terminalEvent?.actions?.stateDelta?.stopReason, 'dependency_wait');
+        stopCalls.push(structuredClone(args));
+        resources.delete(ref.sessionId);
+      },
     } as unknown as Options['executions'],
     messages: {
       readMessageExecutionDispositionAdmitted: async (sid: string, messageId: string) =>
@@ -365,9 +370,8 @@ function fixture() {
     },
     hasLiveResources: async (sid) => resources.has(sid),
     hasBlockingGoal: () => false,
-    acquireResidency: () => ({ release() {} }),
     onError: (error) => {
-      throw error;
+      errors.push(error);
     },
     now: () => timestamp,
   };
@@ -416,6 +420,8 @@ function fixture() {
     deleted,
     headerOverrides,
     resources,
+    stopCalls,
+    errors,
     peerPending,
     queuedInputs,
     stopped,
@@ -487,7 +493,7 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy'] as c
         modelId: 'test',
       },
     ]);
-    const read = () => f.runtime.tool.impl({ operation: 'read', sourceActionId: 'b' }, f.caller());
+    const read = () => f.runtime.read({ operation: 'read', sourceActionId: 'b' }, f.caller());
     assert.equal(((await read()) as { status: string }).status, 'ok');
     const modern = scenario === 'modern' || scenario === 'mixed-modern';
     const source = f.assignments.find((a) => a.actionId === 'b')!;
@@ -533,7 +539,7 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy'] as c
     if (scenario.startsWith('mixed')) add('earlier-stop', !modern, 'not_owned');
     add('matched-stop', modern, 'already_terminal');
     assert.equal(((await read()) as { status: string }).status, modern ? 'ok' : 'unavailable');
-    const list = (await f.runtime.tool.impl({ operation: 'list' }, f.caller())) as {
+    const list = (await f.runtime.list({ operation: 'list' }, f.caller())) as {
       tasks: { actionId: string }[];
     };
     assert.equal(
@@ -542,65 +548,51 @@ for (const scenario of ['modern', 'legacy', 'mixed-modern', 'mixed-legacy'] as c
     );
   });
 
-test('WorkHubEvidence advertises an object schema without losing any operation fields', () => {
+test('pure readers retain strict validation and do not expose retired producer or lifecycle APIs', async () => {
   const f = fixture();
-  const parameters = f.runtime.tool.parameters as z.ZodType;
-  const schema = z.toJSONSchema(parameters, { io: 'input', target: 'draft-7' });
-  assert.equal(schema.type, 'object');
-  assert.equal(schema.oneOf, undefined);
-  assert.equal(schema.anyOf, undefined);
-  assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, ['operation']);
-  const source = { workId: 'a', generationId: 'a', actionId: 'a', delegationId: 'delegation-a' };
-  const correlation = { requesterSessionId: 'a', questionId: `whpq_${'a'.repeat(48)}` };
-  const calls = [
-    { operation: 'list', query: 'checksum', limit: 16, cursor: 'cursor' },
-    { operation: 'read', sourceActionId: 'a', source, cursor: 'cursor' },
-    {
-      operation: 'read',
-      sourceActionId: 'a',
-      view: 'task_history',
-      kinds: ['user', 'tool_result'],
-    },
-    { operation: 'ask', source, question: 'Which checksum?' },
-    { operation: 'inbox', limit: 8, cursor: 'cursor' },
-    { operation: 'result', ...correlation },
-    { operation: 'reply', ...correlation, answer: 'abc123' },
-    { operation: 'cancel', ...correlation },
-    { operation: 'wait', ...correlation },
-    { operation: 'request', question: 'Which checksum?', sourceActionId: 'a' },
-    { operation: 'resolve', requesterActionId: 'a', requestId: 'request-a', sourceActionId: null },
-  ];
-  const operation = schema.properties?.operation;
-  assert.ok(operation && typeof operation === 'object');
-  assert.deepEqual(new Set(operation.enum), new Set(calls.map((call) => call.operation)));
-  for (const call of calls) {
-    assert.ok(parameters.safeParse(call).success, JSON.stringify(call));
-    for (const field of Object.keys(call)) {
-      assert.ok(Object.hasOwn(schema.properties ?? {}, field), `${call.operation}.${field}`);
-    }
+  for (const key of [
+    'tool',
+    'request',
+    'resolve',
+    'ask',
+    'inbox',
+    'reply',
+    'result',
+    'cancel',
+    'wait',
+    'notify',
+    'start',
+    'reconcile',
+    'peerContexts',
+    'holdForHandoff',
+  ]) {
+    assert.equal(Object.hasOwn(f.runtime, key), false, key);
   }
-});
-
-test('WorkHubEvidence keeps operation-specific argument validation at the tool boundary', () => {
-  const parameters = fixture().runtime.tool.parameters as z.ZodType;
+  for (const operation of [
+    'request',
+    'resolve',
+    'ask',
+    'inbox',
+    'reply',
+    'result',
+    'cancel',
+    'wait',
+  ]) {
+    await assert.rejects(f.runtime.read({ operation } as never, f.caller()));
+    await assert.rejects(f.runtime.list({ operation } as never, f.caller()));
+  }
   for (const call of [
     { operation: 'list', answer: 'not a list argument' },
-    { operation: 'read', sourceActionId: null },
-    { operation: 'inbox', limit: 9 },
-    { operation: 'request' },
-    { operation: 'resolve', requesterActionId: 'a', requestId: 'request-a' },
-    { operation: 'reply', requesterSessionId: 'a', questionId: 'invalid', answer: 'abc123' },
-    {
-      operation: 'reply',
-      requesterSessionId: 'a',
-      questionId: `whpq_${'a'.repeat(48)}`,
-      answer: '',
-    },
     { operation: 'list', unrelated: true },
-  ]) {
-    assert.equal(parameters.safeParse(call).success, false, JSON.stringify(call));
-  }
+    { operation: 'list', limit: 17 },
+  ])
+    await assert.rejects(f.runtime.list(call as never, f.caller()));
+  for (const call of [
+    { operation: 'read', sourceActionId: null },
+    { operation: 'read', sourceActionId: 'a', unrelated: true },
+    { operation: 'read', sourceActionId: 'a', kinds: ['user'] },
+  ])
+    await assert.rejects(f.runtime.read(call as never, f.caller()));
 });
 
 test('fresh container admission waits for every owned assignment and checks resources without reading history', async () => {
@@ -733,7 +725,7 @@ test('task history extends only the current same-work native worker without broa
   let cursor: string | undefined,
     text = '';
   do {
-    const result = (await f.runtime.tool.impl(
+    const result = (await f.runtime.read(
       { ...request, ...(cursor ? { cursor } : {}) },
       f.caller('c'),
     )) as {
@@ -752,15 +744,12 @@ test('task history extends only the current same-work native worker without broa
     assert.ok(text.includes(value), value);
   assert.ok(!text.includes('UNRELATED PRIVATE INPUT'));
   for (const sid of ['b', WORKHUB_COORDINATION_SESSION_ID])
-    assert.deepEqual(await f.runtime.tool.impl(request, f.caller(sid)), { status: 'unavailable' });
-  const ordinary = await f.runtime.tool.impl(
-    { operation: 'read', sourceActionId: 'a' },
-    f.caller('c'),
-  );
+    assert.deepEqual(await f.runtime.read(request, f.caller(sid)), { status: 'unavailable' });
+  const ordinary = await f.runtime.read({ operation: 'read', sourceActionId: 'a' }, f.caller('c'));
   assert.match(JSON.stringify(ordinary), /Changed/);
   assert.doesNotMatch(JSON.stringify(ordinary), /Correction: use cookies|Actual assertion failure/);
   f.headerOverrides.set('c', { backend: 'plugin-executor' });
-  const executorHistory = (await f.runtime.tool.impl(request, f.caller('c'))) as {
+  const executorHistory = (await f.runtime.read(request, f.caller('c'))) as {
     history?: unknown;
   };
   assert.ok('history' in executorHistory);
@@ -773,7 +762,6 @@ test('task history extends only the current same-work native worker without broa
 test('only the current same-work generation or coordinator can explicitly read retired-generation evidence', async () => {
   const f = fixture();
   f.terminal('a');
-  const old = f.assignments[0]!;
   f.outputs.set('a', [
     {
       type: 'assistant',
@@ -794,7 +782,7 @@ test('only the current same-work generation or coordinator can explicitly read r
   f.active.delete('c');
   f.active.add('fresh-a');
   const read = async (sid: string) =>
-    f.runtime.tool.impl({ operation: 'read', sourceActionId: 'a' }, f.caller(sid));
+    f.runtime.read({ operation: 'read', sourceActionId: 'a' }, f.caller(sid));
   const result = await read('c');
   assert.match(JSON.stringify(result), /SELECTED_OLD_EVIDENCE/);
   assert.equal((result as { evidence: { historical?: boolean } }).evidence.historical, true);
@@ -804,22 +792,6 @@ test('only the current same-work generation or coordinator can explicitly read r
   );
   assert.deepEqual(await read('b'), { status: 'unavailable' });
   await assert.rejects(read('a'), /current root invocation/);
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      {
-        operation: 'ask',
-        source: {
-          workId: 'a',
-          generationId: 'a',
-          actionId: old.actionId,
-          delegationId: old.delegationId,
-        },
-        question: 'Do not wake old work',
-      },
-      f.caller('c'),
-    ),
-    { status: 'unavailable' },
-  );
   for (const overrides of [
     { labels: ['mode:side_conversation'] },
     { role: 'workhub_coordination' as const },
@@ -842,356 +814,6 @@ test('only the current same-work generation or coordinator can explicitly read r
   assert.deepEqual(f.deliveries, []);
   assert.equal(f.runs.size, 4, 'historical reads do not create an invocation');
 });
-
-const peerSource = (a: WorkHubDelegationAssignedMessage) => ({
-  workId: a.work?.id ?? a.actionId,
-  generationId: a.work?.generationId ?? a.actionId,
-  actionId: a.actionId,
-  delegationId: a.delegationId,
-});
-type PeerReceipt = { questionId: string; requesterSessionId: string; status: string };
-const askPeer = async (f: ReturnType<typeof fixture>, ctx = f.caller()) =>
-  (await f.runtime.tool.impl(
-    { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Which checksum?' },
-    ctx,
-  )) as PeerReceipt;
-
-test('peer ask is nonblocking, native-work scoped and answers only its immutable correlation', async () => {
-  const f = fixture();
-  const q = await askPeer(f);
-  assert.equal(q.status, 'accepted');
-  assert.deepEqual(await askPeer(f), q);
-  assert.equal(f.deliveries.length, 0);
-  assert.equal(f.runs.get('run-a')?.terminalEvent, undefined, 'ask does not suspend A');
-  const contexts = await f.runtime.peerContexts(f.caller('b'));
-  assert.match(contexts[0]!.text, new RegExp(q.questionId));
-  assert.deepEqual(await f.runtime.peerContexts({ ...f.caller('b'), invocationId: 'wrong' }), []);
-  assert.deepEqual(
-    await f.runtime.peerContexts({ sessionId: 'b', turnId: 'turn-b', cwd: '/unused' }),
-    [],
-  );
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Different' },
-        f.caller(),
-      ),
-    /identity conflict/,
-  );
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'result', requesterSessionId: 'a', questionId: q.questionId },
-        f.caller('c'),
-      ),
-    /another work/,
-  );
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'ask', source: peerSource(f.assignments[0]!), question: 'Self' },
-        { ...f.caller(), toolCallId: 'self' },
-      ),
-    /cycle|same Session/,
-  );
-  const answer = (await f.runtime.tool.impl(
-    { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'abc123' },
-    f.caller('b'),
-  )) as { status: string; reply: { answer: string; invocationId: string } };
-  assert.equal(answer.status, 'reply_committed');
-  assert.equal(answer.reply.answer, 'abc123');
-  assert.equal(answer.reply.invocationId, 'run-b');
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      { operation: 'result', requesterSessionId: 'a', questionId: q.questionId },
-      f.caller(),
-    ),
-    answer,
-  );
-  await f.runtime.reconcile();
-  assert.equal(f.deliveries.length, 0, 'a reply does not insert a new root into nonwaiting A');
-  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
-  assert.ok(Buffer.byteLength(JSON.stringify(answer)) <= READ_PAGE_MAX_BYTES);
-  for (const fact of f.records.values())
-    assert.equal(
-      projectSharedSessionTranscriptMessage(fact, 'a'),
-      null,
-      'operational facts stay out of UI transcript',
-    );
-  f.terminal('b');
-  assert.deepEqual(
-    await askPeer(f),
-    q,
-    'exact uncertain-outcome replay retains acceptance after B ends',
-  );
-});
-
-test('an explicit correlated wait alone releases A, bypasses coordinator wake and resumes once after restart', async () => {
-  const f = fixture();
-  const q = await askPeer(f);
-  f.resources.add('a');
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
-        f.caller(),
-      ),
-    /resources.*Goal/,
-  );
-  f.resources.clear();
-  f.options.hasBlockingGoal = () => true;
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
-        f.caller(),
-      ),
-    /active Goal/,
-  );
-  f.options.hasBlockingGoal = () => false;
-  const waiting = await f.runtime.tool.impl(
-    { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
-    f.caller(),
-  );
-  assert.deepEqual(waiting, {
-    kind: 'workhub_evidence_waiting',
-    requestId: workHubEvidenceRequestId('turn-a'),
-  });
-  f.terminal('a', true);
-  const observation = await f.runtime.waitingObservation(f.assignments[0]!, {
-    sessionId: 'a',
-    turnId: 'turn-a',
-    runId: 'run-a',
-  });
-  assert.equal(observation?.notifyCoordinator, false);
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'ask', source: peerSource(f.assignments[0]!), question: 'Cyclic' },
-        f.caller('b'),
-      ),
-    /cycle/,
-  );
-  await f.runtime.tool.impl(
-    { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'abc123' },
-    f.caller('b'),
-  );
-  const restarted = f.restart();
-  await restarted.reconcile();
-  await restarted.reconcile();
-  assert.equal(f.deliveries.length, 1);
-  assert.equal(f.deliveries[0]!.sessionId, 'a');
-  assert.match(f.deliveries[0]!.text, /reply_committed.*abc123/);
-  assert.match(f.deliveries[0]!.text, /not.*permission grant/);
-});
-
-test('deleting a requester does not break another worker next-step inbox sampling', async () => {
-  const f = fixture();
-  await askPeer(f);
-  f.deleted.add('a');
-  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
-  const page = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as {
-    questions: unknown[];
-  };
-  assert.deepEqual(page.questions, []);
-});
-
-test('a queued B inbox cannot be observed or answered by unrelated C in the same Session', async () => {
-  const f = fixture();
-  const b = f.assignments[1]!;
-  const c = {
-    ...b,
-    actionId: 'unrelated-c',
-    delegationId: 'delegation-unrelated-c',
-    targetMessageId: 'message-unrelated-c',
-    targetTurnId: 'turn-b-c',
-  };
-  f.assignments.push(c);
-  f.active.add(c.actionId);
-  f.dispositions.set(b.targetMessageId, { kind: 'pending' });
-  f.dispositions.set(c.targetMessageId, {
-    kind: 'owned_root',
-    turnId: 'turn-b-c',
-    runId: 'run-b-c',
-  });
-  f.runs.set(
-    'run-b-c',
-    testInvocationRecord({ sessionId: 'b', turnId: 'turn-b-c', runId: 'run-b-c' }),
-  );
-  const q = await askPeer(f);
-  const unrelated = {
-    ...f.caller('b'),
-    turnId: 'turn-b-c',
-    runId: 'run-b-c',
-    invocationId: 'run-b-c',
-  };
-  assert.deepEqual(await f.runtime.peerContexts(unrelated), []);
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'wrong' },
-        unrelated,
-      ),
-    /another work/,
-  );
-  f.dispositions.delete(b.targetMessageId);
-  const inbox = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as {
-    questions: { questionId: string }[];
-  };
-  assert.equal(inbox.questions[0]!.questionId, q.questionId);
-});
-
-for (const change of ['expired', 'cancelled', 'retired', 'cold', 'plugin'] as const)
-  test(
-    'peer communication reports ' + change + ' without source wake or revived authority',
-    async () => {
-      const f = fixture();
-      if (change === 'cold') f.terminal('b');
-      if (change === 'plugin') f.headerOverrides.set('b', { backend: 'plugin-executor' });
-      const q = await askPeer(f);
-      if (change === 'cold' || change === 'plugin') {
-        assert.equal(q.status, 'unavailable');
-        assert.equal(f.records.size, 0);
-        return;
-      }
-      if (change === 'cancelled')
-        await f.runtime.tool.impl(
-          { operation: 'cancel', requesterSessionId: 'a', questionId: q.questionId },
-          f.caller(),
-        );
-      if (change === 'expired') f.expire();
-      if (change === 'retired') f.stopped.add('delegation-a');
-      const late = (await f.runtime.tool.impl(
-        { operation: 'reply', requesterSessionId: 'a', questionId: q.questionId, answer: 'late' },
-        f.caller('b'),
-      )) as { status: string };
-      assert.equal(late.status, change === 'retired' ? 'source_retired' : change);
-      await f.runtime.reconcile();
-      assert.equal(f.deliveries.length, 0);
-      assert.equal(
-        f.records.has('b/' + workHubPeerSettlementId(q.questionId)),
-        change === 'cancelled',
-      );
-    },
-  );
-
-test('peer inbox encoded pagination retains its snapshot and rejects changed readers/restarts', async () => {
-  const f = fixture();
-  const expected = new Set<string>();
-  for (let i = 0; i < 8; i++) {
-    const value = (await f.runtime.tool.impl(
-      {
-        operation: 'ask',
-        source: peerSource(f.assignments[1]!),
-        question: '\u0000'.repeat(300) + '😀',
-      },
-      { ...f.caller(), toolCallId: `escaped-${i}` },
-    )) as PeerReceipt;
-    expected.add(value.questionId);
-  }
-  type Page = { questions: { questionId: string }[]; nextCursor: string | null };
-  const first = (await f.runtime.tool.impl(
-    { operation: 'inbox', limit: 8 },
-    f.caller('b'),
-  )) as Page;
-  assert.ok(first.nextCursor);
-  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= READ_PAGE_MAX_BYTES);
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl({ operation: 'inbox', cursor: first.nextCursor! }, f.caller('c')),
-    /another work/,
-  );
-  await assert.rejects(
-    async () =>
-      f.restart().tool.impl({ operation: 'inbox', cursor: first.nextCursor! }, f.caller('b')),
-    /Invalid or expired/,
-  );
-  const later = (await f.runtime.tool.impl(
-    { operation: 'ask', source: peerSource(f.assignments[1]!), question: 'Later snapshot' },
-    f.caller('c'),
-  )) as PeerReceipt;
-  const seen = new Set(first.questions.map((q) => q.questionId));
-  let cursor: string | null = first.nextCursor;
-  for (let i = 0; cursor; i++) {
-    assert.ok(i < 8);
-    const page = (await f.runtime.tool.impl(
-      { operation: 'inbox', cursor, limit: 8 },
-      f.caller('b'),
-    )) as Page;
-    assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAGE_MAX_BYTES);
-    for (const q of page.questions) {
-      assert.equal(seen.has(q.questionId), false);
-      seen.add(q.questionId);
-    }
-    cursor = page.nextCursor;
-  }
-  assert.deepEqual(seen, expected);
-  assert.equal(seen.has(later.questionId), false);
-  const hold = f.runtime.holdForHandoff()!;
-  await assert.rejects(
-    async () => askPeer(f, { ...f.caller(), toolCallId: 'during-hold' }),
-    /handoff/,
-  );
-  assert.deepEqual(await f.runtime.peerContexts(f.caller('b')), []);
-  hold.release();
-  f.runtime.beginDrain();
-  await assert.rejects(
-    async () => askPeer(f, { ...f.caller(), toolCallId: 'during-drain' }),
-    /drain/,
-  );
-});
-
-test('a sparse full inbox page does not hide older eligible questions', async () => {
-  const f = fixture();
-  const original = await askPeer(f);
-  for (let i = 0; i < 64; i++) {
-    const sid = `retired-${i}`;
-    const a = {
-      ...f.assignments[2]!,
-      actionId: sid,
-      delegationId: `delegation-${sid}`,
-      targetSessionId: sid,
-      targetMessageId: `message-${sid}`,
-      targetTurnId: `turn-${sid}`,
-    };
-    f.assignments.push(a);
-    f.active.add(sid);
-    f.runs.set(
-      'run-' + sid,
-      testInvocationRecord({ sessionId: sid, turnId: 'turn-' + sid, runId: 'run-' + sid }),
-    );
-    await askPeer(f, f.caller(sid));
-    f.active.delete(sid);
-  }
-  type Page = { questions: { questionId: string }[]; nextCursor: string | null };
-  const sparse = (await f.runtime.tool.impl({ operation: 'inbox' }, f.caller('b'))) as Page;
-  assert.deepEqual(sparse.questions, []);
-  assert.ok(sparse.nextCursor);
-  const older = (await f.runtime.tool.impl(
-    { operation: 'inbox', cursor: sparse.nextCursor! },
-    f.caller('b'),
-  )) as Page;
-  assert.equal(older.questions[0]!.questionId, original.questionId);
-});
-
-for (const change of ['expired', 'unavailable', 'source_retired'] as const)
-  test('a genuine peer dependency wait resumes with explicit ' + change, async () => {
-    const f = fixture();
-    const q = await askPeer(f);
-    await f.runtime.tool.impl(
-      { operation: 'wait', requesterSessionId: 'a', questionId: q.questionId },
-      f.caller(),
-    );
-    f.terminal('a', true);
-    if (change === 'expired') f.expire();
-    if (change === 'unavailable') f.terminal('b');
-    if (change === 'source_retired') f.active.delete('b');
-    const restart = f.restart();
-    await restart.reconcile();
-    await restart.reconcile();
-    assert.equal(f.deliveries.length, 1);
-    assert.match(f.deliveries[0]!.text, new RegExp(change));
-  });
 
 test('evidence discovery pages the canonical work catalog beyond 32 sources without retargeting its snapshot', async () => {
   const f = fixture();
@@ -1227,7 +849,7 @@ test('evidence discovery pages the canonical work catalog beyond 32 sources with
     truncated: boolean;
   };
   const read = async (input: object, runtime = f.runtime) =>
-    (await runtime.tool.impl({ operation: 'list', ...input } as never, f.caller())) as Page;
+    (await runtime.list({ operation: 'list', ...input } as never, f.caller())) as Page;
   const first = await read({});
   assert.equal(first.status, 'ok');
   assert.ok(Buffer.byteLength(JSON.stringify(first)) <= READ_PAGE_MAX_BYTES);
@@ -1274,15 +896,12 @@ test('evidence discovery pages the canonical work catalog beyond 32 sources with
   ] as const)
     await assert.rejects(() => read(input, runtime), /Invalid or expired/u);
   await assert.rejects(
-    async () => f.runtime.tool.impl({ operation: 'list', cursor: firstCursor }, f.caller('c')),
+    async () => f.runtime.list({ operation: 'list', cursor: firstCursor }, f.caller('c')),
     /Invalid or expired/u,
   );
   await assert.rejects(
     async () =>
-      f.runtime.tool.impl(
-        { operation: 'read', sourceActionId: 'b', cursor: firstCursor },
-        f.caller(),
-      ),
+      f.runtime.read({ operation: 'read', sourceActionId: 'b', cursor: firstCursor }, f.caller()),
     /Invalid or expired/u,
   );
   assert.ok(
@@ -1327,7 +946,7 @@ test('direct evidence reads reconstruct oversized escaped Unicode from one owned
   };
   const source = { workId: 'b', generationId: 'b', actionId: 'b', delegationId: 'delegation-b' };
   const read = async (input: object, runtime = f.runtime) =>
-    (await runtime.tool.impl(
+    (await runtime.read(
       { operation: 'read', sourceActionId: 'b', ...input } as never,
       f.caller(),
     )) as Page;
@@ -1381,7 +1000,7 @@ test('direct evidence reads reconstruct oversized escaped Unicode from one owned
   );
   multipart.terminal('b');
   const readMultipart = async (cursor?: string) =>
-    (await multipart.runtime.tool.impl(
+    (await multipart.runtime.read(
       { operation: 'read', source, ...(cursor ? { cursor } : {}) },
       multipart.caller(),
     )) as Page;
@@ -1424,177 +1043,23 @@ test('direct evidence reads reconstruct oversized escaped Unicode from one owned
   assert.equal(f.records.size, 0);
 });
 
-test('evidence requests persist fixed sender identity and continue once from bounded source results after restart', async () => {
-  const f = fixture();
-  const call = { ...f.caller(), toolCallId: 'exec:nested:call' };
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      { operation: 'request', question: 'Which checksum?', sourceActionId: 'b' },
-      call,
-    ),
-    { kind: 'workhub_evidence_waiting', requestId: workHubEvidenceRequestId(call.turnId) },
-  );
-  await f.runtime.reconcile();
-  assert.equal(
-    f.deliveries.length,
-    0,
-    'a request without canonical tool/Turn settlement cannot resume',
-  );
-  f.terminal('a', true);
-  await f.runtime.reconcile();
-  assert.equal(f.deliveries.length, 0, 'a running source cannot be treated as evidence');
-  f.outputs.set('b', [
-    { type: 'user', id: 'hidden-user', turnId: 'turn-b', ts: 1, text: 'PRIVATE USER HISTORY' },
-    {
-      type: 'assistant',
-      id: 'source-reply',
-      turnId: 'turn-b',
-      ts: 2,
-      text: 'sha256=verified😀'.repeat(2000),
-      modelId: 'test',
-    },
-    {
-      type: 'assistant',
-      id: 'unrelated-reply',
-      turnId: 'other-turn',
-      ts: 3,
-      text: 'PRIVATE OTHER TASK',
-      modelId: 'test',
-    },
-  ]);
-  f.terminal('b');
-  const recovered = f.restart();
-  await recovered.reconcile();
-  await recovered.reconcile();
-  assert.equal(f.deliveries.length, 1);
-  const delivery = f.deliveries[0]!.text;
-  assert.match(delivery, /original delegated user task/u);
-  assert.match(delivery, /source-reply/u);
-  assert.match(delivery, /"sourceMessageId":"message-b"/u);
-  assert.match(delivery, /"sourceRunId":"run-b"/u);
-  assert.match(delivery, /"truncated":true/u);
-  assert.doesNotMatch(delivery, /PRIVATE USER HISTORY|PRIVATE OTHER TASK/u);
-  assert.ok(Buffer.byteLength(delivery) < 20000);
-  const original = { sessionId: 'a', turnId: 'turn-a', runId: 'run-a' };
-  const task = await recovered.taskExecution(f.assignments[0]!, original);
-  assert.equal(task.turnId, workHubEvidenceTurnId(workHubEvidenceRequestId('turn-a')));
-  assert.equal(task.round, 1);
-  assert.deepEqual(
-    await f.options.executions.readLatestRootTurnLineage(original),
-    original,
-    'task continuation must not mutate execution lineage used by task grants',
-  );
-});
-
-test('escaped evidence and task text fit the real root admission encoding', async () => {
-  const f = fixture();
-  f.assignments[0] = { ...f.assignments[0]!, userText: '\u0000'.repeat(8000) };
-  await f.runtime.tool.impl(
-    { operation: 'request', question: '\u0000'.repeat(4000), sourceActionId: 'b' },
-    f.caller(),
-  );
-  f.terminal('a', true);
-  f.outputs.set(
-    'b',
-    Array.from({ length: 8 }, (_, index) => ({
-      type: 'assistant',
-      id: 'reply-' + index,
-      turnId: 'turn-b',
-      ts: index,
-      text: '\u0000'.repeat(2000),
-      modelId: 'test',
-    })),
-  );
-  f.terminal('b');
-  await f.runtime.reconcile();
-  assert.equal(f.deliveries.length, 1);
-  const content = { text: f.deliveries[0]!.text, displayText: 'Evidence response' };
-  assert.deepEqual(normalizeRootTurnAdmissionPayload(content, []).normalizedInput, content);
-  assert.match(content.text, /"originalTaskTruncated":true/u);
-  assert.match(content.text, /"truncated":true/u);
-  assert.match(content.text, /"sourceMessageId":"message-b"/u);
-});
-
-test('WorkHub relays an unbound evidence question without blocking and resolves only a visible source', async () => {
-  const f = fixture();
-  await f.runtime.tool.impl(
-    { operation: 'request', question: 'Missing release evidence' },
-    f.caller(),
-  );
-  f.terminal('a', true);
-  const waiting = await f.runtime.waitingObservation(f.assignments[0]!, {
-    sessionId: 'a',
-    turnId: 'turn-a',
-    runId: 'run-a',
-  });
-  assert.equal(waiting?.status, 'waiting_for_dependency');
-  const requestId = workHubEvidenceRequestId('turn-a');
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'resolve', requesterActionId: 'a', requestId, sourceActionId: 'b' },
-        f.caller('c'),
-      ),
-    /Only WorkHub/u,
-  );
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      {
-        operation: 'resolve',
-        requesterActionId: 'a',
-        requestId,
-        sourceActionId: 'foreign-host-action',
-      },
-      f.caller(WORKHUB_COORDINATION_SESSION_ID),
-    ),
-    { status: 'unavailable' },
-  );
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      { operation: 'resolve', requesterActionId: 'a', requestId, sourceActionId: 'b' },
-      f.caller(WORKHUB_COORDINATION_SESSION_ID),
-    ),
-    { status: 'accepted', requestId },
-  );
-  assert.deepEqual(
-    await f.runtime.tool.impl(
-      { operation: 'resolve', requesterActionId: 'a', requestId, sourceActionId: 'b' },
-      f.caller(WORKHUB_COORDINATION_SESSION_ID),
-    ),
-    { status: 'accepted', requestId },
-  );
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'resolve', requesterActionId: 'a', requestId, sourceActionId: 'c' },
-        f.caller(WORKHUB_COORDINATION_SESSION_ID),
-      ),
-    /identity conflict/u,
-  );
-  f.terminal('b');
-  await f.runtime.reconcile();
-  assert.equal(f.deliveries.length, 1);
-});
-
-test('evidence fails closed on foreign fields, non-root or stale senders, hidden tasks, live resources and cycles', async () => {
+test('read-only evidence rejects foreign fields, non-root senders and hidden tasks', async () => {
   const f = fixture();
   await assert.rejects(async () =>
-    f.runtime.tool.impl({ operation: 'list', hostId: 'foreign' } as never, f.caller()),
+    f.runtime.list({ operation: 'list', hostId: 'foreign' } as never, f.caller()),
   );
   await assert.rejects(
-    async () =>
-      f.runtime.tool.impl({ operation: 'list' }, { ...f.caller(), invocationId: 'other' }),
+    async () => f.runtime.list({ operation: 'list' }, { ...f.caller(), invocationId: 'other' }),
     /current root/u,
   );
   await assert.rejects(
-    async () => f.runtime.tool.impl({ operation: 'list' }, { ...f.caller(), sessionId: 'private' }),
+    async () => f.runtime.list({ operation: 'list' }, { ...f.caller(), sessionId: 'private' }),
     /root invocation/u,
   );
   f.archived.add('b');
-  assert.deepEqual(
-    await f.runtime.tool.impl({ operation: 'read', sourceActionId: 'b' }, f.caller()),
-    { status: 'unavailable' },
-  );
+  assert.deepEqual(await f.runtime.read({ operation: 'read', sourceActionId: 'b' }, f.caller()), {
+    status: 'unavailable',
+  });
   f.archived.delete('b');
   for (const hidden of [
     { role: 'workhub_coordination' },
@@ -1609,193 +1074,414 @@ test('evidence fails closed on foreign fields, non-root or stale senders, hidden
     },
   ] satisfies Partial<SessionHeader>[]) {
     f.headerOverrides.set('b', hidden);
-    assert.deepEqual(
-      await f.runtime.tool.impl({ operation: 'read', sourceActionId: 'b' }, f.caller()),
-      { status: 'unavailable' },
-    );
-    const result = (await f.runtime.tool.impl({ operation: 'list' }, f.caller())) as {
+    assert.deepEqual(await f.runtime.read({ operation: 'read', sourceActionId: 'b' }, f.caller()), {
+      status: 'unavailable',
+    });
+    const result = (await f.runtime.list({ operation: 'list' }, f.caller())) as {
       tasks: { actionId: string }[];
     };
     assert.ok(result.tasks.every((task) => task.actionId !== 'b'));
   }
   f.headerOverrides.delete('b');
-  f.resources.add('a');
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'request', question: 'Need B', sourceActionId: 'b' },
-        f.caller(),
-      ),
-    /live background/u,
-  );
-  f.resources.clear();
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'request', question: 'Need myself', sourceActionId: 'a' },
-        f.caller(),
-      ),
-    /cycle/u,
-  );
-  await f.runtime.tool.impl(
-    { operation: 'request', question: 'Need B', sourceActionId: 'b' },
-    f.caller(),
-  );
-  f.terminal('a', true);
-  await assert.rejects(
-    async () =>
-      f.runtime.tool.impl(
-        { operation: 'request', question: 'Need A', sourceActionId: 'a' },
-        f.caller('b'),
-      ),
-    /cycle/u,
-  );
-  f.resources.add('a');
-  await assert.rejects(
-    () => f.runtime.assertSafeTerminal({ sessionId: 'a', turnId: 'turn-a', runId: 'run-a' }),
-    /unsafe/u,
-  );
+  assert.deepEqual(f.deliveries, []);
+  assert.equal(f.records.size, 0);
 });
 
-for (const change of [
-  'cancel',
-  'archive',
-  'replace',
-  'source_retired',
-  'source_cancelled',
-  'expire',
-  'unavailable',
-] as const)
-  test('evidence wait handles ' + change + ' without reviving retired task authority', async () => {
-    const f = fixture();
-    await f.runtime.tool.impl(
-      {
-        operation: 'request',
-        question: 'Need B',
-        ...(change === 'unavailable' ? {} : { sourceActionId: 'b' }),
-      },
-      f.caller(),
-    );
-    f.terminal('a', true);
-    if (change === 'cancel') f.stopped.add('delegation-a');
-    if (change === 'archive') f.archived.add('a');
-    if (change === 'replace') f.replaced.add('delegation-a');
-    if (change === 'source_retired') f.active.delete('b');
-    if (change === 'source_cancelled') f.cancelledMessages.add('b');
-    if (change === 'expire') f.expire();
-    if (change === 'unavailable')
-      await f.runtime.tool.impl(
-        {
-          operation: 'resolve',
-          requesterActionId: 'a',
-          requestId: workHubEvidenceRequestId('turn-a'),
-          sourceActionId: null,
-        },
-        f.caller(WORKHUB_COORDINATION_SESSION_ID),
-      );
-    f.terminal('b');
-    await f.restart().reconcile();
-    const requesterRetired = change === 'cancel' || change === 'archive' || change === 'replace';
-    assert.equal(f.deliveries.length, requesterRetired ? 0 : 1);
-    if (requesterRetired)
-      assert.equal(
-        (
-          await f.runtime.taskExecution(f.assignments[0]!, {
-            sessionId: 'a',
-            turnId: 'turn-a',
-            runId: 'run-a',
-          })
-        ).request,
-        undefined,
-        'retirement cannot remain an active dependency after its fragment already settled',
-      );
-    if (f.deliveries.length)
-      assert.match(
-        f.deliveries[0]!.text,
-        new RegExp(
-          change.startsWith('source_') ? change : change === 'expire' ? 'expired' : 'unavailable',
-        ),
-      );
-  });
-
-test('actual persisted task lineage refuses a ninth evidence round', async () => {
-  const f = fixture();
-  let ctx = f.caller();
-  for (let round = 1; round <= 8; round++) {
-    const result = await f.runtime.tool.impl(
-      { operation: 'request', question: 'Still missing evidence' },
-      ctx,
-    );
-    assert.equal((result as { kind: string }).kind, 'workhub_evidence_waiting');
-    f.terminal('a', true, ctx.runId);
-    f.expire();
-    await f.runtime.reconcile();
-    const turnId = workHubEvidenceTurnId(workHubEvidenceRequestId(ctx.turnId));
-    const root = f.roots.get(turnId)!;
-    ctx = {
-      ...ctx,
-      turnId,
-      runId: root.runId,
-      invocationId: root.runId,
-      toolCallId: 'call-round-' + round,
-    };
-  }
-  assert.equal(f.deliveries.length, 8);
-  await assert.rejects(
-    async () => f.runtime.tool.impl({ operation: 'request', question: 'Round nine' }, ctx),
-    /round limit/u,
-  );
-});
-
-test('handoff fences polling, an old release cannot cancel a later hold, and drain cannot restart it', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const f = fixture();
-  await f.runtime.tool.impl({ operation: 'request', question: 'Missing evidence' }, f.caller());
-  f.terminal('a', true);
-  f.expire();
-  f.runtime.start();
-  const first = f.runtime.holdForHandoff()!;
-  t.mock.timers.tick(1000);
-  assert.equal(f.deliveries.length, 0);
-  first.release();
-  const second = f.runtime.holdForHandoff()!;
-  first.release();
-  t.mock.timers.tick(1000);
-  assert.equal(f.deliveries.length, 0);
-  second.release();
-  t.mock.timers.tick(100);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const settling = f.runtime.holdForHandoff()!;
-  await settling.settled();
-  assert.equal(f.deliveries.length, 1);
-  await f.runtime.close();
-  settling.release();
-  f.runtime.start();
-  t.mock.timers.tick(6000);
-  assert.equal(f.deliveries.length, 1);
-});
-
-test('one unavailable requester does not starve another evidence continuation', async (t) => {
-  const f = fixture();
-  await f.runtime.tool.impl(
-    { operation: 'request', question: 'Need B', sourceActionId: 'b' },
-    f.caller('c'),
-  );
-  f.terminal('c', true);
-  f.terminal('b');
-  const errors: unknown[] = [];
-  f.options.onError = (error) => {
-    errors.push(error);
+function legacyWait(f: ReturnType<typeof fixture>, sid = 'a', selectedSource = true) {
+  const source = f.assignments.find((a) => a.targetSessionId === sid)!;
+  const request: WorkHubEvidenceRequestMessage = {
+    type: 'workhub_evidence',
+    schemaVersion: 1,
+    id: workHubEvidenceRequestId('turn-' + sid),
+    turnId: 'turn-' + sid,
+    ts: 1000,
+    expiresAt: 3601000,
+    senderSessionId: sid,
+    senderRunId: 'run-' + sid,
+    senderInvocationId: 'run-' + sid,
+    toolCallId: 'call-' + sid,
+    actionId: source.actionId,
+    delegationId: source.delegationId,
+    rootMessageId: source.targetMessageId,
+    question: 'Old missing evidence',
+    round: 1,
   };
-  const readHeader = f.options.stores.sessionStore.readHeaderSnapshot;
-  t.mock.method(f.options.stores.sessionStore, 'readHeaderSnapshot', async (sid: string) => {
-    if (sid === 'a') throw new Error('Unavailable requester');
-    return readHeader(sid);
+  f.records.set(sid + '/' + request.id, decodeCanonicalMessage(request));
+  if (selectedSource) {
+    const resolution: WorkHubEvidenceResolutionMessage = {
+      type: 'workhub_evidence_resolution',
+      schemaVersion: 1,
+      id: workHubEvidenceResolutionId(request.id),
+      turnId: 'original-coordinator-turn',
+      ts: 1001,
+      requestId: request.id,
+      requesterSessionId: sid,
+      senderRunId: 'original-coordinator-run',
+      senderInvocationId: 'original-coordinator-invocation',
+      toolCallId: 'original-resolve',
+      sourceActionId: 'b',
+      sourceDelegationId: 'delegation-b',
+      sourceSessionId: 'b',
+      sourceMessageId: 'message-b',
+    };
+    f.records.set(sid + '/' + resolution.id, decodeCanonicalMessage(resolution));
+  }
+  f.terminal(sid, true);
+  return request;
+}
+async function legacyQuestion(
+  f: ReturnType<typeof fixture>,
+  suffix = 'old-question',
+  source = {
+    turnId: 'turn-a',
+    runId: 'run-a',
+    invocationId: 'run-a',
+  },
+) {
+  const ref = (a: WorkHubDelegationAssignedMessage) => ({
+    workId: a.work?.id ?? a.actionId,
+    generationId: a.work?.generationId ?? a.actionId,
+    actionId: a.actionId,
+    delegationId: a.delegationId,
+    sessionId: a.targetSessionId,
+    messageId: a.targetMessageId,
   });
-  await f.restart().reconcile();
-  assert.equal(errors.length, 1);
+  const question: WorkHubPeerQuestionMessage = {
+    type: 'workhub_peer_question',
+    schemaVersion: 1,
+    id: '',
+    turnId: source.turnId,
+    ts: 1000,
+    expiresAt: 3601000,
+    sender: ref(f.assignments[0]!),
+    recipient: ref(f.assignments[1]!),
+    senderRunId: source.runId,
+    senderInvocationId: source.invocationId,
+    toolCallId: suffix,
+    question: 'Old unanswered question',
+    round: 1,
+  };
+  const fixed = {
+    ...question,
+    id:
+      'whpq_' +
+      createHash('sha256').update(workHubPeerQuestionIdentity(question)).digest('hex').slice(0, 48),
+  };
+  await f.options.stores.sessionStore.commitWorkHubPeerQuestion(fixed);
+  return fixed;
+}
+
+test('startup retirement releases only the exact old wait and closes unanswered peers idempotently without new Turns', async () => {
+  const f = fixture();
+  const request = legacyWait(f);
+  const question = await legacyQuestion(f);
+  const selection = structuredClone(f.records.get('a/' + workHubEvidenceResolutionId(request.id)));
+  f.resources.add('a');
+  f.queuedInputs.push('unrelated-queued-first', 'unrelated-queued-second');
+  const result = await f.runtime.retireLegacy();
+  assert.deepEqual(result, { retiredWaits: 1, retiredQuestions: 1, unavailable: 0 });
   assert.deepEqual(
-    f.deliveries.map((value) => value.sessionId),
-    ['c'],
+    f.stopCalls,
+    [[{ sessionId: 'a', turnId: 'turn-a', runId: 'run-a' }]],
+    'no user stop source is fabricated',
   );
+  assert.equal(f.resources.has('a'), false);
+  assert.deepEqual(f.queuedInputs, ['unrelated-queued-first', 'unrelated-queued-second']);
+  assert.equal(
+    f.runs.get('run-b')?.terminalEvent,
+    undefined,
+    'ordinary active task B is untouched',
+  );
+  const marker = f.records.get(
+    'a/' + workHubEvidenceRetirementId(request.id),
+  ) as WorkHubEvidenceResolutionMessage;
+  assert.equal(marker.origin, 'legacy_protocol_retirement');
+  assert.equal(marker.senderInvocationId, request.senderInvocationId);
+  assert.equal(marker.turnId, request.turnId);
+  assert.equal(marker.sourceActionId, null);
+  assert.deepEqual(
+    f.records.get('a/' + workHubEvidenceResolutionId(request.id)),
+    selection,
+    'keep the original source selection',
+  );
+  const settlement = f.records.get(
+    'b/' + workHubPeerSettlementId(question.id),
+  ) as WorkHubPeerSettlementMessage;
+  assert.equal(settlement.origin, 'legacy_protocol_retirement');
+  assert.equal(settlement.outcome, 'cancelled');
+  assert.deepEqual(settlement.actor, question.sender);
+  const ref = { sessionId: 'a', turnId: 'turn-a', runId: 'run-a' };
+  assert.equal((await f.runtime.waitingObservation(f.assignments[0]!, ref))?.status, 'cancelled');
+  assert.equal((await f.runtime.taskExecution(f.assignments[0]!, ref)).request, undefined);
+  for (let restart = 0; restart < 3; restart++) {
+    const runtime = f.restart();
+    assert.deepEqual(await runtime.retireLegacy(), {
+      retiredWaits: 0,
+      retiredQuestions: 0,
+      unavailable: 0,
+    });
+    assert.equal((await runtime.waitingObservation(f.assignments[0]!, ref))?.status, 'cancelled');
+  }
+  const reply: WorkHubPeerSettlementMessage = {
+    ...settlement,
+    origin: undefined,
+    actor: question.recipient,
+    outcome: 'reply',
+    answer: 'Late old reply',
+    turnId: 'turn-b',
+    senderRunId: 'run-b',
+    senderInvocationId: 'run-b',
+    toolCallId: 'late-reply',
+  };
+  assert.deepEqual(
+    await f.options.stores.sessionStore.commitWorkHubPeerSettlement(reply),
+    settlement,
+  );
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 0,
+  });
+  assert.equal(f.stopCalls.length, 1);
+  assert.equal(f.roots.size, 4);
+  assert.equal(f.runs.size, 4);
+  assert.deepEqual(f.deliveries, []);
+  assert.deepEqual(f.errors, []);
+});
+
+test('unanswered peer retirement alone never stops an ordinary active or pending task', async () => {
+  const f = fixture();
+  await legacyQuestion(f);
+  f.dispositions.set('message-b', { kind: 'pending' });
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 1,
+    unavailable: 0,
+  });
+  assert.equal(f.stopCalls.length, 0);
+  assert.equal(f.runs.get('run-a')?.terminalEvent, undefined);
+  assert.equal(f.runs.get('run-b')?.terminalEvent, undefined);
+  assert.deepEqual(f.dispositions.get('message-b'), { kind: 'pending' });
+});
+
+test('retirement authenticates archived original ownership without reopening hidden history or stopping unrelated current work', async () => {
+  const f = fixture();
+  const request = legacyWait(f);
+  await legacyQuestion(f);
+  f.archived.add('a');
+  f.archived.add('b');
+  f.active.delete('a');
+  f.active.delete('b');
+  f.expire();
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 1,
+    retiredQuestions: 1,
+    unavailable: 0,
+  });
+  assert.equal(f.stopCalls.length, 1);
+  assert.deepEqual(f.stopCalls[0], [{ sessionId: 'a', turnId: 'turn-a', runId: 'run-a' }]);
+  assert.equal(
+    (
+      await f.runtime.waitingObservation(f.assignments[0]!, {
+        sessionId: 'a',
+        turnId: 'turn-a',
+        runId: 'run-a',
+      })
+    )?.status,
+    'cancelled',
+  );
+  assert.deepEqual(
+    await f.runtime.read({ operation: 'read', sourceActionId: 'a' }, f.caller('c')),
+    { status: 'unavailable' },
+  );
+  assert.equal(
+    f.records.get('a/' + workHubEvidenceRetirementId(request.id))?.type,
+    'workhub_evidence_resolution',
+  );
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 0,
+  });
+});
+
+test('already closed peer facts stay closed after original runtime ownership becomes unavailable', async () => {
+  const f = fixture();
+  const q = await legacyQuestion(f);
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 1,
+    unavailable: 0,
+  });
+  const marker = f.records.get('b/' + workHubPeerSettlementId(q.id));
+  f.roots.delete('turn-a');
+  f.runs.delete('run-a');
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 0,
+  });
+  assert.deepEqual(f.records.get('b/' + workHubPeerSettlementId(q.id)), marker);
+  assert.equal(f.stopCalls.length, 0);
+  assert.deepEqual(f.deliveries, []);
+});
+
+test('a cleanup failure or remaining resources leaves the old wait open and a later restart retries only that exact source', async () => {
+  const f = fixture();
+  const request = legacyWait(f, 'a', false);
+  const originalStop = f.options.executions.stopRootPreservingFollowups;
+  f.options.executions.stopRootPreservingFollowups = async () => {
+    throw new Error('cleanup failed');
+  };
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 1,
+  });
+  assert.equal(f.records.has('a/' + workHubEvidenceRetirementId(request.id)), false);
+  f.resources.add('a');
+  f.options.executions.stopRootPreservingFollowups = async (...args) => {
+    f.stopCalls.push(args);
+  };
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 1,
+  });
+  assert.equal(f.records.has('a/' + workHubEvidenceRetirementId(request.id)), false);
+  assert.equal(
+    (
+      await f.runtime.waitingObservation(f.assignments[0]!, {
+        sessionId: 'a',
+        turnId: 'turn-a',
+        runId: 'run-a',
+      })
+    )?.status,
+    'waiting_for_dependency',
+  );
+  f.options.executions.stopRootPreservingFollowups = originalStop;
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 1,
+    retiredQuestions: 0,
+    unavailable: 0,
+  });
+  assert.equal(f.roots.size, 4);
+  assert.equal(f.errors.length, 1);
+});
+
+test('an already admitted old child remains authenticated lineage and is never stopped or recreated by retirement', async () => {
+  const f = fixture();
+  const request = legacyWait(f);
+  const turnId = workHubEvidenceTurnId(request.id);
+  const origin = {
+    kind: 'workhub_evidence',
+    requestId: request.id,
+    delegationId: request.delegationId,
+    sourceTurnId: request.turnId,
+    sourceRunId: request.senderRunId,
+  };
+  const next = { sessionId: 'a', turnId, runId: 'old-child-run' };
+  f.roots.set(turnId, { ...next, execution: { kind: 'external_message', origin } });
+  f.runs.set(next.runId, testInvocationRecord({ ...next }));
+  const childQuestion = await legacyQuestion(f, 'child-question', {
+    turnId: next.turnId,
+    runId: next.runId,
+    invocationId: next.runId,
+  });
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 1,
+    unavailable: 0,
+  });
+  assert.deepEqual(
+    (
+      await f.runtime.readEvidenceContinuation(f.assignments[0]!, {
+        sessionId: 'a',
+        turnId: 'turn-a',
+        runId: 'run-a',
+      })
+    )?.next,
+    next,
+  );
+  assert.deepEqual(
+    await f.runtime.taskExecution(f.assignments[0]!, {
+      sessionId: 'a',
+      turnId: 'turn-a',
+      runId: 'run-a',
+    }),
+    { ...next, round: 1 },
+  );
+  assert.equal(f.stopCalls.length, 0);
+  assert.equal(f.runs.size, 5);
+  assert.equal(f.records.has('a/' + workHubEvidenceRetirementId(request.id)), false);
+  const settlement = f.records.get(
+    'b/' + workHubPeerSettlementId(childQuestion.id),
+  ) as WorkHubPeerSettlementMessage;
+  assert.equal(settlement.turnId, next.turnId);
+  assert.equal(settlement.senderRunId, next.runId);
+  assert.equal(settlement.outcome, 'cancelled');
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 0,
+  });
+});
+
+test('startup pages old facts behind unrelated history and rejects a conflicting retirement marker without new authority', async () => {
+  const f = fixture();
+  const request = legacyWait(f);
+  await legacyQuestion(f);
+  for (let i = 0; i < 150; i++)
+    f.records.set('a/unrelated-' + i, {
+      type: 'assistant',
+      id: 'unrelated-' + i,
+      turnId: 'turn-a',
+      ts: 1000,
+      text: 'Existing history ' + i,
+      modelId: 'test',
+    });
+  assert.deepEqual(await f.runtime.retireLegacy(), {
+    retiredWaits: 1,
+    retiredQuestions: 1,
+    unavailable: 0,
+  });
+  assert.equal(f.stopCalls.length, 1);
+  assert.equal(
+    f.transcriptReads.length,
+    0,
+    'retirement scans existing operational facts, not model context',
+  );
+  const markerId = 'a/' + workHubEvidenceRetirementId(request.id);
+  const marker = f.records.get(markerId)!;
+  f.records.set(markerId, { ...marker, toolCallId: 'wrong-original-tool' } as StoredMessage);
+  assert.deepEqual(await f.restart().retireLegacy(), {
+    retiredWaits: 0,
+    retiredQuestions: 0,
+    unavailable: 1,
+  });
+  assert.equal(
+    f.stopCalls.length,
+    1,
+    'a marker conflict cannot manufacture a second stop or new root',
+  );
+  assert.equal(f.roots.size, 4);
+});
+
+test('retirement refuses missing, shared or mismatched original ownership and cannot retarget another execution', async () => {
+  for (const change of ['missing', 'shared', 'mismatch'] as const) {
+    const f = fixture();
+    const request = legacyWait(f);
+    if (change === 'missing') f.roots.delete('turn-a');
+    if (change === 'shared') f.dispositions.set('message-a', { kind: 'shared_turn' } as never);
+    if (change === 'mismatch')
+      f.records.set('a/' + request.id, { ...request, senderInvocationId: 'another-invocation' });
+    assert.deepEqual(
+      await f.runtime.retireLegacy(),
+      { retiredWaits: 0, retiredQuestions: 0, unavailable: 1 },
+      change,
+    );
+    assert.equal(f.stopCalls.length, 0);
+    assert.equal(f.records.has('a/' + workHubEvidenceRetirementId(request.id)), false);
+    assert.equal(f.runs.get('run-b')?.terminalEvent, undefined);
+  }
 });

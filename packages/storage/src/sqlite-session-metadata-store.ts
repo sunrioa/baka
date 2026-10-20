@@ -2714,6 +2714,17 @@ export class SqliteSessionMetadataStore {
       )
         throw new SessionMetadataConflictError('Peer question is unavailable');
       const actor = settlement.actor;
+      const retirement = settlement.origin === 'legacy_protocol_retirement';
+      if (
+        retirement &&
+        (settlement.outcome !== 'cancelled' ||
+          !isDeepStrictEqual(actor, question.sender) ||
+          settlement.turnId !== question.turnId ||
+          settlement.senderRunId !== question.senderRunId ||
+          settlement.senderInvocationId !== question.senderInvocationId ||
+          settlement.toolCallId !== question.toolCallId)
+      )
+        throw new SessionMetadataConflictError('Peer retirement source identity conflict');
       const inbox = this.readMessageByIdSync(
         question.recipient.sessionId,
         workHubPeerInboxId(question.id),
@@ -2748,10 +2759,10 @@ export class SqliteSessionMetadataStore {
           throw new SessionMetadataConflictError('Peer answer identity conflict');
         return old;
       }
-      this.assertWorkHubPeerTaskSync(actor);
+      if (!retirement) this.assertWorkHubPeerTaskSync(actor);
       if (settlement.outcome === 'reply') this.assertWorkHubPeerTaskSync(question.sender);
       if (
-        question.expiresAt <= this.now() ||
+        (!retirement && question.expiresAt <= this.now()) ||
         settlement.ts < question.ts ||
         settlement.ts > this.now()
       )

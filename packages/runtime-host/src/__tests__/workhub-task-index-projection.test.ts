@@ -440,7 +440,6 @@ test('index refresh uses the production result and evidence projections without 
     reader: {} as never,
     hasLiveResources: async () => false,
     hasBlockingGoal: () => false,
-    acquireResidency: () => ({ release() {} }),
     onError,
   });
   const results = createWorkHubResultRuntime({

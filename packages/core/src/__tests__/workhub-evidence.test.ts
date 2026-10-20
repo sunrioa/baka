@@ -105,6 +105,34 @@ test('evidence records decode strict fixed identities, bounded rounds/lifetime a
   assert.equal(decodeTurnOrigin({ ...origin, permissionMode: 'bypass' }), undefined);
 });
 
+test('legacy evidence retirement is a distinct Host-origin fact with no selected source authority', () => {
+  const retirement = {
+    ...reply,
+    id: 'retirement',
+    origin: 'legacy_protocol_retirement',
+    turnId: request.turnId,
+    senderRunId: request.senderRunId,
+    senderInvocationId: request.senderInvocationId,
+    toolCallId: request.toolCallId,
+    sourceActionId: null,
+    sourceDelegationId: null,
+    sourceSessionId: null,
+    sourceMessageId: null,
+  };
+  assert.deepEqual(decodeCanonicalMessage(retirement), retirement);
+  assert.deepEqual(deriveTurnRecords([decodeCanonicalMessage(retirement)]), []);
+  assert.equal(
+    isWorkHubEvidenceResolution({ ...reply, origin: 'legacy_protocol_retirement' }),
+    false,
+  );
+  assert.equal(isWorkHubEvidenceResolution({ ...retirement, origin: 'model' }), false);
+  assert.deepEqual(
+    decodeCanonicalMessage(reply),
+    reply,
+    'ordinary old source selections stay readable',
+  );
+});
+
 test('peer question, inbox and terminal settlement are strict bounded operational facts', () => {
   const sender = {
     workId: 'work-a',
@@ -164,6 +192,21 @@ test('peer question, inbox and terminal settlement are strict bounded operationa
     outcome: 'reply',
     answer: 'Checksum abc123.',
   };
+  const retired = {
+    ...answer,
+    actor: sender,
+    outcome: 'cancelled',
+    answer: undefined,
+    origin: 'legacy_protocol_retirement',
+    turnId: question.turnId,
+    senderRunId: question.senderRunId,
+    senderInvocationId: question.senderInvocationId,
+    toolCallId: question.toolCallId,
+  };
+  assert.deepEqual(decodeCanonicalMessage(retired), retired);
+  assert.deepEqual(deriveTurnRecords([decodeCanonicalMessage(retired)]), []);
+  assert.throws(() => decodeCanonicalMessage({ ...answer, origin: 'legacy_protocol_retirement' }));
+  assert.throws(() => decodeCanonicalMessage({ ...retired, origin: 'model' }));
   for (const fact of [
     question,
     inbox,
