@@ -19,12 +19,13 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
+import { createElement, useEffect, useState } from "react";
+import { deferred } from '@maka/core/test-only/async-primitives';
 import { parseHTML } from 'linkedom';
 import { ChatSurfaceLayout, LocaleProvider } from '@maka/ui';
-import { WorkHubConversation, WorkHubHighlightContext, WorkHubTaskView, workHubLinkedWork } from '../../renderer/features/workhub/testing.js';
+import { WorkHubConversation, WorkHubHighlightContext, WorkHubTaskView, useWorkHubLinkedWork, workHubLinkedWork } from '../../renderer/features/workhub/testing.js';
 import { renderTranscriptMarkup } from './transcript-test-dom.js';
-import type { StoredMessage, ToolCallMessage, ToolResultMessage } from '@maka/core/session';
+import type { ToolCallMessage, ToolResultMessage } from '@maka/core/session';
 import type { WorkHubTask, WorkHubTaskAssignment } from '@maka/runtime-host/protocol';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
 
@@ -193,53 +194,111 @@ test('flat stop links keep each requested task and do not present stopping as a 
   assert.equal(document.querySelectorAll('[data-work-session-id]').length > 0, true, 'the task remains navigable');
 });
 
-test('flat continuation links survive an unloaded original assignment and a task outside the recent overview', () => {
+test('flat continuation links load bounded task history when the actual transcript has no control-plane facts', async () => {
   const target = desktopSession('host-a', 'old-segment');
   const coordination = desktopSession('host-a', 'maka_workhub_coordination');
   const call: ToolCallMessage = { type: 'tool_call', id: 'continue-old', turnId: 'current-turn', ts: 3,
     toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue it' } };
   for (const mode of ['steering', 'queued_supplement', 'continuation'] as const) {
-    const input: Extract<StoredMessage, { kind: 'task_input' }> = {
-      type: 'workhub_coordination', kind: 'task_input', schemaVersion: 1, id: 'accepted-input',
-      turnId: 'original-assignment-turn', ts: 4, inputId: 'input', workId: 'old-task', generationId: 'old-generation',
-      sourceActionId: 'old-action', sourceDelegationId: 'old-delegation', text: 'Continue it',
-      targetSessionId: target, targetMessageId: 'target-message', targetContentDigest: 'sha256:content',
-      sourceMessageId: 'current-user-message', mode,
-    };
+    const assignment: WorkHubTaskAssignment = { workId: 'old-task', generationId: 'old-generation', actionId: 'old-action', delegationId: 'old-delegation',
+      targetSessionId: target, targetSessionName: 'Original task', targetMessageId: 'target-message', text: 'Original requirement',
+      createdAt: 1, state: 'queued', superseded: false };
     const result: ToolResultMessage = { type: 'tool_result', id: 'continued', turnId: call.turnId, ts: 5,
       toolUseId: call.id, isError: false, content: { kind: 'json', value: { taskId: 'old-task', container: 'reuse', mode, delivery: 'queued' } } };
-    const links = workHubLinkedWork([call, input, result], [{ id: target, name: 'Original task', cwd: '/projects/original' }], 'Work', coordination);
-    assert.deepEqual(links, [{ workId: 'old-task', operation: 'continue', id: 'continued', coordinationTurnId: call.turnId,
-      targetSessionId: target, targetSessionName: 'Original task', workspaceName: 'original' }], mode);
-    assert.equal(workHubLinkedWork([call, input, result], [], 'Work', coordination)[0]?.targetSessionName, 'Work', 'a canonical target needs no loaded Session catalog');
+    const reads: unknown[] = [];
+    const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner, input) => {
+      reads.push({ owner, input }); return { workId: input.workId, assignments: [assignment], nextCursor: 'older-page-not-needed' };
+    } };
+    function Probe() {
+      const links = useWorkHubLinkedWork(services, coordination, [call, result], [], 'Work', [], 1);
+      return createElement('output', null, links.map(link => createElement('span', { key: link.id, 'data-target': link.targetSessionId }, link.targetSessionName)));
+    }
+    const { document } = parseHTML(await renderTranscriptMarkup(createElement(Probe)));
+    assert.equal(document.querySelector('output span')?.getAttribute('data-target'), target, mode);
+    assert.equal(document.querySelector('output span')?.textContent, 'Original task', 'canonical history works without a loaded Session catalog');
+    assert.deepEqual(reads, [{ owner: coordination, input: { workId: 'old-task' } }], 'one bounded history page, not all tasks or all old transcript pages');
     for (const changed of [
-      { ...input, targetSessionId: desktopSession('other-host', 'old-segment') },
-      { ...input, targetSessionId: 'unscoped-model-session' },
-      { ...input, workId: 'another-task' },
-    ]) assert.deepEqual(workHubLinkedWork([call, changed, result], [], 'Work', coordination), []);
-    assert.deepEqual(workHubLinkedWork([call, input, { ...result, turnId: 'another-turn' }], [], 'Work', coordination), []);
-    assert.deepEqual(workHubLinkedWork([call, input, { ...result, isError: true }], [], 'Work', coordination), []);
+      { ...assignment, targetSessionId: desktopSession('other-host', 'old-segment') },
+      { ...assignment, targetSessionId: 'unscoped-model-session' },
+      { ...assignment, workId: 'another-task' },
+    ]) assert.deepEqual(workHubLinkedWork([call, result], [], 'Work', coordination, [], [changed]), []);
+    assert.deepEqual(workHubLinkedWork([call, { ...result, turnId: 'another-turn' }], [], 'Work', coordination, [], [assignment]), []);
+    assert.deepEqual(workHubLinkedWork([call, { ...result, isError: true }], [], 'Work', coordination, [], [assignment]), []);
   }
 });
 
-test('flat stop links recover every old task from its new canonical stop claim without the recent overview', () => {
+test('flat stop links recover every requested old task through task history without transcript stop claims', async () => {
   const coordination = desktopSession('host-a', 'maka_workhub_coordination');
   const call: ToolCallMessage = { type: 'tool_call', id: 'stop-old', turnId: 'stop-turn', ts: 3,
     toolName: 'mcp__desktop_workhub__stop', args: { taskIds: ['old-a', 'old-b'] } };
-  const claims: Extract<StoredMessage, { kind: 'delegation_stop_requested' }>[] = ['old-a', 'old-b'].map(workId => ({
-    type: 'workhub_coordination', kind: 'delegation_stop_requested', schemaVersion: 3, id: `claim-${workId}`,
-    turnId: call.turnId, coordinationTurnId: call.turnId, ts: 4, actionId: `stop-${workId}`, actionFingerprint: 'sha256:stop',
-    stopsActionId: `assignment-${workId}`, stopsDelegationId: `delegation-${workId}`, workId, taskStop: true,
-    targetSessionId: desktopSession('host-a', workId), targetMessageId: `message-${workId}`, targetSessionName: `Title ${workId}`, userText: 'Stop both',
-  }));
+  const assignments: WorkHubTaskAssignment[] = ['old-a', 'old-b'].map(workId => ({ workId, generationId: workId,
+    actionId: `assignment-${workId}`, delegationId: `delegation-${workId}`, targetSessionId: desktopSession('host-a', workId),
+    targetMessageId: `message-${workId}`, targetSessionName: `Title ${workId}`, text: 'Original requirement', createdAt: 1, state: 'unavailable', superseded: false }));
   const result: ToolResultMessage = { type: 'tool_result', id: 'stopped', turnId: call.turnId, ts: 5, toolUseId: call.id, isError: false,
     content: { kind: 'json', value: { kind: 'result', targets: ['old-a', 'old-b', 'not-requested'].map(taskId => ({ taskId, outcome: 'already_terminal' })) } } };
-  const links = workHubLinkedWork([call, ...claims, result], [], 'Work', coordination);
-  assert.deepEqual(links.map(link => [link.workId, link.operation, link.coordinationTurnId, link.targetSessionId, link.targetSessionName]),
-    claims.map(claim => [claim.workId, 'stop', call.turnId, claim.targetSessionId, claim.targetSessionName]));
-  assert.deepEqual(workHubLinkedWork([call, ...claims.map(claim => ({ ...claim, targetSessionId: desktopSession('other-host', 'target') })), result], [], 'Work', coordination), []);
-  assert.deepEqual(workHubLinkedWork([call, ...claims.map(claim => ({ ...claim, taskStop: undefined })), result], [], 'Work', coordination), [], 'legacy stop claims are not native task bindings');
-  assert.deepEqual(workHubLinkedWork([call, ...claims, { ...result, isError: true }], [], 'Work', coordination), []);
+  const reads: string[] = [];
+  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner, input) => {
+    assert.equal(owner, coordination); reads.push(input.workId);
+    return { workId: input.workId, assignments: assignments.filter(item => item.workId === input.workId), nextCursor: null };
+  } };
+  function Probe() {
+    const links = useWorkHubLinkedWork(services, coordination, [call, result], [], 'Work', [], 1);
+    return createElement('output', null, links.map(link => createElement('span', { key: link.workId, 'data-target': link.targetSessionId, 'data-operation': link.operation }, link.targetSessionName)));
+  }
+  const { document } = parseHTML(await renderTranscriptMarkup(createElement(Probe)));
+  assert.deepEqual(Array.from(document.querySelectorAll('output span'), element => [element.getAttribute('data-target'), element.getAttribute('data-operation'), element.textContent]),
+    assignments.map(item => [item.targetSessionId, 'stop', item.targetSessionName]));
+  assert.deepEqual(reads, ['old-a', 'old-b'], 'an unrequested target in a result does not cause a history read or navigation');
+  assert.deepEqual(workHubLinkedWork([call, result], [], 'Work', coordination, [], assignments.map(item => ({ ...item, targetSessionId: desktopSession('other-host', 'target') }))), []);
+  assert.deepEqual(workHubLinkedWork([call, { ...result, isError: true }], [], 'Work', coordination, [], assignments), []);
+});
+
+test('late task-history reads cannot publish another Host target after an owner switch', async () => {
+  const owners = ['host-a', 'host-b'].map(host => desktopSession(host, 'maka_workhub_coordination'));
+  const assignment = (host: string): WorkHubTaskAssignment => ({ workId: 'old-task', generationId: 'generation', actionId: 'action', delegationId: 'delegation',
+    targetSessionId: desktopSession(host, 'task'), targetSessionName: host, targetMessageId: 'message', text: 'Requirement', createdAt: 1, state: 'unavailable', superseded: false });
+  const first = deferred<Awaited<ReturnType<WorkHubServices['taskHistory']>>>();
+  const reads: string[] = [], displayed: Array<{ owner: string; targets: string[] }> = [];
+  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async (owner) => {
+    reads.push(owner); return owner === owners[0] ? first.promise : { workId: 'old-task', assignments: [assignment('host-b')], nextCursor: null };
+  } };
+  const call: ToolCallMessage = { type: 'tool_call', id: 'continue', turnId: 'turn', ts: 1, toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue' } };
+  const result: ToolResultMessage = { type: 'tool_result', id: 'receipt', turnId: call.turnId, ts: 2, toolUseId: call.id, isError: false,
+    content: { kind: 'json', value: { taskId: 'old-task', container: 'fresh', admission: 'admitted' } } };
+  function Probe() {
+    const [owner, setOwner] = useState(owners[0]!);
+    const links = useWorkHubLinkedWork(services, owner, [call, result], [], 'Work', [], 1);
+    displayed.push({ owner, targets: links.map(link => link.targetSessionId) });
+    useEffect(() => {
+      setOwner(owners[1]!);
+      first.resolve({ workId: 'old-task', assignments: [assignment('host-a')], nextCursor: null });
+    }, []);
+    return createElement('output', null, links.map(link => createElement('span', { key: link.id, 'data-target': link.targetSessionId }, link.targetSessionName)));
+  }
+  const { document } = parseHTML(await renderTranscriptMarkup(createElement(Probe)));
+  assert.equal(document.querySelector('span')?.getAttribute('data-target'), desktopSession('host-b', 'task'));
+  assert.deepEqual(reads, owners);
+  assert.ok(displayed.every(value => value.owner !== owners[1] || value.targets.every(target => target === desktopSession('host-b', 'task'))));
+});
+
+test('invalid or failed native receipts never trigger task-history lookup', async () => {
+  const call: ToolCallMessage = { type: 'tool_call', id: 'continue', turnId: 'turn', ts: 1, toolName: 'mcp__desktop_workhub__continue', args: { taskId: 'old-task', text: 'Continue' } };
+  const result: ToolResultMessage = { type: 'tool_result', id: 'receipt', turnId: call.turnId, ts: 2, toolUseId: call.id, isError: false,
+    content: { kind: 'json', value: { taskId: 'old-task', mode: 'steering' } } };
+  let reads = 0;
+  const services: Pick<WorkHubServices, 'taskHistory'> = { taskHistory: async () => { reads++; return assert.fail('No accepted exact task receipt exists'); } };
+  for (const [input, output] of [
+    [call, { ...result, isError: true }], [call, { ...result, turnId: 'other-turn' }],
+    [{ ...call, args: { taskId: 'unrelated' } }, result], [{ ...call, toolName: 'Read' }, result],
+  ] as const) {
+    function Probe() {
+      const links = useWorkHubLinkedWork(services, desktopSession('host-a', 'maka_workhub_coordination'), [input, output], [], 'Work', [], 1);
+      return createElement('output', { 'data-count': links.length });
+    }
+    const { document } = parseHTML(await renderTranscriptMarkup(createElement(Probe)));
+    assert.equal(document.querySelector('output')?.getAttribute('data-count'), '0');
+    assert.equal(reads, 0, 'failure and unrelated call/result identities do not cause even a read');
+  }
 });
 
 function desktopSession(hostId: string, sessionId: string) { return JSON.stringify([hostId, sessionId]); }

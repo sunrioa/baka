@@ -69,6 +69,12 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
           if (channel === 'workhub:answerInteraction') return { sessionId: 'original-task', interactionId: 'question', turnId: 'turn', runId: 'run', status: 'answered' };
           if (channel === 'workhub:queryTasks') return { tasks: [{ actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' }], truncated: false };
           if (channel === 'workhub:readTask') return { task: { actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' } };
+          if (channel === 'workhub:taskHistory') {
+            assert.deepEqual(JSON.parse(JSON.stringify(mode)), { workId: 'older-than-recent-task' });
+            assert.equal(scope.hostId, 'host-b');
+            return { workId: 'older-than-recent-task', assignments: [{ workId: 'older-than-recent-task', generationId: 'generation', actionId: 'old-action', delegationId: 'old-delegation',
+              targetSessionId: 'original-task', targetSessionName: 'Older task', targetMessageId: 'old-message', text: 'Original requirement', createdAt: 1, state: 'unavailable', superseded: false }], nextCursor: null };
+          }
           if (channel === 'workhub:continueTask') return { disposition: 'delegate_existing', targetSessionId: 'original-task' };
           if (channel === 'workhub:sendTaskInput' || channel === 'workhub:readTaskInput') {
             const request = mode as OperationInput<'workhub.tasks.send'>;
@@ -105,6 +111,9 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   const taskRef = { actionId: 'task-action', delegationId: 'task-delegation' };
   const taskDetail = await bridge.workHub.readTask(session('host-b'), taskRef);
   assert.equal(taskDetail.task.targetSessionId, session('host-b', 'original-task'));
+  const history = await bridge.workHub.taskHistory(session('host-b'), { workId: 'older-than-recent-task' });
+  assert.equal(history.workId, 'older-than-recent-task');
+  assert.equal(history.assignments[0]!.targetSessionId, session('host-b', 'original-task'), 'bounded task lookup uses the owning Host even when it is not default');
   const continuation = await bridge.workHub.continueTask(session('host-b'), { ...taskRef, turnId: 'new-turn', text: 'Continue' });
   assert.equal(continuation.targetSessionId, session('host-b', 'original-task'));
   const taskInput = { inputId: 'task-input', workId: 'task-work', generationId: 'task-generation', sourceActionId: 'task-action', sourceDelegationId: 'task-delegation', text: 'Correction' };
