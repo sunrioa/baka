@@ -276,7 +276,7 @@ test('cursors reject tampering, target/view changes and a new Host instance', as
   );
 });
 
-test('every page enforces current candidate eligibility and rejects other callers', async () => {
+test('every page enforces current native eligibility and rejects other callers', async () => {
   const f = fixture([assistant('a'.repeat(1000))]);
   const cursor = (await f.read({ view: 'latest_reply', maxTextChars: 256 })).transcript.nextCursor!;
   const reads = f.requests.length;
@@ -300,16 +300,19 @@ test('every page enforces current candidate eligibility and rejects other caller
   assert.equal(f.requests.length, reads);
 });
 
-test('explicit eligible old Session inspection does not depend on the recent candidate cap', async () => {
+test('exact eligible Session inspection is independent of recency, state and display-name collisions', async () => {
   const f = fixture([assistant('a'.repeat(1000))]);
   f.setSessions([
-    session(),
+    { ...session(), status: 'waiting_for_user' },
     ...Array.from({ length: 40 }, (_, i) => ({
       ...session(`recent-${i}`),
       lastMessageAt: 100 + i,
     })),
   ]);
   const first = await f.read({ view: 'latest_reply', maxTextChars: 256 });
+  assert.equal(first.sessionId, 'target');
+  assert.equal(first.sessionName, 'Release');
+  assert.equal(first.workspace.hostCwd, '/work/target');
   assert.ok(first.transcript.nextCursor);
   const next = await f.read({
     view: 'latest_reply',

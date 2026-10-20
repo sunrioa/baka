@@ -23,7 +23,10 @@ import { WORKHUB_COORDINATION_SESSION_ID, userFacingText } from '@maka/core/sess
 import type { MakaTool } from '@maka/runtime/tool-runtime';
 import { isSessionNotFoundError } from '@maka/storage/execution-stores';
 import type { TurnSnapshot } from '../protocol/index.js';
-import { candidateSet, type WorkHubActionGateSession } from './workhub-coordination-action-gate.js';
+import {
+  workHubTaskCandidate,
+  type WorkHubActionGateSession,
+} from './workhub-coordination-action-gate.js';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
 
@@ -102,10 +105,10 @@ export function createWorkHubInspectionTool(options: {
       );
     }
   };
-  const candidate = async (sessionId: string) =>
-    candidateSet(
-      (await options.listSessions()).filter((session) => session.id === sessionId),
-    ).candidates.find((item) => item.sessionId === sessionId);
+  const candidate = async (sessionId: string) => {
+    const session = (await options.listSessions()).find((item) => item.id === sessionId);
+    return session ? workHubTaskCandidate(session) : undefined;
+  };
   const unavailable = (sessionId: string) => ({
     status: 'unavailable' as const,
     sessionId,
@@ -194,7 +197,7 @@ export function createWorkHubInspectionTool(options: {
           const execution = await options.readExecution(input.sessionId);
           if (execution && execution.sessionId !== input.sessionId)
             throw new Error('Session inspection execution identity changed');
-          // Candidate membership may change while another Session becomes recent.
+          // Recheck native eligibility before returning this exact Session's source.
           const target = await candidate(input.sessionId);
           if (!target) return unavailable(input.sessionId);
           ctx.abortSignal.throwIfAborted();
