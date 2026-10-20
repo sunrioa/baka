@@ -22,7 +22,7 @@ import { z } from 'zod';
 import type { AttachmentRef } from '@maka/core/events';
 import { isWorkHubActionResult, type WorkHubActionResult } from '@maka/core/workhub-action-result';
 import { decodeMessageContent } from './turn.js';
-import { WORKHUB_COORDINATION_SESSION_ID, type WorkHubCreateDefaults } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   requireCount,
   requireEntityId,
@@ -33,11 +33,7 @@ import {
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
 import { defineOperation } from './operation-spec.js';
-import {
-  decodeWorkspaceTarget,
-  type WorkspaceProjection,
-  type WorkspaceTarget,
-} from './workspace.js';
+import { decodeWorkspaceTarget, type WorkspaceTarget } from './workspace.js';
 import {
   decodeSessionConfigurationUpdateInput,
   decodeSessionUpdateResult,
@@ -83,7 +79,6 @@ export function decodeWorkHubCoordinationConfigureModelInput(
 }
 
 export const WORKHUB_COORDINATION_TEXT_MAX_BYTES = 48 * 1024;
-export const WORKHUB_COORDINATION_CANDIDATE_MAX_ITEMS = 32;
 export const WORKHUB_COORDINATION_DEFAULT_MODEL_REQUIRED_MESSAGE =
   'WorkHub Coordination Session requires an available default model';
 
@@ -126,46 +121,6 @@ export interface WorkHubCoordinationAnswerInput {
 export interface WorkHubCoordinationTurnResult {
   readonly turnId: string;
 }
-export interface WorkHubTaskContinueInput {
-  readonly turnId: string;
-  readonly actionId: string;
-  readonly delegationId: string;
-  readonly text: string;
-}
-
-export type WorkHubCoordinationCandidateState =
-  | 'active'
-  | 'running'
-  | 'waiting_for_user'
-  | 'blocked'
-  | 'aborted';
-
-export interface WorkHubCoordinationCandidate {
-  /** Opaque strategy-facing identity. Proposals never carry a Session id. */
-  readonly candidateRef: string;
-  /** Presentation/navigation identity; adapters must not expose it to a model strategy. */
-  readonly sessionId: string;
-  readonly sessionName: string;
-  readonly workspace: WorkspaceProjection;
-  readonly state: WorkHubCoordinationCandidateState;
-  readonly updatedAt: number;
-  /** Latest durable linkage for compare-and-swap correction; never model-facing. */
-  readonly latestDelegationActionId?: string;
-}
-
-export type WorkHubCoordinationCandidatesInput = Record<string, never>;
-
-export interface WorkHubCoordinationCandidatesResult {
-  readonly candidateSetId: string;
-  readonly candidates: readonly WorkHubCoordinationCandidate[];
-}
-
-export interface WorkHubWorksQueryInput {
-  readonly query?: string;
-  readonly cursor?: string;
-  readonly limit?: number;
-}
-
 export interface WorkHubContextObservation {
   readonly currentModelId: string;
   readonly currentConnectionId: string | null;
@@ -250,117 +205,10 @@ const contextEstimatesSchema = z
   .strict();
 export type WorkHubContextEstimates = z.infer<typeof contextEstimatesSchema>;
 
-/** Source-backed objective identity; Session activity is not creation provenance. */
-export interface WorkHubWorkSummary {
-  readonly workId: string;
-  readonly sourceActionId: string;
-  readonly sourceDelegationId: string;
-  readonly targetSessionId: string;
-  readonly targetSessionName: string;
-  readonly coordinationTurnId: string;
-  readonly sourceMessageId?: string;
-  readonly createdAt: number;
-  readonly originalRequest: string;
-  readonly requestTruncated: boolean;
-  /** Distinguishes independent objectives originating in the same user Message. */
-  readonly objective: string;
-  readonly objectiveTruncated: boolean;
-  readonly available: boolean;
-  readonly context?: WorkHubContextObservation;
-}
-
-export interface WorkHubWorksQueryResult {
-  readonly works: readonly WorkHubWorkSummary[];
-  readonly nextCursor: string | null;
-}
-
-export type WorkHubRoutingProposal =
-  | {
-      readonly disposition: 'delegate_existing';
-      readonly candidateRef: string;
-    }
-  | {
-      readonly disposition: 'continue_work';
-      readonly workId: string;
-      readonly sourceActionId: string;
-      /** Resource choice only; the Host resolves the original workspace and new identity. */
-      readonly container?: 'reuse' | 'fresh';
-    }
-  | { readonly disposition: 'create_new'; readonly title: string };
-
-export type WorkHubLinkedOperationProposal =
-  | {
-      readonly operation: 'correct';
-      /** Action identity of the exact durable delegation link being corrected. */
-      readonly replacesActionId: string;
-      readonly target:
-        | { readonly disposition: 'delegate_existing'; readonly candidateRef: string }
-        | { readonly disposition: 'create_new'; readonly title: string };
-    }
-  | {
-      readonly operation: 'stop';
-      /**
-       * The expected state the Coordination policy resolved against. It carries no
-       * authority of its own; the Action Gate revalidates it against current
-       * durable facts, so a resolution that has gone stale fails closed instead
-       * of stopping work the user never resolved.
-       *
-       * Which delegation the stop ends is not stated here. A client cannot
-       * prove which link is live, so the Gate resolves it from its own active
-       * links, and on replay from the durable claim this action already owns.
-       */
-      readonly expects: WorkHubCoordinationLinkedTargetPreconditions;
-    }
-  | {
-      readonly operation: 'resume';
-      /** Bound reference from candidate discovery; the Gate checks current ownership. */
-      readonly resumesActionId: string;
-      readonly expects: WorkHubCoordinationLinkedTargetPreconditions;
-    };
-
-/**
- * A coordination proposal is either a routing decision or an operation over a
- * durable delegation. Linked operations are deliberately not dispositions.
- */
-export type WorkHubCoordinationProposal = WorkHubRoutingProposal | WorkHubLinkedOperationProposal;
-
-export interface WorkHubCoordinationLinkedTargetPreconditions {
-  /**
-   * Session the resolved delegation was proposed against. Sole-active-delegation
-   * is proved by the Host from durable state under the admission lease, so the
-   * proposal states only what it resolved, never its own proof.
-   */
-  readonly targetSessionId: string;
-}
-
 export interface WorkHubCoordinationCreateContext {
   /** The Host materializes isolated work; explicit targets still pass its workspace resolver. */
   readonly workspace: WorkspaceTarget | { readonly kind: 'isolated' };
 }
-
-/** A model action can name its active Turn, never supply user-originated authority. */
-export interface WorkHubCoordinationActFromTurnInput {
-  readonly turnId: string;
-  readonly actionId: string;
-  readonly proposal: WorkHubCoordinationProposal;
-  readonly candidateSetId?: string;
-  readonly create?: WorkHubCoordinationCreateContext;
-  readonly newWorkDefaults?: WorkHubCreateDefaults;
-  /** Work content prepared by the coordination model for a delegated task. */
-  readonly delegationText?: string;
-}
-
-export interface WorkHubCoordinationSelectAndDelegateInput {
-  readonly turnId: string;
-  readonly actionId: string;
-  readonly candidateSetId: string;
-  readonly candidateRefs: readonly string[];
-  readonly delegationText: string;
-}
-
-export type WorkHubCoordinationSelectAndDelegateResult =
-  | { readonly kind: 'cancelled' }
-  | { readonly kind: 'delegated'; readonly result: WorkHubCoordinationActResult };
 
 export type WorkHubCoordinationActResult = Exclude<
   WorkHubActionResult,
