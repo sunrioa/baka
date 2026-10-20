@@ -301,30 +301,29 @@ test('WorkHub v2 binds control, tasks, attachment reading and user questions whi
     tools: [control, ...tasks, ...browserTools, tool('Bash')],
     groups: [],
   };
-  assert.deepEqual(
-    createFixtureComposer({
-      toolProfile: 'workhub-coordination-v2',
-      clientCapabilities,
-      hostTools: [
-        tool('WorkHubResult'),
-        tool('WorkHubInspect'),
-        tool('WorkHubEvidence'),
-        tool('WorkHubRead'),
-      ],
-      resolveAdditionalTools: () => [tool('plugin_only'), tool('Read')],
-    }).tools.map(({ name }) => name),
-    [
-      control.name,
-      ...tasks.map(({ name }) => name),
-      ...browserTools.map(({ name }) => name),
-      'Read',
-      'AskUserQuestion',
-      'WorkHubResult',
-      'WorkHubInspect',
-      'WorkHubEvidence',
-      'WorkHubRead',
-    ],
-  );
+  const retired = ['WorkHubResult', 'WorkHubInspect', 'WorkHubEvidence'];
+  const published = createFixtureComposer({
+    toolProfile: 'workhub-coordination-v2',
+    clientCapabilities,
+    // Old readers are deliberate decoys, not members of the published contract.
+    hostTools: [...retired.map(tool), tool('WorkHubRead')],
+    resolveAdditionalTools: () => [tool('plugin_only'), tool('Read')],
+  }).tools.map(({ name }) => name);
+  assert.deepEqual(published, [
+    control.name,
+    ...tasks.map(({ name }) => name),
+    ...browserTools.map(({ name }) => name),
+    'Read',
+    'AskUserQuestion',
+    'WorkHubRead',
+  ]);
+  for (const name of retired) {
+    assert.equal(
+      published.includes(name),
+      false,
+      `retired ${name} must not be republished from available host tools`,
+    );
+  }
   assert.deepEqual(
     createFixtureComposer({
       toolProfile: 'workhub-coordination-v1',

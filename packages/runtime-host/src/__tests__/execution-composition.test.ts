@@ -4510,7 +4510,7 @@ test('production WorkHub inspects an independent Session through its provider to
 
 test('native WorkHub ask records an exact durable choice before a separate task start', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
-    const connectionId = await configureFakeDefaultTarget(owner);
+    const connectionId = await configureFakeDefaultTarget(owner, ['fake-model', 'selected-model']);
     const { composition, manager } = await createCapturedExecutionComposition(owner, {});
     const context: ConnectionContext = {
       hostEpoch: 'execution-composition-test',
@@ -4545,7 +4545,7 @@ test('native WorkHub ask records an exact durable choice before a separate task 
         name: 'Release',
         llmConnectionId: connectionId,
         llmConnectionSlug: 'fake',
-        model: 'fake-model',
+        model: 'selected-model',
         permissionMode: 'bypass',
       });
       const turnId = randomUUID();
@@ -4621,9 +4621,16 @@ test('native WorkHub ask records an exact durable choice before a separate task 
       );
       assert.ok(answered.ok, JSON.stringify(answered));
       const selection = await pending;
-      assert.deepEqual(selection, {
-        ok: true,
-        result: { kind: 'selected', target: { kind: 'session', id: beta.id } },
+      assert.ok(selection.ok && selection.result.kind === 'selected', JSON.stringify(selection));
+      assert.deepEqual(selection.result.target, { kind: 'session', id: beta.id });
+      assert.equal(selection.result.generationId, undefined);
+      assert.equal(selection.result.context?.currentConnectionId, beta.llmConnectionId);
+      assert.equal(selection.result.context?.currentConnectionSlug, beta.llmConnectionSlug);
+      assert.equal(selection.result.context?.currentModelId, beta.model);
+      assert.notEqual(selection.result.context?.currentModelId, alpha.model);
+      assert.deepEqual(selection.result.context?.lastRequest, {
+        status: 'unknown',
+        reason: 'not_observed',
       });
       assert.equal(
         await stores.sessionStore.readWorkHubAssignment(input.actionId),
@@ -4642,7 +4649,14 @@ test('native WorkHub ask records an exact durable choice before a separate task 
       );
       assert.ok(delegated.ok, JSON.stringify(delegated));
       assert.notEqual(beta.id, alpha.id);
-      assert.deepEqual(await composition.handlers['workhub.tasks.ask'](input, context), selection);
+      const replay = await composition.handlers['workhub.tasks.ask'](input, context);
+      assert.ok(replay.ok && replay.result.kind === 'selected', JSON.stringify(replay));
+      assert.deepEqual(replay.result.target, selection.result.target);
+      assert.equal(replay.result.generationId, selection.result.generationId);
+      // The choice is durable; its advisory observation still comes from the selected Session.
+      assert.equal(replay.result.context?.currentConnectionId, beta.llmConnectionId);
+      assert.equal(replay.result.context?.currentConnectionSlug, beta.llmConnectionSlug);
+      assert.equal(replay.result.context?.currentModelId, beta.model);
       const assignment = await stores.sessionStore.readWorkHubAssignment('selected-release-task');
       assert.equal(assignment?.targetSessionId, beta.id);
       const targetTurnId = delegated.result.targetTurnId;
@@ -4908,14 +4922,54 @@ test('WorkHub native task and linked child approval preserve original Session au
       if (!assigned.ok || assigned.result.disposition !== 'create_new') return;
       const target = assigned.result.targetSessionId;
       const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const unrelated = await manager.createSession({
+        cwd: root,
+        llmConnectionId: connectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        permissionMode: 'ask',
+      });
+      const readConfiguration = async (sessionId: string) => {
+        const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
+        return {
+          cwd: header.cwd,
+          backend: header.backend,
+          executorId: header.executorId,
+          executorConfig: header.executorConfig,
+          llmConnectionId: header.llmConnectionId,
+          llmConnectionSlug: header.llmConnectionSlug,
+          model: header.model,
+          permissionMode: header.permissionMode,
+        };
+      };
+      const independentSessions = [WORKHUB_COORDINATION_SESSION_ID, unrelated.id];
+      const independentBefore = await Promise.all(
+        independentSessions.map(async (sessionId) => ({
+          configuration: await readConfiguration(sessionId),
+          boundary: await stores.sessionStore.readExecutionBoundary(sessionId),
+          grants: await stores.sessionStore.listTaskExecutionGrants(sessionId),
+        })),
+      );
+      const targetConfiguration = await readConfiguration(target);
       await waitFor(
         async () =>
           (await stores.sessionStore.listPendingSandboxBoundaryRequests(target)).length === 1,
       );
       const before = await stores.sessionStore.readExecutionBoundary(target);
+      const allowRequestedNetwork = (boundary: typeof before) => {
+        assert.ok(boundary.kind === 'managed');
+        return {
+          ...boundary,
+          profile: { ...boundary.profile, network: { kind: 'enabled' as const } },
+          revision: boundary.revision + (boundary.profile.network.kind === 'enabled' ? 0 : 1),
+        };
+      };
       const inbox = await composition.handlers['workhub.interactions.query']({}, context);
       assert.ok(inbox.ok);
       const original = inbox.result.requests[0]!.interaction;
+      assert.equal(original.sessionId, target);
+      assert.ok(original.request.kind === 'sandbox_boundary');
+      assert.deepEqual(original.request.expansion, { network: { enabled: true } });
       const approved = await composition.handlers['workhub.interactions.answer'](
         {
           actionId: 'task-grant-action',
@@ -4927,7 +4981,9 @@ test('WorkHub native task and linked child approval preserve original Session au
         context,
       );
       assert.ok(approved.ok, JSON.stringify(approved));
-      assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
+      const parentApproved = await stores.sessionStore.readExecutionBoundary(target);
+      assert.deepEqual(parentApproved, allowRequestedNetwork(before));
+      assert.deepEqual(await readConfiguration(target), targetConfiguration);
       assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(target), []);
       const childReady = deferred<{ childSessionId: string; turnId: string; runId: string }>();
       childTask = manager.spawnChildSession(target, {
@@ -4958,7 +5014,15 @@ test('WorkHub native task and linked child approval preserve original Session au
         childRequest,
         'the production linked child (without cross-Session Run lineage) reaches its task inbox',
       );
+      assert.equal(childRequest.interaction.sessionId, child.childSessionId);
+      assert.equal(childRequest.interaction.turnId, child.turnId);
+      assert.equal(childRequest.interaction.runId, child.runId);
+      assert.ok(childRequest.interaction.request.kind === 'sandbox_boundary');
+      assert.deepEqual(childRequest.interaction.request.expansion, {
+        network: { enabled: true },
+      });
       const childBefore = await stores.sessionStore.readExecutionBoundary(child.childSessionId);
+      const childConfiguration = await readConfiguration(child.childSessionId);
       const childApproval = await composition.handlers['workhub.interactions.answer'](
         {
           actionId: 'task-grant-action',
@@ -4972,15 +5036,28 @@ test('WorkHub native task and linked child approval preserve original Session au
       assert.ok(childApproval.ok, JSON.stringify(childApproval));
       assert.deepEqual(
         await stores.sessionStore.readExecutionBoundary(child.childSessionId),
-        childBefore,
+        allowRequestedNetwork(childBefore),
       );
+      assert.deepEqual(await readConfiguration(child.childSessionId), childConfiguration);
       assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(target), []);
       assert.deepEqual(
         await stores.sessionStore.listTaskExecutionGrants(child.childSessionId),
         [],
         'answering an original request does not create task-wide grants',
       );
-      assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
+      assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), parentApproved);
+      assert.deepEqual(await readConfiguration(target), targetConfiguration);
+      assert.deepEqual(
+        await Promise.all(
+          independentSessions.map(async (sessionId) => ({
+            configuration: await readConfiguration(sessionId),
+            boundary: await stores.sessionStore.readExecutionBoundary(sessionId),
+            grants: await stores.sessionStore.listTaskExecutionGrants(sessionId),
+          })),
+        ),
+        independentBefore,
+        'original Session approval cannot expand the coordinator or an unrelated Session',
+      );
     } finally {
       release.resolve();
       await composition.close();
@@ -6673,6 +6750,7 @@ test('one coordinator Root establishes independent native tasks and supplements 
       );
       assert.ok(authority?.userMessageId);
       const a = (await stores.sessionStore.readWorkHubAssignment('batch-a'))!;
+      const b = (await stores.sessionStore.readWorkHubAssignment('batch-b'))!;
       for (const id of ['batch-a', 'batch-b']) {
         const source = (await stores.sessionStore.readWorkHubAssignment(id))!;
         assert.equal(source.userText, userText);
@@ -6701,10 +6779,13 @@ test('one coordinator Root establishes independent native tasks and supplements 
         (await stores.sessionStore.readLatestWorkHubAssignment('batch-a'))?.actionId,
         a.actionId,
       );
-      assert.deepEqual(
-        sends.map((send) => send.text),
-        ['manual-capacity-holder'],
-      );
+      // Manual execution does not consume WorkHub capacity; only A shares its Session FIFO.
+      await waitFor(async () => sends.length === 2, 10000);
+      assert.deepEqual(sends, [
+        { sessionId: manual.id, text: 'manual-capacity-holder' },
+        { sessionId: b.targetSessionId, text: 'batch objective B' },
+      ]);
+      assert.notEqual(b.targetSessionId, a.targetSessionId);
       const pending = await stores.sessionStore.readMessageAdmission(
         a.targetSessionId,
         a.targetMessageId,
@@ -6713,9 +6794,8 @@ test('one coordinator Root establishes independent native tasks and supplements 
       assert.match(JSON.stringify(pending?.content), /batch objective A[\s\S]*A follow-up details/);
       release.resolve();
       await waitFor(async () => sends.length === 3, 10000);
-      assert.equal(sends[1]!.sessionId, a.targetSessionId);
-      assert.match(sends[1]!.text, /A follow-up details/);
-      assert.equal(sends[2]!.text, 'batch objective B');
+      assert.equal(sends[2]!.sessionId, a.targetSessionId);
+      assert.match(sends[2]!.text, /batch objective A[\s\S]*A follow-up details/);
       await waitFor(async () => {
         const delivered = await composition.handlers['workhub.tasks.input.read'](
           { workId: 'batch-a', inputId: 'batch-a-followup' },
@@ -7359,6 +7439,7 @@ for (const { entry, pendingStop } of [
           assert.equal(noop.result.targets[0]?.outcome, 'already_terminal');
           const firstStop = await stores.sessionStore.readWorkHubStopRequest(source.delegationId);
           assert.ok(firstStop?.executionBinding);
+          assert.ok(firstStop.stopSet);
           // A constructed, immutable crash-window fact: actual Stop delivery is
           // covered above; continuation admission and its effects below are real.
           const actionId = 'unfinished-stop';
@@ -7377,6 +7458,7 @@ for (const { entry, pendingStop } of [
               workId: source.work.id,
               actionId,
               actionFingerprint,
+              stopSet: { ...firstStop.stopSet, actionId },
               id:
                 'whq_' +
                 createHash('sha256')
@@ -7386,6 +7468,15 @@ for (const { entry, pendingStop } of [
               ts: Date.now(),
             },
           ]);
+          assert.equal(
+            (await stores.sessionStore.readWorkHubStopRequest(source.delegationId, undefined, true))
+              ?.stopSet?.actionId,
+            actionId,
+          );
+          assert.equal(
+            await stores.sessionStore.readWorkHubStopResolution(source.delegationId, actionId),
+            undefined,
+          );
           const beforeSessions = (await stores.sessionStore.listHeaders()).length;
           const beforeSends = seen.length;
           const attempt =
@@ -8191,15 +8282,19 @@ test('native input lineage accepts its own execution history cursor across the 1
   });
 });
 
-test('native task input preserves exact same-name task identity, rejects unsupported active execution and reconstructs accepted facts after restart', async () => {
+test('native task input steers the exact same-name task and reconstructs accepted facts after restart', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     let stores = await openInteractiveExecutionStoresForWrite(owner.lease);
     const release = deferred<void>(),
       finishNotifications = deferred<void>();
+    const residencies = new HostResidencyRegistry();
+    const hostedRoots = () =>
+      residencies.snapshot().find(({ label }) => label === 'hosted-execution')?.count ?? 0;
     let notificationStarted = false;
     const sends: Array<{ sessionId: string; text: string }> = [];
     let { composition, manager } = await createCapturedExecutionComposition(owner, {
+      residencies,
       coordinationBackendFactory: (backendContext) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
@@ -8223,7 +8318,7 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
       hostEpoch: 'execution-composition-test',
       connectionId: 'task-overview-client',
       principal: 'local_os_user',
-      acquireResidency: () => ({ release() {} }),
+      acquireResidency: () => residencies.acquire('hosted-execution'),
     };
     let desktop:
       | ReturnType<NonNullable<typeof composition.clientCapabilities>['attachConnection']>
@@ -8267,11 +8362,31 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
         generationId: source.work.generationId,
         text: 'followup-task',
       };
-      const unsupported = await composition.handlers['workhub.tasks.send'](input, context);
-      assert.ok(!unsupported.ok, JSON.stringify(unsupported));
-      assert.equal(unsupported.error.code, 'operation_unavailable');
-      assert.equal(await stores.sessionStore.readWorkHubTaskInput(input.inputId), undefined);
-      assert.equal((await query()).length, 1, 'unsupported active input is not silently queued');
+      const originalRoot = await stores.agentRunStore.readRootTurnAdmission(
+        target.id,
+        source.targetTurnId,
+      );
+      assert.ok(originalRoot);
+      const originalExecution = { turnId: originalRoot.turnId, runId: originalRoot.runId };
+      const liveInput = {
+        ...input,
+        inputId: 'overview-live-steering',
+        text: 'native-live-details',
+      };
+      const live = await composition.handlers['workhub.tasks.send'](liveInput, context);
+      assert.ok(live.ok, JSON.stringify(live));
+      assert.equal(live.result.mode, 'steering');
+      assert.equal(live.result.delivery, 'queued');
+      assert.equal(live.result.targetSessionId, target.id);
+      const liveFact = await stores.sessionStore.readWorkHubTaskInput(liveInput.inputId);
+      assert.equal(liveFact?.mode, 'steering');
+      assert.equal(liveFact?.sourceActionId, source.actionId);
+      assert.equal(liveFact?.sourceDelegationId, source.delegationId);
+      assert.deepEqual(liveFact?.execution, originalExecution);
+      assert.equal(await stores.sessionStore.readWorkHubAssignment(liveInput.inputId), undefined);
+      assert.equal((await query()).length, 1, 'live Steering does not create a task or later Run');
+      assert.equal((await stores.runtimeEventStore.listSessionInvocations(target.id)).length, 1);
+      assert.equal((await stores.runtimeEventStore.listSessionInvocations(unrelated.id)).length, 0);
       assert.deepEqual(
         sends.map((send) => send.text),
         ['original-task'],
@@ -8292,8 +8407,27 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
         ).ok,
       );
       release.resolve();
-      await waitFor(async () => manager.runningTurnIds(target.id).length === 0);
-      await waitFor(async () => notificationStarted);
+      await waitFor(async () => {
+        const receipt = await composition.handlers['workhub.tasks.input.read'](
+          { workId: liveInput.workId, inputId: liveInput.inputId },
+          context,
+        );
+        return (
+          receipt.ok &&
+          receipt.result.delivery === 'delivered' &&
+          manager.runningTurnIds(target.id).length === 0 &&
+          notificationStarted &&
+          hostedRoots() === 1
+        );
+      });
+      const liveReceipt = await composition.handlers['workhub.tasks.input.read'](
+        { workId: liveInput.workId, inputId: liveInput.inputId },
+        context,
+      );
+      assert.ok(liveReceipt.ok, JSON.stringify(liveReceipt));
+      assert.deepEqual(liveReceipt.result.execution, originalExecution);
+      assert.equal((await stores.runtimeEventStore.listSessionInvocations(target.id)).length, 1);
+      // Only the held notification Root remains; target ownership and its resources are released.
       const first = await composition.handlers['workhub.tasks.send'](input, context);
       assert.ok(first.ok, JSON.stringify(first));
       assert.equal(first.result.mode, 'continuation');
@@ -8311,7 +8445,8 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
         return (
           receipt.ok &&
           receipt.result.delivery === 'delivered' &&
-          manager.runningTurnIds(target.id).length === 0
+          manager.runningTurnIds(target.id).length === 0 &&
+          hostedRoots() === 1
         );
       });
       const receipt = await composition.handlers['workhub.tasks.input.read'](
@@ -8362,7 +8497,8 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
       await waitFor(
         async () =>
           manager.runningTurnIds(target.id).length === 0 &&
-          sends.some((send) => send.text === afterEndInput.text),
+          sends.some((send) => send.text === afterEndInput.text) &&
+          hostedRoots() === 1,
       );
       assert.deepEqual(
         sends.map((send) => send.sessionId),
@@ -8374,6 +8510,7 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
       );
       assert.equal((await stores.runtimeEventStore.listSessionInvocations(unrelated.id)).length, 0);
       assert.deepEqual(await stores.sessionStore.readWorkHubTaskInput(input.inputId), fact);
+      assert.deepEqual(await stores.sessionStore.readWorkHubTaskInput(liveInput.inputId), liveFact);
       const taskRows = await query();
       assert.equal(taskRows.length, 3);
       assert.ok(taskRows.every((task) => task.workId === source.work!.id));
@@ -8391,6 +8528,14 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
       ({ composition, manager } = await createCapturedExecutionComposition(owner));
       stores = await openInteractiveExecutionStoresForWrite(owner.lease);
       assert.deepEqual(await stores.sessionStore.readWorkHubTaskInput(input.inputId), fact);
+      assert.deepEqual(await stores.sessionStore.readWorkHubTaskInput(liveInput.inputId), liveFact);
+      assert.deepEqual(
+        await composition.handlers['workhub.tasks.input.read'](
+          { workId: liveInput.workId, inputId: liveInput.inputId },
+          context,
+        ),
+        liveReceipt,
+      );
       const restored = await query();
       assert.equal(restored.length, 3);
       assert.ok(restored.every((task) => task.status === 'pending_acceptance'));
@@ -8400,6 +8545,160 @@ test('native task input preserves exact same-name task identity, rejects unsuppo
       release.resolve();
       finishNotifications.resolve();
       await desktop?.close();
+      await composition.close();
+    }
+  });
+});
+
+test('active plugin executor task rejects unsupported Steering without queuing or changing authority', async () => {
+  await withCompositionRoot(async ({ root, owner }) => {
+    await configureFakeDefaultTarget(owner);
+    const { composition, manager } = await createCapturedExecutionComposition(owner);
+    const context: ConnectionContext = {
+      hostEpoch: 'execution-composition-test',
+      connectionId: 'active-executor-input-client',
+      principal: 'local_os_user',
+      acquireResidency: () => ({ release() {} }),
+    };
+    try {
+      const sourceDirectory = join(root, 'active-executor-fixture');
+      await mkdir(sourceDirectory);
+      await writeFile(
+        join(sourceDirectory, 'maka.extension.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          id: 'active-executor-fixture',
+          runtime: { entry: 'index.mjs' },
+          configuration: { properties: {}, required: [] },
+          composition: { patch: 'maka.composition.json', structuralDependencies: [] },
+        }),
+      );
+      await writeFile(
+        join(sourceDirectory, 'index.mjs'),
+        `export default {
+          packageId: 'active-executor-fixture',
+          contributions: [{ id: 'executor', kind: 'executor' }],
+          host: { apply(ctx) {
+            ctx.executors.register({
+              id: 'test.workhub-live',
+              capabilities: { toolActivity: true },
+              discover: async () => ({
+                id: 'test.workhub-live', displayName: 'Held test executor', readiness: 'ready',
+                models: [{ id: 'held-model', name: 'held-model' }],
+                supportsAttachments: false, supportsModelChange: true,
+              }),
+              execute: async (_request, context) => {
+                context.emit({ type: 'tool_start', toolCallId: 'executor-entered', name: 'FixtureExecutorHold' });
+                context.emit({ type: 'tool_result', toolCallId: 'executor-entered',
+                  content: { kind: 'text', text: 'WORKHUB_EXECUTOR_ENTERED' } });
+                await new Promise(resolve => {
+                  if (context.signal.aborted) resolve();
+                  else context.signal.addEventListener('abort', () => resolve(), { once: true });
+                });
+                return { status: 'cancelled' };
+              },
+            });
+          } },
+        };`,
+      );
+      await writeFile(
+        join(sourceDirectory, 'maka.composition.json'),
+        JSON.stringify([
+          {
+            type: 'insert',
+            rootId: 'profile',
+            entry: {
+              id: 'active-executor',
+              packageId: 'active-executor-fixture',
+              config: {},
+            },
+          },
+        ]),
+      );
+      const installed = await composition.plugins.installPackage(sourceDirectory);
+      assert.equal(installed.convergence, 'converged', JSON.stringify(installed));
+      assert.ok((await composition.handlers['workhub.coordination.resolve']({}, context)).ok);
+      const assigned = await actWorkHub(
+        composition,
+        {
+          actionId: 'live-executor-source',
+          userText: 'Keep the executor task active for its original request.',
+          proposal: { disposition: 'create_new', title: 'Live executor task' },
+          create: { workspace: { kind: 'host_path', path: root } },
+          newWorkDefaults: {
+            executorId: 'test.workhub-live',
+            executorModel: 'held-model',
+            permissionMode: 'ask',
+          },
+        },
+        context,
+      );
+      assert.ok(assigned.ok, JSON.stringify(assigned));
+      const stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+      const source = await stores.sessionStore.readWorkHubAssignment('live-executor-source');
+      assert.ok(source?.work);
+      assert.equal(source.targetSessionId, assigned.result.targetSessionId);
+      assert.equal(source.targetTurnId, assigned.result.targetTurnId);
+      const target = source.targetSessionId;
+      // This is a real plugin-backed Run, not a native fake relabelled as unsupported.
+      await waitFor(async () =>
+        (await readLedgerMessages(stores.runtimeEventStore, target)).some(
+          (message) =>
+            message.type === 'tool_result' &&
+            message.turnId === source.targetTurnId &&
+            JSON.stringify(message.content).includes('WORKHUB_EXECUTOR_ENTERED'),
+        ),
+      );
+      const original = await stores.agentRunStore.readRootTurnAdmission(
+        target,
+        source.targetTurnId,
+      );
+      assert.ok(original);
+      const before = {
+        header: await stores.sessionStore.readHeaderRecordSnapshot(target),
+        boundary: await stores.sessionStore.readExecutionBoundary(target),
+        assignment: await stores.sessionStore.readLatestWorkHubAssignment(source.work.id),
+        admissions: await stores.sessionStore.listMessageAdmissions(target),
+        invocations: await stores.runtimeEventStore.listSessionInvocations(target),
+        grants: await stores.sessionStore.listTaskExecutionGrants(target),
+      };
+      assert.equal(before.header.header.backend, 'plugin-executor');
+      assert.equal(before.header.header.executorId, 'test.workhub-live');
+      assert.equal(before.header.header.model, 'held-model');
+      assert.deepEqual(before.header.header.executorConfig, { model: 'held-model' });
+      assert.equal(before.header.header.permissionMode, 'ask');
+      assert.equal(before.header.header.cwd, root);
+      assert.deepEqual(manager.runningTurnIds(target), [original.turnId]);
+      assert.equal(before.invocations.length, 1);
+      assert.equal(before.invocations[0]!.runId, original.runId);
+      const input = {
+        inputId: 'live-executor-rejected-input',
+        workId: source.work.id,
+        generationId: source.work.generationId,
+        text: 'This must not become a hidden later executor request.',
+      };
+      // Task-aware input reaches the live provider check, not the saved-legacy-input gate.
+      const rejected = await composition.handlers['workhub.tasks.send'](input, context);
+      assert.ok(!rejected.ok, JSON.stringify(rejected));
+      assert.equal(rejected.error.code, 'operation_unavailable');
+      assert.match(rejected.error.message, /Live task Steering is not supported for this executor/);
+      assert.equal(await stores.sessionStore.readWorkHubTaskInput(input.inputId), undefined);
+      assert.equal(await stores.sessionStore.readWorkHubAssignment(input.inputId), undefined);
+      assert.deepEqual(
+        {
+          header: await stores.sessionStore.readHeaderRecordSnapshot(target),
+          boundary: await stores.sessionStore.readExecutionBoundary(target),
+          assignment: await stores.sessionStore.readLatestWorkHubAssignment(source.work.id),
+          admissions: await stores.sessionStore.listMessageAdmissions(target),
+          invocations: await stores.runtimeEventStore.listSessionInvocations(target),
+          grants: await stores.sessionStore.listTaskExecutionGrants(target),
+        },
+        before,
+        'unsupported live input cannot alter the original task, authority or pending FIFO',
+      );
+      assert.deepEqual(manager.runningTurnIds(target), [original.turnId]);
+    } finally {
+      // The provider waits on the real executor cancellation signal from normal Host close.
       await composition.close();
     }
   });
