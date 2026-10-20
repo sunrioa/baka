@@ -590,10 +590,8 @@ function fixture() {
           targetMessageId: 'continued-message',
         };
       },
-      handlers: {
-        'workhub.coordination.actFromTurn': async () =>
-          assert.fail('No fresh container is authorized in these reuse cases'),
-      },
+      continueTaskFresh: async () =>
+        assert.fail('No fresh container is authorized in these reuse cases'),
     },
     requestDrain: () => {
       f.drains++;

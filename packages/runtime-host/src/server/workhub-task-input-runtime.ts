@@ -83,12 +83,7 @@ export function createWorkHubTaskInputRuntime(options: {
   messages: HostMessageCoordinator;
   executions: RootTurnCoordinator;
   evidence: Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'taskExecution'>;
-  coordination: Pick<HostWorkHubCoordinationCoordinator, 'continueTaskInput'> & {
-    handlers: Pick<
-      HostWorkHubCoordinationCoordinator['handlers'],
-      'workhub.coordination.actFromTurn'
-    >;
-  };
+  coordination: Pick<HostWorkHubCoordinationCoordinator, 'continueTaskInput' | 'continueTaskFresh'>;
   requestDrain(): void;
   onError(error: unknown): void;
 }) {
@@ -604,41 +599,8 @@ export function createWorkHubTaskInputRuntime(options: {
                 'operation_conflict',
                 'This action already owns a reused task input',
               );
-            const committed = await sessions.readWorkHubAssignment(input.actionId);
-            const source = committed?.work?.continuesActionId
-              ? await sessions.readWorkHubAssignment(committed.work.continuesActionId)
-              : await sessions.readLatestWorkHubAssignment(input.taskId);
-            if (!source || (source.work?.id ?? source.actionId) !== input.taskId)
-              throw new InputFailure('not_found', 'The selected task does not exist');
-            const outcome = await options.coordination.handlers['workhub.coordination.actFromTurn'](
-              {
-                turnId: input.turnId,
-                actionId: input.actionId,
-                delegationText: input.text,
-                proposal: {
-                  disposition: 'continue_work',
-                  workId: input.taskId,
-                  sourceActionId: source.actionId,
-                  container: 'fresh',
-                },
-              },
-              context,
-            );
-            if (!outcome.ok)
-              throw new InputFailure(
-                outcome.error.code === 'candidate_set_stale'
-                  ? 'operation_conflict'
-                  : outcome.error.code === 'unauthorized'
-                    ? 'operation_unavailable'
-                    : outcome.error.code,
-                outcome.error.message,
-              );
-            if (
-              outcome.result.disposition !== 'create_new' ||
-              outcome.result.workId !== input.taskId
-            )
-              throw new Error('Fresh task continuation returned a different task');
-            return { ok: true, result: { container: 'fresh', action: outcome.result } };
+            const action = await options.coordination.continueTaskFresh(input, context);
+            return { ok: true, result: { container: 'fresh', action } };
           }
           const latest = previous
             ? undefined

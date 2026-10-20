@@ -97,6 +97,8 @@ export interface WorkHubTaskAssignment extends WorkHubTaskRef {
   readonly createdAt: number;
   readonly state: 'queued' | 'cancelled' | 'owned' | 'shared' | 'unavailable';
   readonly superseded: boolean;
+  /** Canonical Session segment ordinal; absent when complete ancestry is unavailable. */
+  readonly segment?: number;
   readonly execution?: SessionExecutionScope;
 }
 export interface WorkHubTaskHistoryInput {
@@ -136,7 +138,7 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
       'state',
       'superseded',
     ],
-    ['execution'],
+    ['execution', 'segment'],
   );
   if (
     !['queued', 'cancelled', 'owned', 'shared', 'unavailable'].includes(String(item.state)) ||
@@ -156,6 +158,9 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
   }
   if ((item.state === 'owned') !== !!execution)
     throw invalidProtocolFrame('Invalid WorkHub assignment ownership');
+  const segment =
+    item.segment === undefined ? undefined : requireCount(item.segment, 'WorkHub segment');
+  if (segment === 0) throw invalidProtocolFrame('Invalid WorkHub segment ordinal');
   return {
     ...decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId }),
     workId: requireEntityId(item.workId, 'WorkHub work'),
@@ -167,6 +172,7 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
     createdAt: requireCount(item.createdAt, 'WorkHub assignment time'),
     state: item.state as WorkHubTaskAssignment['state'],
     superseded: item.superseded,
+    ...(segment === undefined ? {} : { segment }),
     ...(execution ? { execution } : {}),
   };
 }

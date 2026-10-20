@@ -72,6 +72,7 @@ import type {
   WorkHubTaskAskInput,
   WorkHubTaskChoice,
 } from '../protocol/workhub-task-actions.js';
+import type { WorkHubTaskContinueFromTurnInput } from '../protocol/workhub-task-input.js';
 import type {
   ConnectionContext,
   OperationHandlerMap,
@@ -1605,6 +1606,92 @@ export class HostWorkHubCoordinationCoordinator {
         );
       }
     });
+  }
+
+  /** Resolve a task's current segment directly, without the retired routing RPC. */
+  async continueTaskFresh(
+    input: WorkHubTaskContinueFromTurnInput,
+    context: ConnectionContext,
+  ): Promise<Extract<WorkHubCoordinationActResult, { disposition: 'create_new' }>> {
+    const request = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
+    if (!request)
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        'Task continuation requires its currently active WorkHub model Turn',
+      );
+    const committed = await this.#stores.readWorkHubAssignment(input.actionId);
+    const source = committed?.work?.continuesActionId
+      ? await this.#stores.readWorkHubAssignment(committed.work.continuesActionId)
+      : await this.#stores.readLatestWorkHubAssignment(input.taskId);
+    if (!source || (source.work?.id ?? source.actionId) !== input.taskId)
+      throw new WorkHubActionEffectFailure('not_found', 'The selected task does not exist');
+    const target = await this.#actionGate.nativeTaskCandidate(source.targetSessionId);
+    if (!target && !committed)
+      throw new WorkHubActionEffectFailure(
+        'operation_unavailable',
+        'The current task segment is unavailable; do not substitute a historical Session',
+      );
+    if (
+      !committed &&
+      (await this.#stores.readHeaderSnapshot(source.targetSessionId)).backend === 'plugin-executor'
+    )
+      throw new WorkHubActionEffectFailure(
+        'operation_unavailable',
+        'Fresh continuation is not supported for this executor: recorded history is readable, but its provider has no Host history-tool bridge. Reuse the current segment instead.',
+      );
+    const workspace = committed?.create?.workspace ?? target?.workspace.target;
+    if (!workspace)
+      throw new WorkHubActionEffectFailure(
+        'operation_unavailable',
+        'The current task workspace is unavailable',
+      );
+    const result = await this.#actionGate.act(
+      {
+        actionId: input.actionId,
+        delegationText: input.text,
+        proposal: {
+          disposition: 'create_new',
+          title:
+            committed?.create?.title ??
+            (Array.from(source.taskTitle ?? source.targetSessionName)
+              .slice(0, 64)
+              .join('') ||
+              'Continue work'),
+        },
+        continuation: { workId: input.taskId, sourceActionId: source.actionId, container: 'fresh' },
+        create: { workspace },
+        selectedTarget: {
+          sessionId: source.targetSessionId,
+          workspaceDigest: target ? digest(target.workspace) : digest({ replay: input.actionId }),
+          sourceTask: { actionId: source.actionId, delegationId: source.delegationId },
+        },
+        validateAuthority: async () => {
+          if (
+            !isDeepStrictEqual(
+              await this.#executions.readActiveWorkHubRoutingRequest(input.turnId),
+              request,
+            )
+          )
+            throw new WorkHubActionGateFailure(
+              'action_conflict',
+              'The continuing WorkHub Run is no longer active',
+            );
+        },
+        ...(request.sourceMessageId ? { sourceMessageId: request.sourceMessageId } : {}),
+        coordinationRunId: request.runId,
+        inputOrigin: request.origin,
+        userText: request.content.text,
+        ...(request.content.attachments ? { attachments: request.content.attachments } : {}),
+      },
+      context,
+      input.turnId,
+    );
+    if (result.disposition !== 'create_new' || result.workId !== input.taskId)
+      throw new WorkHubActionGateFailure(
+        'action_conflict',
+        'Fresh continuation changed task identity',
+      );
+    return result;
   }
 
   /** The shared task-input path never allocates another coordinator model Turn. */

@@ -5041,7 +5041,7 @@ for (const restart of [false, true]) {
   });
 }
 
-test('WorkHub native task approval and revocation leave Session defaults untouched', async () => {
+test('WorkHub native task and linked child approval preserve original Session authority', async () => {
   await withCompositionRoot(async ({ root, owner }) => {
     const connectionId = await configureFakeDefaultTarget(owner);
     const release = deferred<void>();
@@ -5107,16 +5107,12 @@ test('WorkHub native task approval and revocation leave Session defaults untouch
           expectedTurnId: original.turnId,
           expectedRunId: original.runId,
           answer: { kind: 'sandbox_boundary', decision: 'allow' },
-          grantScope: 'task',
         },
         context,
       );
       assert.ok(approved.ok, JSON.stringify(approved));
       assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
-      const grants = await composition.handlers['workhub.interactions.query']({}, context);
-      assert.ok(grants.ok);
-      assert.equal(grants.result.grants!.length, 1);
-      const grantId = grants.result.grants![0]!.grant.grantId;
+      assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(target), []);
       const childReady = deferred<{ childSessionId: string; turnId: string; runId: string }>();
       childTask = manager.spawnChildSession(target, {
         agentProfile: 'local_read',
@@ -5154,7 +5150,6 @@ test('WorkHub native task approval and revocation leave Session defaults untouch
           expectedTurnId: child.turnId,
           expectedRunId: child.runId,
           answer: { kind: 'sandbox_boundary', decision: 'allow' },
-          grantScope: 'task',
         },
         context,
       );
@@ -5163,33 +5158,12 @@ test('WorkHub native task approval and revocation leave Session defaults untouch
         await stores.sessionStore.readExecutionBoundary(child.childSessionId),
         childBefore,
       );
-      assert.equal(
-        (
-          await composition.handlers['workhub.interactions.revoke'](
-            { actionId: 'unrelated', grantId },
-            context,
-          )
-        ).ok,
-        false,
-      );
-      assert.ok(
-        (
-          await composition.handlers['workhub.interactions.revoke'](
-            { actionId: 'task-grant-action', grantId },
-            context,
-          )
-        ).ok,
-      );
-      assert.equal(
-        (await stores.sessionStore.listTaskExecutionGrants(target)).length,
-        1,
-        'revocation targets one grant, not another approved resource',
-      );
-      await composition.handlers['workhub.interactions.revoke'](
-        { actionId: 'task-grant-action', grantId: childRequest.interaction.interactionId },
-        context,
-      );
       assert.deepEqual(await stores.sessionStore.listTaskExecutionGrants(target), []);
+      assert.deepEqual(
+        await stores.sessionStore.listTaskExecutionGrants(child.childSessionId),
+        [],
+        'answering an original request does not create task-wide grants',
+      );
       assert.deepEqual(await stores.sessionStore.readExecutionBoundary(target), before);
     } finally {
       release.resolve();

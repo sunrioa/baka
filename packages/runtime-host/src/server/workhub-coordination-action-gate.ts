@@ -573,6 +573,7 @@ export class WorkHubCoordinationActionGate {
             'Fresh continuation requires its fixed source',
           );
         const validate = async () => {
+          await input.validateAuthority?.();
           const source = await this.#continuedSource(input, selected.sessionId);
           const candidate = await this.nativeTaskCandidate(selected.sessionId);
           if (!source || !candidate || digest(candidate.workspace) !== selected.workspaceDigest)

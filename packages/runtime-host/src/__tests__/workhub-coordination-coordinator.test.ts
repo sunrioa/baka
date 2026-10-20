@@ -54,6 +54,7 @@ import {
 } from '../server/session-catalog-coordinator.js';
 import {
   WorkHubActionEffectFailure,
+  WorkHubActionGateFailure,
   workHubCreatedSessionId,
   type WorkHubActionGateEffects,
   type WorkHubAdmittedAction,
@@ -72,6 +73,105 @@ const CONTEXT: ConnectionContext = {
 };
 
 describe('task-centric start and selection', () => {
+  for (const mode of ['native', 'lost_authority', 'executor'] as const)
+    test(`fresh uses the canonical task source and current authority directly (${mode})`, async () => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-task-fresh-')));
+      const store = createSessionStore(root);
+      try {
+        let active = true;
+        const authority = {
+          runId: 'model-run',
+          content: { text: '继续，保留刚才的纠正。' },
+          origin: 'user' as const,
+          sourceMessageId: 'fresh-user-message',
+        };
+        const worker = await store.create({
+          cwd: root,
+          name: 'Container name is not the task title',
+          model: 'original-model',
+          llmConnectionSlug: 'original-connection',
+          permissionMode: 'ask',
+          ...(mode === 'executor' ? { executorId: 'test-executor' } : {}),
+        });
+        const assigned: Parameters<WorkHubActionGateEffects['assign']>[0][] = [];
+        const host = coordinator(
+          root,
+          store,
+          undefined,
+          undefined,
+          {
+            ...coordinationExecutions(new SessionAdmissionGate()).executions,
+            readActiveWorkHubRoutingRequest: async () => (active ? authority : undefined),
+          },
+          undefined,
+          {
+            assign: async (input) => {
+              if (mode === 'lost_authority') active = false;
+              await input.validateFreshTarget?.();
+              assigned.push(input);
+              return { messageId: 'fresh-message' };
+            },
+          },
+        );
+        assert.ok((await host.handlers['workhub.coordination.resolve']({}, CONTEXT)).ok);
+        await persistTestAssignment(
+          store,
+          {
+            actionId: 'original-task',
+            work: { id: 'original-task', generationId: 'original-task' },
+            actionFingerprint: `sha256:${'a'.repeat(64)}`,
+            taskTitle: 'The actual task',
+            targetSessionId: worker.id,
+            targetSessionName: worker.name,
+            disposition: 'delegate_existing',
+            userText: 'Original user request',
+          },
+          'original-turn',
+        );
+        const before = await store.readHeaderSnapshot(worker.id);
+        const continuation = host.continueTaskFresh(
+          {
+            turnId: 'model-turn',
+            actionId: 'next-segment',
+            taskId: 'original-task',
+            text: 'Prepared worker input',
+            container: 'fresh',
+          },
+          CONTEXT,
+        );
+        if (mode === 'native') {
+          const result = await continuation;
+          assert.equal(result.workId, 'original-task');
+          assert.equal(result.targetSessionId, workHubCreatedSessionId('next-segment'));
+          assert.equal(assigned.length, 1);
+          assert.equal(assigned[0]!.taskTitle, 'The actual task');
+          assert.equal(assigned[0]!.userText, authority.content.text);
+          assert.equal(assigned[0]!.delegationText, 'Prepared worker input');
+          assert.equal(assigned[0]!.freshSource?.assignment.targetSessionId, worker.id);
+          assert.deepEqual(assigned[0]!.work, {
+            id: 'original-task',
+            generationId: 'next-segment',
+            continuesActionId: 'original-task',
+            sourceMessageId: 'fresh-user-message',
+          });
+        } else {
+          await assert.rejects(continuation, (error: unknown) =>
+            mode === 'executor'
+              ? error instanceof WorkHubActionEffectFailure &&
+                error.code === 'operation_unavailable' &&
+                error.message.includes('no Host history-tool bridge')
+              : error instanceof WorkHubActionGateFailure && error.code === 'action_conflict',
+          );
+          assert.equal(assigned.length, 0);
+          assert.equal(await store.readWorkHubAssignment('next-segment'), undefined);
+        }
+        assert.deepEqual(await store.readHeaderSnapshot(worker.id), before);
+      } finally {
+        await store.close?.();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
   test('start separates task title and real user authority from the worker prompt and effective creation settings', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-task-start-')));
     const store = createSessionStore(root);
@@ -3482,6 +3582,7 @@ function coordinator(
   });
   return {
     handlers: host.handlers,
+    continueTaskFresh: host.continueTaskFresh.bind(host),
     prepareTaskStop: host.prepareTaskStop.bind(host),
     resolveTaskStop: host.resolveTaskStop.bind(host),
     async act(
