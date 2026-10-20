@@ -326,24 +326,30 @@ test('the shared task view withdraws send authority synchronously on scope or av
   const history = (workId: string) => ({ ...assignment(workId), workId });
   const services = {
     taskHistory: async (_owner: string, input: { workId: string }) => ({ workId: input.workId, assignments: [history(input.workId)], nextCursor: null }),
+    readTask: async (_owner: string, input: { workId: string }) => {
+      const source = history(input.workId);
+      return { task: { ...source, status: 'running', execution: { ...source.execution!, sharedTurn: false } },
+        brief: { workId: source.workId, actionId: source.actionId, delegationId: source.delegationId, status: 'unavailable', reason: 'Fixture has no overview' } };
+    },
     taskExecutions: async (_owner: string, input: { actionId: string; delegationId: string }) => ({ actionId: input.actionId, delegationId: input.delegationId, targetSessionId: 'same-session', executions: [{ ...turn(`turn-${input.actionId}`), runId: `run-${input.actionId}` }], nextCursor: null }),
     subscribeSessions: () => () => {}, subscribeAvailability: (handler: () => void) => { availability.add(handler); return () => { availability.delete(handler); }; },
   } as unknown as WorkHubServices;
   let view!: ReturnType<typeof useWorkHubTaskView>;
   function Probe({ workId, available = true }: { workId?: string; available?: boolean }) { view = useWorkHubTaskView(services, 'owner', workId, available); return null; }
-  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'a' }))); });
+  const render = (props: { workId?: string; available?: boolean }) => root.render(createElement(StrictMode, {}, createElement(LocaleProvider, { locale: 'en', children: createElement(Probe, props) })));
+  await act(async () => { render({ workId: 'a' }); });
   const a = view; assert.equal(a.currentSnapshot().assignment?.workId, 'a');
-  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'b' }))); });
+  await act(async () => { render({ workId: 'b' }); });
   assert.equal(view.assignment?.workId, 'b'); assert.equal(a.currentSnapshot().ready, false);
   const beforeLoss = view;
   await act(async () => {
     for (const handler of availability) handler();
     assert.equal(beforeLoss.currentSnapshot().ready, false, 'invalidated live model outranks a still-rendered ready closure');
   });
-  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, { workId: 'b', available: false }))); });
+  await act(async () => { render({ workId: 'b', available: false }); });
   assert.equal(view.assignment?.workId, 'b', 'records remain inspectable while authority is absent');
   assert.equal(beforeLoss.currentSnapshot().ready, false); assert.equal(view.currentSnapshot().ready, false);
-  await act(async () => { root.render(createElement(StrictMode, {}, createElement(Probe, {}))); });
+  await act(async () => { render({}); });
   assert.deepEqual(view.assignments, []); assert.equal(view.currentSnapshot().ready, false);
 });
 
@@ -360,6 +366,12 @@ test('real task input hook uses the shared canonical source, survives switching,
   let successor = '';
   const services = {
     taskHistory: async (_owner, input) => ({ workId: input.workId, assignments: tasks.filter(a => a.workId === input.workId), nextCursor: null }),
+    readTask: async (_owner, input) => {
+      assert.ok('workId' in input);
+      const source = tasks.find(a => a.workId === input.workId)!;
+      return { task: { ...source, status: 'running' as const, execution: { ...source.execution!, sharedTurn: false } },
+        brief: { workId: source.workId, actionId: source.actionId, delegationId: source.delegationId, status: 'unavailable' as const, reason: 'Fixture has no overview' } };
+    },
     taskExecutions: async (_owner, input) => {
       const a = tasks.find(a => a.actionId === input.actionId)!;
       return { actionId: a.actionId, delegationId: a.delegationId, targetSessionId: a.targetSessionId,
@@ -378,7 +390,7 @@ test('real task input hook uses the shared canonical source, survives switching,
     },
     readTaskInput: async () => { throw new Error('No receipt yet'); },
     stop: async (...args) => { stops.push(args); return []; },
-  } satisfies Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'getTaskSession' | 'subscribeSessions' | 'subscribeAvailability' | 'sendTaskInput' | 'readTaskInput' | 'stop'>;
+  } satisfies Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'readTask' | 'getTaskSession' | 'subscribeSessions' | 'subscribeAvailability' | 'sendTaskInput' | 'readTaskInput' | 'stop'>;
   let view!: ReturnType<typeof useWorkHubTaskView>, input!: ReturnType<typeof useWorkHubTaskInput>;
   function Probe({ workId }: { workId: string }) {
     view = useWorkHubTaskView(services, owner, workId);
@@ -386,7 +398,7 @@ test('real task input hook uses the shared canonical source, survives switching,
     return null;
   }
   const { root } = installReactRenderer();
-  const render = (workId: string) => root.render(createElement(StrictMode, {}, createElement(Probe, { workId })));
+  const render = (workId: string) => root.render(createElement(StrictMode, {}, createElement(LocaleProvider, { locale: 'en', children: createElement(Probe, { workId }) })));
   await act(async () => { render('work-a'); });
   assert.equal(input.ready, true); const oldA = input;
   await act(async () => { input.model.writeDraft('A correction'); });

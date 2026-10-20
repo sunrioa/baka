@@ -44,7 +44,8 @@ test('task history waits for its first transcript and Session identity before mo
         return { observationChanged() {}, async loadEarlier() {}, async close() {} };
       },
     } satisfies Pick<WorkHubServices, 'getTaskSession' | 'observe' | 'openTranscript'>;
-    const snapshot = { assignments: [assignment], historyCursor: null, ready: true, loadingEarlier: false, executions: [], executionsReady: true };
+    const snapshot = { assignments: [assignment], historyCursor: null, ready: true, loadingEarlier: false, executions: [], executionsReady: true,
+      brief: undefined, briefReady: true, briefLoading: false, briefError: undefined };
     const markup = await renderTranscriptMarkup(createElement(LocaleProvider, { locale: 'en', children: null },
       createElement(ChatSurfaceLayout, { composer: null, children: null }, createElement(WorkHubTaskView, {
         services: services as unknown as WorkHubServices, owner: 'owner', workId: 'work', name: 'Task',

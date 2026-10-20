@@ -103,6 +103,93 @@ test('task-id detail lookup resolves old tasks outside the overview without scan
   assert.equal(missing.ok, false);
 });
 
+const preparedOverview = () => ({
+  status: 'ok' as const,
+  brief: {
+    taskId: 'action',
+    sourceActionId: 'action',
+    goal: { text: 'Original user task', messageId: 'private-user-id', actionId: 'action', at: 1 },
+    requirements: [],
+    omittedRequirements: 0,
+    files: [],
+    limits: [],
+  },
+  witness: { taskId: 'action', throughSequence: 1 },
+});
+
+test('task overview is read only after original task validation and outside existing admission lanes', async () => {
+  const reads: unknown[] = [];
+  const f = fixture(false, async (input) => {
+    reads.push(input);
+    // The real gate rejects this if the handler still holds task/coordination
+    // admission. No timeout or fake admission is needed to prove lock ordering.
+    await f.admission.run(WORKHUB_COORDINATION_SESSION_ID, () => {});
+    return preparedOverview();
+  });
+  const ordinary = await f.handlers['workhub.tasks.read']({ workId: 'action' }, {} as never);
+  assert.ok(ordinary.ok);
+  assert.equal(ordinary.result.brief, undefined);
+  assert.equal(reads.length, 0);
+  const missing = await f.handlers['workhub.tasks.read'](
+    { workId: 'foreign', includeBrief: true },
+    {} as never,
+  );
+  assert.equal(missing.ok, false);
+  assert.equal(reads.length, 0);
+  const detailed = await f.handlers['workhub.tasks.read'](
+    { workId: 'action', includeBrief: true, briefLocale: 'en' },
+    {} as never,
+  );
+  assert.ok(detailed.ok);
+  assert.equal(detailed.result.task.status, ordinary.result.task.status);
+  assert.equal(detailed.result.brief?.status, 'ok');
+  if (detailed.result.brief?.status !== 'ok') assert.fail('Expected a bounded overview');
+  assert.match(detailed.result.brief.text, /Original user task|original user wording/u);
+  assert.doesNotMatch(detailed.result.brief.text, /private-user-id|read\(taskId=/u);
+  assert.deepEqual(reads, [{ taskId: 'action', sourceActionId: 'action', abortSignal: undefined }]);
+  assert.equal(f.questions.length, 1);
+  assert.deepEqual(f.forwarded, []);
+});
+
+test('failed, foreign and changed-source overviews never withdraw the original task or approval', async () => {
+  for (const outcome of ['throw', 'foreign_work', 'foreign_action', 'changed_source'] as const) {
+    const f = fixture(false, async () => {
+      if (outcome === 'throw') throw new Error('Overview source unavailable');
+      if (outcome === 'changed_source') f.setTargetMissing();
+      const prepared = preparedOverview();
+      return {
+        ...prepared,
+        brief: {
+          ...prepared.brief,
+          ...(outcome === 'foreign_work' ? { taskId: 'foreign-work' } : {}),
+          ...(outcome === 'foreign_action' ? { sourceActionId: 'foreign-action' } : {}),
+        },
+      };
+    });
+    const result = await f.handlers['workhub.tasks.read'](
+      { workId: 'action', includeBrief: true },
+      {} as never,
+    );
+    assert.ok(result.ok);
+    assert.equal(result.result.task.actionId, 'action');
+    assert.equal(result.result.task.status, 'waiting_for_user');
+    assert.equal(result.result.brief?.status, 'unavailable');
+    assert.equal(f.questions.length, 1);
+    assert.deepEqual(f.forwarded, []);
+    assert.equal(f.briefErrors.length, outcome === 'throw' ? 1 : 0);
+  }
+});
+
+test('an archived task cannot start overview preparation', async () => {
+  const f = fixture(false, async () => assert.fail('Archived task history must not be scanned'));
+  f.setTargetArchived();
+  const result = await f.handlers['workhub.tasks.read'](
+    { workId: 'action', includeBrief: true },
+    {} as never,
+  );
+  assert.equal(result.ok, false);
+});
+
 test('task overview follows the owned continuation and separates queue, resources, dependency and user waiting without reading delivery', async () => {
   const f = fixture();
   const query = async () => {
@@ -340,7 +427,8 @@ for (const scenario of [
     },
   );
 
-function fixture(childRequest = false) {
+function fixture(childRequest = false, readBrief?: Options['readBrief']) {
+  const briefErrors: unknown[] = [];
   let overviewVisible = true;
   const latestLookups: string[] = [];
   let active = true,
@@ -358,6 +446,7 @@ function fixture(childRequest = false) {
   let resultReads = 0;
   let resultText = '😀'.repeat(16001);
   let targetMissing = false;
+  let targetArchived = false;
   let onReadResult = () => {};
   let onReadAssignment = () => {};
   let waitReason: 'concurrency' | 'workspace' | undefined;
@@ -479,6 +568,7 @@ function fixture(childRequest = false) {
         },
         readWorkHubAssignmentsPage: async () =>
           assert.fail('Exact task lookup must not scan global assignment history'),
+        readWorkHubTaskFactsPage: async () => ({ highWaterSequence: 1, records: [] }),
         readHeaderSnapshot: async (id: string) => {
           if (id === 'target' && targetMissing) throw new SessionNotFoundError(id);
           return id === 'child'
@@ -502,7 +592,7 @@ function fixture(childRequest = false) {
                   },
                 },
               }
-            : { id: 'target', name: 'Release', isArchived: false };
+            : { id: 'target', name: 'Release', isArchived: targetArchived };
         },
         readActiveWorkHubAssignmentsByTarget: async () => (active ? [assignment] : []),
         readWorkHubReplacement: async (_id: string, pendingOnly?: true) =>
@@ -625,12 +715,19 @@ function fixture(childRequest = false) {
       return latestInput;
     },
     admission,
+    readBrief,
     acquireResidency: () => ({ release() {} }),
     onError: (error) => {
+      if (readBrief) {
+        briefErrors.push(error);
+        return;
+      }
       throw error;
     },
   });
   return {
+    admission,
+    briefErrors,
     context,
     coordinatorRun,
     coordinatorAdmission,
@@ -654,6 +751,9 @@ function fixture(childRequest = false) {
     },
     setTargetMissing: () => {
       targetMissing = true;
+    },
+    setTargetArchived: () => {
+      targetArchived = true;
     },
     onReadResult: (hook: () => void) => {
       onReadResult = hook;

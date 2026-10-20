@@ -45,6 +45,11 @@ import {
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
 import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
+import {
+  formatWorkHubTaskBrief,
+  isWorkHubTaskBriefCurrent,
+  type createWorkHubTaskBriefReader,
+} from './workhub-task-brief.js';
 import { readHostedExecutionMembership } from './hosted-execution-membership.js';
 import {
   WORKHUB_TASK_MAX_ITEMS,
@@ -52,6 +57,7 @@ import {
   WORKHUB_DELIVERY_MAX_BYTES,
   type WorkHubTask,
   type WorkHubTaskDetail,
+  type WorkHubTaskBriefProjection,
 } from '../protocol/workhub-tasks.js';
 
 const resultReadParameters = z
@@ -171,6 +177,8 @@ export function createWorkHubResultRuntime(options: {
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
   readTurnInput(sessionId: string, turnId: string): Promise<string>;
+  /** Optional task-view projection. Its history reader must run outside admission. */
+  readBrief?: ReturnType<typeof createWorkHubTaskBriefReader>;
   acquireResidency(): { release(): void };
   onError(error: unknown): void;
 }) {
@@ -717,7 +725,7 @@ export function createWorkHubResultRuntime(options: {
         },
       };
     },
-    'workhub.tasks.read': async (input) => {
+    'workhub.tasks.read': async (input, context) => {
       const missing = {
         ok: false as const,
         error: { code: 'not_found' as const, message: 'The original WorkHub task is unavailable' },
@@ -734,10 +742,67 @@ export function createWorkHubResultRuntime(options: {
       )
         return missing;
       const lanes = await taskLanes(assignment);
-      return admission.runMany(lanes, async (lease) => {
-        const result = await taskProjection(assignment, lease, true, lanes);
-        return result ? { ok: true, result } : missing;
+      const result = await admission.runMany(lanes, (lease) =>
+        taskProjection(assignment, lease, true, lanes),
+      );
+      if (!result) return missing;
+      if (!input.includeBrief) return { ok: true, result };
+      const binding = {
+        workId: assignment.work?.id ?? assignment.actionId,
+        actionId: assignment.actionId,
+        delegationId: assignment.delegationId,
+      };
+      const unavailable = (): WorkHubTaskBriefProjection => ({
+        ...binding,
+        status: 'unavailable',
+        reason: 'The bounded task overview is unavailable; refresh or read task history',
       });
+      let brief = unavailable();
+      if (options.readBrief) {
+        try {
+          // This reader takes existing history admissions of its own. Never run
+          // it inside taskProjection's runMany, and never scan on default reads.
+          const prepared = await options.readBrief({
+            taskId: binding.workId,
+            sourceActionId: assignment.actionId,
+            abortSignal: context.inputClosedSignal,
+          });
+          if (
+            prepared.status === 'ok' &&
+            prepared.brief.taskId === binding.workId &&
+            prepared.brief.sourceActionId === binding.actionId &&
+            prepared.witness.taskId === binding.workId
+          ) {
+            const current = await admission.runMany(lanes, async (lease) => {
+              if (context.inputClosedSignal?.aborted) return false;
+              const source =
+                'workId' in input
+                  ? await stores.sessionStore.readLatestWorkHubAssignment(input.workId)
+                  : await stores.sessionStore.readWorkHubAssignment(input.actionId);
+              return (
+                source?.actionId === binding.actionId &&
+                source.delegationId === binding.delegationId &&
+                source.targetSessionId === assignment.targetSessionId &&
+                source.targetMessageId === assignment.targetMessageId &&
+                (source.work?.id ?? source.actionId) === binding.workId &&
+                !!(await taskProjection(source, lease, false, lanes)) &&
+                (await isWorkHubTaskBriefCurrent(stores.sessionStore, prepared.witness))
+              );
+            });
+            if (current)
+              brief = {
+                ...binding,
+                status: 'ok',
+                text: formatWorkHubTaskBrief(prepared.brief, input.briefLocale ?? 'en'),
+              };
+          }
+        } catch (error) {
+          // Brief failure is not a loss of task history, send authority or the
+          // original pending interaction. Do not turn it into a task-read error.
+          options.onError(error);
+        }
+      }
+      return { ok: true, result: { ...result, brief } };
     },
     'workhub.interactions.query': async () => {
       const requests: WorkHubPendingInteraction[] = [];

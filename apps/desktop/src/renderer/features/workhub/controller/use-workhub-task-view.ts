@@ -17,18 +17,24 @@
  * under the License.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { applyLiveTurnBufferEvent, reconcileLiveTurnBuffer, settleLiveTurnBufferStep, useUiLocale, type LiveTurnBuffer } from '@maka/ui';
 import type { SessionSummary } from '@maka/core/session';
+import type { WorkHubTaskBriefProjection } from '@maka/runtime-host/protocol';
 import { chatTurnActivity, type SessionExecutionProjection } from '../../../application/contracts/session-execution.js';
 import { createWorkHubTaskViewModel, type WorkHubTaskViewSnapshot } from '../model/task-view-model.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
 
 const emptyTranscript: WorkHubTranscriptSnapshot = { messages: [], ready: false, hasOlder: false };
 const emptyView: WorkHubTaskViewSnapshot = { assignments: [], historyCursor: null, ready: false, loadingEarlier: false, executions: [], executionsReady: false };
-type TaskViewServices = Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'subscribeSessions' | 'subscribeAvailability'>;
+type TaskViewServices = Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'readTask' | 'subscribeSessions' | 'subscribeAvailability'>;
 
 export function useWorkHubTaskView(services: TaskViewServices, owner: string | undefined, workId: string | undefined, available = true) {
+  const locale = useUiLocale();
+  const briefScope = useMemo(() => ({ services, owner, workId, available, locale }), [services, owner, workId, available, locale]);
+  type BriefState = { scope?: typeof briefScope; brief?: WorkHubTaskBriefProjection; ready: boolean; loading: boolean; error?: string };
+  const [briefState, setBriefState] = useState<BriefState>({ ready: false, loading: false });
+  const refreshBrief = useRef<() => Promise<void>>(undefined);
   const [state, setState] = useState<{ services?: TaskViewServices; owner?: string; workId?: string; value: WorkHubTaskViewSnapshot }>({ value: emptyView });
   const model = useRef<{ services: TaskViewServices; owner: string; workId: string; value: ReturnType<typeof createWorkHubTaskViewModel> }>(undefined);
   const rendered = useRef({ services, owner, workId, available }); rendered.current = { services, owner, workId, available };
@@ -52,12 +58,59 @@ export function useWorkHubTaskView(services: TaskViewServices, owner: string | u
       if (model.current?.value === current) model.current = undefined;
     };
   }, [services, owner, workId]);
+  // Independent display data: a slow or failed overview cannot park history,
+  // input or approvals. Only this selected task's existing refresh events read it.
+  useEffect(() => {
+    if (!owner || !workId || !available) return;
+    let closed = false, version = 0, dirty = false;
+    let reading: Promise<void> | undefined;
+    const identity = { scope: briefScope };
+    setBriefState({ ...identity, ready: false, loading: false });
+    const refresh = (): Promise<void> => {
+      dirty = true;
+      if (reading) return reading;
+      const task = (async () => {
+        while (dirty && !closed) {
+          dirty = false;
+          const generation = version;
+          setBriefState(previous => ({ ...previous, ...identity, loading: true }));
+          try {
+            const result = await services.readTask(owner, { workId, includeBrief: true, briefLocale: locale });
+            if (closed || generation !== version) continue;
+            const { task: source, brief } = result;
+            if ((source.workId ?? source.actionId) !== workId || !brief || brief.workId !== workId || brief.actionId !== source.actionId || brief.delegationId !== source.delegationId)
+              throw new Error('Task overview changed its canonical source');
+            setBriefState({ ...identity, brief, ready: true, loading: false });
+          } catch (reason) {
+            if (!closed && generation === version) setBriefState({ ...identity, ready: true, loading: false, error: reason instanceof Error ? reason.message : String(reason) });
+          }
+        }
+      })().finally(() => { if (reading === task) reading = undefined; });
+      reading = task;
+      return task;
+    };
+    refreshBrief.current = refresh;
+    const unsubscribe = services.subscribeSessions(() => { void refresh(); });
+    const unavailable = services.subscribeAvailability(() => {
+      ++version;
+      setBriefState({ ...identity, ready: false, loading: false });
+      void refresh();
+    });
+    void refresh();
+    return () => {
+      closed = true; ++version;
+      unsubscribe(); unavailable();
+      if (refreshBrief.current === refresh) refreshBrief.current = undefined;
+    };
+  }, [briefScope]);
   const displayed = state.services === services && state.owner === owner && state.workId === workId ? state.value : emptyView;
+  const overview = available && briefState.scope === briefScope ? briefState : undefined;
   return { ...displayed, ready: available && displayed.ready, currentSnapshot: () => {
     const current = currentModel()?.snapshot() ?? emptyView;
     return available && rendered.current.available ? current : { ...current, ready: false };
   },
-    refresh: () => currentModel()?.refresh(), loadEarlier: () => currentModel()?.loadEarlier(),
+    brief: overview?.brief, briefReady: overview?.ready ?? false, briefLoading: overview?.loading ?? false, briefError: overview?.error,
+    refresh: () => Promise.all([currentModel()?.refresh(), refreshBrief.current?.()]).then(() => {}), loadEarlier: () => currentModel()?.loadEarlier(),
     selectAssignment: (id: string) => currentModel()?.selectAssignment(id), selectExecution: (id: string) => currentModel()?.selectExecution(id),
     followLatest: () => currentModel()?.followLatest() };
 }

@@ -62,6 +62,18 @@ test('registers the WorkHub Session projection as a reconnectable read', () => {
   assert.equal(reconnectable.has('workhub:revokeTaskGrant'), false);
 });
 
+test('existing task read IPC forwards the opt-in overview and source-bound response without another operation', async () => {
+  const handlers = new Map<string, IpcHandler>();
+  const input = { workId: 'work', includeBrief: true as const, briefLocale: 'en' as const };
+  const result = { task: { workId: 'work', actionId: 'action', delegationId: 'delegation', targetSessionId: 'session', targetSessionName: 'Task', targetMessageId: 'message', text: 'Original requirement', createdAt: 1, status: 'queued' as const },
+    brief: { workId: 'work', actionId: 'action', delegationId: 'delegation', status: 'ok' as const, text: 'Original user wording; worker progress is unverified.' } };
+  const calls: unknown[] = [];
+  const client = { readWorkHubTask: async (value: unknown) => { calls.push(value); return result; } } as Parameters<typeof registerRuntimeHostWorkHubIpc>[0];
+  registerRuntimeHostWorkHubIpc(client, { handle: (channel, handler) => handlers.set(channel, handler) }, {});
+  assert.equal(await handlers.get('workhub:readTask')!({} as Parameters<IpcHandler>[0], input), result);
+  assert.deepEqual(calls, [input]);
+});
+
 test('native task input IPC preserves exact IDs and distinguishes rejected from unknown without another command', async () => {
   const handlers = new Map<string, IpcHandler>();
   const input = { inputId: 'input-1', workId: 'work-1', generationId: 'gen-1', sourceActionId: 'action-1', sourceDelegationId: 'delegation-1', text: 'Correction' };

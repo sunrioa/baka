@@ -2803,6 +2803,13 @@ export async function createExecutionRuntimeHostComposition(
       admission: sessionAdmission,
       readTurnResult: readTurnText,
       readTurnInput: (sessionId, turnId) => readTurnText(sessionId, turnId, 'user'),
+      readBrief: (input) =>
+        createWorkHubTaskBriefReader({
+          sessions: stores.sessionStore,
+          reader: requireTranscriptReader(transcriptReader),
+          history: workHubEvidence!.history,
+          readTodo: (sessionId) => sessionTodo.read(sessionId),
+        })(input),
       acquireResidency: () => context.acquireResidency('hosted-execution'),
       onError: (error) =>
         console.error(

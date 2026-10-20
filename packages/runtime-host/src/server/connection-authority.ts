@@ -114,6 +114,16 @@ export function authorizeRuntimeHostOperation(
   if (authority.operationGrants !== 'all' && !authority.operationGrants.includes(frame.operation)) {
     return false;
   }
+  // The new bounded overview includes original task history, not just the old
+  // metadata/delivery projection. Do not expand any existing remote credential
+  // grant by reusing the operation name. Internal fresh preparation is separate.
+  if (
+    frame.operation === 'workhub.tasks.read' &&
+    frame.input.includeBrief &&
+    authority.principalKind !== 'local_owner'
+  ) {
+    return false;
+  }
   if (
     (frame.operation === 'client.capability.replace' ||
       frame.operation === 'client.capability.unregister') &&

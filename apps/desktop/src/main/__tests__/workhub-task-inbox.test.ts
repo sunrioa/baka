@@ -54,6 +54,7 @@ test('opening an inbox approval resolves its task independently of the first eig
     createdAt: 20 - index, state: index % 2 ? 'cancelled' : 'queued', superseded: false,
   }));
   const taskReads: Array<Parameters<WorkHubServices['readTask']>[1]> = [];
+  const overviewReads: Array<Parameters<WorkHubServices['readTask']>[1]> = [];
   const historyReads: Array<Parameters<WorkHubServices['taskHistory']>[1]> = [];
   const answers: Array<Parameters<WorkHubServices['answerTaskInteraction']>> = [];
   let answered = false;
@@ -69,6 +70,12 @@ test('opening an inbox approval resolves its task independently of the first eig
       },
     },
     async readTask(sessionId, ref) {
+      if (ref.includeBrief) {
+        assert.equal(sessionId, owner); overviewReads.push(ref);
+        assert.deepEqual(ref, { workId: 'work', includeBrief: true, briefLocale: 'en' });
+        const task: WorkHubTask = { ...original, actionId: recent[0]!.actionId, delegationId: recent[0]!.delegationId, targetMessageId: recent[0]!.targetMessageId, status: 'queued' };
+        return { task, brief: { workId: 'work', actionId: task.actionId, delegationId: task.delegationId, status: 'unavailable' as const, reason: 'No overview in this approval fixture' } };
+      }
       assert.equal(sessionId, owner); taskReads.push(ref);
       assert.ok('actionId' in ref, 'the original request uses an exact assignment read, not the latest task');
       const task = ref.actionId === original.actionId ? original : foreign;
@@ -119,6 +126,7 @@ test('opening an inbox approval resolves its task independently of the first eig
   assert.equal(view.assignments.some(item => item.actionId === original.actionId), false);
   assert.equal(view.historyCursor, 'original-on-next-page');
   assert.deepEqual(historyReads, [{ workId: 'work' }]);
+  assert.equal(overviewReads.length, 1);
   assert.match(container.textContent, /Original tool/);
   assert.match(container.textContent, /Allow once/);
   assert.match(container.textContent, /Allow for this turn/);
@@ -151,6 +159,7 @@ test('Host-proven child approvals retain their own Session and execution while s
         review: { kind: 'command', command: 'npm test -- child' }, rememberForTurnAllowed: false } } } };
   let requests = [rootRequest, childRequest];
   const reads: Array<Parameters<WorkHubServices['readTask']>> = [];
+  const overviewReads: Array<Parameters<WorkHubServices['readTask']>> = [];
   const answers: Array<Parameters<WorkHubServices['answerTaskInteraction']>> = [];
   const assignment: WorkHubTaskAssignment = { workId: 'work', generationId: 'work', actionId: task.actionId,
     delegationId: task.delegationId, targetSessionId: task.targetSessionId, targetSessionName: task.targetSessionName,
@@ -158,6 +167,12 @@ test('Host-proven child approvals retain their own Session and execution while s
     execution: { turnId: rootRequest.interaction.turnId, runId: rootRequest.interaction.runId } };
   const services = {
     async readTask(sessionId, ref) {
+      if (ref.includeBrief) {
+        overviewReads.push([sessionId, ref]);
+        assert.equal(sessionId, owner);
+        assert.deepEqual(ref, { workId: 'work', includeBrief: true, briefLocale: 'en' });
+        return { task, brief: { workId: 'work', actionId: task.actionId, delegationId: task.delegationId, status: 'unavailable' as const, reason: 'No overview in this approval fixture' } };
+      }
       reads.push([sessionId, ref]);
       assert.equal(sessionId, owner);
       assert.deepEqual(ref, { actionId: task.actionId, delegationId: task.delegationId });
@@ -204,6 +219,7 @@ test('Host-proven child approvals retain their own Session and execution while s
   assert.equal(inbox.error, undefined, 'Host-proven child ancestry is not rejected by a same-Session rule');
   assert.equal(inbox.ready, true);
   assert.deepEqual(reads, [[owner, { actionId: task.actionId, delegationId: task.delegationId }]], 'one exact assignment lookup per refresh, including root and child requests');
+  assert.equal(overviewReads.length, 1, 'the independent display read does not replace or multiply exact approval ownership reads');
   assert.notEqual(childRequest.interaction.sessionId, task.targetSessionId);
   assert.deepEqual(inbox.requestsForWork('work'), [rootRequest, childRequest]);
   assert.equal(inbox.requests[0], rootRequest);

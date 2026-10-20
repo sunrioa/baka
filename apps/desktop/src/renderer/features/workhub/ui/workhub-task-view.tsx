@@ -43,6 +43,14 @@ export function WorkHubTaskView({ services, workId, name, view, inbox, onReady }
     <span className="maka-visually-hidden" data-status={status} role="status">
       {execution ? copy.status[execution.status] : view.assignment ? copy.state[view.assignment.state] : copy.loading}
     </span>
+    <details className="workHubTaskBrief">
+      <summary>{copy.briefTitle}<span>{copy.briefReadonly}</span></summary>
+      <div className="workHubTaskBriefBody">
+        {view.brief?.status === 'ok' ? <pre>{view.brief.text}</pre> : <p role="status">{view.briefReady ? copy.briefUnavailable : copy.briefLoading}</p>}
+        {view.briefLoading && view.brief?.status === 'ok' && <p role="status">{copy.briefLoading}</p>}
+        <Button size="sm" variant="ghost" label={copy.refresh} isDisabled={view.briefLoading} onClick={() => { void view.refresh(); }} />
+      </div>
+    </details>
     {view.error && <div role="alert">{view.error}<Button size="sm" variant="ghost" label={copy.refresh} onClick={() => { void view.refresh(); }} /></div>}
     {inbox?.error && <div role="alert">{inbox.error}<Button size="sm" variant="ghost" label={copy.refresh} onClick={() => { void inbox.refresh(); }} /></div>}
     {!view.ready && <p role="status">{copy.loading}</p>}

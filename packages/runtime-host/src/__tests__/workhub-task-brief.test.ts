@@ -624,6 +624,14 @@ test('brief keeps only proven original user requirements, not rewrites, feedback
   assert.match(text, /2 条输入缺少可确认的用户原文来源或任务归属/);
   assert.match(text, /不是完整约束/);
   assert.match(text, /read\(taskId="task", view=history\)/);
+  for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+    const visible = formatWorkHubTaskBrief(brief, locale);
+    assert.doesNotMatch(
+      visible,
+      /MODEL_REWRITE|PREPARED_INPUT|HISTORICAL_BACKGROUND|OTHER_TASK_SECRET|UNPROVEN_BINDING/u,
+    );
+    assert.ok(visible.includes(JSON.stringify(first.originalUserText)));
+  }
 });
 
 test('worker status accepts only an unquoted final assistant block and falls back to an explicitly labelled 800-character excerpt', async () => {
@@ -692,6 +700,11 @@ test('brief requires successful task-owned write/result pairs and matching curre
   const text = formatWorkHubTaskBrief(brief);
   assert.doesNotMatch(text, /HIDDEN_PATH|FOREIGN_PATH/);
   assert.match(text, /失败，不能当作成功修改/);
+  for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+    const visible = formatWorkHubTaskBrief(brief, locale);
+    assert.doesNotMatch(visible, /HIDDEN_PATH|FOREIGN_PATH/u);
+    assert.match(visible, /src\/failed\.ts|src\/unknown\.ts/u);
+  }
   f.setTodo({ items: [{ content: '来自别的任务', status: 'completed' }] });
   const changed = await f.read();
   assert.equal(changed.todo, undefined);
@@ -781,9 +794,71 @@ test('brief is deterministic, bounded for Unicode and escaped input, and reports
   assert.match(text, /input-39/);
   assert.match(text, /原文已截断/);
   assert.match(text, /已省略 \d+ 条用户要求、\d+ 条进展\/待办\/文件记录/);
+  for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+    const visible = formatWorkHubTaskBrief(brief, locale);
+    assert.equal(formatWorkHubTaskBrief(brief, locale), visible);
+    assert.ok(Buffer.byteLength(visible) <= WORKHUB_TASK_BRIEF_MAX_BYTES);
+    assert.doesNotMatch(visible, /input-39|read\(taskId=|session-todo/u);
+    assert.match(
+      visible,
+      /39:/u,
+      'the newest original user wording remains despite hidden metadata IDs',
+    );
+    assert.doesNotMatch(visible, /\ud83d(?!\ude00)/u);
+  }
   assert.doesNotMatch(text, /\ud83d(?!\ude00)/u);
   assert.match(WORKHUB_WORKER_STATUS_INSTRUCTION, /Pure JSON, a single line/);
   assert.match(WORKHUB_WORKER_STATUS_INSTRUCTION, /Never make a separate report/);
+});
+
+test('task-view brief localizes source limits without stripping literal IDs or HTML from original user text', () => {
+  const wording =
+    'Keep the literal Session ID user-written-id and <script>alert(1)</script> unchanged';
+  const brief: WorkHubTaskBrief = {
+    taskId: 'private-task-id',
+    sourceActionId: 'private-source-id',
+    goal: { text: wording, messageId: 'private-goal-id', actionId: 'private-source-id', at: 1 },
+    requirements: [
+      {
+        text: 'Only change validation',
+        messageId: 'private-input-id',
+        actionId: 'private-source-id',
+        at: 2,
+      },
+    ],
+    omittedRequirements: 3,
+    files: [],
+    limits: [
+      { kind: 'missing_execution', actionId: 'private-missing-id' },
+      { kind: 'unknown_inputs', count: 2 },
+    ],
+  };
+  for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+    const text = formatWorkHubTaskBrief(brief, locale);
+    assert.ok(
+      text.includes(JSON.stringify(wording)),
+      'presentation never regex-redacts user wording',
+    );
+    assert.doesNotMatch(
+      text,
+      /private-(?:task|source|goal|input|missing)-id|read\(taskId=|session-todo/u,
+    );
+    assert.match(text, /2/u);
+    assert.match(text, /3/u);
+    assert.match(
+      text,
+      locale === 'en'
+        ? /unknown|Source limitation|Omitted/u
+        : locale === 'zh-CN'
+          ? /未知|来源限制|已省略/u
+          : /未知|來源限制|已省略/u,
+    );
+  }
+  assert.match(
+    formatWorkHubTaskBrief(brief),
+    /private-missing-id/u,
+    'the existing model-facing provenance format is retained',
+  );
 });
 
 test('brief leaves legacy provenance and missing records explicit without a summary call or new state', async () => {

@@ -30,11 +30,13 @@ interface TaskViewCopy {
   dispatchedTasks: string; dispatchSummary: string; dispatchDetails: string; taskStatePending: string; executionEnded: string;
   source: string; feed: string; historical: string; historyLimit: string;
   segment: string; segmentPending: string;
+  briefTitle: string; briefReadonly: string; briefLoading: string; briefUnavailable: string;
   state: Record<WorkHubTaskAssignment['state'], string>;
   status: Record<TurnSnapshot['status'], string>;
 }
 export const workHubTaskViewCopy = {
   en: {
+    briefTitle: 'Task overview', briefReadonly: 'Read only', briefLoading: 'Refreshing the bounded overview from task records.', briefUnavailable: 'The overview is unavailable. Task history, input and original approvals remain available; refresh or read the history below.',
     title: 'Task execution', description: 'Continuous task history. Sending stays bound to the current task; execution ending is not verified completion.',
     segment: 'Segment {number}', segmentPending: 'Earlier segment',
     back: 'Back to WorkHub', follow: 'Follow latest execution', refresh: 'Refresh', loading: 'Refreshing task facts or waiting for the Host.',
@@ -51,6 +53,7 @@ export const workHubTaskViewCopy = {
     status: { created: 'Queued', admitted: 'Queued', running: 'Running', waiting_for_user: 'Needs your input', completed: 'Ended', failed: 'Failed / stopped', cancelled: 'Failed / stopped' },
   },
   'zh-CN': {
+    briefTitle: '任务概况', briefReadonly: '只读', briefLoading: '正在从任务记录刷新有界概况。', briefUnavailable: '概况暂不可用；任务历史、直接输入和原审批不受影响，可刷新或查阅下方历史。',
     title: '任务实时执行', description: '连续展示任务历史；输入只发给当前任务，执行结束不代表目标已达成。',
     segment: '第 {number} 段', segmentPending: '较早执行段',
     back: '返回 WorkHub', follow: '跟随最新执行', refresh: '刷新', loading: '任务事实正在刷新或暂不可用。',
@@ -67,6 +70,7 @@ export const workHubTaskViewCopy = {
     status: { created: '排队中', admitted: '排队中', running: '执行中', waiting_for_user: '待你处理', completed: '已结束', failed: '失败 / 已停止', cancelled: '失败 / 已停止' },
   },
   'zh-TW': {
+    briefTitle: '任務概況', briefReadonly: '唯讀', briefLoading: '正在從任務記錄更新有界概況。', briefUnavailable: '概況暫時無法取得；任務歷史、直接輸入與原審批不受影響，可重新整理或查閱下方歷史。',
     title: '任務即時執行', description: '連續顯示任務歷史；輸入只傳給目前任務，執行結束不代表目標已達成。',
     segment: '第 {number} 段', segmentPending: '較早執行段',
     back: '返回 WorkHub', follow: '跟隨最新執行', refresh: '重新整理', loading: '任務資訊正在更新或暫時無法取得。',

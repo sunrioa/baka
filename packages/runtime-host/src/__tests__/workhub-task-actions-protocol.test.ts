@@ -28,6 +28,7 @@ import {
 import {
   authorizeRuntimeHostOperation,
   createRuntimeHostConnectionAuthority,
+  LOCAL_OWNER_CONNECTION_AUTHORITY,
 } from '../server/connection-authority.js';
 
 const start = HOST_OPERATION_SPECS['workhub.tasks.start'];
@@ -125,6 +126,102 @@ test('remote task discovery preserves read grants without widening explicit gran
     assert.equal(operationAllowsRemoteOwner(command.operation), false, command.operation);
     assert.equal(authorizeRuntimeHostOperation(all, command), false, command.operation);
   }
+});
+
+test('task overview is local-owner-only without upgrading old remote credentials or changing ordinary task reads', () => {
+  const grants = Object.freeze([
+    'workhub.tasks.read',
+    'workhub.tasks.history',
+    'workhub.interactions.query',
+    'workhub.interactions.answer',
+  ] as const);
+  const remote = createRuntimeHostConnectionAuthority({
+    principalKind: 'remote_owner',
+    principalId: 'local_os_user',
+    credentialId: 'old-credential',
+    operationGrants: grants,
+    canPublishClientCapabilities: false,
+    canUseHostPaths: false,
+  });
+  const read: RequestFrame = {
+    requestId: 'read',
+    operation: 'workhub.tasks.read',
+    input: { workId: 'work' },
+  };
+  const overview: RequestFrame = {
+    ...read,
+    input: { workId: 'work', includeBrief: true, briefLocale: 'en' },
+  };
+  assert.equal(authorizeRuntimeHostOperation(remote, read), true);
+  assert.equal(
+    authorizeRuntimeHostOperation(remote, {
+      requestId: 'history',
+      operation: 'workhub.tasks.history',
+      input: { workId: 'work' },
+    }),
+    true,
+  );
+  assert.equal(
+    authorizeRuntimeHostOperation(remote, {
+      requestId: 'inbox',
+      operation: 'workhub.interactions.query',
+      input: {},
+    }),
+    true,
+  );
+  assert.equal(
+    authorizeRuntimeHostOperation(remote, {
+      requestId: 'answer',
+      operation: 'workhub.interactions.answer',
+      input: {
+        actionId: 'action',
+        interactionId: 'original-request',
+        expectedTurnId: 'turn',
+        expectedRunId: 'run',
+        answer: { kind: 'permission', decision: 'deny', rememberForTurn: false },
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    authorizeRuntimeHostOperation(remote, overview),
+    false,
+    'a principal string resembling the local user is not local-owner authentication',
+  );
+  assert.equal(
+    authorizeRuntimeHostOperation(
+      createRuntimeHostConnectionAuthority({
+        ...remote,
+        operationGrants: 'all',
+        canUseHostPaths: true,
+      }),
+      overview,
+    ),
+    false,
+  );
+  assert.equal(authorizeRuntimeHostOperation(LOCAL_OWNER_CONNECTION_AUTHORITY, overview), true);
+  assert.equal(
+    authorizeRuntimeHostOperation(
+      createRuntimeHostConnectionAuthority({
+        ...LOCAL_OWNER_CONNECTION_AUTHORITY,
+        operationGrants: ['workhub.tasks.history'],
+      }),
+      overview,
+    ),
+    false,
+    'local-owner authentication does not replace the original operation grant',
+  );
+  assert.deepEqual(grants, [
+    'workhub.tasks.read',
+    'workhub.tasks.history',
+    'workhub.interactions.query',
+    'workhub.interactions.answer',
+  ]);
+  assert.equal(
+    operationAllowsRemoteOwner('workhub.tasks.read'),
+    true,
+    'the operation allowlist itself is not changed',
+  );
 });
 
 test('task start requires explicit creation settings or an exact existing Session without overrides', () => {
