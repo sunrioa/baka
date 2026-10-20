@@ -3355,9 +3355,13 @@ for (const readMode of ['evidence', 'native-history'] as const)
         'committed',
       );
       let activeOwner = owner;
-      let composition = await createExecutionRuntimeHostComposition(
-        compositionContext(activeOwner),
-      );
+      const residencies = new HostResidencyRegistry();
+      const hostedRoots = () =>
+        residencies.snapshot().find(({ label }) => label === 'hosted-execution')?.count ?? 0;
+      let composition = await createExecutionRuntimeHostComposition({
+        ...compositionContext(activeOwner),
+        acquireResidency: (label, kind) => residencies.acquire(label, kind),
+      });
       const context: ConnectionContext = {
         hostEpoch: 'execution-composition-test',
         connectionId: 'fresh-client',
@@ -3440,6 +3444,7 @@ for (const readMode of ['evidence', 'native-history'] as const)
         assert.ok(a);
         await withTimeout(sourceCallEntered.promise, 10000, 'source model call entered');
         await wait(async () => requests.filter((request) => request.coordinator).length === 1);
+        assert.equal(hostedRoots(), 2, 'the held coordinator and source each own a live root');
         const beforeBlocked = (await stores.sessionStore.listHeaders()).map(({ id }) => id).sort();
         const beforeBlockedRequests = requests.length;
         const blocked = await continueTask('fresh-a', 'FRESH_CONTINUE', 'fresh');
@@ -3468,7 +3473,12 @@ for (const readMode of ['evidence', 'native-history'] as const)
           async () => (await inputReceipt('raw-source-correction')).delivery === 'delivered',
         );
         releaseSource.resolve();
-        await wait(() => done(a.targetSessionId, a.targetTurnId));
+        // A canonical terminal event precedes Host transition/resource cleanup.
+        // Wait for the worker's real residency release; the coordinator stays
+        // deliberately held open. Never retry the continuation command itself.
+        await wait(
+          async () => (await done(a.targetSessionId, a.targetTurnId)) && hostedRoots() === 1,
+        );
         const reused = await continueTask('reuse-a', 'REUSE_CHECK', 'reuse');
         assert.ok(reused.ok, JSON.stringify(reused));
         assert.equal(reused.result.container, 'reuse');
@@ -3477,7 +3487,10 @@ for (const readMode of ['evidence', 'native-history'] as const)
         await wait(async () => (await inputReceipt('reuse-a')).delivery === 'delivered');
         const reuse = await inputReceipt('reuse-a');
         assert.ok(reuse.execution);
-        await wait(() => done(a.targetSessionId, reuse.execution!.turnId));
+        await wait(
+          async () =>
+            (await done(a.targetSessionId, reuse.execution!.turnId)) && hostedRoots() === 1,
+        );
         await wait(async () => {
           if (
             !requests.some(
