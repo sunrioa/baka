@@ -30,11 +30,11 @@
 |---|---|---|---|
 | 1 | 删除 Jev / 预路由，兼容旧策略、凭据、准入与用量，修正工具描述 | 已实现，待人工审阅 | [PR #35](https://github.com/sunrioa/baka/pull/35)，未合并 |
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
-| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史与六工具的 ai-sdk 入口已接入，完整回归通过；真实模型验证部分完成，旧协议尚未退役 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)、[PR #53](https://github.com/sunrioa/baka/pull/53)；3i 最终完整 Host 2,538 通过 / 12 原有跳过 / 0 失败，真实 DS coding / 本轮纠正已验证，界面与自然追问仍待补验 |
-| 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 未开始 | — |
-| 5 | 有界任务说明、历史入口和可选状态块 | 未开始 | — |
-| 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 未开始 | — |
-| 7 | 逐阶段回归、真实 coding、长上下文与成本实测 | 持续建设 | 已记录阶段 1 / 2 样本，完整评测尚未完成 |
+| 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史与六工具的 ai-sdk 入口已接入，完整回归通过；真实模型验证部分完成，后续退役与实测见阶段 4–7 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)、[PR #53](https://github.com/sunrioa/baka/pull/53)；3i 最终完整 Host 2,538 通过 / 12 原有跳过 / 0 失败，真实 DS coding / 本轮纠正已验证，界面与自然追问仍待补验 |
+| 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 并行收敛分支已接入；旧半完成纠正的收尾尚待规则确认，组合恢复验证未完成 | 见下文 2026-10-20 并行收敛记录；未发布、未合并 |
+| 5 | 有界任务说明、历史入口和可选状态块 | 有界拼装、提交前一致性复核和原生 worker 可选状态块已接入；任务视图的只读概况未接入 | 编译与定向回归通过；实际换段及用量尚未复测 |
+| 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 任务搜索 / 标题 / 执行段、原交互与创建来源折叠已接入；审批分页与旧连接近期列表补修已核验，executor 新任务默认值的持久化范围待确认 | Native 模型 / 思考级别共用持久配置；新界面尚未做原实例 GUI 核验，不宣称 executor 桥接完成 |
+| 7 | 逐阶段回归、真实 coding、长上下文与成本实测 | 固定评测已有可执行计划和证据检查器；真实模型门槛尚未通过 | 离线检查器测试不计作模型路由、真实用量或成本对照 |
 
 ## 验证规则
 
@@ -52,7 +52,46 @@
 
 ## 当前实测状态
 
-已开始阶段 1 / 2 真实采样，统一使用现有 Command Code 连接的 `deepseek/deepseek-v4.1-flash`。当前样本不用于声称全部改造完成或费用下降。
+原实例仍运行下文已核验的阶段 3i 代码，使用现有 Command Code 连接的 `deepseek/deepseek-v4.1-flash`。新的并行收敛分支尚未替换原实例；旧实测不能算作新分支通过，也不能用于声称全部改造完成或费用下降。
+
+## 阶段 4–7 并行收敛记录（2026-10-20，未发布）
+
+集成分支为 `feat/workhub-adr-convergence`，并行基准为 `5c643a4de`。以下编译与定向回归对应运行时代码 `c2953cd52`，不是完整冻结套件或真实模型通过记录。
+
+### 已接入的收敛
+
+- 删除旧纠正 / 恢复 writer、候选快照与旧发现 RPC；Gate 只保留新建、接入和 fresh 的原生准入。普通续作与侧栏共用任务输入，fresh 直接调用任务续作命令，不再绕回旧 `coordination.actFromTurn`。原任务 stop 的归属、确认、精确执行绑定和 FIFO 仍保留。
+- 删除 B 的模型问题转发、D 的任务授权及 E / F 的新等待、问答、唤醒生产者；子任务交互归属改为独立只读证明。原问题、表单、沙箱和客户端能力审批仍由原交互 lifecycle 处理，不新增任务级授权。历史普通 `permission` schema 没有当前活 continuation，不能伪造成功答复。
+- 经用户明确批准，在原 E / F 终态记录中增加 `legacy_protocol_retirement` 来源。Host 先核对原始不可变归属；E 精确停止旧等待 Root 并确认资源释放，F 结清原问答。固定身份保证重复恢复不另写结算；不冒充活跃用户 / Agent、不新增表、恢复服务或模型调用。已提交的旧续作血缘继续可读，迟到答复不唤醒已删除协议。
+- 统一读取只保留有授权的纯读路径。executor 的已记录 user / assistant / tool 事件能由 Host 按任务血缘分页读取；这不等于 executor provider 有 Host 工具桥。其 fresh 在创建新段前明确拒绝，原生工具描述说明限制，不宣称端到端支持。
+- 任务说明由既有原始目标、用户纠正、可归属 todo、可确认文件工具结果与可选 worker 状态临时拼装，有界且标注省略 / 未知。先在准入锁外读取，再在原有锁内复核源任务、当前设置与记录水位；事实变化则明确冲突，不带旧说明提交，不新增重试循环。worker 状态块只注入有当前任务执行归属的原生请求上下文，严格单行 / JSON 输出仍优先。
+- 前端接入索引搜索 / 分页、独立任务标题、完整对话与执行段标记、原交互就地回答和创建来源折叠；预览不改变总对话派发主题。原生协调 / 新任务模型和思考级别使用已有持久配置，旧任务不被新默认值覆盖。
+- 合并协议变动统一使用 epoch 238。旧记录继续解码，未删除凭据或原用户配置。旧纯机制测试随功能删除，综合 FIFO、原审批、消费、结果和冷历史测试改走原生任务 API，不延长超时或放宽断言。
+
+### 已运行的集成校验与限制
+
+- 完整 `npm run build`、全仓 typecheck / lint / format、ASF headers、Desktop / UI knip 均通过；renderer architecture 为 165/165。
+- Host WorkHub 定向 276 项中 274 通过、2 项在取得测试数据根锁前因账户级注册目录 `EPERM` 失败，未进入业务断言。相关 Core / Storage / Eval 定向 75/75，Desktop WorkHub / 导航定向 188/188，完整 UI 739/739。不同批次和独立审查有重叠，不相加作为独立覆盖率。
+- E / F warm/cold 恢复、11 项崩溃恢复及冷历史 fresh 的真实 Host 组合夹具已经迁移并编译，但涉及标准账户级锁目录，尚未取得本轮所需授权完成业务执行。不能把编译、内存测试或旧代码的通过记作这些夹具通过；也不改锁算法、伪装系统用户或绕过目录限制。
+- 对原实例只读核对未发现未结清的 E / F 及纠正事务；这不代替带中间状态的升级夹具。原 App、数据与其他 Maka 实例未被本轮测试替换或停止。
+- 独立静态审查发现两项待补修：任务原审批会受已加载历史页限制；新 `find` 未进入原 remote-owner 只读 allowlist。补修后须重新记录测试，不以前述结果覆盖新代码。
+- `da3f9b35b` 已修审批分页：在既有刷新批次通过精确 action / delegation 查询任务归属，不依赖已加载历史；Host 已证明的子 Agent 请求保留自己的 Session / Turn / Run，不强制与父任务同 Session。旧响应、失联与切 Host 仍不能回答过期请求。补修后完整构建、typecheck / lint / format 与 41 项 Host 原交互 / 授权回归通过；Desktop 定向 196 项通过，另一个综合测试进程在受限沙箱中触发 Node 原生断言，业务测试尚未完成，不能算通过。
+- Desktop 原生 HTTP 综合夹具的业务数据使用临时目录。取得工具审批后，两项用例真实失败：夹具仍靠已删除的 `WorkHubResult` 识别协调请求，误把它算作 worker。`3215571bd` 仅改为识别实际协调 profile，两项原测试通过；FIFO、同轮 Steering、原审批、配置继承、fresh 和停止断言及超时均未放宽。
+- **测试权限说明更正**：最初误认为该夹具的 `managedDeploymentAuthority` 同时隔离数据根锁，因此工具审批说明错误写成“不访问标准账户 registry”。继续核对调用链才确认：它只隔离部署记录，`tryAcquireRuntimeHostLaunch` 仍调用账户级 `tryAcquireStateRootOwner`。上述两次运行实际接触标准锁 / 控制目录；业务数据库仍是临时目录，不是原实例数据库。已向用户更正、停止相关测试，未再尝试升级或改锁算法 / 系统身份。只读检查发现对应测试时段四个新控制目录及四个 0 字节、0600 普通锁文件，未擅自删除或清理账户目录。此前标准 registry 恢复测试的授权问题仍待用户回答；两项功能通过不能代替这项授权或其他恢复夹具。不能继续使用“所有锁都已隔离”的错误说明。
+- 完整 Core 928/928、原生 ToolRuntime 权限 / 工具边界 61/61、完整 UI 739/739 通过。Eval JS 初跑为 114 通过、23 失败、1 原有跳过，含沙箱本地监听与子进程产物失败；取得不涉及账户 registry 的限定工具审批后，模拟 HTTP 用量 5/5、既有生命周期 / 审计 28/28 通过。再以完整 JS 文件集合排除唯一涉及标准 registry 的 `maka-initialization` 文件，136 通过、1 原有跳过、0 失败；未运行的初始化和 Python 测试不能计入这组通过。
+- `12ab65ad3` 补齐旧远程凭据兼容：不自动加 grant；只有精确 `find/unauthorized` 且无搜索 / 目录 / 游标的请求，才能由同一 Host 的原 `query` 独立授权读取近期列表。Desktop 明确区分 `recent_only` 与索引结果，禁用未授权的搜索 / 分页，保留原始 action / delegation 并只展示同任务优先的首条记录；查询事实不变。补修后完整构建、Desktop 212 项纯回归、全仓类型 / lint / format、架构 165、knip 通过；独立增量静态复核未发现新增可操作问题。旧连接只保留原近期窗口，不据此宣称获得新索引权限。
+- 最后静态核对发现活动结果通知仍推荐已删除的 Result / Evidence 工具。`994fac76e` 只修通知 factory 与其现有历史投影：统一推荐 `WorkHubRead(taskId, view=result, sourceActionId=actionId)`；新通知从 canonical assignment 携带逻辑 taskId，旧通知缺失时不从 actionId 猜测。两项新增回归先失败，修复后相关结果 / 读取 / 历史 56/56，Core 928/928、完整构建及静态检查通过；原 6144 字节预算、通知来源、权限和调度不变，无新增持久 schema 或模型调用。独立增量静态复核未发现新增可操作问题，不替代真实模型或人类审阅。
+- 本轮 UI 将旧 TextArea 改为 TextInput 后，surface inventory 曾过期；使用仓库生成器只更新对应一行，路径清单不变，覆盖检查通过。没有混入 ResizeObserver 或其他 Maka 界面改动。
+- 最终运行时代码停在 `994fac76e`：完整构建、全仓 typecheck / lint / format、ASF headers 与 surface inventory 通过；再次运行 Core 928、Desktop 212（明确排除涉及 Host / registry 的 HTTP 综合文件）、UI 739、结果 / 统一读取 / 模型历史 56、原交互 / 授权 41 项均通过。不同批次有重叠，不汇总成独立覆盖数；完整 Host 恢复套件、当前实例 GUI / Command Code DeepSeek 路由和真实用量仍未完成。原 App 未换代码，也未因这些纯回归重启。
+
+### 尚未完成 / 待确认
+
+- 旧未派出的 replacement 意图会挡住原任务继续；现有 abort 原因语义是“旧执行已退役”，不能用来冒充“Host 仅取消旧协议意图”。其真实最小退役原因、原执行保持与新入口可继续规则已单独请求用户确认，尚未擅自实现。
+- executor 新任务默认值的持久化范围待确认；已有进程内 executor 入口未被擅自删除或声称已持久化。任务顶部只读概况尚未接入；不为补这一显示复制整段历史。
+- 固定评测已有 `plan` / `check`，T01、T02、T13、J07、J12 仍待新分支的真实 Desktop 模型循环执行。T01 的自然九天历史、J07 的空主对话、T13 的真实未投递追问各需满足原前置条件；不能改现场时间戳、清空原历史或伪造消费来计通过。只读采集须保留整个观察窗口的原始事实、意外动作与所有请求，不能仅按预期任务标题筛选。
+- 当前没有新分支的真实供应商用量、接近有效模型窗口时的 AI 自主 reuse / fresh 或复用 / 压缩 / 换窗等价成本对照。没有为本轮改模型窗口、主动压缩目标、权限或并发。
+- 历史调用回放目前只把旧 coordinator `tasks` 标为退役事实；旧 Result / Evidence / Inspect 的调用示例仍可能在历史中出现。这不是重新发布工具或新动作授权，但属于待真实模型门槛确认的路由质量风险。暂不为静态风险新增 projection v6、数据库迁移或通用修复层；活动通知推荐已单独修正。
+- 本分支未推送、未创建额外叠加 PR、未合并；所有旧 draft PR 保持未合并，GitHub Actions 保持停用。独立 AI 静态审查不能替代仓库要求的独立人类最终审阅。
 
 ## 阶段 1 记录
 
