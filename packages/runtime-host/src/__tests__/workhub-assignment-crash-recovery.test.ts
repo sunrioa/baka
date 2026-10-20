@@ -45,11 +45,10 @@ import {
 } from '@maka/storage/root-authority';
 import { RuntimeHostOperationError, type RuntimeHostConnection } from '../client/index.js';
 import type {
-  WorkHubCoordinationActResult,
-  WorkHubCoordinationActFromTurnInput,
-  WorkHubCoordinationCandidatesResult,
+  WorkHubTaskFindResult,
+  WorkHubTaskStartInput,
+  WorkHubTaskStartResult,
 } from '../protocol/index.js';
-import type { WorkHubAdmittedAction } from '../server/workhub-coordination-action-gate.js';
 import { connectClient, waitForTerminalTurn } from './fixtures/execution-host-suite.js';
 import { removePosixEndpointDirectories } from './fixtures/endpoint-hygiene.js';
 import { workHubDesktopCapabilityOffers } from './fixtures/workhub-capabilities.js';
@@ -74,8 +73,15 @@ type Notice =
 const TIMEOUT = 15_000;
 const ATTACHMENT_TEXT = 'Durable requirements: resume exactly this submitted message.';
 const clientHosts = new WeakMap<RuntimeHostConnection, HostProcess>();
-type WorkHubTestAction = Omit<WorkHubAdmittedAction, 'create'> &
-  Pick<WorkHubCoordinationActFromTurnInput, 'create'>;
+type NativeTaskStart = {
+  readonly actionId: string;
+  readonly title: string;
+  readonly text: string;
+  readonly attachments?: AttachmentRef[];
+} & (
+  | { readonly sessionRef: string; readonly create?: never }
+  | { readonly sessionRef?: never; readonly create: NonNullable<WorkHubTaskStartInput['create']> }
+);
 
 for (const limit of [1, 3])
   test(`WorkHub concurrency ${limit} recovers same-workspace queued roots after process death without replaying a dispatched root`, {
@@ -114,14 +120,12 @@ for (const limit of [1, 3])
           workspace: { kind: 'host_path', path: root },
           modelTarget: { kind: 'default' },
         });
-        const candidates = await client.request('workhub.coordination.candidates', {});
-        const candidate = candidates.candidates.find((item) => item.sessionId === sessionId);
-        assert.ok(candidate);
-        const result = await actWorkHub(client, {
+        await assertDiscoverable(client, 'session', sessionId, sessionId);
+        const result = await startTask(client, {
           actionId: `pool-action-${index}`,
-          userText: FAKE_HOLD_OPEN_PROMPT,
-          candidateSetId: candidates.candidateSetId,
-          proposal: { disposition: 'delegate_existing', candidateRef: candidate.candidateRef },
+          title: sessionId,
+          text: FAKE_HOLD_OPEN_PROMPT,
+          sessionRef: sessionId,
         });
         assert.equal(result.disposition, 'delegate_existing');
         if (result.disposition !== 'delegate_existing') throw new Error('Missing delegation');
@@ -194,11 +198,23 @@ for (const limit of [1, 3])
         sessionId: 'pool-target-1',
         turnId: turns[1]!,
       });
-      await restored.request('turn.stop', {
-        sessionId: running.sessionId,
-        turnId: running.turnId,
-        runId: running.runId,
-      });
+      const stopped = await withNativeTaskTurn(
+        restored,
+        { text: 'Stop the first recovered task so the next queued task can run' },
+        (turnId) =>
+          restored.request('workhub.tasks.stop', {
+            turnId,
+            actionId: 'stop-recovered-task',
+            taskIds: ['pool-action-1'],
+          }),
+      );
+      assert.equal(stopped.kind, 'result');
+      if (stopped.kind !== 'result') throw new Error('Task stop was not applied');
+      assert.equal(stopped.targets.length, 1);
+      assert.equal(stopped.targets[0]!.workId, 'pool-action-1');
+      assert.equal(stopped.targets[0]!.targetSessionId, running.sessionId);
+      assert.equal(stopped.targets[0]!.targetTurnId, running.turnId);
+      assert.equal(stopped.targets[0]!.outcome, 'stop_delivered');
       await second.wait('dispatch', (notice) => notice.sessionId === 'pool-target-2');
       assert.deepEqual(
         second.notices
@@ -243,15 +259,10 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         const client = await connectFixtureClient(root, first);
         clients.push(client);
         await client.request('workhub.coordination.resolve', {});
-        const action: WorkHubTestAction = {
-          actionId: 'durable-delegation',
-          userText:
-            disposition === 'create_new'
-              ? 'Create a new task to review the durable requirements'
-              : 'Review the durable requirements',
-          proposal: { disposition: 'create_new', title: 'Requirements' },
-          create: { workspace: { kind: 'isolated' } },
-        };
+        const text =
+          disposition === 'create_new'
+            ? 'Create a new task to review the durable requirements'
+            : 'Review the durable requirements';
         if (disposition === 'delegate_existing') {
           await client.request('session.create', {
             sessionId: 'existing-target',
@@ -267,21 +278,21 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
             });
             await first.wait('dispatch');
           }
-          const candidates = await client.request('workhub.coordination.candidates', {});
-          const target = candidates.candidates.find((c) => c.sessionId === 'existing-target');
-          assert.ok(target);
-          Object.assign(action, {
-            proposal: { disposition, candidateRef: target.candidateRef },
-            candidateSetId: candidates.candidateSetId,
-            create: undefined,
-          });
+          await assertDiscoverable(client, 'session', 'existing-target', 'Requirements');
         }
-        if (withAttachment)
-          Object.assign(action, { attachments: [await uploadAttachment(client)] });
+        const action: NativeTaskStart = {
+          actionId: 'durable-delegation',
+          title: 'Requirements',
+          text,
+          ...(disposition === 'create_new'
+            ? { create: { workspace: { kind: 'isolated' } } as const }
+            : { sessionRef: 'existing-target' }),
+          ...(withAttachment ? { attachments: [await uploadAttachment(client)] } : {}),
+        };
 
         // Attach both fulfillment and rejection handlers immediately: the
         // original caller loses its response when we kill the owner.
-        const request = actWorkHub(client, action).then(() => {
+        const request = startTask(client, action).then(() => {
           throw new Error('The trapped assignment unexpectedly returned to its caller');
         });
         const committed = await Promise.race([first.wait('assignment_committed'), request]);
@@ -348,7 +359,7 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
         assert.equal(dispatch.sessionId, assignment.targetSessionId);
         if (busy) assert.notEqual(dispatch.turnId, assignment.targetTurnId);
         else assert.equal(dispatch.turnId, assignment.targetTurnId);
-        assert.equal(dispatch.text, action.userText);
+        assert.equal(dispatch.text, action.text);
         const terminal = await waitForTerminalTurn(
           connection,
           assignment.targetSessionId,
@@ -370,32 +381,40 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
           if (payload.kind !== 'text') throw new Error('Expected text attachment');
           assert.deepEqual(payload.preview, { ok: true, text: ATTACHMENT_TEXT });
         }
-        const candidates = await connection.request('workhub.coordination.candidates', {});
-        assert.equal(
-          candidates.candidates.find((c) => c.sessionId === assignment.targetSessionId)
-            ?.latestDelegationActionId,
-          action.actionId,
+        // Process recovery preserves accepted work, not a new model's authority
+        // to reuse an old command identity. Reconcile from native read APIs.
+        const detail = await connection.request('workhub.tasks.read', {
+          workId: action.actionId,
+        });
+        assert.equal(detail.task.workId, action.actionId);
+        assert.equal(detail.task.actionId, action.actionId);
+        assert.equal(detail.task.delegationId, assignment.delegationId);
+        assert.equal(detail.task.targetSessionId, assignment.targetSessionId);
+        assert.equal(detail.task.targetMessageId, assignment.targetMessageId);
+        assert.equal(detail.task.execution?.turnId, dispatch.turnId);
+        const ownership = await connection.request('turn.message.execution.query', {
+          sessionId: assignment.targetSessionId,
+          messageIds: [assignment.targetMessageId],
+        });
+        assert.deepEqual(ownership.resolutions, [
+          {
+            messageId: assignment.targetMessageId,
+            state: 'owned',
+            turnId: dispatch.turnId,
+            runId: terminal.runId,
+          },
+        ]);
+        await assertDiscoverable(connection, 'task', action.actionId, action.title);
+        assert.deepEqual(
+          await connection.request('workhub.tasks.read', { workId: action.actionId }),
+          detail,
         );
-
-        // Recovery and a client retry converge on the SAME durable linkage.
-        // No stale candidate reference needs to be re-authorized for replay.
-        const replay = await actWorkHub(connection, action);
-        assert.equal(replay.disposition, disposition);
-        assert.ok('targetSessionId' in replay);
-        assert.equal(replay.targetSessionId, assignment.targetSessionId);
-        assert.ok('targetTurnId' in replay);
-        assert.equal(replay.targetTurnId, dispatch.turnId);
-        assert.ok('targetMessageId' in replay);
-        assert.equal(replay.targetMessageId, assignment.targetMessageId);
-        assert.deepEqual(await actWorkHub(connection, action), replay);
-        await assert.rejects(
-          actWorkHub(connection, {
-            ...action,
-            userText: 'A different task',
-          }),
-          (error: unknown) =>
-            error instanceof RuntimeHostOperationError && error.code === 'operation_conflict',
-        );
+        for (const retry of [action, { ...action, text: 'A different task' }])
+          await assert.rejects(
+            startTask(connection, retry),
+            (error: unknown) =>
+              error instanceof RuntimeHostOperationError && error.code === 'operation_conflict',
+          );
         await connection.close();
         await recovered.stop();
         assert.equal(recovered.notices.filter((n) => n.type === 'dispatch').length, 1);
@@ -456,7 +475,7 @@ for (const scenario of ['create_new', 'delegate_existing', 'busy_existing'] as c
 }
 
 for (const failAssignment of [false, true]) {
-  test(`WorkHub reuses attachments across delegations and retries (assignment failure=${failAssignment})`, {
+  test(`WorkHub native start and continuation reuse attachments and same-source retries (assignment failure=${failAssignment})`, {
     timeout: 60_000,
   }, async () => {
     const base = await mkdtemp(join(tmpdir(), 'maka-workhub-attachment-retry-'));
@@ -482,41 +501,119 @@ for (const failAssignment of [false, true]) {
         modelTarget: { kind: 'default' },
       });
       const attachment = await uploadAttachment(client);
+      const connection = client;
+      const runningHost = host;
+      await assertDiscoverable(connection, 'session', sessionId, 'Requirements');
       const turnIds: string[] = [];
-      for (const actionId of ['first-delegation', 'second-delegation']) {
-        const candidates: WorkHubCoordinationCandidatesResult = await client.request(
-          'workhub.coordination.candidates',
-          {},
-        );
-        const target = candidates.candidates.find((c) => c.sessionId === sessionId);
-        assert.ok(target);
-        const action: WorkHubAdmittedAction = {
-          actionId,
-          userText: 'Review the durable requirements',
-          candidateSetId: candidates.candidateSetId,
-          proposal: { disposition: 'delegate_existing', candidateRef: target.candidateRef },
-          attachments: [attachment],
-        };
-        if (failAssignment && actionId === 'first-delegation') {
-          await assert.rejects(
-            actWorkHub(client, action),
-            (error: unknown) =>
-              error instanceof RuntimeHostOperationError && error.code === 'persistence_failed',
+      const sourceTurns: string[] = [];
+      const text = 'Review the durable requirements';
+      const first = await withNativeTaskTurn(
+        connection,
+        { text, attachments: [attachment] },
+        async (turnId) => {
+          sourceTurns.push(turnId);
+          const command = await nativeStartInput(connection, turnId, {
+            actionId: 'first-delegation',
+            title: 'Requirements',
+            text,
+            sessionRef: sessionId,
+          });
+          if (failAssignment) {
+            await assert.rejects(
+              connection.request('workhub.tasks.start', command),
+              (error: unknown) =>
+                error instanceof RuntimeHostOperationError && error.code === 'persistence_failed',
+            );
+            await runningHost.wait('assignment_failed');
+            assert.equal(runningHost.notices.filter((n) => n.type === 'dispatch').length, 0);
+          }
+          const assigned = await connection.request('workhub.tasks.start', command);
+          assert.equal(assigned.disposition, 'delegate_existing');
+          assert.equal(assigned.workId, command.actionId);
+          assert.equal(assigned.targetSessionId, sessionId);
+          assert.ok(assigned.targetTurnId);
+          turnIds.push(assigned.targetTurnId);
+          assert.equal(
+            (await waitForTerminalTurn(connection, sessionId, assigned.targetTurnId)).status,
+            'completed',
           );
-          await host.wait('assignment_failed');
-          assert.equal(host.notices.filter((n) => n.type === 'dispatch').length, 0);
-        }
-        const assigned: WorkHubCoordinationActResult = await actWorkHub(client, action);
-        assert.ok(assigned.disposition === 'delegate_existing');
-        assert.equal(assigned.targetSessionId, sessionId);
-        assert.ok(assigned.targetTurnId);
-        turnIds.push(assigned.targetTurnId);
-        assert.equal(
-          (await waitForTerminalTurn(client, sessionId, assigned.targetTurnId)).status,
-          'completed',
+          assert.deepEqual(await connection.request('workhub.tasks.start', command), assigned);
+          await assert.rejects(
+            connection.request('workhub.tasks.start', { ...command, text: 'Different input' }),
+            isOperationConflict,
+          );
+          return assigned;
+        },
+      );
+      assert.ok(first.workId);
+      const workId = first.workId;
+      const continued = await withNativeTaskTurn(
+        connection,
+        { text, attachments: [attachment] },
+        async (turnId) => {
+          sourceTurns.push(turnId);
+          const command = {
+            turnId,
+            actionId: 'second-delegation',
+            taskId: workId,
+            text,
+            container: 'reuse' as const,
+          };
+          const result = await connection.request('workhub.tasks.continue', command);
+          assert.equal(result.container, 'reuse');
+          if (result.container !== 'reuse') throw new Error('Task did not reuse its container');
+          assert.equal(result.input.workId, workId);
+          assert.equal(result.input.generationId, first.workId);
+          assert.equal(result.input.targetSessionId, sessionId);
+          assert.equal(result.input.mode, 'continuation');
+          const dispatch = await runningHost.wait(
+            'dispatch',
+            (notice) => notice.sessionId === sessionId && notice.turnId !== turnIds[0],
+          );
+          turnIds.push(dispatch.turnId);
+          assert.equal(
+            (await waitForTerminalTurn(connection, sessionId, dispatch.turnId)).status,
+            'completed',
+          );
+          const receipt = await connection.request('workhub.tasks.input.read', {
+            workId,
+            inputId: command.actionId,
+          });
+          assert.equal(receipt.targetMessageId, result.input.targetMessageId);
+          assert.equal(receipt.delivery, 'delivered');
+          assert.equal(receipt.execution?.turnId, dispatch.turnId);
+          // Delivery proof can advance after acceptance; retries must retain the
+          // exact accepted source and return its current immutable execution.
+          assert.deepEqual(await connection.request('workhub.tasks.continue', command), {
+            container: 'reuse',
+            input: receipt,
+          });
+          await assert.rejects(
+            connection.request('workhub.tasks.continue', { ...command, text: 'Different input' }),
+            isOperationConflict,
+          );
+          return receipt;
+        },
+      );
+      await withNativeTaskTurn(connection, { text, attachments: [attachment] }, async (turnId) => {
+        await assert.rejects(
+          connection.request('workhub.tasks.continue', {
+            turnId,
+            actionId: continued.inputId,
+            taskId: workId,
+            text,
+            container: 'reuse',
+          }),
+          isOperationConflict,
         );
-        assert.deepEqual(await actWorkHub(client, action), assigned);
-      }
+        assert.deepEqual(
+          await connection.request('workhub.tasks.input.read', {
+            workId,
+            inputId: continued.inputId,
+          }),
+          continued,
+        );
+      });
       assert.notEqual(turnIds[0], turnIds[1]);
       await client.close();
       await host.stop();
@@ -553,6 +650,21 @@ for (const failAssignment of [false, true]) {
           (m) => m.type === 'workhub_coordination' && m.kind === 'delegation_assigned',
         );
         assert.equal(assignments.length, 2);
+        assert.ok(assignments.every((assignment) => assignment.work?.id === workId));
+        const input = await execution.sessionStore.readWorkHubTaskInput(continued.inputId);
+        assert.ok(input);
+        assert.equal(input.workId, workId);
+        assert.equal(input.generationId, continued.generationId);
+        assert.equal(input.turnId, sourceTurns[0]);
+        assert.equal(assignments[1]!.coordinationTurnId, sourceTurns[1]);
+        const origin = await execution.agentRunStore.readRootTurnAdmission(
+          WORKHUB_COORDINATION_SESSION_ID,
+          sourceTurns[1]!,
+        );
+        assert.ok(origin);
+        assert.equal(input.sourceMessageId, origin.userMessageId);
+        assert.equal(input.originalUserText, text);
+        assert.equal(input.inputOrigin, 'user');
         assert.equal(
           (await execution.runtimeEventStore.listSessionInvocations(sessionId)).length,
           2,
@@ -622,39 +734,49 @@ test('real Host uses the independent Memory provider for messages, history and W
       await subscription.close();
     }
     await client.request('workhub.coordination.resolve', {});
-    const candidates = await client.request('workhub.coordination.candidates', {});
-    const target = candidates.candidates.find((c) => c.sessionId === 'memory-task');
-    assert.ok(target);
-    const action: WorkHubAdmittedAction = {
-      actionId: 'memory-delegation',
-      userText: 'Continue payment work',
-      candidateSetId: candidates.candidateSetId,
-      proposal: { disposition: 'delegate_existing', candidateRef: target.candidateRef },
-    };
-    const assigned = await actWorkHub(client, action);
-    assert.equal(assigned.disposition, 'delegate_existing');
-    if (assigned.disposition !== 'delegate_existing') throw new Error('Delegation not admitted');
-    assert.ok(assigned.targetTurnId);
-    assert.equal(
-      (await waitForTerminalTurn(client, assigned.targetSessionId, assigned.targetTurnId)).status,
-      'completed',
+    const connection = client;
+    // Discovery is an optional storage projection. Memory must fail explicitly
+    // instead of consulting SQLite for candidate/task data.
+    await assert.rejects(
+      connection.request('workhub.tasks.find', { query: 'Memory task' }),
+      (error: unknown) =>
+        error instanceof RuntimeHostOperationError && error.code === 'operation_unavailable',
     );
-    assert.deepEqual(await actWorkHub(client, action), assigned);
-    const create: WorkHubAdmittedAction = {
-      actionId: 'memory-create',
-      userText: 'Create a new task to inspect the transaction contract',
-      proposal: { disposition: 'create_new', title: 'Transaction contract' },
-      create: { workspace: { kind: 'host_path', path: root } },
-    };
-    const created = await actWorkHub(client, create);
-    assert.equal(created.disposition, 'create_new');
-    if (created.disposition !== 'create_new') throw new Error('New delegation not admitted');
-    assert.ok(created.targetTurnId);
-    assert.equal(
-      (await waitForTerminalTurn(client, created.targetSessionId, created.targetTurnId)).status,
-      'completed',
-    );
-    assert.deepEqual(await actWorkHub(client, create), created);
+    for (const action of [
+      {
+        actionId: 'memory-delegation',
+        title: 'Memory payment task',
+        text: 'Continue payment work',
+        sessionRef: 'memory-task',
+      },
+      {
+        actionId: 'memory-create',
+        title: 'Transaction contract',
+        text: 'Create a new task to inspect the transaction contract',
+        create: { workspace: { kind: 'host_path', path: root } },
+      },
+    ] satisfies NativeTaskStart[]) {
+      await withNativeTaskTurn(connection, action, async (turnId) => {
+        const command = await nativeStartInput(connection, turnId, action);
+        const assigned = await connection.request('workhub.tasks.start', command);
+        assert.equal(assigned.disposition, action.sessionRef ? 'delegate_existing' : 'create_new');
+        assert.equal(assigned.workId, action.actionId);
+        assert.ok(assigned.targetTurnId);
+        assert.equal(
+          (await waitForTerminalTurn(connection, assigned.targetSessionId, assigned.targetTurnId))
+            .status,
+          'completed',
+        );
+        assert.deepEqual(await connection.request('workhub.tasks.start', command), assigned);
+        const detail = await connection.request('workhub.tasks.read', {
+          workId: action.actionId,
+        });
+        assert.equal(detail.task.workId, action.actionId);
+        assert.equal(detail.task.targetSessionId, assigned.targetSessionId);
+        assert.equal(detail.task.targetMessageId, assigned.targetMessageId);
+        assert.equal(detail.task.execution?.turnId, assigned.targetTurnId);
+      });
+    }
     await client.close();
     await host.stop();
     assert.equal(host.notices.filter((n) => n.type === 'dispatch').length, 3);
@@ -702,27 +824,25 @@ async function connectFixtureClient(
   }
 }
 
-// Each proposal is authorized by an actual admitted coordination Turn. Only
-// model output is deterministic: the primary fake model stays open, without
-// a pre-routing model or injected decision. Client capability binding, Host
-// admission and action validation remain production code, including on replay.
-async function actWorkHub(
+// Each command belongs to an actual admitted coordination Turn. Multiple
+// retries intentionally share that same source, unlike independent user turns.
+// The fake primary model only stays open; all authority, capability binding,
+// admission and execution ownership remain production code.
+async function withNativeTaskTurn<T>(
   client: RuntimeHostConnection,
-  input: WorkHubTestAction,
-): Promise<WorkHubCoordinationActResult> {
-  const { userText, attachments, ...action } = input;
+  input: { readonly text: string; readonly attachments?: AttachmentRef[] },
+  run: (turnId: string) => Promise<T>,
+): Promise<T> {
   const turnId = randomUUID();
-  const host = clientHosts.get(client);
-  assert.ok(host);
-  // This fixture holds the fake model open. A completed delegated target can
-  // immediately wake a result Turn, which would otherwise occupy WorkHub while
-  // this test submits its next independent coordination request.
+  assert.ok(clientHosts.get(client));
+  // A completed target may wake a held automatic feedback Turn before the next
+  // independent request. End only those fixture-held feedback executions.
   for (;;) {
     try {
       await client.request('workhub.coordination.answer', {
         turnId,
-        text: userText,
-        ...(attachments ? { attachments } : {}),
+        text: input.text,
+        ...(input.attachments ? { attachments: input.attachments } : {}),
       });
       break;
     } catch (error) {
@@ -735,18 +855,79 @@ async function actWorkHub(
     }
   }
   try {
-    return await client.request('workhub.coordination.actFromTurn', { ...action, turnId });
+    return await run(turnId);
   } finally {
-    const run = await client.request('turn.query', {
+    const active = await client.request('turn.query', {
       sessionId: WORKHUB_COORDINATION_SESSION_ID,
       turnId,
     });
     await client.request('turn.stop', {
       sessionId: WORKHUB_COORDINATION_SESSION_ID,
       turnId,
-      runId: run.runId,
+      runId: active.runId,
     });
   }
+}
+
+async function nativeStartInput(
+  client: RuntimeHostConnection,
+  turnId: string,
+  input: NativeTaskStart,
+): Promise<WorkHubTaskStartInput> {
+  const base = { turnId, actionId: input.actionId, title: input.title, text: input.text };
+  if (input.sessionRef) return { ...base, sessionRef: input.sessionRef };
+  const session = await client.request('workhub.coordination.query', {});
+  assert.ok(!('kind' in session));
+  if ('kind' in session) throw new Error('Shared WorkHub model is not representable');
+  assert.ok(session.llmConnectionId);
+  assert.ok(session.llmConnectionSlug);
+  assert.ok(session.model);
+  assert.ok(input.create);
+  const policy = await client.request('runtime.policy.query', {});
+  return {
+    ...base,
+    create: input.create,
+    newWorkDefaults: {
+      model: {
+        llmConnectionId: session.llmConnectionId,
+        llmConnectionSlug: session.llmConnectionSlug,
+        model: session.model,
+      },
+      ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}),
+      permissionMode: policy.policy.chatDefaults.workHubPermissionMode ?? 'ask',
+    },
+  };
+}
+
+async function startTask(
+  client: RuntimeHostConnection,
+  input: NativeTaskStart,
+): Promise<WorkHubTaskStartResult> {
+  return withNativeTaskTurn(client, input, async (turnId) =>
+    client.request('workhub.tasks.start', await nativeStartInput(client, turnId, input)),
+  );
+}
+
+async function assertDiscoverable(
+  client: RuntimeHostConnection,
+  kind: 'task' | 'session',
+  id: string,
+  query: string,
+): Promise<void> {
+  let cursor: string | null = null;
+  do {
+    const page: WorkHubTaskFindResult = await client.request('workhub.tasks.find', {
+      query,
+      ...(cursor ? { cursor } : {}),
+    });
+    if (page.items.some((item) => item.kind === kind && item.id === id && item.available)) return;
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.fail(`Native discovery did not find ${kind} ${id}`);
+}
+
+function isOperationConflict(error: unknown): boolean {
+  return error instanceof RuntimeHostOperationError && error.code === 'operation_conflict';
 }
 
 async function stopHeldResultTurn(client: RuntimeHostConnection): Promise<boolean> {
