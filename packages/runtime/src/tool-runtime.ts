@@ -1778,6 +1778,28 @@ export class ToolRuntime {
       }
     } catch (err) {
       if (err instanceof RuntimeCommitBoundaryError) throw err;
+      if (
+        err instanceof RuntimeInteractionClosedError &&
+        err.reason === 'turn_stopped' &&
+        durableAttempt
+      ) {
+        // Host closure can win before backend abort. Settle the dispatched
+        // operation on its captured attempt before propagating cancellation;
+        // returning a provider error here would let the model loop continue.
+        output.flush();
+        await this.writeSyntheticToolResult(
+          toolUseId,
+          turnId,
+          tool.name,
+          formatSyntheticToolErrorText(err),
+          queue,
+          undefined,
+          undefined,
+          undefined,
+          activityIdentity,
+          durableAttempt,
+        );
+      }
       if (isInteractionControlError(err)) throw err;
       output.flush();
       const sandboxError = serializeSandboxError(err);
