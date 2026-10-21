@@ -291,11 +291,12 @@ for (const bridge of ['pane', 'model'] as const) test(`Desktop ${bridge} task in
   }
 });
 
-test('Desktop native question interrupt settles the original durable attempt without draining the Host', { timeout: 30_000 }, async (t) => {
+for (const interactionKind of ['question', 'workhub selection'] as const) test(`Desktop native ${interactionKind} interrupt settles the original durable attempt without draining the Host`, { timeout: 30_000 }, async (t) => {
   const base = await mkdtemp(join(tmpdir(), 'maka-desktop-question-stop-'));
   const root = join(base, 'root');
   const questionTurnId = 'native-question-stop';
   const questionToolId = 'native-question-call';
+  const toolName = interactionKind === 'question' ? 'AskUserQuestion' : 'mcp__desktop_workhub__ask';
   const requests: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
   const questionRequests: typeof requests = [];
   const providerErrors: unknown[] = [];
@@ -313,7 +314,12 @@ test('Desktop native question interrupt settles the original durable attempt wit
       requests.push(input); // Count actual HTTP requests, never inferred model steps.
       const asking = input.messages.some(message =>
         message.role === 'user' && JSON.stringify(message.content).includes('NATIVE_QUESTION_STOP'));
-      if (asking) { questionRequests.push(input); assert.match(body, /AskUserQuestion/); }
+      if (asking) {
+        questionRequests.push(input);
+        const tools = (input as typeof input & { tools: Array<{ function: { name: string } }> }).tools;
+        assert.equal(tools.filter(tool => tool.function.name === toolName).length, 1,
+          'the actual native request publishes the interaction tool exactly once');
+      }
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       const chunk = (delta: unknown, finish: string | null) => `data: ${JSON.stringify({
         id: `question-stop-${requests.length}`, object: 'chat.completion.chunk', created: 1,
@@ -321,9 +327,9 @@ test('Desktop native question interrupt settles the original durable attempt wit
       })}\n\n`;
       response.write(chunk(asking ? { role: 'assistant', tool_calls: [{
         index: 0, id: questionToolId, type: 'function', function: {
-          name: 'AskUserQuestion', arguments: JSON.stringify({ questions: [{
+          name: toolName, arguments: JSON.stringify(interactionKind === 'question' ? { questions: [{
             question: 'Which implementation should continue?', options: [{ label: 'First' }, { label: 'Second' }],
-          }] }),
+          }] } : { question: 'Start independent work instead?', choices: [] }),
         },
       }] } : { role: 'assistant', content: 'The unrelated task is complete.' }, null));
       response.write(chunk({}, asking ? 'tool_calls' : 'stop'));
@@ -418,7 +424,9 @@ test('Desktop native question interrupt settles the original durable attempt wit
     });
     const unrelatedBefore = completedFacts();
     await client.replaceClientCapabilities({ offers: () => [
-      { offerId: 'desktop-workhub', label: 'Desktop WorkHub', version: '0', affinity: 'session', hostPathAccess: 'none', tools: ['control', 'find', 'start', 'continue', 'ask', 'stop'].map(name => ({ serverId: 'desktop_workhub', name, inputSchema: { type: 'object', additionalProperties: false } })) },
+      // Retain an older full offer in the question variant to cover same-epoch
+      // Desktop compatibility; selection must also work with no CC ask/stop.
+      { offerId: 'desktop-workhub', label: 'Desktop WorkHub', version: '0', affinity: 'session', hostPathAccess: 'none', tools: (interactionKind === 'question' ? ['control', 'find', 'start', 'continue', 'ask', 'stop'] : ['control', 'find', 'start', 'continue']).map(name => ({ serverId: 'desktop_workhub', name, inputSchema: { type: 'object', additionalProperties: false } })) },
       { offerId: 'desktop-browser', label: 'Browser', version: '0', affinity: 'session', hostPathAccess: 'none', tools: ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_wait', 'browser_extract'].map(name => ({ serverId: 'desktop_browser', name, inputSchema: { type: 'object', additionalProperties: false } })) },
     ], call: async () => assert.fail('The native question never calls a Desktop UI tool') });
     await client.resolveWorkHubCoordinationSession();
@@ -429,13 +437,22 @@ test('Desktop native question interrupt settles the original durable attempt wit
     await waitFor(async () => {
       const opened = await client!.openSession(WORKHUB_COORDINATION_SESSION_ID);
       try {
+        const formToolId = clientCapabilityEntityId(JSON.stringify(['workhub-task', questionTurnId, questionToolId]));
         question = opened.snapshot.interactions.pending.find(item =>
-          item.turnId === questionTurnId && item.request.kind === 'question' && item.request.toolUseId === questionToolId);
+          item.turnId === questionTurnId && (interactionKind === 'question'
+            ? item.request.kind === 'question' && item.request.toolUseId === questionToolId
+            : item.request.kind === 'form' && item.request.toolUseId === formToolId));
         return question !== undefined;
       } finally { await opened.close(); }
     }, { timeoutMs: 10_000, pollMs: 10, message: 'The actual provider tool call did not publish its native question' });
     assert.ok(question);
-    assert.equal(question.request.kind, 'question');
+    assert.equal(question.request.kind, interactionKind === 'question' ? 'question' : 'form');
+    if (question.request.kind === 'form') {
+      const target = question.request.fields.find(field => field.name === 'target');
+      assert.equal(target?.kind, 'single_select');
+      if (target?.kind !== 'single_select') assert.fail('No original task selection field');
+      assert.deepEqual(target.options.map(option => option.value), ['new_task']);
+    }
     const operation = database.prepare(`SELECT operation_id, invocation_id, run_id, turn_id, tool_name,
       current_state, call_event_id, dispatch_event_id, result_event_id FROM tool_operations
       WHERE provider_tool_call_id = ? AND turn_id = ?`).all(questionToolId, questionTurnId) as unknown as Array<{
@@ -444,7 +461,7 @@ test('Desktop native question interrupt settles the original durable attempt wit
     }>;
     assert.equal(operation.length, 1);
     const original = operation[0]!;
-    assert.equal(original.tool_name, 'AskUserQuestion');
+    assert.equal(original.tool_name, toolName);
     assert.equal(original.current_state, 'prepared');
     assert.ok(original.dispatch_event_id);
     assert.equal(original.result_event_id, null);
