@@ -236,12 +236,40 @@ export function checkWorkHubCapture(
     check(text(env.pricingSource).trim(), 'missing_pricing_source', 'environment.pricingSource');
   const bindings = record(c.bindings);
   const ids: unknown[] = [];
+  const selectionCandidates: {
+    kind: 'task' | 'session';
+    id: string;
+    generationId?: string;
+  }[] = [];
   for (const name of spec.bindings) {
     const b = record(bindings[name]);
-    for (const key of ['workId', 'generationId', 'sessionId'])
-      check(identity(b[key]), 'missing_private_binding', `bindings.${name}.${key}`);
+    if (spec.id === 'J07' && b.kind === 'session') {
+      check(identity(b.sessionId), 'missing_private_binding', `bindings.${name}.sessionId`);
+      check(
+        !['work', 'workId', 'generationId', 'actionId'].some((key) => Object.hasOwn(b, key)),
+        'session_binding_has_work_identity',
+        `bindings.${name}`,
+      );
+      selectionCandidates.push({ kind: 'session', id: text(b.sessionId) });
+      ids.push(JSON.stringify(['session', b.sessionId]));
+    } else {
+      if (spec.id === 'J07')
+        check(
+          b.kind === undefined || b.kind === 'task',
+          'invalid_selection_binding_kind',
+          `bindings.${name}.kind`,
+        );
+      for (const key of ['workId', 'generationId', 'sessionId'])
+        check(identity(b[key]), 'missing_private_binding', `bindings.${name}.${key}`);
+      if (spec.id === 'J07')
+        selectionCandidates.push({
+          kind: 'task',
+          id: text(b.workId),
+          generationId: text(b.generationId),
+        });
+      ids.push(spec.id === 'J07' ? JSON.stringify(['task', b.workId]) : b.workId);
+    }
     check(text(b.title).trim(), 'missing_private_title', `bindings.${name}.title`);
-    ids.push(b.workId);
   }
   check(new Set(ids).size === ids.length, 'duplicate_task_bindings', 'bindings');
 
@@ -406,6 +434,52 @@ export function checkWorkHubCapture(
       check(
         options.some((option) => text(option.value) !== 'new_task'),
         'task_choices_missing',
+        `${at}.interaction`,
+      );
+      const choiceKey = (choice: RecordValue) => JSON.stringify([choice.kind, choice.id]);
+      const expectedChoices = new Set(selectionCandidates.map(choiceKey));
+      const sameChoices = (choices: RecordValue[]) =>
+        choices.length === selectionCandidates.length &&
+        new Set(choices.map(choiceKey)).size === choices.length &&
+        choices.every((choice) => expectedChoices.has(choiceKey(choice)));
+      check(
+        sameChoices(list(record(record(calls[0]?.request).input).choices).map(record)),
+        'ask_candidates_mismatch',
+        `${at}.toolCall`,
+      );
+      const fields = list(request.fields)
+        .map(record)
+        .filter((field) => field.name === 'target');
+      const targetOptions = list(fields[0]?.options).map(record);
+      const offered = targetOptions
+        .filter((option) => option.value !== 'new_task')
+        .map((option) => {
+          let tuple: unknown;
+          try {
+            tuple = JSON.parse(text(option.value));
+          } catch {
+            return {};
+          }
+          if (!Array.isArray(tuple) || tuple.length !== 3) return {};
+          const [kind, id, basis] = tuple;
+          const candidate = selectionCandidates.find(
+            (item) => item.kind === kind && item.id === id,
+          );
+          if (
+            !candidate ||
+            (kind === 'session'
+              ? !/^sha256:[a-f0-9]{64}$/u.test(text(basis))
+              : basis !== candidate.generationId)
+          )
+            return {};
+          return { kind, id };
+        });
+      check(
+        fields.length === 1 &&
+          fields[0].kind === 'single_select' &&
+          targetOptions.filter((option) => option.value === 'new_task').length === 1 &&
+          sameChoices(offered),
+        'native_selection_candidates_mismatch',
         `${at}.interaction`,
       );
       p.admission = 'not_applicable';

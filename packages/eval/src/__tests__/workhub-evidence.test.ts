@@ -44,7 +44,13 @@ interface Fixture {
   environment: Obj;
   bindings: Record<
     string,
-    { workId: string; generationId: string; sessionId: string; title: string }
+    {
+      kind?: 'task' | 'session';
+      workId?: string;
+      generationId?: string;
+      sessionId: string;
+      title: string;
+    }
   >;
   setup: Obj;
   factsBefore: Obj[];
@@ -189,11 +195,9 @@ function fixture(caseId: string): Fixture {
           kind: 'form',
           fields: [
             {
+              kind: 'single_select',
               name: 'target',
-              options: [
-                { value: 'task_a', label: '候选一' },
-                { value: 'new_task', label: '新建任务' },
-              ],
+              options: [],
             },
           ],
         },
@@ -352,6 +356,53 @@ function fixture(caseId: string): Fixture {
       ];
     }
   }
+  if (caseId === 'J07') setSelection(f);
+  return f;
+}
+
+/** Native ask shapes in synthetic OFFLINE inputs, not model dispatch or invented Work IDs. */
+function setSelection(f: Fixture): void {
+  const candidates = Object.values(f.bindings);
+  const choices = candidates.map((binding) => ({
+    kind: binding.kind ?? 'task',
+    id: binding.kind === 'session' ? binding.sessionId : binding.workId,
+  }));
+  ((f.toolCalls[0].request as Obj).input as Obj).choices = choices;
+  ((f.steps[0].interaction as Obj).request as { fields: { options: Obj[] }[] }).fields[0].options =
+    [
+      ...candidates.map((binding, index) => ({
+        label: binding.title,
+        value: JSON.stringify([
+          choices[index].kind,
+          choices[index].id,
+          binding.kind === 'session' ? `sha256:${'a'.repeat(64)}` : binding.generationId,
+        ]),
+      })),
+      { value: 'new_task', label: '新建任务' },
+    ];
+}
+
+function sessionSelectionFixture(): Fixture {
+  const f = fixture('J07');
+  f.bindings = Object.fromEntries(
+    Object.entries(f.bindings).map(([name, binding]) => [
+      name,
+      { kind: 'session' as const, sessionId: binding.sessionId, title: binding.title },
+    ]),
+  );
+  setSelection(f);
+  const call = f.toolCalls[0];
+  f.toolCalls = [
+    {
+      turnId: call.turnId,
+      content: {
+        kind: 'function_call',
+        id: call.toolCallId,
+        name: 'mcp__desktop_workhub__ask',
+        args: (call.request as Obj).input as Obj,
+      },
+    },
+  ];
   return f;
 }
 
@@ -515,6 +566,78 @@ describe('WorkHub evidence checker — OFFLINE synthetic fixtures, not real-mode
     issue(antecedent, 'no_antecedent_unproven');
   });
 
+  test('J07 accepts native Session candidates without Work or generation identities', () => {
+    const f = sessionSelectionFixture();
+    assert.deepEqual(Object.keys(f.bindings.a).sort(), ['kind', 'sessionId', 'title']);
+    const result = checkWorkHubCapture(f);
+    assert.deepEqual(result.issues, []);
+    assert.equal(result.verdict, 'pass');
+    assert.equal(result.realModelPass, false);
+    assert.equal(result.phases[0].settlement, 'waiting_for_user');
+    f.mode = 'desktop-model';
+    issue(f, 'unbound_evidence');
+    const mixed = fixture('J07');
+    mixed.bindings.a = { kind: 'session', sessionId: 'session_a', title: 'Manual Session' };
+    mixed.bindings.b.kind = 'task';
+    setSelection(mixed);
+    assert.deepEqual(checkWorkHubCapture(mixed).issues, []);
+  });
+
+  test('J07 rejects fabricated Work fields on Session bindings and duplicate Session candidates', () => {
+    for (const key of ['work', 'workId', 'generationId', 'actionId']) {
+      const f = sessionSelectionFixture();
+      (f.bindings.a as Obj)[key] = key === 'work' ? { id: 'fake_work' } : 'fake_identity';
+      issue(f, 'session_binding_has_work_identity');
+    }
+    const duplicate = sessionSelectionFixture();
+    duplicate.bindings.b.sessionId = duplicate.bindings.a.sessionId;
+    issue(duplicate, 'duplicate_task_bindings');
+    const otherCase = fixture('J12');
+    otherCase.bindings.a = { kind: 'session', sessionId: 'session_a', title: 'Manual Session' };
+    issue(otherCase, 'missing_private_binding');
+  });
+
+  test('J07 Session clarification rejects unexpected dispatch in tools or canonical facts', () => {
+    const call = sessionSelectionFixture();
+    call.toolCalls.push({
+      turnId: call.steps[0].trigger.turnId,
+      toolCallId: 'unexpected_start',
+      request: { kind: 'start', input: { sessionRef: call.bindings.a.sessionId } },
+    });
+    issue(call, 'unexpected_write_call_count');
+    const dispatched = sessionSelectionFixture();
+    dispatched.factsAfter.push({
+      id: 'unexpected_assignment',
+      kind: 'delegation_assigned',
+      actionId: 'unexpected_action',
+      targetSessionId: dispatched.bindings.a.sessionId,
+    });
+    issue(dispatched, 'unsolicited_or_duplicate_effect');
+  });
+
+  test('J07 ask choices and original native form must match the privately bound candidates', () => {
+    const wrongCall = sessionSelectionFixture();
+    (((wrongCall.toolCalls[0].content as Obj).args as Obj).choices as Obj[])[0].id =
+      'unoffered_session';
+    issue(wrongCall, 'ask_candidates_mismatch');
+    for (const options of [
+      [{ value: JSON.stringify(['session', 'unoffered_session', `sha256:${'a'.repeat(64)}`]) }],
+      [{ value: JSON.stringify(['session', 'session_a', 'fake_generation']) }],
+      [],
+    ]) {
+      const f = sessionSelectionFixture();
+      const field = ((f.steps[0].interaction as Obj).request as { fields: { options: Obj[] }[] })
+        .fields[0];
+      field.options.splice(0, 1, ...options);
+      issue(f, 'native_selection_candidates_mismatch');
+    }
+    const work = fixture('J07');
+    const field = ((work.steps[0].interaction as Obj).request as { fields: { options: Obj[] }[] })
+      .fields[0];
+    field.options[0].value = JSON.stringify(['task', 'work_a', 'unrelated_generation']);
+    issue(work, 'native_selection_candidates_mismatch');
+  });
+
   test('fixed input cannot be padded with IDs, full titles or forced tools', () => {
     const f = fixture('J12');
     f.steps[1].trigger.userText += ` ${f.bindings.a.workId} WorkHubContinue`;
@@ -618,6 +741,41 @@ describe('WorkHub capture CLI — OFFLINE file integrity and command tests', () 
     assert.equal(JSON.parse(out).status, 'pending_desktop_execution');
     assert.equal(await runWorkHubEvalCli(['plan', 'unknown'], io), 2);
     assert.match(err, /Unknown WorkHub case/u);
+  });
+
+  test('J07 Session selection evidence retains source hash and pointer verification', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'workhub-j07-checker-'));
+    try {
+      const f = sessionSelectionFixture();
+      const source = join(root, 'selection.json');
+      const manifest = join(root, 'capture.json');
+      await writeFile(source, JSON.stringify({ selection: f.steps[0].interaction }));
+      const sha256 = createHash('sha256')
+        .update(await readFile(source))
+        .digest('hex');
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          ...f,
+          steps: [
+            {
+              ...f.steps[0],
+              interaction: { $evidence: { file: 'selection.json', sha256, pointer: '/selection' } },
+            },
+          ],
+        }),
+      );
+      const loaded = await loadWorkHubCapture(manifest);
+      const interaction = (loaded.capture as Fixture).steps[0].interaction as object;
+      assert(loaded.verified.has(interaction));
+      const report = checkWorkHubCapture(loaded.capture, loaded);
+      assert.deepEqual(report.issues, []);
+      assert.equal(report.realModelPass, false);
+      await writeFile(source, '{}');
+      await assert.rejects(loadWorkHubCapture(manifest), /SHA-256 mismatch/u);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test('source hashes and pointers are verified; offline check exit codes distinguish pass/fail/invalid', async () => {

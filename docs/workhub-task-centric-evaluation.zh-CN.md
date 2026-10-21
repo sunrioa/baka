@@ -59,7 +59,7 @@ node packages/eval/dist/workhub-cli.js check /private/path/capture.json
 | `schemaVersion`, `mode`, `caseId` | `1`；`desktop-model` 或 `offline-checker-fixture`；`plan` 中的用例 ID |
 | `run` | 完整 40 位 `commit`、`profile: isolated`、毫秒 `startedAt`/`endedAt`、`completeObservation: true`、`history: none/natural/tagged-isolated-fixture`；夹具另带标签。这是运行者声明，不能冒充 Host 证明 |
 | `environment` | 引用当次有效配置观察：`modelId`、`connectionId`、`connectionSlug`、`executor`、`effectiveContextWindow`、`configuredInputLimit`、`compactionThreshold`、`pricingVerified`；数值未知或主动阈值未配置显式为 `null`。价格核实时补 `pricingSource`，代理连接不得套用上游保证 |
-| `bindings` | `plan.bindings` 每个槽位的 `workId`、初始 `generationId`/`sessionId`、`title`；来自真实创建/阶段记录，只用于私有断言，不注入用户输入。模型自主选 fresh 时，检查器沿当前来源派活的 `continuesActionId` 证明同任务、新 generation 与新 Session 后更新本次检查的段身份，不把路由用例强行固定为 reuse，也不改写初始绑定 |
+| `bindings` | `plan.bindings` 每个槽位的 `workId`、初始 `generationId`/`sessionId`、`title`；来自真实创建/阶段记录，只用于私有断言，不注入用户输入。仅 J07 也接受手动候选 `{kind: "session", sessionId, title}`，禁止补填 `work`/`workId`/`generationId`/`actionId`；已有 Work 绑定仍保留全部原字段，可标 `kind: "task"`。模型自主选 fresh 时，检查器沿当前来源派活的 `continuesActionId` 证明同任务、新 generation 与新 Session 后更新本次检查的段身份，不把路由用例强行固定为 reuse，也不改写初始绑定 |
 | `setup` | 引用实际布置观察。T01：`oldCreatedAt`（自然历史时）；T02：`previewWorkId`、`mainTopicWorkId`；J07：`coordinatorHistory: empty`、`antecedentWorkIds: []`；T13：`undeliveredFollowup` 的原 `messageId`、`workId`、`userText`、`consumption: null`、`coordinationStatus: cancelled`。应保留这些观察所依据的原始 UI/Host 记录，不把总结性字段当作独立的消费证明 |
 | `factsBefore`, `factsAfter` | 引用观察窗口前后的完整、相同范围的持久 WorkHub 事实数组，保留原生 `id`、`kind`、`work`/`workId`、目标与来源字段；至少覆盖所有派活与 `task_input`。原有事实必须保持，新增效果必须逐条归属于固定步骤。额外任务派发、重复效果或复活旧追问都失败 |
 | `retiredMutations` | 引用同一窗口新写入或变更的旧纠正事务、任务授权、证据等待、跨任务问答记录差异，原生记录逐条保留，预期为空数组；不能只导出正确目标分组或只检查新六工具而漏掉旧协议副作用。此字段缺失或出现旧协议写入均失败 |
@@ -74,7 +74,7 @@ node packages/eval/dist/workhub-cli.js check /private/path/capture.json
 - `admission`：原生持久 `delegation_assigned` 或 `task_input` 事实，包含绑定、来源、`targetMessageId`；输入事实需 `targetContentDigest`。单纯工具回执或“已受理”文案不满足。已结束任务的 continuation 会原子写入一条 `task_input` 和一条 `delegate_existing` 派活；检查器要求恰好一条相同消息/任务/阶段且 `continuesActionId` 指向输入原来源的伴随派活，把这两条事实算作同一次执行准入。输入事实的 `turnId` 保留原来源协调轮，当前触发由 `sourceMessageId` 及伴随派活的 `coordinationTurnId` 共同证明，不按字段名误认为另一次派发。
 - `queue`：有观察到队列时引用原生 `queue_update`，保留 `steeringEntries`/`followupEntries` 与消息身份；没有捕获时报告 `not_observed`。T03-queue 额外需要 `queueBefore`，补充前后消息身份与顺序相同，`cancellation` 为取消后的原生任务输入回执，`activeBefore`/`activeAfter` 为 A 相同执行的仍运行快照。被取消输入不能声称消费或完成。
 - `consumption`：原生 `{admission, sourceMessage}` Root 源消息证明，或 `{event}` 不可变 Steering 证明。执行身份、消息身份与已受理内容摘要必须一致。T03-direct 另需 `activeBefore` 及 `activeTool` 的原执行、`startedAt`/`completedAt`/`status`，证明输入发生在工具期间、消费在工具完成后且仍是同一 Turn/Run。队列记录消失或回执 `delivered` 本身不能代替此证明。
-- `terminal`：消费所属执行的原生已完成 `TurnSnapshot`，带 `terminalEventId`。自动反馈步骤也须有自己的协调终态，确保观察没有停在动作发生之前。J07 改用仍待回答的原生 `interaction` 快照，选项同时有候选与 `new_task`，且没有派活。
+- `terminal`：消费所属执行的原生已完成 `TurnSnapshot`，带 `terminalEventId`。自动反馈步骤也须有自己的协调终态，确保观察没有停在动作发生之前。J07 改用仍待回答的原生 `interaction` 快照，选项同时有候选与 `new_task`，且没有派活。其完整 `ask.input.choices` 与原生 `target` single-select 的候选须逐一对应私有绑定；保留原始选项值 `[kind,id,generation或workspace摘要]`，不把手动 Session 的 workspace 摘要当作 generation，也不从截断投影猜造。
 - T06-fresh 另需 `previousSegment` 旧段观察，以及 `historyReads`：新段实际 `read` 工具回调数组，保留 `{sessionId, turnId, runId, input: {taskId, view: history}, result}`，`result` 是原生 `status/history` 页。要求原请求、`recordSource: task_input` 的纠正、工具参数与结果均实际读到，记录的 `actionId` 必须属于本任务既有权威事实；无关任务内容、不可用或不支持不当作空成功。此项只检查实际读取与血缘，不据此宣称模型已遵守全部纠正；后者还需具体 coding 产物核验。
 
 ## 检查器的边界

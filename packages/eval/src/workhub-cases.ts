@@ -143,7 +143,7 @@ export const WORKHUB_EVAL_CASES: readonly WorkHubEvalCase[] = [
     id: 'J07',
     purpose: '没有先行词时询问任务选择，并提供新建任务。',
     setup: [
-      '准备至少两个候选任务 a、b；使用全新的协调对话，不能有可确认的任务先行词。原生选择保持未回答。',
+      '准备至少两个候选 a、b（已有 Work 或通过普通 Session UI 创建的手动 coding 对话）；使用全新的协调对话，不能有可确认的任务先行词。手动候选绑定 kind=session，不补造 Work/generation。原生选择保持未回答。',
     ],
     bindings: ['a', 'b'],
     steps: [
