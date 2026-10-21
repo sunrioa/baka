@@ -126,26 +126,43 @@ export function createWorkHubTaskHistoryReader(options: {
         const content = message.content;
         let body = JSON.stringify(content),
           archiveStatus: string | undefined;
-        if (content.kind === 'archived_tool_result') {
-          archiveStatus = content.status === 'not_loaded' ? 'unavailable' : content.status;
+        if (
+          content.kind === 'archived_tool_result' ||
+          (content.kind === 'terminal' &&
+            content.output.mode === 'pipes' &&
+            (content.output.stdoutTruncated || content.output.stderrTruncated))
+        ) {
+          // Transcript terminal tails are display projections, not the retained
+          // result. Resolve only this authorized source's canonical event; a
+          // copied recovery hint is neither a cross-Session address nor authority.
+          const runtimeEventId =
+            content.kind === 'archived_tool_result' ? content.runtimeEventId : message.id;
+          archiveStatus =
+            content.kind === 'archived_tool_result' && content.status !== 'not_loaded'
+              ? content.status
+              : 'unavailable';
           const evidence = options.archiveEvidence;
           if (evidence) {
             const loaded = await evidence.read({
               sessionId,
-              runtimeEventId: content.runtimeEventId,
+              runtimeEventId,
             });
             if (
               loaded.ok &&
+              loaded.event.id === runtimeEventId &&
               loaded.event.sessionId === sessionId &&
               loaded.event.turnId === message.turnId &&
+              loaded.event.modelVisibility !== 'hidden' &&
               loaded.event.content?.kind === 'function_response' &&
+              !loaded.event.content.providerExecuted &&
               loaded.event.content.id === message.toolUseId &&
-              loaded.event.content.name === content.toolName
+              (content.kind !== 'archived_tool_result' ||
+                loaded.event.content.name === content.toolName)
             ) {
-              const result = await createLedgerArchiveResourceReader(evidence)({
+              const result = await createLedgerArchiveResourceReader({ read: async () => loaded })({
                 storage: 'event',
                 sessionId,
-                runtimeEventId: content.runtimeEventId,
+                runtimeEventId,
                 maxBytes: TOOL_RESULT_ARCHIVE_EVIDENCE_MAX_BYTES,
               });
               if (result.ok) {

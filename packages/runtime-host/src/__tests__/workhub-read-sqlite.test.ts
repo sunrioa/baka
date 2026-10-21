@@ -26,11 +26,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createSessionStore } from '@maka/storage/session-store';
+import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
+import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import { openToolResultArchiveEvidenceReader } from '@maka/storage/tool-result-archive-evidence';
 import type { WorkHubDelegationAssignedMessage } from '@maka/core/session';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import { encodeDurableToolResultOutput } from '@maka/runtime/durable-tool-result-projection';
+import { createLedgerArchiveResourceReader } from '@maka/runtime/ledger-tool-result-archive-reader';
+import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
+import { shapeTerminalResult } from '@maka/runtime/shell-tools';
+import { seedInvocation } from '@maka/runtime/test-only/invocation-fixture';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { createSessionTranscriptReader } from '../server/session-transcript-reader.js';
 import { createWorkHubReadTool } from '../server/workhub-read-tool.js';
+import { createWorkHubTaskHistoryReader } from '../server/workhub-task-history-reader.js';
 
 const coordination = 'maka_workhub_coordination';
 const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
@@ -210,5 +220,205 @@ test('requirements page actual SQLite across unrelated records, Unicode and reop
     )
       throw new Error('Refusing cleanup outside the exact temporary test directory');
     await rm(root, { recursive: true });
+  }
+});
+
+test('WorkHubRead pages retained terminal bytes from the source SQLite Session without widening ordinary resource access', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'wh-read-sqlite-terminal-'));
+  const capability = await resolveStorageRoot({ path: join(base, 'root'), kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  assert.ok(owner);
+  let stores: Awaited<ReturnType<typeof openInteractiveExecutionStoresForWrite>> | undefined;
+  let evidence: Awaited<ReturnType<typeof openToolResultArchiveEvidenceReader>> | undefined;
+  try {
+    stores = await openInteractiveExecutionStoresForWrite(owner.lease);
+    for (const sessionId of [coordination, 'worker', 'new-worker']) {
+      await stores.sessionStore.createStableSession({
+        sessionId,
+        requestFingerprint: `sha256:${'a'.repeat(64)}`,
+        input: {
+          cwd: base,
+          model: 'test',
+          llmConnectionSlug: 'test',
+          permissionMode: 'ask',
+          ...(sessionId === coordination
+            ? { role: 'workhub_coordination', toolProfile: 'workhub-coordination-v2' }
+            : {}),
+        },
+      });
+    }
+    const original = source('task-a', 'Generate the retained terminal output');
+    const current: WorkHubDelegationAssignedMessage = {
+      ...source('fresh', 'Read the original output, without copying context'),
+      targetSessionId: 'new-worker',
+      work: { id: 'task-a', generationId: 'fresh', continuesActionId: 'task-a' },
+    };
+    await stores.sessionStore.appendMessages(coordination, [original, current]);
+    await seedInvocation(stores.runtimeEventStore, {
+      sessionId: 'worker',
+      runId: 'worker-run',
+      turnId: 'worker-turn',
+      openedAt: 1,
+    });
+    const terminal = shapeTerminalResult({
+      cwd: base,
+      command: 'synthetic output; never executed',
+      result: {
+        stdout: 'BEGIN\n' + '中文😀\"\\\n'.repeat(4000) + 'END\n',
+        stderr: 'ERROR_BEGIN\n' + 'error\n'.repeat(1000) + 'ERROR_END\n',
+        exitCode: 1,
+      },
+    });
+    const identity = {
+      sessionId: 'worker',
+      turnId: 'worker-turn',
+      runId: 'worker-run',
+      invocationId: 'worker-run',
+      ts: 2,
+      partial: false,
+    };
+    await stores.runtimeEventStore.appendRuntimeEvent('worker', 'worker-run', {
+      ...identity,
+      id: 'terminal-call-event',
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'function_call', id: 'terminal-call', name: 'Bash', args: {} },
+    });
+    await stores.runtimeEventStore.appendRuntimeEvent('worker', 'worker-run', {
+      ...identity,
+      id: 'retained-terminal',
+      role: 'tool',
+      author: 'tool',
+      content: {
+        kind: 'function_response',
+        id: 'terminal-call',
+        name: 'Bash',
+        result: terminal,
+        modelProjection: encodeDurableToolResultOutput(
+          { type: 'json', value: JSON.parse(JSON.stringify(terminal)) },
+          'worker',
+        ),
+      },
+    });
+    await stores.runtimeEventStore.appendRuntimeEvent('worker', 'worker-run', {
+      ...identity,
+      id: 'worker-completed',
+      ts: 3,
+      role: 'system',
+      author: 'system',
+      status: 'completed',
+    });
+    const reader = createSessionTranscriptReader({
+      stores,
+      canonicalPermissionOutcomes: { readPermissionOutcome: async () => undefined },
+    });
+    const projected = await reader.readDurableRecords('worker', {
+      direction: 'older',
+      maxMessages: 10,
+      maxStoredBytes: 256 * 1024,
+    });
+    assert.match(JSON.stringify(projected), /truncated\. Read/);
+    evidence = await openToolResultArchiveEvidenceReader(owner.lease);
+    const admission = new SessionAdmissionGate();
+    const history = createWorkHubTaskHistoryReader({
+      stores: stores.sessionStore,
+      reader,
+      admission,
+      archiveEvidence: evidence,
+      authorize: async (assignment, caller) =>
+        caller.sessionId === 'new-worker' && assignment.work?.id === 'task-a' ? current : undefined,
+      history: {
+        readAssignmentState: async () => 'owned',
+        readExecutions: async (actionId, delegationId) => ({
+          actionId,
+          delegationId,
+          targetSessionId: 'worker',
+          executions: [
+            {
+              sessionId: 'worker',
+              turnId: 'worker-turn',
+              runId: 'worker-run',
+              status: 'completed',
+              terminalEventId: 'worker-completed',
+            },
+          ],
+          nextCursor: null,
+        }),
+      },
+    });
+    const unexpected = async () => {
+      throw Error('Unexpected non-history read');
+    };
+    const tool = createWorkHubReadTool({
+      sessions: stores.sessionStore,
+      admission,
+      authorize: async () => current,
+      status: unexpected,
+      result: unexpected,
+      evidence: unexpected,
+      catalog: unexpected,
+      inspect: unexpected,
+      history: (input, caller) =>
+        history(
+          { operation: 'read', view: 'task_history', ...input, kinds: [...(input.kinds ?? [])] },
+          caller,
+        ),
+    });
+    const records: Array<{ messageId: string; text: string; textOffset: number }> = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = (await tool.impl(
+        {
+          taskId: 'task-a',
+          view: 'history',
+          kinds: ['tool_result'],
+          ...(cursor ? { cursor } : {}),
+        },
+        { ...ctx, sessionId: 'new-worker' },
+      )) as {
+        status: string;
+        history: { records: typeof records };
+        nextCursor: string | null;
+      };
+      assert.equal(page.status, 'ok');
+      assert.ok(Buffer.byteLength(JSON.stringify(page)) <= READ_PAGE_MAX_BYTES + 2000);
+      records.push(...page.history.records);
+      cursor = page.nextCursor ?? undefined;
+      assert.ok(++pages < 80, 'bounded pages must make progress');
+    } while (cursor);
+    assert.ok(pages > 1);
+    let offset = 0;
+    for (const record of records) {
+      assert.equal(record.messageId, 'retained-terminal');
+      assert.equal(record.textOffset, offset);
+      offset += record.text.length;
+    }
+    const recovered = JSON.parse(records.map((record) => record.text).join(''));
+    assert.deepEqual(recovered.output, terminal.output);
+    assert.deepEqual(
+      await createLedgerArchiveResourceReader(evidence)({
+        storage: 'event',
+        sessionId: 'new-worker',
+        runtimeEventId: 'retained-terminal',
+        maxBytes: 256 * 1024,
+      }),
+      { ok: false, reason: 'not_found' },
+      'ordinary resource addresses still do not grant cross-Session access',
+    );
+    for (const sessionId of ['worker', 'new-worker'])
+      assert.equal((await stores.sessionStore.readHeaderSnapshot(sessionId)).permissionMode, 'ask');
+  } finally {
+    evidence?.close();
+    await stores?.sessionStore.close?.();
+    await owner.close();
+    const stat = await lstat(base);
+    if (
+      !base.startsWith(join(tmpdir(), 'wh-read-sqlite-terminal-')) ||
+      !stat.isDirectory() ||
+      stat.isSymbolicLink()
+    )
+      throw Error('Refusing cleanup outside the exact temporary test directory');
+    await rm(base, { recursive: true });
   }
 });

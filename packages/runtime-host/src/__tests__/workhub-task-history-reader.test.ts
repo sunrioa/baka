@@ -30,9 +30,12 @@ import {
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { encodeDurableToolResultOutput } from '@maka/runtime/durable-tool-result-projection';
+import { projectTranscriptToolResult } from '@maka/runtime/runtime-event-read-model';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
 import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
+import { shapeTerminalResult } from '@maka/runtime/shell-tools';
 import { createWorkHubTaskHistoryReader } from '../server/workhub-task-history-reader.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
@@ -598,6 +601,142 @@ test('history recovers a matching ledger tool result but never follows a mismatc
   f.options.archiveEvidence = undefined;
   const missing = await collect(f, { kinds: ['tool_result'] });
   assert.equal(missing[0]!.archiveStatus, 'unavailable');
+});
+
+function terminalHistoryFixture(stdout: string, stderr = '') {
+  const f = fixture();
+  const retained = shapeTerminalResult({
+    cwd: '/old-task',
+    command: 'synthetic retained output',
+    result: { stdout, stderr, exitCode: 1 },
+  });
+  const event: RuntimeEvent = {
+    id: 'terminal-result',
+    sessionId: 'old',
+    turnId: 'turn-work',
+    runId: 'run-turn-work',
+    invocationId: 'invocation',
+    ts: 1,
+    partial: false,
+    role: 'tool',
+    author: 'tool',
+    content: {
+      kind: 'function_response',
+      id: 'terminal-call',
+      name: 'Bash',
+      result: retained,
+      modelProjection: encodeDurableToolResultOutput(
+        { type: 'json', value: JSON.parse(JSON.stringify(retained)) },
+        'old',
+      ),
+    },
+  };
+  f.rows.set('old', [
+    {
+      type: 'tool_result',
+      id: event.id,
+      turnId: event.turnId,
+      ts: event.ts,
+      toolUseId: 'terminal-call',
+      isError: false,
+      content: projectTranscriptToolResult(event, retained),
+    },
+  ]);
+  let reads = 0;
+  f.options.archiveEvidence = {
+    read: async (input) => {
+      reads++;
+      assert.deepEqual(input, { sessionId: 'old', runtimeEventId: event.id });
+      return { ok: true, event, transitions: [] };
+    },
+  };
+  return { f, event, retained, reads: () => reads };
+}
+
+for (const stream of ['stdout', 'stderr'] as const) {
+  test(`same-work history recovers the retained ${stream}, not the terminal display tail, in bounded pages`, async () => {
+    const text = Array.from(
+      { length: 160 },
+      (_, i) => `${i}: 中文😀\"\\ ${'0123456789abcdef'.repeat(8)}`,
+    ).join('\n');
+    const { f, reads } = terminalHistoryFixture(
+      stream === 'stdout' ? text : '',
+      stream === 'stderr' ? text : '',
+    );
+    const preview = f.rows.get('old')![0]!;
+    assert.equal(preview.type, 'tool_result');
+    assert.match(JSON.stringify(preview), /truncated\. Read/);
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.ok(records.length > 1, 'the retained output, not its small preview, needs pagination');
+    let offset = 0;
+    for (const row of records) {
+      assert.equal(row.messageId, 'terminal-result');
+      assert.equal(row.sessionId, 'old');
+      assert.equal(row.archiveStatus, 'loaded');
+      assert.equal(row.textOffset, offset);
+      offset += row.text.length;
+    }
+    assert.equal(offset, records[0]!.totalTextChars);
+    const result = JSON.parse(records.map((row) => row.text).join(''));
+    assert.equal(result.output[stream], text);
+    assert.equal(result.output.stdoutTruncated, false);
+    assert.equal(result.output.stderrTruncated, false);
+    assert.doesNotMatch(JSON.stringify(result), /maka:\/\/runtime\/tool-results\//);
+    assert.equal(reads(), records.length, 'one fixed evidence snapshot per projected page');
+  });
+}
+
+for (const mismatch of ['id', 'session', 'turn', 'call', 'hidden', 'provider'] as const) {
+  test(`terminal history never hydrates a retained result with a mismatched ${mismatch}`, async () => {
+    const { f, event } = terminalHistoryFixture('PRIVATE_RETAINED_FRONT\n' + 'x'.repeat(5000));
+    assert.equal(event.content?.kind, 'function_response');
+    if (event.content?.kind !== 'function_response') assert.fail('expected a tool response');
+    if (mismatch === 'id') event.id = 'foreign-event';
+    if (mismatch === 'session') event.sessionId = 'foreign';
+    if (mismatch === 'turn') event.turnId = 'foreign-turn';
+    if (mismatch === 'call') event.content.id = 'foreign-call';
+    if (mismatch === 'hidden') event.modelVisibility = 'hidden';
+    if (mismatch === 'provider') event.content.providerExecuted = true;
+    // The query must still name the canonical projected record, never a ref
+    // extracted from its untrusted display text or a substituted source.
+    f.options.archiveEvidence = {
+      read: async (input) => {
+        assert.deepEqual(input, { sessionId: 'old', runtimeEventId: 'terminal-result' });
+        return { ok: true, event, transitions: [] };
+      },
+    };
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.equal(records[0]!.archiveStatus, 'source_mismatch');
+    assert.doesNotMatch(JSON.stringify(records), /PRIVATE_RETAINED_FRONT/);
+  });
+}
+
+test('unavailable terminal evidence is explicit, and same-work authority is checked before hydration', async () => {
+  for (const reason of ['not_found', 'too_large', 'corrupt', 'unavailable'] as const) {
+    const { f } = terminalHistoryFixture('x'.repeat(5000));
+    f.options.archiveEvidence = { read: async () => ({ ok: false, reason }) };
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.equal(records[0]!.archiveStatus, reason);
+    assert.equal(JSON.parse(records[0]!.text).output.stdoutTruncated, true);
+  }
+  const { f, reads } = terminalHistoryFixture('PRIVATE_RETAINED_FRONT\n' + 'x'.repeat(5000));
+  f.denied.add('work');
+  assert.deepEqual(
+    await f.reader(
+      { operation: 'read', view: 'task_history', sourceActionId: 'work', kinds: ['tool_result'] },
+      f.ctx,
+    ),
+    { status: 'unavailable' },
+  );
+  assert.equal(reads(), 0);
+});
+
+test('short terminal history stays inline and never needs an evidence lookup', async () => {
+  const { f, reads } = terminalHistoryFixture('small output');
+  const records = await collect(f, { kinds: ['tool_result'] });
+  assert.equal(records[0]!.archiveStatus, undefined);
+  assert.equal(JSON.parse(records[0]!.text).output.stdout, 'small output');
+  assert.equal(reads(), 0);
 });
 
 test('accepted task inputs expose raw requirements and distinguish feedback from consumption proof', async () => {
