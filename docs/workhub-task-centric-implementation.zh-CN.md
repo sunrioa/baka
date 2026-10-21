@@ -32,7 +32,7 @@
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
 | 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史与六工具的 ai-sdk 入口已接入，完整回归通过；真实模型验证部分完成，后续退役与实测见阶段 4–7 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)、[PR #53](https://github.com/sunrioa/baka/pull/53)；3i 最终完整 Host 2,538 通过 / 12 原有跳过 / 0 失败，真实 DS coding / 本轮纠正已验证，界面与自然追问仍待补验 |
 | 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 已接入；经用户批准完成旧未派出替换意图的最小退役，保留原执行；恢复组合与受影响完整文件通过，原实例待复测 | 见下文 2026-10-20 并行收敛记录；未发布、未合并，保留完整 Host 的首次失败记录 |
-| 5 | 有界任务说明、历史入口和可选状态块 | 有界拼装、提交前一致性复核和原生 worker 可选状态块已接入；只读任务概况已集成，待合并后回归及 GUI 核验 | 实际同任务 fresh、原始要求 / 纠正 / 工具历史读取及 coding 已验证；近窗口自主决策与等价成本对照未完成 |
+| 5 | 有界任务说明、历史入口和可选状态块 | 有界拼装、提交前一致性复核和原生 worker 可选状态块已接入；只读任务概况已集成，完整 Host / Desktop 回归及临时实例切换已核验 | 实际同任务 fresh、原始要求 / 纠正 / 工具历史读取及 coding 已验证；近窗口自主 fresh 已观察，Agent 端 Node 验证待原审批，等价成本对照未完成 |
 | 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 任务搜索 / 标题 / 执行段、原交互与创建来源折叠已接入；审批分页与旧连接近期列表补修已核验；经用户确认，executor 新建入口保留且默认选择已持久化 | Native 模型 / 思考级别共用持久配置；新界面尚未做原实例 GUI 核验，executor fresh 仍明确不支持 |
 | 7 | 逐阶段回归、真实 coding、长上下文与成本实测 | 固定 J07 / 修订 J12 / 修订 T02 已通过；取消事实补修后的真实 T13 及带标签历史夹具 T01 亦通过，原失败保留；其余门槛分别跟踪 | 离线检查器测试不计作模型路由、真实用量或成本对照；未宣称整体完成 |
 
@@ -222,6 +222,39 @@ J07 的 PASS 截止于原生 pending 表单实拍；之后 UI Stop 的 cancelled
 - T01 完整窗口 `[1792584665000,1792585089291)` 有 9 个 completed Root、4 条新事实（两次新建及续作的配对事实）、20 对工具交换；capture SHA-256 为 `29cb03022c660c3db72fb9c77d9f058fc275a4c6f5fbbb4271530121479a767d`，report 为 `c79c0704de4f72410a190c8e3e3260a40c7a6774e5063555ed00d3fd03c70907`。28 次请求均 reported：输入 752,606、输出 17,990、缓存读 703,744、未命中 48,862、归一化缓存写 0，价格未核实、费用 null。T01 与 T13 共用 20 条原生 attempt，**不能把两例请求或 token 总量相加**；计数也不证明供应商每一缓存子字段均为显式报告。
 - 随后的真实 coding 任务实现了无依赖 TAP 汇总 CLI，并实际前台运行原 execution-composition 完整文件，106/106、真实退出码 0、87.1 秒，完整 stdout / stderr 与退出码留在任务私有目录。工具输出结束前未提交侧栏纠正，准备的草稿未发送并已清空；因此该次任务不计严格 T03-direct 通过，没有把后续一轮冒充本轮消费，也没有为制造等待重新跑相同任务。原先实际 FIFO、原位补充 / 取消及同轮消费证据仍保留，严格工具期间 GUI 发送继续单独跟踪。
 - `716cc4dbd` 接入此前独立审查的只读任务概况：现有 local-owner task read 的可选、source-bound、有界投影；不增加模型调用、持久摘要或任务权威。与取消事实补修组成同批未发布 epoch 239，合并冲突仅保留两份 ADR 说明并组合版本注释。独立静态审查未发现可操作问题、目标测试 121/121，但尚未覆盖悬挂概况时真正发送 / 回答审批；正在补该测试，合并后的完整回归与 GUI 核验仍待完成。不得将本节 `99ee88701` 的模型结果改记为此新界面已通过。
+
+### 任务概况集成后的冻结与界面核验（2026-10-21）
+
+- `b6e8f922d` 补两个真实 React hook 组合回归：概况请求仍悬挂时，正式 input controller 发送和 inbox controller 回答原审批均可完成；概况随后成功或失败不重放输入、不改变回执、审批及已加载历史。四个生产 hook 经 mock 端口核对原 Host / work / action / interaction 身份，完整文件 9/9。它们证明前端并发接线，不冒充真实供应商或故意延迟生产 Host 的界面证据。
+- 合并后的完整 Host 单次为 2,506 通过、12 原有跳过、0 失败，468.4 秒；开始提交为 `716cc4dbd`，运行期间仅新增上述测试与文档，受测 Host / Core / Storage / Runtime 产物 4,434 个文件前后摘要完全相同。日志 SHA-256 为 `96a09950970f30894f708638b22e0261c72a10ca781aae7ff43cf7ff00ace805`。
+- `b6e8f922d` 完整 Desktop 单次覆盖 428 个编译测试文件及官方五个源脚本，3,396/3,396、0 失败，182.2 秒；实际核对的依赖产物及源脚本共 5,866 个文件，前后摘要相同。日志 SHA-256 为 `bf9fb1aed9e7c0ef1a0bfa6c5ca43511e58433dcf9bdc300a4976d2c9823cea9`。没有用前一批分开运行的结果代替这次完整清单。
+- 同一临时数据根先正常退出，再核对数据库与四份配置的备份；新版本完整构建后正常重启唯一开发 App，epoch 239、Command Code DeepSeek、bypass、并发 1 保持。通过统一工具栏先打开任务列表，再进入本轮 A、展开只读概况、切到独立 B 并展开其概况：目标、后续要求和文件来源随任务更新，B 不沿用 A 的概况；输入目标同时切换，完整原始对话仍可滚动查看。此为正常 UI 观察，不证明所有长历史已加载，也不把摘要当完整约束。
+- 全仓类型检查、ASF headers（4,392 覆盖 / 254 既有排除）、surface inventory 与 renderer architecture 165/165 通过；随后全仓 lint / format（4,173 / 2,367 文件）、Desktop / UI knip 与 diff-check 亦通过。本批冻结结束时原用户 profile 尚未恢复为本版本；后续严格工具期间纠正与获批模型切换另记下文，未宣称整个 ADR 完成。
+
+### 严格工具期间侧栏纠正与真实 coding 联调（2026-10-21）
+
+- 对实际 TAP 汇总工具追加 `spawn(..., shell:false)` 执行入口、原始 stdout / stderr 留存及真实退出状态测试；用新增入口单次运行正式 Desktop 完整清单，3,396/3,396、exit 0、stderr 0 字节，169.4 秒。该次用于真实 coding 产物的端到端联调，不作为新的独立测试覆盖数叠加前述同一清单。工具自然结束，不使用 sleep、后台占位或重复同一联调来制造窗口。
+- 在长 Bash 运行时，通过真实任务侧栏逐字发送固定 T03-direct 原文“补充一下：保留原来的大小写，只修改空格处理。”原生顺序为：工具开始 `1792587293419` → `task_input.ts=1792587309821` → 工具完成 `1792587462937` → 同 Turn / Run 的 user Steering `1792587462959` → worker completed `1792587507125`。消息 ID、来源摘要及 `refs.providerEventId` 一致；消费发生在工具结束后 22 ms，没有另建 worker Turn。执行中切到独立 B 再切回，原历史和 queued 回执仍在；收尾 UI 为“已送入执行”。
+- 现有 checker 及父级独立重跑均 exit 0、`realModelPass=true`、issues 为空；capture SHA-256 为 `5962ec8cd08a70e3c3b781e1466a9c21a7d41c3f85e22d43626f6e000276e69d`，report 为 `cf671700968d84027defcae3de81a0e4030bb9daab8f33cd0885245e36752f7c`。完整广窗包含真实布置及两次工具错误，23 对调用 / 回执、22 次 reported 物理请求（输入 1,059,315 / 输出 28,757）；窄 checker 窗仅固定纠正一步，6 次请求（输入 358,290 / 输出 5,527）是该 22 次的子集，不相加。原生不可变事实按原 ts 机械分区，不伪造执行前的可变快照；全部费用仍 null。
+- 另一个真实空格 CLI 任务完成 28 条 unittest 和单次全部 Unicode 码点契约审计（1,114,112 个码点 × 8 模板、8,912,896 次比较、无不一致）；该工具仅 4.5 秒，未赶上发送的草稿已清空，不能计为纠正通过或在之后补投。前述未赶上 87 秒窗口的 TAP 任务也原样保留，不追改为成功。
+- 收回开发日志时发现一次 React `Maximum update depth exceeded`，当时靠近原生中文输入 / AX 清空后 paste 操作。`93f52d06d` 仅新增真实 TaskComposer（含其 draft 同步 effect）的三个纯 DOM 用例和 testing 入口导出，连同相关 hook / restore 文件 13/13；普通中文、composition、静默清空后 paste、概况成功 / 失败均未复现。没有无根因的生产防抖、屏蔽或逻辑改动；LinkeDOM 不等于 macOS IME / AX / Chromium 时序，仍不能据此宣称该日志问题消失。ResizeObserver 保留给原线程，不混入本次补修。
+- `93f52d06d` 单次完整 Desktop 再核验 429 个编译测试文件及五个官方脚本，3,399/3,399、0 失败，166.3 秒；5,885 个依赖产物与源脚本前后清单摘要一致，日志 SHA-256 为 `c321eaa85aa478b6868ece6b9877e98f88915bf019b8f91c7f83e9675594b637`。此提交仅加测试和既有 testing 入口导出，不更改运行中的生产行为或 epoch。随后全仓类型检查、lint（4,174 文件）、format（2,367 文件）、ASF（4,393 覆盖 / 254 排除）、surface inventory（335 / 1 排除）、renderer architecture 165/165、Desktop / UI knip 及 diff-check 全部通过。
+- 在获批隔离压力 App 上单次重做原生中文输入 → AX 清空 → paste → 清空草稿：粘贴内容正确，最后输入为空、发送禁用，没有派发；当前精确开发日志未出现相同 React 错误。中文 `typeText` 此次只输入标点，实际指令仍用 paste 并先核对文本。该观察没有复现原错误，不是根因结论，也不是生产修复证明。
+
+### 原数据恢复及长上下文夹具准备（2026-10-21）
+
+- 临时 App / Host 正常退出后，原 profile 离线备份核对 `quick_check=ok`，50 个 Session、852 条消息、225 条 Root 准入；数据库和四份配置与源哈希一致。随后在 `b6e8f922d` 正常启动原数据的唯一开发 App，其他已安装 Maka 未动。
+- 用户批准只把 `WH-LONG-PRESSURE-R2-1016` 切到现有 Command Code DeepSeek。预检查发现该任务已于 10 月 16 日明确 fresh 到第 2 段，近百万 token 历史在已退役第 1 段，首次只读保护拒绝了旧段假设，没有写入。核对 canonical assignment 后，仅将实际当前段 model / connection 改为 Command Code `deepseek/deepseek-v4.1-flash`；其 ask、目录、thinking 等持久设置及其他 Session 配置不变，四份默认 / 凭据配置与备份逐字节相同。操作证据 SHA-256 为 `f2db3b461480b5a34e5ff07afbbbc80e9f5141a59a4a11df73d984b3a69cb6a8`。
+- 经另一次明确授权，以官方 `session-bundle.export/import` 复制**原合成压力夹具**的第 1 段到新隔离根；不回滚原任务当前段、不编辑 bundle / 原历史、不导入其他会话。源和副本均为 854 条事件 / 424 条消息，模型改为既有 Command Code，副本目录改为私有测试目录，原 ask 保留；默认窗口 / 主动压缩阈值 / 队列未改。bundle SHA-256 为 `e0151fc5a15108039f4fdc32cf1f5bddb78cfa3c30453e8073875c254b57d1d1`，导入与设置证据为 `1d5443f4621d92618d91d181da1d0dcf5e5086eea774829f2099e554b5c14397`。这是带标签的合成历史副本，不冒充自然老化或百万 token 真实 coding 历史。
+- 先通过正常协调模型接管该普通 Session，只做显式的单行基线，不把这一步算作自主选择。实际 Command Code worker 请求报告 input 1,006,683 / output 53、32.9 秒，并正确返回基线；当前连接声明窗口为 1,000,000、主动阈值未配置，没有改成旧连接的 1,048,576。供应商实际接受这次请求，不推断其真实最大窗口。完整基线窗口含 5 次 reported 请求，无 compaction 类型调用；后续 coding 的自主 reuse / fresh、读取、产物及用量仍须另记，不由这次基线成功代替。
+
+### 隔离压力任务的自主 fresh 与真实 coding（2026-10-21，正式运行验证尚待审批）
+
+- 用户只要求模型先查询真实上下文 / 配置，再自主决定 reuse 或 fresh，两种均允许；不按固定 token 或闲置时间切换。模型实际查询到窗口 1,000,000、最近请求 input 1,006,683 / output 53、当前路由匹配、主动阈值未配置；随后 `continue(container:fresh)` 保留同一 work 身份，由导入的第 1 段进入新原生 Session。原 ask、隔离 cwd 和模型继承；没有修改模型窗口、阈值、并发、原任务历史或其他 Session。
+- 委托的实际 `text` 为 2,215 UTF-8 字节，Host 既定的任务说明 / fresh guidance 追加 2,150 字节，合成后 4,365 字节；新 worker 首请求 input 7,370，远小于基线的约百万输入。仍有 ADR 既定的有界任务说明，不能描述成“完全没有简报”；没有额外专用 summary / compaction 请求，没有全量复制旧历史。这是两个不同阶段的实际请求大小，不是同一工作量的费用对照。
+- 协调者通过 `WorkHubRead(result)` 核对上阶段基线后把该值写进委托；新 worker 自身没有调用 WorkHubRead。故本次只证明真实自主换段和编码，不把基线复述算作 worker 独立恢复旧历史；原要求 / 纠正 / 工具输出的按需恢复证据仍来自先前另一次真实 fresh coding。
+- 新段实际交付隔离目录中的 `parse-port.mjs` 与 `parse-port.test.mjs`。Agent 端 Node 因原 ask 沙箱无法读取已安装动态库，真实 `node --test` / CLI 启动 exit 134；52 项 JavaScriptCore 辅助断言通过不等于 Node 验证完成。父级另在自身测试权限内独立执行现有 node:test：13/13（含真实 CLI 子进程与退出码）；没有改文件，也不能用父级结果冒充 Agent 已在原沙箱内执行通过。
+- 首轮只在 Bash 声明 `required_boundary`，实际返回预检查失败，没有原生审批请求或用户拒绝记录。21:37 从任务侧栏只续发未完成的验证，明确不得改权限模式 / 产物；Agent 本次真正调用 `request_sandbox_boundary`，原生请求仅 `/opt/homebrew/Cellar/node@24/24.19.0` 的 read / subtree，停在“本任务允许 / 拒绝”界面，尚未回答。pending 证据 SHA-256 为 `b1b7105865ce04ea96190fa069161c8cc8691fa178854ff7ea1f78bf5d7f9db8`。这项新续作不追记进上一轮已完成的压力观察窗，不把等待审批写成完成或拒绝；隔离 App 暂留以保留真实等待，原 profile 仍停止，最终恢复另记。
 
 ## 阶段 1 记录
 
