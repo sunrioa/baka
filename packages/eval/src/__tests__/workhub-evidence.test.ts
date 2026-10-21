@@ -417,6 +417,53 @@ function issue(f: Fixture, code: string): void {
 }
 
 describe('WorkHub evidence checker — OFFLINE synthetic fixtures, not real-model passes', () => {
+  test('T02 and J12 fix planning-only antecedents while preserving vague follow-ups', () => {
+    const t02 = workHubEvalCase('T02');
+    const j12 = workHubEvalCase('J12');
+    assert.equal(
+      t02.steps.find((step) => step.id === 'create-b')!.text,
+      '再新开一件独立的工作：写一个把非负秒数转换为分秒显示的小函数。现在只给实现和测试计划，不写文件，也不执行代码或测试；等我下一句继续后，再按计划实现并测试。',
+    );
+    assert.equal(
+      j12.steps.find((step) => step.id === 'create-a')!.text,
+      '新开一件独立的工作：写一个清理字符串首尾空格的小函数，先保留字符串内部的空格。现在只给实现和测试计划，不写文件，也不执行代码或测试；等我下一句继续后，再按计划实现并测试。',
+    );
+    assert.equal(t02.steps.at(-1)!.text, '继续。');
+    assert.equal(j12.steps.at(-1)!.text, '接着做吧。');
+    for (const id of ['T01', 'T13'])
+      assert.deepEqual(
+        workHubEvalCase(id)
+          .steps.filter((step) => step.id === 'create-a' || step.id === 'create-b')
+          .map((step) => step.text),
+        [
+          '新开一件独立的工作：写一个清理字符串首尾空格的小函数，先保留字符串内部的空格。',
+          '再新开一件独立的工作：写一个把非负秒数转换为分秒显示的小函数。',
+        ],
+      );
+  });
+
+  for (const [caseId, createId, previousText] of [
+    ['T02', 'create-b', '再新开一件独立的工作：写一个把非负秒数转换为分秒显示的小函数。'],
+    [
+      'J12',
+      'create-a',
+      '新开一件独立的工作：写一个清理字符串首尾空格的小函数，先保留字符串内部的空格。',
+    ],
+  ])
+    test(`${caseId}: rejects old implementation input and a more explicit follow-up`, () => {
+      const current = fixture(caseId);
+      assert.equal(
+        current.steps.find((step) => step.id === createId)!.trigger.userText,
+        workHubEvalCase(caseId).steps.find((step) => step.id === createId)!.text,
+      );
+      const previous = fixture(caseId);
+      previous.steps.find((step) => step.id === createId)!.trigger.userText = previousText;
+      issue(previous, 'fixed_input_changed');
+      const explicit = fixture(caseId);
+      explicit.steps.at(-1)!.trigger.userText = '继续刚才规划的那件事。';
+      issue(explicit, 'fixed_input_changed');
+    });
+
   for (const spec of WORKHUB_EVAL_CASES)
     test(`${spec.id}: accepts complete offline evidence without claiming model quality`, () => {
       const result = checkWorkHubCapture(fixture(spec.id));

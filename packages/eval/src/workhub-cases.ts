@@ -37,6 +37,8 @@ export interface WorkHubEvalCase {
 
 const createA = '新开一件独立的工作：写一个清理字符串首尾空格的小函数，先保留字符串内部的空格。';
 const createB = '再新开一件独立的工作：写一个把非负秒数转换为分秒显示的小函数。';
+const planOnly =
+  '现在只给实现和测试计划，不写文件，也不执行代码或测试；等我下一句继续后，再按计划实现并测试。';
 const followA = '回到刚才处理空格的那件事，再补上空字符串和连续空格的测试，保持原来的行为。';
 
 /** Instructions for a human/Desktop driver, never a router or an SDK model impersonation. */
@@ -80,7 +82,10 @@ export const WORKHUB_EVAL_CASES: readonly WorkHubEvalCase[] = [
   {
     id: 'T02',
     purpose: '预览 A，总对话主题 B，总输入的“继续”仍指向 B。',
-    setup: ['按顺序完成 create-a、create-b，然后仅在右栏预览 A。保存预览与主对话的实际 UI 观察。'],
+    setup: [
+      '按顺序发送 create-a、create-b；A 正常完成，B 只完成实现与测试计划，并明确等待下一句继续才实施。',
+      '确认 B 规划轮已自然结束且没有待回答的原生审批或问题，再仅在右栏预览 A；保存预览与主对话的实际 UI 观察。',
+    ],
     bindings: ['a', 'b'],
     steps: [
       {
@@ -93,7 +98,7 @@ export const WORKHUB_EVAL_CASES: readonly WorkHubEvalCase[] = [
       },
       {
         id: 'create-b',
-        text: createB,
+        text: `${createB}${planOnly}`,
         origin: 'user',
         surface: 'main',
         operation: 'start',
@@ -153,12 +158,15 @@ export const WORKHUB_EVAL_CASES: readonly WorkHubEvalCase[] = [
   {
     id: 'J12',
     purpose: '有明确先行词时不靠标题关键词，继续正确任务。',
-    setup: ['在总对话发 create-a 并等待结果；随后直接发送不含标题或 ID 的追问。'],
+    setup: [
+      '在总对话发送 create-a，只完成实现与测试计划，不写文件、不执行代码或测试，并明确等待下一句继续才实施。',
+      '确认规划轮已自然结束且没有待回答的原生审批或问题，随后直接发送不含标题或 ID 的固定追问。',
+    ],
     bindings: ['a'],
     steps: [
       {
         id: 'create-a',
-        text: createA,
+        text: `${createA}${planOnly}`,
         origin: 'user',
         surface: 'main',
         operation: 'start',
