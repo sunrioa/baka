@@ -24,10 +24,12 @@ import { parseHTML } from 'linkedom';
 import { ChatSurfaceLayout, LocaleProvider } from '@maka/ui';
 import { deferred } from '@maka/core/test-only/async-primitives';
 import type { UiLocale } from '@maka/core/ui-locale';
-import type { WorkHubTask, WorkHubTaskAssignment, WorkHubTaskDetail } from '@maka/runtime-host/protocol';
+import type { StoredMessage } from '@maka/core/session';
+import type { WorkHubPendingInteraction, WorkHubTask, WorkHubTaskAssignment, WorkHubTaskDetail, WorkHubTaskInputResult } from '@maka/runtime-host/protocol';
 import { RuntimeHostOperationError } from '@maka/runtime-host/client';
-import { useWorkHubTaskView, WorkHubTaskView, workHubTaskInputSource } from '../../renderer/features/workhub/testing.js';
+import { useWorkHubSessionView, useWorkHubTaskInbox, useWorkHubTaskInput, useWorkHubTaskView, WorkHubTaskView, workHubTaskInputSource } from '../../renderer/features/workhub/testing.js';
 import type { WorkHubServices } from '../../renderer/features/workhub/index.js';
+import { desktopSessionKey } from '../../shared/runtime-host-identity.js';
 import { installReactRenderer, cleanupFakeDom } from './fake-dom.js';
 import { renderTranscriptMarkup } from './transcript-test-dom.js';
 
@@ -90,6 +92,147 @@ test('the Host overview is independent of loaded history and a slow read never b
   if (h.view.brief?.status !== 'ok') assert.fail('Expected the independent Host overview');
   assert.match(h.view.brief.text, /Original user goal/u);
   assert.equal(workHubTaskInputSource(h.view.currentSnapshot())?.actionId, 'latest-work');
+});
+
+for (const outcome of ['resolve', 'reject'] as const) test(`task input and original approval finish before a pending overview can ${outcome}`, { timeout: 5_000 }, async t => {
+  const storage = new Map<string, string>();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => { storage.set(key, value); },
+  } });
+  t.after(() => { if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor); else Reflect.deleteProperty(globalThis, 'sessionStorage'); });
+  const owner = desktopSessionKey({ hostId: 'task-host', sessionId: 'maka_workhub_coordination' });
+  const target = desktopSessionKey({ hostId: 'task-host', sessionId: 'shared-session' });
+  const original: WorkHubTask = { ...source('work'), actionId: 'original-action', delegationId: 'original-link',
+    targetSessionId: target, targetMessageId: 'original-message', status: 'waiting_for_user',
+    execution: { turnId: 'waiting-turn', runId: 'waiting-run', sharedTurn: false } };
+  const request: WorkHubPendingInteraction = { actionId: original.actionId, delegationId: original.delegationId,
+    targetSessionName: original.targetSessionName, interaction: {
+      schemaVersion: 1, interactionId: 'original-permission', sessionId: target,
+      turnId: 'waiting-turn', runId: 'waiting-run', revision: 1, status: 'pending', outcome: null,
+      request: { kind: 'permission', toolUseId: 'original-tool', prompt: { kind: 'tool_permission',
+        toolName: 'Bash', category: 'shell_unsafe', reason: 'shell_dangerous',
+        review: { kind: 'command', command: 'npm test' }, rememberForTurnAllowed: true } },
+    } };
+  const pending = deferred<WorkHubTaskDetail>();
+  let settled = false, overviewReads = 0, transcriptReads = 0;
+  const exactReads: Array<Parameters<WorkHubServices['readTask']>> = [];
+  const f = fixture(async (sessionId, ref) => {
+    assert.equal(sessionId, owner);
+    if (ref.includeBrief) {
+      ++overviewReads;
+      assert.deepEqual(ref, { workId: 'work', includeBrief: true, briefLocale: 'en' });
+      return pending.promise;
+    }
+    exactReads.push([sessionId, ref]);
+    assert.deepEqual(ref, { actionId: original.actionId, delegationId: original.delegationId });
+    return { task: original };
+  });
+  let requests = [request];
+  let receipt: WorkHubTaskInputResult | undefined;
+  const sends: Array<Parameters<WorkHubServices['sendTaskInput']>> = [];
+  const answers: Array<Parameters<WorkHubServices['answerTaskInteraction']>> = [];
+  const messages: StoredMessage[] = [
+    { type: 'user', id: 'original-user', turnId: 'original-turn', ts: 1, text: 'Original task history' },
+    { type: 'user', id: 'other-user', turnId: 'other-turn', ts: 2, text: 'Intervening Session history' },
+  ];
+  const services = {
+    ...f.services,
+    taskHistory: async (...args: Parameters<WorkHubServices['taskHistory']>) => {
+      const page = await f.services.taskHistory(...args);
+      return { ...page, assignments: page.assignments.map(item => ({ ...item, targetSessionId: target })) };
+    },
+    getTaskSession: async (id: string) => {
+      assert.equal(id, target);
+      return { id, name: 'Actual task', backend: 'ai-sdk' as const, model: 'worker-model', llmConnectionId: 'worker-connection', llmConnectionSlug: 'worker',
+        permissionMode: 'ask' as const, cwd: '/original-worker', isFlagged: false, isArchived: false, labels: [], hasUnread: false, status: 'active' as const, connectionLocked: false };
+    },
+    async sendTaskInput(sessionId, input) {
+      assert.equal(settled, false, 'input must reach its Host before overview settlement');
+      assert.equal(sessionId, owner);
+      assert.deepEqual(input, { inputId: input.inputId, workId: 'work', generationId: 'work', text: 'New task requirement' });
+      sends.push([sessionId, input]);
+      receipt = { inputId: input.inputId, workId: input.workId, generationId: input.generationId,
+        sourceActionId: 'latest-work', sourceDelegationId: 'link-work', targetSessionId: target,
+        targetMessageId: 'accepted-input', acceptedAt: 12, mode: 'queued_supplement', delivery: 'queued' };
+      return { kind: 'accepted' as const, receipt };
+    },
+    async readTaskInput(sessionId, input) {
+      assert.equal(sessionId, owner); assert.ok(receipt);
+      assert.deepEqual(input, { workId: 'work', inputId: receipt.inputId });
+      return receipt;
+    },
+    queryTaskInteractions: async (sessionId: string) => { assert.equal(sessionId, owner); return { requests, truncated: false }; },
+    async answerTaskInteraction(sessionId, input) {
+      assert.equal(settled, false, 'the original approval must reach its Host before overview settlement');
+      assert.equal(sessionId, owner);
+      assert.deepEqual(input, { actionId: original.actionId, interactionId: request.interaction.interactionId,
+        expectedTurnId: request.interaction.turnId, expectedRunId: request.interaction.runId,
+        answer: { kind: 'permission', decision: 'allow', rememberForTurn: false } });
+      assert.deepEqual(requests, [request]);
+      answers.push([sessionId, input]);
+      if (input.answer.kind !== 'permission') assert.fail('Expected the native permission answer');
+      requests = [];
+      return { ...request.interaction, status: 'answered' as const, revision: 2,
+        outcome: { ...input.answer, kind: 'permission_answer' as const, reviewer: 'user' as const, committedAt: 13 } };
+    },
+    subscribeActiveInteractions: () => () => {},
+    observe(_id, _event, _error, phase) { phase('ready'); return () => {}; },
+    async openTranscript(id, accept, _signal, _error, scope) {
+      assert.equal(id, target); assert.equal(scope, undefined); ++transcriptReads;
+      accept({ messages, ready: true, hasOlder: false });
+      return { observationChanged() {}, loadEarlier: async () => {}, close: async () => {} };
+    },
+    stop: async () => assert.fail('This fixture must not stop an execution'),
+  } satisfies Pick<WorkHubServices, 'taskHistory' | 'taskExecutions' | 'readTask' | 'getTaskSession' | 'subscribeSessions' |
+    'subscribeAvailability' | 'sendTaskInput' | 'readTaskInput' | 'stop' | 'queryTaskInteractions' | 'answerTaskInteraction' |
+    'subscribeActiveInteractions' | 'observe' | 'openTranscript'>;
+  const ports = services as unknown as WorkHubServices;
+  let view!: ReturnType<typeof useWorkHubTaskView>, input!: ReturnType<typeof useWorkHubTaskInput>;
+  let inbox!: ReturnType<typeof useWorkHubTaskInbox>, session!: ReturnType<typeof useWorkHubSessionView>;
+  function Probe() {
+    view = useWorkHubTaskView(ports, owner, 'work');
+    input = useWorkHubTaskInput(ports, owner, 'work', view);
+    inbox = useWorkHubTaskInbox(ports, owner);
+    session = useWorkHubSessionView(ports, target);
+    return null;
+  }
+  const { root } = installReactRenderer();
+  await act(async () => { root.render(createElement(LocaleProvider, { locale: 'en', children: createElement(Probe) })); });
+  assert.equal(view.ready, true); assert.equal(view.briefLoading, true); assert.equal(view.briefReady, false);
+  assert.equal(input.ready, true); assert.equal(input.source?.actionId, 'latest-work');
+  assert.equal(inbox.ready, true); assert.equal(inbox.requestsForWork('work')[0], request);
+  assert.equal(session.ready && session.sessionReady && session.transcript.ready, true);
+  assert.deepEqual(session.transcript.messages, messages);
+  await act(async () => { await view.loadEarlier(); });
+  const assignments = view.assignments;
+  await act(async () => {
+    input.model.writeDraft('New task requirement');
+    const [sent] = await Promise.all([input.send('New task requirement'), inbox.respond(request, { kind: 'permission', decision: 'allow', rememberForTurn: false })]);
+    assert.equal(sent, true);
+  });
+  assert.equal(settled, false); assert.equal(sends.length, 1); assert.equal(answers.length, 1);
+  assert.equal(input.state.receipt, receipt); assert.equal(input.state.sending, false); assert.equal(input.state.error, undefined);
+  assert.equal(inbox.ready, true); assert.deepEqual(inbox.requests, []); assert.equal(inbox.isAnswering(request), false);
+  assert.equal(view.briefReady, false); assert.equal(view.briefLoading, true);
+  assert.deepEqual(exactReads, [[owner, { actionId: original.actionId, delegationId: original.delegationId }]]);
+  await act(async () => {
+    settled = true;
+    if (outcome === 'resolve') {
+      const result = detail('work', 'Overview arrived after accepted input and approval');
+      pending.resolve({ ...result, task: { ...result.task, targetSessionId: target } });
+    } else pending.reject(new Error('Overview failed after accepted input and approval'));
+  });
+  assert.equal(view.briefReady, true); assert.equal(view.briefLoading, false);
+  if (outcome === 'resolve') assert.equal(view.brief?.status, 'ok');
+  else assert.match(view.briefError ?? '', /Overview failed after accepted input and approval/u);
+  assert.equal(input.state.receipt, receipt); assert.equal(input.state.error, undefined); assert.equal(input.ready, true);
+  assert.equal(inbox.ready, true); assert.deepEqual(inbox.requests, []); assert.equal(inbox.error, undefined);
+  assert.equal(view.ready, true); assert.equal(view.error, undefined); assert.deepEqual(view.assignments, assignments);
+  assert.equal(session.ready && session.sessionReady && session.transcript.ready, true);
+  assert.equal(session.error, undefined); assert.deepEqual(session.transcript.messages, messages);
+  assert.equal(sends.length, 1); assert.equal(answers.length, 1); assert.equal(overviewReads, 1); assert.equal(transcriptReads, 1);
 });
 
 test('overview notification bursts coalesce exact-source requests without serializing normal history refresh', async () => {
