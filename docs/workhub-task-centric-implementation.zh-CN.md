@@ -52,7 +52,7 @@
 
 ## 当前实测状态
 
-原实例已于 2026-10-21 正常退出、备份后，以收敛分支 `553b68b5e` 重启，使用现有 Command Code 连接的 `deepseek/deepseek-v4.1-flash`，兼容 epoch 为 238。新分支的第一批真实观察见下文；派发与界面门槛尚未通过，旧实测不能算作新分支通过，也不能用于声称全部改造完成或费用下降。
+原实例于 2026-10-21 首先以 `553b68b5e` 核验，随后正常退出、验证备份并部署 `cd5182c1b`（含原生问题停止补修）；均使用现有 Command Code 连接的 `deepseek/deepseek-v4.1-flash`，兼容 epoch 为 238。后续真实观察见下文。固定评测和界面门槛尚未全部通过，旧实测不能算作新分支通过，也不能用于声称全部改造完成或费用下降。空主对话评测使用经用户批准的独立临时数据根，不清空原历史；两个开发 App 不同时运行。
 
 ## 阶段 4–7 并行收敛记录（2026-10-20，未发布）
 
@@ -137,14 +137,37 @@
 
 31 条有 token 报告的记录均报告缓存写入为 0；剩余一次失败尝试的 token / 缓存未知，不补零。32 条费用均未知，不将未知费用合计成 0。完整私有原生观察 `live-window-after-B-followup-20261021.json` 的 SHA-256 为 `2a8dd4b457801e1d66ad872076925d5f4216b35c9f1126a150b93435e8d28978`；隐藏 / reasoning 正文不导出，省略项明确记录。
 
-### 原生问答停止的最小补修（2026-10-21，未部署原实例）
+### 原生问答停止的最小补修（2026-10-21）
 
 - 原实例的 `Stop` 缺口在收敛前已有：Host 先关闭原生问答，`ToolRuntime` 抛 `RuntimeInteractionClosedError(turn_stopped)` 却没有提交已派出工具的 T2，正确的 storage terminal guard 因此拒绝封口并导致 Host drain。保留原失败事实，不伪造正常取消或修写原数据库。
 - 集成提交 `3d777817f` 仅在这个异常和捕获的原 `durableAttempt` 存在时提交原工具的取消错误结果，随后仍抛出原关闭异常；不返回成功让模型循环继续。T2 持久化失败与 Invariant / FailStop 仍向外传播，不放宽 storage guard、权限、FIFO 或停止算法，无 schema / epoch 变化。
 - 新增纯回归在修复前真实失败（closure-first 缺少 T2）；修复后 8 个相关 Runtime 文件 77/77。`9b2b161ea` 增加真实 AiSdkBackend / ToolRuntime、本地 HTTP、隔离 SQLite 的公开 interrupt 组合测试：唯一原 T2 seq 6 先于 canonical `aborted` terminal seq 7，public Turn 为同 terminal ID 的 `cancelled`；HTTP 实收 2 次（无关完成任务 1、问题 1），停止后没有第二次问题请求。原生问题关闭，Root residency 1→0、Host ready，权限 / 模型 / 目录及无关完成任务的五组事实不变。
 - 具名组合用例最终 1/1、0 skip；此前四次夹具入口 / capability offer / Root label / native 与 public 状态命名错误均保留，前三次没有调用 interrupt，不能把它们称作 Host 生命周期 RED→GREEN。测试仅在新临时根以 incognito 抑制启动 metadata 网络请求，确认 skip 后通过公开接口恢复；关闭 bootstrap 导入并使用临时 skillHome，不改变产品默认或全局 HOME。标准账户临时锁确有写入，按精确 native Root / PID / inode 归属可恢复 quarantine，未知条目和原实例 Root 未动。
-- 独立 AI 静态复核确认补丁与具名组合证据，无新增可操作问题；不替代人工批准。该项仍缺原 App / 真实模型复测，不能将具名本地 provider 通过或较早全量回归标成新版本全部通过。原实例目前仍运行 `553b68b5e`，尚未部署此补修。
+- 独立 AI 静态复核确认补丁与具名组合证据，无新增可操作问题；不替代人工批准。该组合批次结束时原实例仍为 `553b68b5e`、尚未部署补修；后续实际部署与真实模型验证另记下文，不将具名本地 provider 或较早全量回归改写成新版本全部通过。
 - 父级在集成 `9b2b161ea` 重新完成全仓 build、typecheck、lint（4,169 文件）、format（2,364 文件）、ASF headers 与 diff-check，8 个 Runtime 文件再次 77/77、0 skip（4.43 秒）。没有把同一用例两次通过相加为 154 项，也未重跑全套 Host / Runtime；当前 GUI 观察恢复前不重启或替换原实例。
+
+### 补修部署后的原实例回归（2026-10-21）
+
+- 原 App 与 Host 正常退出，未强制结束。离线备份包含 49 个 Session、834 条会话消息、203 条 Root 准入，`quick_check=ok`，数据库及选定配置文件与源哈希相同。原 checkout 保留旧分支，以 detached `cd5182c1b` 全量构建并于 12:46 CST 重新启动；沿用原数据、Command Code DeepSeek、bypass、并发 1。新 Host epoch 为 `880a89ca-7389-4fa2-9324-6c772d11bc42`。其他已安装 Maka 不动，未同时启动第二个开发 App。
+- **A 自然续作与侧栏纠正**：总输入不带标题 / ID，要求继续多行清理，回到本轮 A 原 work / generation / Session。侧栏将 CLI 退出码纠正为 64；原生队列、持久 Steering 事件证明在同 Turn / Run 消费，后续工具落实纠正。独立检查产物并重跑 51/51、exit 0。该次纠正受理比当时 Bash 结束晚约 0.7 秒，证明活动轮内消费，**不计严格“工具仍运行时受理”的 T03-direct 通过**。
+- **实际 FIFO**：A 真实实现流式模块期间，B 的 CLI 续作处于 admitted；A 完成后约 98 ms，B 才开始执行。A 含一次 `provider_unavailable` 后按原规则重试，失败记录保留。父级独立重跑 A 72/72、B 57/57。第一次 B 补充实际上晚于其开始执行约 14 秒，成为同轮 Steering；随后点击停止时遇到锁屏，B 自然完成。这次不计排队原位追加或取消通过。
+- **排队补充与投递前取消**：改用 A 等待真实原生编码方案问题的场景。B 的求和续作仍是原 admitted Turn / Run，补充后 queue revision 0→1，只有一个 current-turn queued entry，没有新 Root。UI 取消 B 后，原生 terminal 为 aborted / user_stop，public 为 cancelled；补充有取消墓碑、没有消费证明。该 B Run 的模型 stream、物理尝试、用量行、工具 operation / journal 均为 0。B 停止后的原生订阅仍显示 A 原 Turn / Run、同一 pending 问题，未误伤 A。不将“待答占用名额”解释成修改了原排队规则。
+- **原生问题停止实机通过**：随后仅点击 A 任务侧栏停止。原问题先关闭为 `turn_stopped`；唯一原 operation 的 T2 seq 8 于 13:22:35.458 提交，早于原生 aborted terminal seq 9（13:22:35.490），public cancelled 的 terminal ID 一致。该 Run 只有一次物理模型调用，停止后没有第二次调用或 recovery claim，队列与 pending interaction 清空。13:36:02 的公开诊断为 ready、同 epoch、residencies 为空；同时保留 activeOperations=1、upgradeBlockingActivity=true 的原值，不据此宣称未观测的整个时段绝无 drain。私有只读审计 SHA-256：`34701a20d9377f576b79a42bde2811e1f170ade738aa4da4c7fdf7d3dab42aa1`。
+- **同任务 fresh 与原始历史**：总输入要求在 A 换新段补一条真实 CLI 多参数测试，不重复旧退出码答案。新段属于原 work，新增 generation / Session，原模型、connection、bypass 和 cwd 一致，旧段保留。三次 WorkHubRead 返回原用户要求、侧栏纠正及旧工具参数 / 72 项测试结果，均早于实际文件读取；其间一次 Read 为 `maka://read` 工具输出续读，不是文件读取。各历史页仍有游标，旧大输出仍可能是有界预览，不能声称全量历史读完。只有一处测试文件 Edit，实跑及父级独立重跑均为 73/73、exit 0，未接 pipeline。总输入 8,036 字节，其中有界 brief 5,317 字节，未复制全部旧上下文，也未新增交接模型调用。brief 本身也含退出码 64，因此不能把答对该值唯一归因于历史读取。主审计与字段补充 SHA-256 分别为 `535e921084dcaacb759ac893cfbfd60ab2817a5a8b03c18ad5f20428a1242098`、`4e2c9d4e98dbe1b1eb92df025544874a542316a2f41c634e6366f47584194262`。这是明确请求换段的 coding 验证，不冒充近窗口 AI 自主决策或混合同 Session 血缘用例全部通过。
+- **模糊追问分阶段变体**：总对话重新安排 B，但先只列求和实现计划，明确等下一条“继续”再落地；计划结束后没有原生问题或审批待答，右栏仍预览 A。从总输入只发“继续。”，实际续办 B，未被 A 预览带偏。B 产物独立重跑 72/72、exit 0。此输入不是原固定创建步骤，保留为变体，不追溯改记固定 T02 已通过。
+- **评测前提修正**：经用户于 2026-10-21 明确确认，只调整固定 T02 的 B 与 J12 的 A 为“先完成计划，等待下一句才实施”；两句模糊输入逐字保留，T01 / T13 原文、Host、路由提示与 checker 判定标准不变。独立 AI 静态审查未发现新增问题，Eval 构建 / typecheck 与 33 项离线检查通过；新固定布置仍需另跑，旧澄清观察及失败原样保留，离线通过不是模型通过。
+
+部署后完整观察窗口 `[1792557970000, 1792562080856)` 的物理账本共 67 次尝试、66 次有用量报告，包含上述失败和重试，不与其子窗口重复相加。已报告部分累计输入 8,025,445、输出 53,859、缓存读取输入 7,582,464、未命中输入 442,981、缓存写入 0 token；一次失败尝试用量未知，不补零。67 条费用均为 unpriced / null，不报告零费用、成本下降或未选 fresh / reuse 方案的实际费用。原生观察文件 `live-window-fresh-and-vague-followup-20261021.json` SHA-256 为 `09fccc68f8b53598ab76e46dccf9d2ae7f1c549b72cb8a8d86ed9ae49f017238`。
+
+空主对话 J07、带标签历史 T01、T13 的未投递追问前提、修订后的固定 T02 / J12、严格工具期间输入和近窗口自主决策 / 等价成本对照仍分别跟踪，不以上述局部成功合并宣称全部门槛通过。任务概况分支仍未集成，原始消息在实际 AX 中的显示上限仍未定因，其他线程的 ResizeObserver 工作不混入。
+
+### 隔离空对话首次 J07：发现真实交互超时（2026-10-21）
+
+- 在原 App / Host 已正常退出后，以同一开发 checkout 启动经批准的临时评测根。只选取原 Command Code 连接配置与对应凭据，未复制原历史。普通 Session 界面在两个独立临时目录完成真实 coding，之后经正常通用设置启用 WorkHub 导航。首次 WorkHub 输入前，协调 Root / WorkHub 事实 / 动作 claim 均为 0；两个普通 Session 不伪造为 Work / generation。较早只读 diagnostics 因尚未启用 WorkHub 而报告协调状态不存在，不将其解释成已有对话或模型请求失败。
+- 固定原文“继续那个任务。”产生 `find` → `ask`，正确选择两个实际手动 Session；Host 原生 target 表单含两候选及 new_task，没有 start / continue 或派活。父级未回答或停止，但没有在表单仍 pending 时成功保存原生快照，不能事后伪造 pending 或生成 PASS 清单。
+- ask 等待恰好 150 秒后，Client Capability 返回 `outcome_unknown: Client Capability invocation timed out after admission`、`retrySafe=false`。协调轮随后 completed，原表单因 `turn_terminal` 关闭，最终 UI 只剩文字询问；这不是原生选择已通过。首次请求含 4 次物理尝试（3 次完成，1 次 network / ECONNRESET 重试，用量缺失），完整保留，不报告零错误或零费用。
+- 接线原因已定位：现有 Client Capability broker 收到自己的 nested interaction_request 时本会暂停执行计时；WorkHub ask 却从 Desktop 调回 Host 直接创建原表单，没有进入该分支，所以原 150 秒 deadline 仍在走。普通直连 Host Form 测试没有覆盖这层真实 reverse-call 链路。尚未修改超时、自动重试或权限；最小修复与端到端复测仍待完成，多任务 stop 的原确认等待也需核对同一边界。
+- 私有完整窗口 `isolated-j07-first-attempt-after-20261021.json` SHA-256 为 `12638edd421dbb975fb8bfabfbca14496f15cd732e5597242db4749c4074ab7c`；只读原生结算审计为 `11a7b4423369acfe31815af8e36e8cb5cfe90c5dea5c276e064acd3e89217719`。另一诊断进程的 IPC connect EPERM 是其工具沙箱限制，不是 Host 已退出的证明，也没有以伪造身份、改锁或后台写入规避。
 
 ## 阶段 1 记录
 
