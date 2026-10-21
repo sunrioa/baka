@@ -85,6 +85,8 @@ node packages/eval/dist/workhub-cli.js check /private/path/capture.json
 
 用量按原生 `usageBasis` 与可用字段汇总：任何请求缺少某项计数时，该项总数为 `null`，不会补零；供应商报告的零则保留为零。`estimatedUsd` 只在连接价格已核实、每个已捕获请求均有价格时给出，标签固定为 `connection_price_estimate_only`。这些记录只能证明已捕获请求，输出固定注明 `coverage: captured_attempts_only`；不能证明崩溃期间无遗漏，不称为账单，不输出未选方案费用或虚构的冷缓存节省。
 
+2026-10-21–22 经用户批准另做一组**指定 reuse / fresh 的隔离等价编码对照**，详见[实施记录中的本轮收尾](workhub-task-centric-implementation.zh-CN.md)。它核对同一导入历史、相同 baseline 可见结果、逐字相同编码正文、原生完整请求和相同独立 CLI 检查；不使用上述固定路由用例 ID，不计 `realModelPass` 或 AI 自主选择成功。两臂缓存已被实际观察为高命中，未控制供应商缓存；模型生成内容与修复次数也不同。对照保留准备、失败与通知用量，不把较小输入、归一化缓存字段或未定价格换算成账单节省，也未因此修改生产选择或压缩算法。
+
 ## 原 Jev 十二例的生产路径替代
 
 原始输入、三个候选及历史期望完整保留在 [原始 JSON](archive/jev-routing-evaluation-2026-09-22/results/default.json)。新评测通过正常 WorkHub 工具循环运行，不再调用 Intent / Recall 适配器。阶段 1 先保留行为语义；六工具落地后使用右列入口核验。
