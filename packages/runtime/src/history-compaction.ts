@@ -24,6 +24,7 @@ import { finitePositive } from './context-budget-helpers.js';
 import {
   estimateRuntimeEventChars,
   estimateRuntimeEventsTokens,
+  workHubCoordinationCancellationText,
   workHubCoordinationReceiptText,
 } from './model-history.js';
 import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
@@ -551,7 +552,9 @@ export function applyRuntimeEventHistoryCompact(
 /** True when the event carries model-visible content the compact projection counts. */
 export function isHistoryCompactContentEvent(event: RuntimeEvent): boolean {
   return (
-    (event.modelVisibility !== 'hidden' || workHubCoordinationReceiptText(event) !== undefined) &&
+    (event.modelVisibility !== 'hidden' ||
+      workHubCoordinationReceiptText(event) !== undefined ||
+      workHubCoordinationCancellationText(event) !== undefined) &&
     estimateRuntimeEventChars(event) > 0
   );
 }

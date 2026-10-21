@@ -39,6 +39,7 @@ import {
 import { buildHistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
 import { SUMMARY_FORMAT_TEMPLATE } from '../history-compact-summary-validation.js';
 import { sectionedSummary } from './history-compact-test-fixtures.js';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 
 // The summarization instruction rides as the request's trailing user message,
 // never as a separate system-role field (#4634).
@@ -91,6 +92,49 @@ function inputWith(events: RuntimeEvent[], abortSignal?: AbortSignal): HistoryCo
 }
 
 describe('buildLlmHistorySummarizer', () => {
+  test('the same native WorkHub cancellation fact reaches the summary request without changing its source', async () => {
+    let seen: Parameters<AiSdkGenerateTextLike>[0] | undefined;
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async (options) => {
+        seen = options;
+        return { text: VALID_SUMMARY };
+      },
+    });
+    const events = [
+      ev({
+        sessionId: WORKHUB_COORDINATION_SESSION_ID,
+        role: 'user',
+        author: 'user',
+        content: { kind: 'text', text: 'Add a regression to the earlier task.' },
+      }),
+      ev({
+        id: 'stopped-coordinator-terminal',
+        sessionId: WORKHUB_COORDINATION_SESSION_ID,
+        role: 'system',
+        author: 'system',
+        status: 'aborted',
+        modelVisibility: 'hidden',
+        actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+      }),
+    ];
+    const source = JSON.stringify(events);
+    await summarize({ ...inputWith(events), sessionId: WORKHUB_COORDINATION_SESSION_ID });
+    const messages = JSON.stringify(seen?.messages);
+    assert.ok(messages.includes('Add a regression to the earlier task.'));
+    assert.ok(messages.includes('stopped-coordinator-terminal'));
+    assert.match(messages, /unsubmitted work.*not a pending request/);
+    assert.match(messages, /committed task operations remain unchanged/);
+    assert.equal(JSON.stringify(events), source);
+    assert.ok(
+      seen?.messages.some(
+        (message) =>
+          message.role === 'assistant' &&
+          JSON.stringify(message.content).includes('stopped-coordinator-terminal'),
+      ),
+    );
+  });
+
   test('inherits the session provider options and applies the default output cap', async () => {
     let seen: Parameters<AiSdkGenerateTextLike>[0] | undefined;
     const providerOptions = { openaiCompatible: { reasoningEffort: 'high' } };

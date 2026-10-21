@@ -32,9 +32,9 @@
 | 2 | 配置继承、目录、观测与估计、执行绑定及 stop | 已实现，待人工审阅 | [PR #36](https://github.com/sunrioa/baka/pull/36)，未合并 |
 | 3 | 可重建任务索引、六工具、统一输入与历史读取 | 索引、输入、历史与六工具的 ai-sdk 入口已接入，完整回归通过；真实模型验证部分完成，后续退役与实测见阶段 4–7 | [PR #37](https://github.com/sunrioa/baka/pull/37)、[PR #38](https://github.com/sunrioa/baka/pull/38)、[PR #39](https://github.com/sunrioa/baka/pull/39)、[PR #40](https://github.com/sunrioa/baka/pull/40)、[PR #41](https://github.com/sunrioa/baka/pull/41)、[PR #42](https://github.com/sunrioa/baka/pull/42)、[PR #43](https://github.com/sunrioa/baka/pull/43)、[PR #44](https://github.com/sunrioa/baka/pull/44)、[PR #53](https://github.com/sunrioa/baka/pull/53)；3i 最终完整 Host 2,538 通过 / 12 原有跳过 / 0 失败，真实 DS coding / 本轮纠正已验证，界面与自然追问仍待补验 |
 | 4 | 删除旧纠正 / 候选快照 / 转发 / 任务授权 / 依赖等待 / peer 协议 | 已接入；经用户批准完成旧未派出替换意图的最小退役，保留原执行；恢复组合与受影响完整文件通过，原实例待复测 | 见下文 2026-10-20 并行收敛记录；未发布、未合并，保留完整 Host 的首次失败记录 |
-| 5 | 有界任务说明、历史入口和可选状态块 | 有界拼装、提交前一致性复核和原生 worker 可选状态块已接入；任务视图的只读概况未接入 | 编译与定向回归通过；实际换段及用量尚未复测 |
+| 5 | 有界任务说明、历史入口和可选状态块 | 有界拼装、提交前一致性复核和原生 worker 可选状态块已接入；任务视图的只读概况未接入 | 实际同任务 fresh、原始要求 / 纠正 / 工具历史读取及 coding 已验证；近窗口自主决策与等价成本对照未完成 |
 | 6 | 任务界面、原审批、侧栏折叠、默认模型持久化 | 任务搜索 / 标题 / 执行段、原交互与创建来源折叠已接入；审批分页与旧连接近期列表补修已核验；经用户确认，executor 新建入口保留且默认选择已持久化 | Native 模型 / 思考级别共用持久配置；新界面尚未做原实例 GUI 核验，executor fresh 仍明确不支持 |
-| 7 | 逐阶段回归、真实 coding、长上下文与成本实测 | 固定评测已有可执行计划和证据检查器；真实模型门槛尚未通过 | 离线检查器测试不计作模型路由、真实用量或成本对照 |
+| 7 | 逐阶段回归、真实 coding、长上下文与成本实测 | 固定 J07 / 修订 J12 / 修订 T02 已通过真实模型证据检查；T13 实际失败并保留，补修中；其余门槛分别跟踪 | 离线检查器测试不计作模型路由、真实用量或成本对照；未宣称整体完成 |
 
 ## 验证规则
 
@@ -168,6 +168,47 @@
 - ask 等待恰好 150 秒后，Client Capability 返回 `outcome_unknown: Client Capability invocation timed out after admission`、`retrySafe=false`。协调轮随后 completed，原表单因 `turn_terminal` 关闭，最终 UI 只剩文字询问；这不是原生选择已通过。首次请求含 4 次物理尝试（3 次完成，1 次 network / ECONNRESET 重试，用量缺失），完整保留，不报告零错误或零费用。
 - 接线原因已定位：现有 Client Capability broker 收到自己的 nested interaction_request 时本会暂停执行计时；WorkHub ask 却从 Desktop 调回 Host 直接创建原表单，没有进入该分支，所以原 150 秒 deadline 仍在走。普通直连 Host Form 测试没有覆盖这层真实 reverse-call 链路。尚未修改超时、自动重试或权限；最小修复与端到端复测仍待完成，多任务 stop 的原确认等待也需核对同一边界。
 - 私有完整窗口 `isolated-j07-first-attempt-after-20261021.json` SHA-256 为 `12638edd421dbb975fb8bfabfbca14496f15cd732e5597242db4749c4074ab7c`；只读原生结算审计为 `11a7b4423369acfe31815af8e36e8cb5cfe90c5dea5c276e064acd3e89217719`。另一诊断进程的 IPC connect EPERM 是其工具沙箱限制，不是 Host 已退出的证明，也没有以伪造身份、改锁或后台写入规避。
+
+### 协调者确认改为 Host 原生等待（2026-10-21）
+
+- `365e088ca` 保持模型可见的六工具、ask / stop 名称、扁平参数、Turn / tool call 派生的 actionId 与 stop 回执不变，只把两种确认工具直接接到现有 Host 命令。其他四个 Desktop 工具与浏览器能力仍绑定原已认证 provider，新准入与恢复共用同一必需工具清单。只在 WorkHub v2 已存在实际 Host 同名工具时替换旧 Desktop 的这两个 CC offer；其他已发布重名仍拒绝。没有延长 150 秒、改 broker、加 keepalive / 重试、放宽权限或增加协议 / 表 / epoch。
+- Host Form 的真实持久 `turn_stopped` 关闭与重放透传原 ClosedError，走已有原 T2 先落盘、再取消的路径；用户点击取消仍是正常 `form_answer`，普通 `turn_terminal` 保持原语义。共享 ask / stop handler 不把 Closed / Invariant / FailStop 异常包装成成功。
+- `72162609e` 扩展真实 Host / ToolRuntime / 本地 HTTP 组合测试；修复前的新原生 ask 入口因仍要求 Desktop ask / stop provider 而真实失败。这个 RED 是准入依赖失败，不冒充 150 秒生命周期 RED；后者由上面的实际 App 失败证明。修复后该完整文件 4/4、真实 writer 的 interaction 完整文件 28/28、六个纯工具文件 66/66；Root 准入 / 来源 / retry 定向 4/4 和原错误 provider 恢复用例 1/1。各组存在覆盖重叠，不相加为独立覆盖数，也不称完整 Host / Desktop 重跑通过。
+- 原生 ask 组合用例仅发布剩余四个 Desktop 工具，实际请求中 ask 恰好一次，CC 执行回调禁止被调用。停止后原 T2 seq 5 早于 cancelled terminal seq 6，Host ready、Root residency 归零，没有第二次协调请求；原配置与无关 completed 事实不变。旧六 offer 的实际组合变体调用的是 AskUserQuestion；旧同名 ask / stop 的精确替换由 composer 对象断言覆盖，不能混称该组合执行了原生 stop。
+- 独立 AI 静态复核及组合日志复核未发现新增可操作问题，不替代人工批准。正常退出空闲的临时 App / Host 后，在同一 checkout 部署 `365e088ca`，仍只运行一个开发 App，沿用临时数据与 Command Code DeepSeek、bypass、并发 1；原数据 profile 与其他已安装 Maka 未动。
+- **真实长等待专项通过**：从总输入明确要求先查询、选择后只确认不执行。唯一原 Form 的 pending 快照拍到已等待 156,438 ms；实际 GUI 选择在 309,487 ms 后提交，原 ask seq 10 的唯一 T2 为 seq 12，随后同 Turn / Run 的 seq 15 completed。全窗口只有 find 和 ask，未 start / continue / stop，未生成新派活事实；等待区间没有新物理模型请求，选择后只确认原候选。收尾诊断 ready、同 epoch、residencies 为空，同时保留 activeOperations=1 / upgradeBlockingActivity=true 的原值，不推断未观测期间的状态。
+- 长等待窗口为 `[1792570800000, 1792571301733)`，共有 3 个 logical call / 4 次物理尝试；回答后出现一次 network / ECONNRESET，再按原规则重试成功，没有重放 ask。3 条 reported 的已知小计为输入 47,553、输出 1,596、缓存读取输入 28,672、未命中输入 18,881、缓存写入 0；另外一条 missing，不补零，完整总用量及全部费用仍未知 / unpriced。主观察 SHA-256 为 `8ed62c614c575d31f517c43a447cbca231ad1b6a1a522dbd64fc27137bc38b27`，pending 实拍为 `7a78b13822ccef75af524b12f85ed5d1feecb7e631af9df5103cd13137333486`，收尾 Host 为 `726e9c629049cedfc967ba4183f9bcfb639aa01c452a2afc3682d786fed9852e`。
+- 随后的真实 GUI 取消为 `form_answer / cancel`，ask 正常返回 cancelled，原协调轮 completed，没有派活。第三个表单点击停止则为真实 `closure / turn_stopped`，原工具唯一 T2 seq 7（16:46:05.420）先于 aborted seq 8（16:46:05.436），public cancelled / user_stop 的 terminal ID 相同；没有停止后的模型调用，队列与交互清空、Host ready / residencies 为空。取消与 Stop 各在约 7 分 2 秒 / 4 分 1 秒等待后发生，仍没有旧 deadline 提前结束。
+- 三项专项的完整累计窗口共 10 次物理尝试，7 次 reported，3 次 network 失败用量 missing；已报告小计输入 123,744、输出 2,424、缓存读取 99,584、未命中 24,160、缓存写入 0，全部费用未知。它包含上述四次的子窗口，不重复相加。原观察 SHA-256 为 `929c71476319d16b9d4a7ac6365f95baff1a826d38f5446c3ea4534c1379dcdd`，Stop 收尾 Host 为 `c880413fc5633dcccbf8efea21f5c93f8f29453e640e53b85d6c8e4c91c248b6`；原有唯一任务和模型 / 权限 / 并发保持。
+- 全仓 typecheck、lint（4,171 文件）、format（2,366 文件）、ASF headers 与 diff-check 通过。随后同一已构建代码串行完成完整 Host：2,499 通过、12 原有跳过、0 失败，565.7 秒；完整 Desktop：3,386 通过、0 失败，208.9 秒。这是 `365e088ca` 本轮各自单次结果，不抹掉上文各旧版本全量失败；本轮完整 Runtime 未重跑。
+- 这些专项输入不是固定 J07 原文，协调历史也已非空，候选是普通 Session 与已接管 Work；因此不追改首次 J07 失败或计作 J07 PASS。全新空协调历史的固定 J07 另行采集；原有固定路由、近窗口自主换段和费用对照门槛不因此取消。
+
+### 固定真实模型路由门槛：通过与失败分别保留（2026-10-21）
+
+在 `365e088ca` 的第二个获批临时数据根，通过正常 UI 创建真实 coding 候选、输入固定原文，使用原 Command Code DeepSeek、bypass、并发 1。没有复制原历史、改时间戳、注入预期目标 ID 或修改 checker；原用户 profile 继续保留且未清空。父级重新执行当前 `packages/eval/dist/workhub-cli.js check`，以下三项均为 exit 0、`realModelPass=true`，不是离线夹具通过：
+
+| 用例 | 实际观察 | 物理请求 / 输入 / 输出 token |
+|---|---|---|
+| J07 | 首次协调输入前 Root、事实与动作 claim 为 0；两个实际手动 Session。只发“继续那个任务。”后，find → 原生 ask，选项为这两个真实候选加 new_task；仍待用户选择，无派活 | 2 / 13,355 / 384 |
+| 修订 J12 | 规划轮自然结束，无工具或待答；只发“接着做吧。”，进入原任务同 work / generation / Session 的新轮，原始消息身份与摘要一致，执行及自动反馈完成 | 15 / 150,366 / 8,302 |
+| 修订 T02 | A / B 独立新建；B 只完成计划后，右栏预览 A。总输入只发“继续。”，仍续作 B 原身份，不被预览 A 或旧同主题任务带偏；全部三轮及反馈结束 | 22 / 334,850 / 18,438 |
+
+J07 的 PASS 截止于原生 pending 表单实拍；之后 UI Stop 的 cancelled / user_stop 为窗外清理，不混作选中或执行证明。J12 / T02 没有队列时间线，检查器如实记 `not_observed`，不能代替前述真实 FIFO / 排队补充测试。T02 预览来源是实际 CUA AX 操作观察，保留身份映射与 driver 观察限制，不冒充 Host 记录。各窗口不重叠；上述 39 次请求均 reported，费用未核实 / null。J12 worker 通过本地 `.venv` 安装 pytest，不能声称无网络或无额外环境写入；父级只读检查产物并独立重跑 J12 92/92、T02 B 39/39。原失败与先前变体不追溯改记 PASS。
+
+私有 capture / report 分别保留来源文件摘要与指针。J07 capture SHA-256 为 `33800ca647581b33752783601fd628c5f298e4d600ffdf444daa7d4788f49ee4`，J12 为 `fde3b21cb74f8dd80c1942b2917ce1af92658bb03dd9a3dd9ae9aa6663d99d5c`，T02 为 `0650eeb04b9268af28198be73a23ba6a3dfc9d4d28f0c0544190f9f6a26598d3`。哈希保证后续检查使用同份导出，不认证运行者声明，也不证明未捕获的时段。
+
+**T13 真实失败，不因前三项通过而忽略。**原追问通过正常总输入提交，协调轮仅 find / requirements / result 后被用户 Stop；公开 cancelled / user_stop 与原生 aborted terminal 一致，停止时旧任务完整快照前后相同，无派活或消费。随后发送固定新建 A / B 并等自动反馈，新建 A 的合法新协调轮先 continue 旧任务，再 start 新 A。新事实来源确实是新消息，并非 Host 恢复已取消 Root；模型把已取消旧要求当成未完成待办，新增了旧任务消费与额外反馈。
+
+现有 checker 对完整窗口 `[1792576193461,1792577520112)` 实际 exit 1：额外写调用、错误操作、两条额外副作用及 `stale_followup_resurrected`，没有缺证据类报错。19 对工具交换、9 个公开 Turn、27 次物理请求全部保留；其中含设置期 4 次且不重复相加，一次 aborted / missing，完整 token 总数及费用为 null。失败 capture SHA-256 为 `6acd8f22c191ab10a4077d59df1f2dd0e9027448245de7e5ae28f1c811f4db16`，report 为 `3837419e4a744f35b6a7278dcb3f913f408aad6de4638be6b1427d2c55c0d403`。
+
+静态与原生记录核对发现，旧用户原文保留为普通 user 历史，但其真实 `aborted / user_stop` terminal 在 model-history 中只作诊断、未进入模型消息；本次诊断没有丢弃事件或压缩决策，不先归因于压缩。此为既有投影缺口，不是原生 ask 补修引入。最小补修将原始取消终态按有界 Host 生命周期事实投影到同一 replay / 计量 / 摘要输入；不删除原用户要求或已提交效果，不等同停止底层任务、不增加意图识别或权限 / 队列规则。补修后必须重新跑真实 T13，不能把确定性历史测试当作模型已修好。
+
+### T13 取消事实投影补修（2026-10-21，待实机复测）
+
+- 只将 WorkHub 协调 Session 的原生 system / Host、完整 `aborted` / `cancelled` 且结束 invocation 的 terminal 投影为有界 assistant 历史事实；保留原始 session / turn / run / invocation / terminal ID。隐藏正文不复制，仅输出白名单生命周期字段。只有明确 `user_stop` / `renderer.stop_button` 才表达用户停止；未知来源不推断用户撤销。普通 Session、成功终态及真正 handoff pause 不变。
+- 停止协调轮不等同停止底层任务，也不回滚已经提交的 start / continue。原用户文字、工具调用与结果仍保留，之后明确重提旧任务仍可继续；没有新意图识别器、目标白名单或动作权限。恢复投影语义改为 WorkHub v6，普通仍为 v2，原版本不匹配仍沿现有 park 路径处理。
+- `b5d0b545c` 接入 Core claim / continuation-start 的严格 1–6 解码、迁移 23 及统一 epoch 239；只扩展原 CHECK，不增加表的权威来源，不改写旧 claim 版本 / digest。旧 v1–v5 行及索引逐字段比较、重复迁移、关闭重开、正式 claim API 幂等与拒绝 v7，相关五个完整纯文件单次 229/229。独立复核又发现 Runtime 的一次性 start-proof 仍限 1–5，已随本补修扩到 6 并增加精确身份与一次性消费 / 拒7测试，不能把 `b5d0` 单独部署为完整修复。
+- 三个新增历史回归修复前实际 0/3；修复后历史、摘要、continuation / resume、一次性 proof 五个完整文件 121/121。AiSdkBackend 的实际请求投影断言另有 1/1，接收端是 MockLanguageModelV4，不冒充真实模型。现有 Command Code adapter 序列化测试还实际解析 fetch 请求 JSON，断言原取消事实先于新用户输入、原已提交结果保留；这是离线 wire 测试，不是线上 T13 通过。完整构建通过；最终冻结回归、正常重启及真实模型复测另记，不扩大上述结论。
 
 ## 阶段 1 记录
 

@@ -35,6 +35,8 @@
  *   - role is user, model, or tool (system excluded unless opted in)
  *   - committed Host coordination receipts in WorkHub replay as bounded
  *     acknowledgements, including when hidden from ordinary model history
+ *   - native WorkHub coordinator cancellation facts retain the stopped run's
+ *     lifecycle alongside its historical request, without cancelling its tasks
  *
  * Policy (why an event is DROPPED):
  *   - partial === true (streaming chunks superseded by a later final event)
@@ -84,8 +86,8 @@ import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { isWorkHubActionReceipt } from '@maka/core/workhub-action-result';
 
 export const PROVIDER_REPLAY_PROJECTION_VERSION = 2;
-export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 5;
-export type ProviderReplayProjectionVersion = 2 | 3 | 4 | 5;
+export const WORKHUB_PROVIDER_REPLAY_PROJECTION_VERSION = 6;
+export type ProviderReplayProjectionVersion = 2 | 3 | 4 | 5 | 6;
 
 function isRetiredWorkHubOperation(event: RuntimeEvent): boolean {
   if (
@@ -122,6 +124,46 @@ export function workHubCoordinationReceiptText(event: RuntimeEvent): string | un
     'Host operation receipt: the operation for this user input was already handled. This is not a new request; do not dispatch it again. Admission is not proof of execution or completion.\n\n' +
     JSON.stringify({ actionId: receipt.actionId, ...receipt.result })
   );
+}
+
+/** Retain a native stop fact; never infer cancellation from conversation text. */
+export function workHubCoordinationCancellationText(event: RuntimeEvent): string | undefined {
+  if (
+    event.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+    event.role !== 'system' ||
+    (event.author !== 'system' && event.author !== 'host') ||
+    isPartialRuntimeEvent(event) ||
+    (event.status !== 'aborted' && event.status !== 'cancelled') ||
+    event.actions?.endInvocation !== true ||
+    [event.id, event.invocationId, event.runId, event.turnId].some(
+      (id) => id.length === 0 || id.length > 256,
+    )
+  )
+    return undefined;
+  const source = event.actions.stateDelta?.abortSource;
+  const abortSource =
+    typeof source === 'string' && source.length > 0 && source.length <= 128 ? source : 'unknown';
+  const userStopped = abortSource === 'user_stop' || abortSource === 'renderer.stop_button';
+  return (
+    'Host coordinator lifecycle fact: this previous coordinator invocation ended without completion. This is historical context, not a new user request or a task cancellation. Previously committed task operations remain unchanged.\n' +
+    (userStopped
+      ? 'The user stopped this coordinator invocation; its unsubmitted work is not a pending request. A later explicit user request may continue that work.\n'
+      : '') +
+    '\n' +
+    JSON.stringify({
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      runId: event.runId,
+      invocationId: event.invocationId,
+      terminalEventId: event.id,
+      status: event.status,
+      abortSource,
+    })
+  );
+}
+
+function workHubCoordinationFactText(event: RuntimeEvent): string | undefined {
+  return workHubCoordinationReceiptText(event) ?? workHubCoordinationCancellationText(event);
 }
 
 export function providerReplayProjectionVersion(
@@ -464,8 +506,8 @@ export function estimateEffectiveToolResultChars(
 }
 
 export function estimateRuntimeEventChars(event: RuntimeEvent): number {
-  const receipt = workHubCoordinationReceiptText(event);
-  if (receipt !== undefined) return receipt.length;
+  const fact = workHubCoordinationFactText(event);
+  if (fact !== undefined) return fact.length;
   let total = 0;
   const content = event.content;
   if (content?.kind === 'text' || content?.kind === 'thinking') {
@@ -518,7 +560,7 @@ export function estimateRuntimeEventsTokens(
   let chars = 0;
   let mediaTokens = 0;
   for (const event of events) {
-    if (event.modelVisibility === 'hidden' && !workHubCoordinationReceiptText(event)) continue;
+    if (event.modelVisibility === 'hidden' && !workHubCoordinationFactText(event)) continue;
     chars += estimateRuntimeEventChars(event);
     mediaTokens += estimateRuntimeEventMediaTokens(event);
   }
@@ -941,13 +983,13 @@ export function buildRuntimeEventModelReplayPlan(
       continue;
     }
 
-    const receipt = workHubCoordinationReceiptText(event);
-    if (receipt !== undefined) {
+    const fact = workHubCoordinationFactText(event);
+    if (fact !== undefined) {
       items.push({
         kind: 'text',
         invocationId: event.invocationId,
         role: 'assistant',
-        content: receipt,
+        content: fact,
         eventId: event.id,
         ts: event.ts,
       });

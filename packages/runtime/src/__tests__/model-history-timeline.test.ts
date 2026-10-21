@@ -144,6 +144,137 @@ test('committed native WorkHub receipts remain visible after their user input an
   }
 });
 
+test('a stopped WorkHub coordinator keeps its cancellation fact beside its historical request', async () => {
+  const inCoordinator = (value: RuntimeEvent): RuntimeEvent => ({
+    ...value,
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  });
+  const user = inCoordinator(
+    event({
+      id: 'stopped-request',
+      role: 'user',
+      author: 'user',
+      content: { kind: 'text', text: 'Add a regression to the earlier task.' },
+    }),
+  );
+  const stopped: RuntimeEvent = {
+    ...inCoordinator(event({ id: 'stopped-terminal', role: 'system', author: 'system' })),
+    status: 'aborted',
+    modelVisibility: 'hidden',
+    actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+  };
+  const next = inCoordinator(
+    inInvocation(
+      event({
+        id: 'new-request',
+        role: 'user',
+        author: 'user',
+        content: { kind: 'text', text: 'Start a separate new task.' },
+      }),
+      'next',
+    ),
+  );
+  const events = [user, stopped, next];
+  const raw = JSON.stringify(events);
+  const plan = buildRuntimeEventModelReplayPlan(events);
+  assert.deepEqual(
+    plan.items.map((item) => item.eventId),
+    events.map((value) => value.id),
+  );
+  const fact = plan.items[1];
+  assert.ok(fact?.kind === 'text');
+  assert.equal(fact.role, 'assistant', 'the Host lifecycle fact is not a new user instruction');
+  assert.match(fact.content, /"terminalEventId":"stopped-terminal"/);
+  assert.match(fact.content, /"turnId":"turn-1"/);
+  assert.match(fact.content, /"runId":"run-1"/);
+  assert.match(fact.content, /"invocationId":"invocation-1"/);
+  assert.match(fact.content, /"status":"aborted"/);
+  assert.match(fact.content, /"abortSource":"user_stop"/);
+  assert.match(fact.content, /unsubmitted work.*not a pending request/);
+  assert.match(fact.content, /committed task operations remain unchanged/);
+  assert.ok(isHistoryCompactContentEvent(stopped));
+  assert.ok(estimateRuntimeEventsTokens([stopped]) > 0);
+  const native = await fixtureReplay(plan);
+  assert.ok(JSON.stringify(native).includes('stopped-terminal'));
+  assert.ok(JSON.stringify(plan.textMessages).includes('stopped-terminal'));
+  assert.equal(JSON.stringify(events), raw, 'request projection never edits the ledger');
+});
+
+test('WorkHub cancellation projection does not erase committed effects or a later explicit request', () => {
+  const coordinator = (value: RuntimeEvent): RuntimeEvent => ({
+    ...value,
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+  });
+  const call = coordinator({
+    ...toolCall('already-started'),
+    content: {
+      kind: 'function_call',
+      id: 'start-1',
+      name: 'mcp__desktop_workhub__start',
+      args: { title: 'A', text: 'Implement A' },
+    },
+  });
+  const result = coordinator({
+    ...toolResult('accepted-start'),
+    content: {
+      kind: 'function_response',
+      id: 'start-1',
+      name: 'mcp__desktop_workhub__start',
+      result: { taskId: 'task-a', status: 'admitted' },
+    },
+  });
+  const stopped: RuntimeEvent = coordinator({
+    ...event({ id: 'stop-after-start', role: 'system', author: 'host' }),
+    status: 'cancelled',
+    actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+  });
+  const resumed = coordinator(
+    inInvocation(
+      event({
+        id: 'explicitly-resume',
+        role: 'user',
+        author: 'user',
+        content: { kind: 'text', text: 'Now explicitly continue the earlier task.' },
+      }),
+      'later',
+    ),
+  );
+  const plan = buildRuntimeEventModelReplayPlan([call, result, stopped, resumed]);
+  assert.deepEqual(
+    plan.items.map((item) => item.eventId),
+    [call.id, result.id, stopped.id, resumed.id],
+  );
+  assert.equal(plan.items[0]?.kind, 'tool_call');
+  assert.equal(plan.items[1]?.kind, 'tool_result');
+  assert.equal(plan.items.at(-1)?.kind, 'text');
+  assert.ok(JSON.stringify(plan.items.at(-1)).includes('Now explicitly continue'));
+});
+
+test('only native WorkHub cancellation facts are projected and unknown abort causes do not imply user withdrawal', () => {
+  const terminal: RuntimeEvent = {
+    ...event({ id: 'native-stop', role: 'system', author: 'system' }),
+    sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    status: 'aborted',
+    actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+  };
+  for (const rejected of [
+    { ...terminal, sessionId: 'ordinary-session' },
+    { ...terminal, partial: true },
+    { ...terminal, role: 'tool' as const, author: 'tool' as const },
+    { ...terminal, role: 'model' as const, author: 'agent' as const },
+    { ...terminal, status: 'completed' as const },
+    { ...terminal, status: 'streaming' as const },
+    { ...terminal, actions: { stateDelta: { abortSource: 'user_stop' } } },
+  ]) {
+    assert.equal(buildRuntimeEventModelReplayPlan([rejected]).items.length, 0);
+  }
+  const unknown: RuntimeEvent = { ...terminal, actions: { endInvocation: true } };
+  const item = buildRuntimeEventModelReplayPlan([unknown]).items[0];
+  assert.ok(item?.kind === 'text');
+  assert.match(item.content, /"abortSource":"unknown"/);
+  assert.doesNotMatch(item.content, /The user stopped|unsubmitted work/);
+});
+
 test('malformed or mismatched Host result data cannot substitute another source in replay', () => {
   const origin = {
     kind: 'workhub_result' as const,
@@ -543,7 +674,7 @@ test('retired WorkHub history honors the effective result rather than reviving e
   assert.ok(JSON.stringify(events).includes('RAW_OUTPUT_MUST_STAY_EVICTED'));
 });
 
-test('Command Code Chat wire advertises the flat tools and carries old WorkHub operations only as facts', async () => {
+test('Command Code Chat wire carries native cancellation and retired operations as facts', async () => {
   const oldName = 'mcp__desktop_workhub__tasks';
   const events = [
     event({
@@ -574,6 +705,12 @@ test('Command Code Chat wire advertises the flat tools and carries old WorkHub o
         result: { admitted: true, workId: 'original-A' },
       },
     }),
+    {
+      ...event({ id: 'coordinator-user-stop', role: 'system', author: 'system' }),
+      status: 'aborted' as const,
+      modelVisibility: 'hidden' as const,
+      actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+    },
     event({
       id: 'latest',
       role: 'user',
@@ -640,6 +777,17 @@ test('Command Code Chat wire advertises the flat tools and carries old WorkHub o
   assert.ok(text.includes('Keep duplicate query keys'));
   assert.ok(text.includes('original-A'));
   assert.ok(text.includes('Historical retired WorkHub operation'));
+  assert.ok(text.includes('coordinator-user-stop'));
+  assert.match(text, /unsubmitted work.*not a pending request/);
+  assert.match(text, /committed task operations remain unchanged/);
+  const stoppedIndex = history.findIndex((message) =>
+    JSON.stringify(message.content).includes('coordinator-user-stop'),
+  );
+  const latestIndex = history.findIndex((message) =>
+    JSON.stringify(message.content).includes('Continue the current A'),
+  );
+  assert.equal(history[stoppedIndex]?.role, 'assistant');
+  assert.ok(stoppedIndex >= 0 && stoppedIndex < latestIndex);
   assert.equal(wire.model, 'deepseek/deepseek-v4.1-flash');
   adapter.dispose();
 });
