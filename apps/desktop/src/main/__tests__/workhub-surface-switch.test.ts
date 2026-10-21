@@ -67,6 +67,45 @@ test('the coordinator and shell task reader share selection without accepting an
   assert.equal(subscribers.size, 0);
 });
 
+test('closing the unified workbar hides task highlights and invalidates an older pending open', async () => {
+  const { root } = installReactRenderer();
+  const subscribers = new Set<(snapshot: WorkHubPresentationSnapshot) => void>();
+  const owner = desktopSessionKey({ hostId: 'host', sessionId: 'coordination' });
+  const work = { sessionId: desktopSessionKey({ hostId: 'host', sessionId: 'worker' }), name: 'A', workId: 'a' };
+  const opened: WorkHubPresentationSnapshot = { placement: 'docked', floatingVisible: false, rendererCrashed: false,
+    shortcutRegistered: true, workbar: { collapsed: false, placement: 'right' }, taskSelection: { ownerSessionId: owner, work } };
+  const read = deferred<Awaited<ReturnType<WorkHubServices['readTask']>>>();
+  const writes: NonNullable<WorkHubPresentationSnapshot['taskSelection']>[] = [];
+  const services = { presentation: {
+    getSnapshot: async () => opened,
+    subscribe: (notify: (snapshot: WorkHubPresentationSnapshot) => void) => { subscribers.add(notify); return () => { subscribers.delete(notify); }; },
+    selectTask: async (selection: NonNullable<WorkHubPresentationSnapshot['taskSelection']>) => { writes.push(selection); },
+  }, readTask: () => read.promise } as unknown as WorkHubServices;
+  const readers: Array<ReturnType<typeof useWorkHubTaskSelection>> = [];
+  function Reader({ index }: { index: number }) { readers[index] = useWorkHubTaskSelection(services, owner); return null; }
+  const publish = (snapshot: WorkHubPresentationSnapshot) => { for (const notify of subscribers) notify(snapshot); };
+  try {
+    await act(async () => root.render(createElement('div', null, createElement(Reader, { index: 0 }), createElement(Reader, { index: 1 }))));
+    assert.ok(readers.every(reader => reader.selected?.workId === 'a'));
+    let pending!: Promise<void>;
+    await act(() => { pending = readers[0]!.open({ workId: 'b' }); });
+    await act(() => publish({ ...opened, workbar: { collapsed: true, placement: 'right' } }));
+    assert.ok(readers.every(reader => reader.selected === undefined), 'a hidden task pane must not leave its card pressed');
+    assert.deepEqual(writes, [], 'visibility only changes presentation, not task authority or the retained selection');
+    await act(async () => {
+      read.resolve({ task: { actionId: 'b', workId: 'b', delegationId: 'delegation-b', targetSessionId: work.sessionId,
+        targetSessionName: 'B', targetMessageId: 'message-b', text: 'B', createdAt: 1, status: 'pending_acceptance' } });
+      await pending;
+    });
+    assert.deepEqual(writes, [], 'a read started before closure must not reopen the hidden pane');
+    await act(() => publish(opened));
+    assert.ok(readers.every(reader => reader.selected?.workId === 'a'), 'explicit reopening can still restore the retained exact selection');
+    await act(() => publish({ ...opened, taskSelection: { ownerSessionId: owner } }));
+    assert.ok(readers.every(reader => reader.selected === undefined), 'the generic task-list entry still clears the selection');
+  } finally { await act(async () => root.unmount()); }
+  assert.equal(subscribers.size, 0);
+});
+
 test('the main surface does not mount WorkHub or start its lifecycle', async () => {
   const { root, container } = installReactRenderer();
   const services = { surface: 'main' } as WorkHubServices;
