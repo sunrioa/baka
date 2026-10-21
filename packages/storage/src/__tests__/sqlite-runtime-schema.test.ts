@@ -18,6 +18,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { lstatSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import {
@@ -103,8 +106,10 @@ describe('SQLite runtime schema migration', () => {
     }
   });
 
-  it('preserves released v1/v2/v3 claims while admitting WorkHub v4/v5 projections', () => {
-    const db = new DatabaseSync(':memory:');
+  it('preserves released v1-v5 claims while migrating and reopening WorkHub v6 projections', () => {
+    const root = mkdtempSync(join(tmpdir(), 'maka-continuation-v23-'));
+    const dbPath = join(root, 'runtime.sqlite');
+    let db = new DatabaseSync(dbPath);
     try {
       db.exec('PRAGMA foreign_keys = ON');
       db.exec(`
@@ -176,6 +181,7 @@ describe('SQLite runtime schema migration', () => {
       `);
 
       let releasedRows: unknown[] = [];
+      let releasedIndexes: unknown[] = [];
       const migrating = new Proxy(db, {
         get(target, property) {
           if (property === 'exec')
@@ -216,6 +222,38 @@ describe('SQLite runtime schema migration', () => {
                   .prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id')
                   .all();
               }
+              if (sql.includes('CREATE TABLE runtime_continuation_claims_v23')) {
+                assert.equal(
+                  (target.prepare('PRAGMA user_version').get() as { user_version: number })
+                    .user_version,
+                  22,
+                );
+                for (const version of [4, 5]) {
+                  target.exec(`
+                    INSERT INTO runtime_continuation_claims VALUES (
+                      'claim-v${version}', 'session', 'source-invocation', 'source-run', 'source-turn', ${version},
+                      'sha256:source-${version}', 'sha256:boundary-v${version}', '{}', ${version}, 'sha256:replay-v${version}',
+                      'session', 'target-invocation-v${version}', 'target-run-v${version}', 'target-turn-v${version}', '{}',
+                      ${version}, NULL, NULL, 1
+                    );
+                  `);
+                }
+                assert.throws(
+                  () =>
+                    target.exec(
+                      "UPDATE runtime_continuation_claims SET provider_projection_version = 6 WHERE claim_id = 'claim-v5'",
+                    ),
+                  /CHECK constraint failed/,
+                );
+                releasedRows = target
+                  .prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id')
+                  .all();
+                releasedIndexes = target
+                  .prepare(
+                    "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'runtime_continuation_claims' ORDER BY name",
+                  )
+                  .all();
+              }
               return target.exec(sql);
             };
           const value = Reflect.get(target, property, target);
@@ -223,11 +261,18 @@ describe('SQLite runtime schema migration', () => {
         },
       });
       migrateSqliteRuntimeDatabase(migrating);
-      assert.equal(releasedRows.length, 3);
+      assert.equal(releasedRows.length, 5);
       assert.deepEqual(
         db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
         releasedRows,
       );
+      const indexes = () =>
+        db
+          .prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'runtime_continuation_claims' ORDER BY name",
+          )
+          .all();
+      assert.deepEqual(indexes(), releasedIndexes);
       assert.ok(
         db
           .prepare("SELECT 1 FROM sqlite_master WHERE name = 'runtime_continuation_fresh_turn'")
@@ -261,7 +306,7 @@ describe('SQLite runtime schema migration', () => {
         'invocation_opened',
         'an open claim carries the opening it always implied, not a copy of the Run header',
       );
-      for (const version of [4, 5]) {
+      for (const version of [6]) {
         db.exec(`
           INSERT INTO runtime_continuation_claims VALUES (
             'claim-v${version}', 'session', 'source-invocation', 'source-run', 'source-turn', ${version},
@@ -274,9 +319,16 @@ describe('SQLite runtime schema migration', () => {
       assert.throws(() =>
         db.exec(`
           UPDATE runtime_continuation_claims
-          SET provider_projection_version = 6
+          SET provider_projection_version = 7
           WHERE claim_id = 'claim-v3'
         `),
+      );
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+      assert.equal(
+        db
+          .prepare("SELECT name FROM sqlite_master WHERE name = 'runtime_continuation_claims_v23'")
+          .get(),
+        undefined,
       );
       const after = db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all();
       migrateSqliteRuntimeDatabase(db);
@@ -284,8 +336,27 @@ describe('SQLite runtime schema migration', () => {
         db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
         after,
       );
-    } finally {
       db.close();
+      db = new DatabaseSync(dbPath);
+      migrateSqliteRuntimeDatabase(db);
+      assert.equal(
+        (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
+        23,
+      );
+      assert.deepEqual(
+        db.prepare('SELECT * FROM runtime_continuation_claims ORDER BY claim_id').all(),
+        after,
+      );
+      assert.deepEqual(indexes(), releasedIndexes);
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+    } finally {
+      if (db.isOpen) db.close();
+      assert.ok(root.startsWith(join(tmpdir(), 'maka-continuation-v23-')));
+      assert.ok(lstatSync(root).isDirectory() && !lstatSync(root).isSymbolicLink());
+      assert.ok(
+        realpathSync(root).startsWith(join(realpathSync(tmpdir()), 'maka-continuation-v23-')),
+      );
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

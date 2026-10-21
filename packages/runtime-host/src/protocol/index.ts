@@ -109,7 +109,8 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 238 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 239 as const;
+// 239: WorkHub replay projection v6 retains canonical coordinator terminal facts.
 // 237: Continuation events and claims may carry WorkHub replay projection version 5.
 // 236: Task detail can resolve the current canonical assignment by logical workId.
 // 235: WorkHub Desktop capabilities publish flat task tools instead of the tasks union.

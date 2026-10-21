@@ -34,7 +34,7 @@ import {
   buildSyntheticTerminalRuntimeEvent,
 } from '@maka/core/runtime-invocation';
 
-export const SQLITE_RUNTIME_SCHEMA_VERSION = 22;
+export const SQLITE_RUNTIME_SCHEMA_VERSION = 23;
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY = 'runtime_recovery_authority';
 export const RUNTIME_RECOVERY_AUTHORITY_CAPABILITY_VERSION = 1;
 export const RUNTIME_CONTINUATION_AUTHORITY_CAPABILITY = 'runtime_continuation_authority';
@@ -779,6 +779,42 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     INSERT INTO runtime_continuation_claims_v22 SELECT * FROM runtime_continuation_claims;
     DROP TABLE runtime_continuation_claims;
     ALTER TABLE runtime_continuation_claims_v22 RENAME TO runtime_continuation_claims;
+    CREATE UNIQUE INDEX runtime_continuation_fresh_turn
+      ON runtime_continuation_claims(target_session_id, target_turn_id)
+      WHERE json_extract(target_opening_json, '$.source.kind') <> 'handoff';
+    `,
+  ],
+  [
+    23,
+    `
+    -- WorkHub terminal facts change replay semantics, not existing claim proofs.
+    -- Preserve released versions and every constraint while admitting v6.
+    CREATE TABLE runtime_continuation_claims_v23 (
+      claim_id TEXT PRIMARY KEY,
+      source_session_id TEXT NOT NULL,
+      source_invocation_id TEXT NOT NULL,
+      source_run_id TEXT NOT NULL,
+      source_turn_id TEXT NOT NULL,
+      source_event_high_water INTEGER NOT NULL CHECK (source_event_high_water > 0),
+      source_prefix_digest TEXT NOT NULL,
+      boundary_digest TEXT NOT NULL UNIQUE,
+      boundary_json TEXT NOT NULL,
+      provider_projection_version INTEGER NOT NULL CHECK (provider_projection_version IN (1, 2, 3, 4, 5, 6)),
+      provider_replay_digest TEXT NOT NULL,
+      target_session_id TEXT NOT NULL,
+      target_invocation_id TEXT NOT NULL UNIQUE,
+      target_run_id TEXT NOT NULL UNIQUE,
+      target_turn_id TEXT NOT NULL,
+      target_opening_json TEXT NOT NULL,
+      claimed_at INTEGER NOT NULL,
+      start_event_id TEXT UNIQUE REFERENCES runtime_events(event_id) ON DELETE CASCADE,
+      start_kind TEXT CHECK (start_kind IS NULL OR start_kind IN ('runtime_admission', 'claim_repair')),
+      protocol_version INTEGER NOT NULL CHECK (protocol_version = 1),
+      UNIQUE (source_session_id, source_run_id, source_event_high_water, source_prefix_digest)
+    );
+    INSERT INTO runtime_continuation_claims_v23 SELECT * FROM runtime_continuation_claims;
+    DROP TABLE runtime_continuation_claims;
+    ALTER TABLE runtime_continuation_claims_v23 RENAME TO runtime_continuation_claims;
     CREATE UNIQUE INDEX runtime_continuation_fresh_turn
       ON runtime_continuation_claims(target_session_id, target_turn_id)
       WHERE json_extract(target_opening_json, '$.source.kind') <> 'handoff';

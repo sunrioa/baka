@@ -43,6 +43,7 @@ import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
   buildImmutableRuntimePrefix,
   createRuntimeBoundaryCursor,
+  decodeContinuationClaim,
   runtimePrefixSegment,
   type ContinuationClaimV1,
   type ImmutableRuntimePrefixV1,
@@ -2873,10 +2874,13 @@ describe('SqliteRuntimeStore', () => {
     });
   });
 
-  for (const providerProjectionVersion of [4, 5] as const) {
-    it(`durably claims and reopens WorkHub projection v${providerProjectionVersion} without duplicate admission`, async () => {
+  for (const providerProjectionVersion of [1, 2, 3, 4, 5, 6] as const) {
+    it(`durably claims and reopens projection v${providerProjectionVersion} without duplicate admission`, async () => {
       await withStore(async (store, dbPath) => {
-        const claim = { ...continuationClaim(), providerProjectionVersion };
+        const claim = decodeContinuationClaim({
+          ...continuationClaim(),
+          providerProjectionVersion,
+        });
         await persistImmutablePrefix(store, continuationSourcePrefix());
         assert.equal((await store.claimContinuation({ claim })).kind, 'acquired');
         assert.equal((await store.claimContinuation({ claim })).kind, 'existing');
@@ -2900,6 +2904,24 @@ describe('SqliteRuntimeStore', () => {
       });
     });
   }
+
+  it('refuses an unknown projection claim before any durable admission', async () => {
+    await withStore(async (store) => {
+      const claim = continuationClaim();
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+      await assert.rejects(
+        store.claimContinuation({
+          claim: { ...claim, providerProjectionVersion: 7 } as unknown as ContinuationClaimV1,
+        }),
+        /Invalid continuation claim/,
+      );
+      assert.equal(await store.readContinuationClaimByBoundary(claim.boundaryDigest), undefined);
+      assert.deepEqual(
+        await store.readImmutableRuntimeEvents(claim.target.sessionId, claim.target.runId),
+        [],
+      );
+    });
+  });
 
   it('refuses a continuation target opening it cannot read, stored or submitted', async () => {
     await withStore(async (store, dbPath) => {
