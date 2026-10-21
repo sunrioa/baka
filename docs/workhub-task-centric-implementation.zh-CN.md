@@ -209,6 +209,9 @@ J07 的 PASS 截止于原生 pending 表单实拍；之后 UI Stop 的 cancelled
 - 停止协调轮不等同停止底层任务，也不回滚已经提交的 start / continue。原用户文字、工具调用与结果仍保留，之后明确重提旧任务仍可继续；没有新意图识别器、目标白名单或动作权限。恢复投影语义改为 WorkHub v6，普通仍为 v2，原版本不匹配仍沿现有 park 路径处理。
 - `b5d0b545c` 接入 Core claim / continuation-start 的严格 1–6 解码、迁移 23 及统一 epoch 239；只扩展原 CHECK，不增加表的权威来源，不改写旧 claim 版本 / digest。旧 v1–v5 行及索引逐字段比较、重复迁移、关闭重开、正式 claim API 幂等与拒绝 v7，相关五个完整纯文件单次 229/229。独立复核又发现 Runtime 的一次性 start-proof 仍限 1–5，已随本补修扩到 6 并增加精确身份与一次性消费 / 拒7测试，不能把 `b5d0` 单独部署为完整修复。
 - 三个新增历史回归修复前实际 0/3；修复后历史、摘要、continuation / resume、一次性 proof 五个完整文件 121/121。AiSdkBackend 的实际请求投影断言另有 1/1，接收端是 MockLanguageModelV4，不冒充真实模型。现有 Command Code adapter 序列化测试还实际解析 fetch 请求 JSON，断言原取消事实先于新用户输入、原已提交结果保留；这是离线 wire 测试，不是线上 T13 通过。完整构建通过；最终冻结回归、正常重启及真实模型复测另记，不扩大上述结论。
+- `99ee88701` 冻结生产代码完成完整构建和 Core 930/930、Storage 1,643 通过 / 8 原有跳过、Host 2,500 通过 / 12 原有跳过，均无失败。Runtime 运行 253/255 个编译测试文件，3,756 通过 / 14 原有跳过；两个会写真实 home 的 filesystem-worker 文件未获本轮授权，明确排除，不能称 Runtime 全量。Desktop 427 个编译测试文件为 3,355/3,355；官方清单中的另外五个源脚本单独为 31/31，两个本地 Vite 用例在普通沙箱首次因监听回环端口 EPERM 失败，取得限定审批后原样通过，没有改断言或超时。这两批覆盖同一源码的官方 Desktop 清单，不冒称一次完整运行或重复累计。
+- 上述长套件逐一核验编译产物运行前后摘要不变。Runtime / Core / Storage / Host / Desktop 编译测试日志 SHA-256 依次为 `56adfe0d1a7a42fc578f4f1473439172b16aa92b45d184e89874bb2dd3b45130`、`69ef1ced031cc894d71ca1ce495d1350e4c4903333c5d19877bd651461587dad`、`cf91790af62bddd81e46b5fd5ab75e618ad05449eab5972c7acc98f686ce2f71`、`21c23c6e2f07fe46f40267ce95adcbaad934df65f9d2529349130b7f7cf3ea41`、`560b39471915b0ab443ec4649886c47f1281b1f2ddb9aa0ff45240183786d57c`。全仓 typecheck / lint / format / ASF、Desktop / UI knip、renderer architecture 165/165 与 Eval 离线 33/33 亦通过；它们不是模型路由或费用证明。
+- 独立静态复核冻结生产差异未发现剩余可操作问题，但仍要求真实 T13 证据，不能视为人工批准。另用两个纯回归核对旧压缩 checkpoint：覆盖跨过原隐藏取消事件时，既有精确前缀检查拒绝旧摘要、原事件与取消事实完整保留；覆盖止于该事件之前则保留摘要，取消事实留在尾部。相应完整文件 30/30。这没有修改压缩算法；旧 checkpoint 不会被持久作废，新 checkpoint 成功保存前，多次发送可能反复回退原历史、增加输入成本，不能承诺仅多付一次。未新增作废机制或恢复框架。
 
 ## 阶段 1 记录
 
