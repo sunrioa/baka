@@ -39,7 +39,6 @@ import {
   parseWorkHubTaskToolRequest,
   workHubTaskToolSchemas,
   workHubTaskToolDescriptions,
-  type WorkHubTaskToolName,
   type WorkHubTaskToolRequest,
 } from '../shared/workhub-task-tool-schema.js';
 import type { WorkHubControlSnapshot } from '../shared/workhub-control.js';
@@ -282,7 +281,7 @@ export function createWorkHubControl(deps: WorkHubControlDeps) {
         return { type: "text", value: JSON.stringify(output) };
       },
     };
-    const taskTools = (Object.keys(workHubTaskToolSchemas) as WorkHubTaskToolName[]).map((name): MakaTool => ({
+    const taskTools = (['find', 'start', 'continue'] as const).map((name): MakaTool => ({
       name,
       description: workHubTaskToolDescriptions[name],
       parameters: workHubTaskToolSchemas[name],

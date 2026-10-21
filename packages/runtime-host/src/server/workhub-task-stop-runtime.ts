@@ -28,6 +28,11 @@ import {
 } from '@maka/core/session';
 import { isWorkHubTaskStopSet, type WorkHubTaskStopTarget } from '@maka/core/workhub-task-stop';
 import {
+  RuntimeInteractionClosedError,
+  RuntimeInteractionInvariantError,
+  RuntimeInteractionFailStopError,
+} from '@maka/runtime/interaction-authority';
+import {
   isSessionNotFoundError,
   SessionMetadataConflictError,
   type ExecutionStoresWriter,
@@ -520,6 +525,12 @@ export function createWorkHubTaskStopRuntime(options: {
         try {
           return { ok: true, result: await stop(input) };
         } catch (error) {
+          if (
+            error instanceof RuntimeInteractionClosedError ||
+            error instanceof RuntimeInteractionInvariantError ||
+            error instanceof RuntimeInteractionFailStopError
+          )
+            throw error;
           if (error instanceof WorkHubActionEffectFailure)
             return {
               ok: false,

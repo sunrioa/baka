@@ -442,7 +442,7 @@ test("task coordination does not open or focus the controlled main window", asyn
   });
   t.after(() => h.control.close());
   const tools = h.control.group(scope).tools as MakaTool[];
-  assert.deepEqual(tools.map(tool => tool.name), ['control', 'find', 'start', 'continue', 'ask', 'stop']);
+  assert.deepEqual(tools.map(tool => tool.name), ['control', 'find', 'start', 'continue']);
   const find = tools.find(tool => tool.name === 'find')!;
   assert.deepEqual(await find.impl({ query: '登录' }, h.ctx()), {
     turnId: "turn",

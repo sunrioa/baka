@@ -32,9 +32,27 @@ import { createWorkHubReadTool } from '../server/workhub-read-tool.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import { transcriptReader } from './fixtures/session-transcript-reader.js';
 import {
+  hostedExecutionClientCapabilityToolNames,
   hostedExecutionRunProfile,
   projectHostedExecutionTools,
 } from '../server/hosted-execution-tool-profile.js';
+
+test('native confirmations remain visible but are not Desktop CC admission or recovery requirements', () => {
+  const names = hostedExecutionClientCapabilityToolNames('workhub-coordination-v2');
+  assert.deepEqual(names, [
+    ...['control', 'find', 'start', 'continue'].map((name) => `mcp__desktop_workhub__${name}`),
+    ...['navigate', 'snapshot', 'click', 'type', 'wait', 'extract'].map(
+      (name) => `mcp__desktop_browser__browser_${name}`,
+    ),
+  ]);
+  for (const name of ['ask', 'stop'])
+    assert.ok(
+      hostedExecutionRunProfile('workhub-coordination-v2')!.toolNames.includes(
+        `mcp__desktop_workhub__${name}`,
+      ),
+    );
+  assert.deepEqual(hostedExecutionClientCapabilityToolNames('workhub-coordination-v1'), []);
+});
 
 test('hosted execution tool profiles are durable Session creation inputs', () => {
   const decoded = decodeHostedExecutionStartInput({

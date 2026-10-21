@@ -80,7 +80,9 @@ import {
 } from './session-catalog-coordinator.js';
 import {
   RuntimeInteractionAdmissionRejectedError,
+  RuntimeInteractionClosedError,
   RuntimeInteractionFailStopError,
+  RuntimeInteractionInvariantError,
 } from '@maka/runtime/interaction-authority';
 import type { HostInteractionCoordinator } from './interaction-coordinator.js';
 import type { SessionContinuityCoordinator } from './session-continuity-coordinator.js';
@@ -187,7 +189,7 @@ export class HostWorkHubCoordinationCoordinator {
     | 'workhub.coordination.answer'
   > = {
     'workhub.tasks.start': (input, context) => this.#startTask(input, context),
-    'workhub.tasks.ask': (input) => this.#askTask(input),
+    'workhub.tasks.ask': (input) => this.askTask(input),
     'workhub.coordination.resolve': () => this.#resolve(),
     'workhub.coordination.query': () => this.#query(),
     'workhub.coordination.configureModel': (input) => this.#configureModel(input),
@@ -720,7 +722,7 @@ export class HostWorkHubCoordinationCoordinator {
     };
   }
 
-  async #askTask(input: WorkHubTaskAskInput): Promise<OperationOutcome<'workhub.tasks.ask'>> {
+  async askTask(input: WorkHubTaskAskInput): Promise<OperationOutcome<'workhub.tasks.ask'>> {
     try {
       const authority = await this.#executions.readActiveWorkHubRoutingRequest(input.turnId);
       if (!authority || !this.#requestForm)
@@ -851,7 +853,12 @@ export class HostWorkHubCoordinationCoordinator {
         },
       };
     } catch (error) {
-      if (error instanceof RuntimeInteractionFailStopError) throw error;
+      if (
+        error instanceof RuntimeInteractionClosedError ||
+        error instanceof RuntimeInteractionInvariantError ||
+        error instanceof RuntimeInteractionFailStopError
+      )
+        throw error;
       return {
         ok: false,
         error: {

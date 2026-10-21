@@ -22,6 +22,11 @@ import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { normalizeMessageContent } from '@maka/core/events';
 import {
+  RuntimeInteractionClosedError,
+  RuntimeInteractionFailStopError,
+  RuntimeInteractionInvariantError,
+} from '@maka/runtime/interaction-authority';
+import {
   WORKHUB_COORDINATION_SESSION_ID,
   type WorkHubActionClaim,
   type WorkHubDelegationAssignedMessage,
@@ -291,6 +296,27 @@ async function stop(f: ReturnType<typeof fixture>, command = input) {
   spec.assertOutputForInput!(spec.decodeInput(command), spec.decodeOutput(result));
   return result;
 }
+
+test('native stop handler preserves original Form closure and fatal failures without stopping tasks', async () => {
+  for (const failure of [
+    new RuntimeInteractionClosedError('original-form', 'turn_stopped'),
+    new RuntimeInteractionInvariantError('canonical conflict'),
+    new RuntimeInteractionFailStopError('outcome failed', new Error('storage failure')),
+  ]) {
+    const f = fixture();
+    f.state.beforeConfirm = () => {
+      throw failure;
+    };
+    await assert.rejects(
+      f.runtime.handlers['workhub.tasks.stop'](input),
+      (error) => error === failure,
+    );
+    assert.equal(f.state.forms, 1);
+    assert.equal(f.requests.size, 0);
+    assert.equal(f.resolutions.size, 0);
+    assert.deepEqual(f.effects, []);
+  }
+});
 
 test('single user target stops directly; a second distinct target requires confirmation', async () => {
   const f = fixture();

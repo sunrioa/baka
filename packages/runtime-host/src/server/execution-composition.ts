@@ -46,6 +46,7 @@ import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createWorkHubReadTool } from './workhub-read-tool.js';
+import { createWorkHubCoordinatorTools } from './workhub-coordinator-tools.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { attachmentKindFromMimeType, MAX_READ_IMAGE_BYTES } from '@maka/core/attachments';
@@ -945,6 +946,7 @@ export async function createExecutionRuntimeHostComposition(
     let workHubEvidence: ReturnType<typeof createWorkHubEvidenceRuntime> | undefined;
     let workHubInspection: MakaTool | undefined;
     let workHubRead: ReturnType<typeof createWorkHubReadTool> | undefined;
+    let workHubCoordinatorTools: ReturnType<typeof createWorkHubCoordinatorTools> = [];
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
     let memory: HostMemoryCoordinator | undefined;
     let clientCapabilities: HostClientCapabilityCoordinator | undefined;
@@ -1205,9 +1207,7 @@ export async function createExecutionRuntimeHostComposition(
         hostTools,
         resolveRootTools: async (sessionId) =>
           sessionId === WORKHUB_COORDINATION_SESSION_ID
-            ? workHubRead
-              ? [workHubRead]
-              : []
+            ? [...workHubCoordinatorTools, ...(workHubRead ? [workHubRead] : [])]
             : [
                 ...(await requireGraphCoordinator(graphCoordinator).toolsForSession(sessionId)),
                 ...(workHubRead ? [workHubRead] : []),
@@ -1371,7 +1371,7 @@ export async function createExecutionRuntimeHostComposition(
       try {
         const [graphTools, planState] = await Promise.all([
           sessionId === WORKHUB_COORDINATION_SESSION_ID
-            ? Promise.resolve(workHubRead ? [workHubRead] : [])
+            ? Promise.resolve([...workHubCoordinatorTools, ...(workHubRead ? [workHubRead] : [])])
             : requireGraphCoordinator(graphCoordinator)
                 .toolsForSession(sessionId)
                 .then((tools) => [...tools, ...(workHubRead ? [workHubRead] : [])]),
@@ -2915,6 +2915,13 @@ export async function createExecutionRuntimeHostComposition(
       requestForm: (input) => interactions.requestForm(input),
       onError: (error) =>
         console.error(`[runtime-host] Task stop failed: ${boundedFailureDiagnostic(error)}`),
+    });
+    workHubCoordinatorTools = createWorkHubCoordinatorTools({
+      authorize: async (ctx) => {
+        await evidenceReader.authorizeRead(ctx);
+      },
+      ask: (input) => workHubCoordination.askTask(input),
+      stop: (input) => workHubTaskStop.handlers['workhub.tasks.stop'](input),
     });
     scheduledTasks = new HostScheduledTaskCoordinator({
       store: openedScheduledTaskStore,

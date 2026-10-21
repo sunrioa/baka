@@ -21,6 +21,7 @@ import type { SessionToolProfile } from '@maka/core/session';
 import { parseAttachmentResourceRef } from '@maka/core/attachments';
 import type { MakaTool } from '@maka/runtime/tool-runtime';
 import { readParameters, resolveReadInput } from '@maka/runtime/read-page';
+import { WORKHUB_HOST_CONFIRMATION_TOOL_NAMES } from './workhub-coordinator-tools.js';
 
 const HEADLESS_CODING_V1_TOOL_NAMES = [
   'Bash',
@@ -67,6 +68,15 @@ export interface HostedExecutionRunProfile {
   readonly toolNames: readonly string[];
   readonly systemPrompt: string;
   readonly memoryExtraction: boolean;
+}
+
+/** Model names are stable; Host-owned confirmations require no Desktop tool provider. */
+export function hostedExecutionClientCapabilityToolNames(
+  profile: SessionToolProfile | undefined,
+): readonly string[] {
+  return (hostedExecutionRunProfile(profile)?.toolNames ?? []).filter(
+    (name) => name.startsWith('mcp__') && !WORKHUB_HOST_CONFIRMATION_TOOL_NAMES.includes(name),
+  );
 }
 
 export function hostedExecutionRunProfile(

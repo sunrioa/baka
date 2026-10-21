@@ -23,6 +23,7 @@ import { z } from 'zod';
 import { WORKHUB_TASK_INPUT_TEXT_MAX_BYTES } from '@maka/core/workhub-task-input';
 import { parseWorkHubTaskToolRequest, workHubTaskToolSchemas, workHubTaskToolDescriptions, type WorkHubTaskToolRequest } from '../../shared/workhub-task-tool-schema.js';
 import { createWorkHubTaskModelRuntime } from '../workhub-task-model-runtime.js';
+import { createWorkHubCoordinatorTools } from '../../../../../packages/runtime-host/dist/server/workhub-coordinator-tools.js';
 
 const scope = { hostId: 'host', targetEpoch: 'epoch' };
 const calls: WorkHubTaskToolRequest[] = [
@@ -32,6 +33,36 @@ const calls: WorkHubTaskToolRequest[] = [
   { kind: 'ask', input: { question: 'Which previous task?', choices: [{ kind: 'task', id: 'task' }] } },
   { kind: 'stop', input: { taskIds: ['task'] } },
 ];
+
+test('Host native confirmation parameters remain identical to the original flat Desktop contracts', () => {
+  const tools = createWorkHubCoordinatorTools({
+    authorize: async () => {},
+    ask: async () => ({ ok: true, result: { kind: 'cancelled' } }),
+    stop: async () => ({ ok: true, result: { actionId: 'action', kind: 'cancelled', taskIds: ['task'] } }),
+  });
+  for (const name of ['ask', 'stop'] as const) {
+    const tool = tools.find((tool) => tool.name === `mcp__desktop_workhub__${name}`)!;
+    assert.deepEqual(z.toJSONSchema(tool.parameters as z.ZodType, { unrepresentable: 'any' }), z.toJSONSchema(workHubTaskToolSchemas[name], { unrepresentable: 'any' }));
+    assert.equal(tool.description, workHubTaskToolDescriptions[name]);
+    const samples = name === 'ask' ? [
+      { question: ' Which work? ', choices: [] },
+      { question: 'Which?', choices: [{ kind: 'task', id: 'a' }, { kind: 'session', id: 'a' }] },
+      { question: ' ', choices: [] },
+      { question: '中'.repeat(683), choices: [] },
+      { question: 'Which?', choices: [{ kind: 'task', id: 'a' }, { kind: 'task', id: 'a' }] },
+      { question: 'Which?', choices: [], actionId: 'forged' },
+    ] : [
+      { taskIds: ['a'] }, { taskIds: ['a', 'b'] }, { taskIds: [] },
+      { taskIds: ['a', 'a'] }, { taskIds: [''] }, { taskIds: ['a'], confirmed: true },
+    ];
+    for (const sample of samples) {
+      const host = (tool.parameters as z.ZodType).safeParse(sample);
+      const desktop = workHubTaskToolSchemas[name].safeParse(sample);
+      assert.equal(host.success, desktop.success);
+      if (host.success && desktop.success) assert.deepEqual(host.data, desktop.data);
+    }
+  }
+});
 
 function fixture() {
   let current = true;

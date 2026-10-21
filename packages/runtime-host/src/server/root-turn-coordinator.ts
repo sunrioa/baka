@@ -133,7 +133,7 @@ import type {
   HostClientCapabilityCoordinator,
   SessionBindingPreview,
 } from './client-capability-coordinator.js';
-import { hostedExecutionRunProfile } from './hosted-execution-tool-profile.js';
+import { hostedExecutionClientCapabilityToolNames } from './hosted-execution-tool-profile.js';
 import {
   runtimeHostExecutionUnavailableReason,
   runtimeHostExternalTurnUnavailableReason,
@@ -534,9 +534,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     return this.clientCapabilities.bindRecoveredSession(
       sessionId,
       execution.capabilityBinding,
-      hostedExecutionRunProfile(header.toolProfile)!.toolNames.filter((name) =>
-        name.startsWith('mcp__'),
-      ),
+      hostedExecutionClientCapabilityToolNames(header.toolProfile),
     );
   }
 
@@ -2292,9 +2290,7 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           ? await this.clientCapabilities?.bindSession(
               request.sessionId,
               capabilityInitiatingConnectionId(context),
-              hostedExecutionRunProfile(header.toolProfile)!.toolNames.filter((name) =>
-                name.startsWith('mcp__'),
-              ),
+              hostedExecutionClientCapabilityToolNames(header.toolProfile),
             )
           : undefined;
         const binding = isWorkHubV2

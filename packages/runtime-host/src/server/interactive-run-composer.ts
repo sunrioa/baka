@@ -79,6 +79,7 @@ import {
   projectHostedExecutionTools,
 } from './hosted-execution-tool-profile.js';
 import { shouldResolveHostTavilyWebSearchReadiness } from './web-search-tool.js';
+import { WORKHUB_HOST_CONFIRMATION_TOOL_NAMES } from './workhub-coordinator-tools.js';
 
 const INTERACTIVE_RUN_COMPOSER_ID = 'maka.interactive';
 const INTERACTIVE_RUN_COMPOSER_REVISION = '1';
@@ -162,13 +163,33 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
         input.parentAgentTools,
         input.plan,
       );
+  const nativeConfirmations = new Set(
+    input.toolProfile === 'workhub-coordination-v2'
+      ? defaultTools
+          .filter(
+            (tool) =>
+              tool.hostAdmission !== 'client_capability' &&
+              WORKHUB_HOST_CONFIRMATION_TOOL_NAMES.includes(tool.name),
+          )
+          .map(({ name }) => name)
+      : [],
+  );
+  // A same-epoch older Desktop may still offer these two names. Only the
+  // coordinator's actual Host-owned confirmations supersede their CC copies.
   const clientCapabilityTools =
     input.boundTools !== undefined ||
     (input.toolProfile !== undefined && input.toolProfile !== 'workhub-coordination-v2')
       ? []
-      : (input.clientCapabilities?.tools ?? []);
+      : (input.clientCapabilities?.tools ?? []).filter(
+          (tool) =>
+            tool.hostAdmission !== 'client_capability' || !nativeConfirmations.has(tool.name),
+        );
   const resolveTools = (): readonly MakaTool[] => {
     const stableHostTools = [...defaultTools, ...clientCapabilityTools];
+    if (input.toolProfile === 'workhub-coordination-v2') {
+      const names = hostedExecutionRunProfile(input.toolProfile)!.toolNames;
+      assertUniqueToolNames(stableHostTools.filter(({ name }) => names.includes(name)));
+    }
     const additionalTools = hasToolCeiling
       ? []
       : (input.resolveAdditionalTools?.(stableHostTools) ?? []);

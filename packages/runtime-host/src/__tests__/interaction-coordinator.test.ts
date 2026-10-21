@@ -33,6 +33,7 @@ import type {
 import {
   bindRuntimeInteractionRun,
   RuntimeInteractionAdmissionRejectedError,
+  RuntimeInteractionClosedError,
   RuntimeInteractionFailStopError,
   type RuntimeInteractionRunIdentity,
   type RuntimeFormContinuation,
@@ -179,7 +180,7 @@ describe('HostInteractionCoordinator', () => {
     });
   });
 
-  test('stopping the owning Run cancels its Host-owned form and closes the durable offer', async () => {
+  test('stopping the owning Run rejects its Host form with the actual durable closure, not a user cancellation', async () => {
     await withStore(async ({ store }) => {
       const published = deferred();
       const coordinator = createCoordinator(store, {
@@ -207,13 +208,118 @@ describe('HostInteractionCoordinator', () => {
           ],
         }),
       });
+      const stopped = assert.rejects(
+        pending,
+        (error) =>
+          error instanceof RuntimeInteractionClosedError &&
+          error.requestId === 'stopped-choice' &&
+          error.reason === 'turn_stopped',
+      );
       await published.promise;
       await owner.close('turn_stopped');
-      assert.deepEqual((await pending).answer, { action: 'cancel' });
-      assert.equal(
-        (await store.readInteraction('stopped-choice'))?.outcome?.outcome.kind,
-        'closure',
+      await stopped;
+      const record = await store.readInteraction('stopped-choice');
+      assert.equal(record?.outcome?.outcome.kind, 'closure');
+      assert.equal(coordinator.isPoisoned(), false);
+      await owner.close('turn_stopped');
+      const late = await coordinator.handlers['interaction.answer'](
+        {
+          sessionId: RUN.sessionId,
+          interactionId: 'stopped-choice',
+          answer: { kind: 'form', action: 'accept', values: { target: 'a' } },
+        },
+        connection(),
       );
+      assert.equal(late.ok, false);
+      if (!late.ok) assert.equal(late.error.code, 'already_resolved');
+      assert.deepEqual(await store.readInteraction('stopped-choice'), record);
+      owner.release();
+      await coordinator.close();
+    });
+  });
+
+  test('explicit Host form cancellation is a user answer and replays normally', async () => {
+    await withStore(async ({ store }) => {
+      const published = deferred();
+      const coordinator = createCoordinator(store, {
+        refreshCanonicalContinuity: async () => {
+          published.resolve();
+        },
+      });
+      const owner = coordinator.bindRun(RUN);
+      const input = hostFormInput('user-cancelled');
+      const pending = coordinator.requestForm(input);
+      await published.promise;
+      const answered = await coordinator.handlers['interaction.answer'](
+        {
+          sessionId: RUN.sessionId,
+          interactionId: input.requestId,
+          answer: { kind: 'form', action: 'cancel' },
+        },
+        connection(),
+      );
+      assert.equal(answered.ok, true);
+      assert.deepEqual((await pending).answer, { action: 'cancel' });
+      const record = await store.readInteraction(input.requestId);
+      assert.equal(record?.outcome?.outcome.kind, 'form_answer');
+      assert.deepEqual((await coordinator.requestForm(input)).answer, { action: 'cancel' });
+      await owner.close('turn_terminal');
+      owner.release();
+      await coordinator.close();
+    });
+  });
+
+  for (const reason of ['turn_stopped', 'turn_terminal'] as const)
+    test(`Host form replay preserves stored ${reason} without inferring a Stop`, async () => {
+      await withStore(async ({ store }) => {
+        const input = hostFormInput('closed-replay');
+        const request = {
+          ...RUN,
+          requestId: input.requestId,
+          createdAt: 10,
+          request: await input.create(),
+        };
+        await store.establishRequest(request);
+        await store.commitOutcome(input.requestId, { kind: 'closure', reason, committedAt: 11 });
+        const coordinator = createCoordinator(store);
+        const owner = coordinator.bindRun(RUN);
+        const replay = coordinator.requestForm({
+          ...input,
+          create: async () => {
+            assert.fail('a canonical closure must not republish its Form');
+          },
+        });
+        if (reason === 'turn_stopped')
+          await assert.rejects(
+            replay,
+            (error) =>
+              error instanceof RuntimeInteractionClosedError &&
+              error.requestId === input.requestId &&
+              error.reason === reason,
+          );
+        else assert.deepEqual((await replay).answer, { action: 'cancel' });
+        assert.equal(coordinator.isPoisoned(), false);
+        assert.equal((await store.listPending(RUN)).length, 0);
+        await owner.close('turn_terminal');
+        owner.release();
+        await coordinator.close();
+      });
+    });
+
+  test('ordinary owning Run termination retains the existing Host form cancellation result', async () => {
+    await withStore(async ({ store }) => {
+      const published = deferred();
+      const coordinator = createCoordinator(store, {
+        refreshCanonicalContinuity: async () => {
+          published.resolve();
+        },
+      });
+      const owner = coordinator.bindRun(RUN);
+      const pending = coordinator.requestForm(hostFormInput('terminal-form'));
+      await published.promise;
+      await owner.close('turn_terminal');
+      assert.deepEqual((await pending).answer, { action: 'cancel' });
+      assert.equal(coordinator.isPoisoned(), false);
       owner.release();
       await coordinator.close();
     });
@@ -1427,6 +1533,28 @@ function createCoordinator(
     onSandboxBoundaryGraphWake: async () => {},
     ...overrides,
   });
+}
+
+function hostFormInput(requestId: string) {
+  return {
+    ...RUN,
+    requestId,
+    create: async () => ({
+      kind: 'form' as const,
+      toolUseId: 'select-tool',
+      message: 'Choose work',
+      requester: { name: 'WorkHub' },
+      fields: [
+        {
+          kind: 'single_select' as const,
+          name: 'target',
+          label: 'Work',
+          required: true,
+          options: [{ value: 'a', label: 'A' }],
+        },
+      ],
+    }),
+  };
 }
 
 function questionEvent(requestId: string, ts: number): UserQuestionRequestEvent {

@@ -47,6 +47,7 @@ import type {
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   RuntimeInteractionAdmissionRejectedError,
+  RuntimeInteractionClosedError,
   RuntimeInteractionFailStopError,
   RuntimeInteractionInvariantError,
   type RuntimeInteractionAuthority,
@@ -312,6 +313,8 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       }
       if (replay.outcome) {
         const outcome = runtimeFormOutcome(replay.outcome.outcome);
+        if (outcome.kind === 'closure' && outcome.reason === 'turn_stopped')
+          throw new RuntimeInteractionClosedError(input.requestId, outcome.reason);
         return {
           createdAt: replay.request.createdAt,
           answer: outcome.kind === 'form_answer' ? outcome.answer : { action: 'cancel' },
@@ -350,8 +353,10 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
           applyAnswer: async (answer) => {
             settle(answer);
           },
-          applyClosure: async () => {
-            settle({ action: 'cancel' });
+          applyClosure: async (reason) => {
+            if (reason === 'turn_stopped')
+              reject(new RuntimeInteractionClosedError(input.requestId, reason));
+            else settle({ action: 'cancel' });
           },
           // Host publication is performed by #accept, with no Runtime event producer to await.
           waitForPublication: async () => {},
