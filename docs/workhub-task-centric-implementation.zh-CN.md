@@ -52,7 +52,16 @@
 
 ## 当前实测状态
 
-本轮运行实现固定为 `b61eb25cff61145e13253ad85d76e472cf8e6a85`，兼容 epoch 239。2026-10-22 已在原数据 profile 恢复单一开发 App，仍使用 Command Code `deepseek/deepseek-v4.1-flash`；原默认权限、并发 1、FIFO 与配置保留。原实例的真实编码、同轮纠正及最终界面复核，与隔离受控 reuse / fresh 对照分开记录如下；等待人工审阅，不自动合并。以下历史过程中的“待完成 / 未发布”是当时状态，不是当前清单；失败与最初的授权说明错误均原样保留。
+此前收尾运行实现为 `b61eb25cff61145e13253ad85d76e472cf8e6a85`；下列 2026-10-22 工具全文补修实测使用 `6d6d36ba83d2b3aed5217a9163b2ddf4981d9748`，兼容 epoch 仍为 239。原数据 profile 已恢复单一开发 App，仍使用 Command Code `deepseek/deepseek-v4.1-flash`；各次实测保留当时的权限、并发、FIFO 与配置，不把此前并发 1 和本次用户已配置的并发 8 混为同一快照。原实例的真实编码、同轮纠正及最终界面复核，与隔离受控 reuse / fresh 对照分开记录如下；等待人工审阅，不自动合并。以下历史过程中的“待完成 / 未发布”是当时状态，不是当前清单；失败与最初的授权说明错误均原样保留。
+
+## 跨 Session 工具全文补修（2026-10-22）
+
+- 真实负面对照：原生工具输出实际保留 160 条随机记录、21,322 字节，但换新 Session 后 `WorkHubRead(history, tool_result)` 只得到 1,753 字符的显示预览，没有后续游标；照预览中的旧 Session 资源地址执行普通 `Read` 返回 `not_found`。原始 stdout 哈希未变，不能把这一失败解释成原始数据过期或丢失。
+- `6d6d36ba8` 仅扩展既有历史读取器的回源条件：对被裁剪的管道终端结果，使用已经通过同任务授权的来源 Session 和规范事件 ID，复用现有 ledger 读取器及分页；核对事件、Session、Turn、工具调用身份和可见性。一次投影使用同一份已核对证据。短结果仍内联；源记录缺失、过大或不匹配时明确标记，不能冒充全文。不增加协议、数据表、交接摘要或上下文全量复制，普通 `Read` 的跨 Session 限制保持不变。
+- 新增回归先在旧实现上得到 9 个预期失败，修复后通过。完整 Host 冻结构建回归为 2,517 通过、0 失败、12 项既有跳过；4,434 个编译产物运行前后摘要一致，日志摘要 `aa6e072d8b5bd92d577cd8f7022e0b86d0480a8ce35370460b53b8be45e09209`。另外，真实 SQLite 与工具入口验证 Unicode / stdout / stderr 全文分页和普通资源隔离；相关 Runtime 归档 / Host 读取定向 32 项、Desktop 输入 / Steering / FIFO / 停止集成 19 项通过。这不是宣称重跑了所有 Runtime 或 Desktop 测试。构建、类型检查、lint、格式、Desktop/UI knip 和 ASF 头检查通过。
+- 原实例先正常退出，再沿用原应用身份、原数据与配置加载修复，从正常 WorkHub 输入框发起 Command Code DeepSeek 实测。继续同一任务并明确 fresh，**复用负面对照中的同一份旧输出**，未重跑生成命令。新 Session 6 次 `WorkHubRead` 得到目标记录 6 个片段，offset `0 → 937 → 4687 → 8437 → 12187 → 15937 → 21876` 连续；21,876 是含元数据的 JSON 字符数，不是 stdout 字节数。另一次 `Read` 仅补读新 Session 自身的历史工具回包，不访问旧 Session 地址或磁盘文件。
+- 独立拼接全部片段后，原 stdout 21,322 字节、160 条记录、BEGIN/END 及首中尾随机值均匹配，恢复前后 SHA-256 同为 `5a9a5b16d734fd2268433830eb89197ada2d2b5befb16cbfdc8e7feccda59357`。本轮历史读取均 `status=ok`、目标记录 `archiveStatus=loaded`，未发生新的 `not_found`、`unavailable` 或 `source_mismatch`；读到的旧负面对照错误仍作为历史事实保留。原生成值未放进新段指令或交接摘要，不以执行方自述代替字节核验。可见原生导出摘要为 `cf0b8f2e7334f78bab678964ec256bf20d57e408de14defc67aeb371d6e03b74`，私有原文和模型推理不上传。
+- 本次成功复测窗口含协调与 worker 共 14 次物理请求：input 1,910,066 / output 14,394，cache read 1,856,128 / miss 53,938 / write 0。价格未知，不换算费用；这不是新的 reuse/fresh 成本对照。保留原有失败记录，未将失败阶段追溯改成通过；本次不处理既有 React / ResizeObserver 警告，也不扩展 executor fresh。
 
 ## 本轮收尾（2026-10-21–22）
 
