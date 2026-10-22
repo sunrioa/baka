@@ -104,19 +104,23 @@ export function runtimeHostExecutionUnavailableReason(
   const coordinationTarget = isWorkHubCoordinationSessionTarget(header);
   const coordinationIdentity =
     isWorkHubCoordinationSessionId(header.id) && isWorkHubCoordinationSession(header);
+  // Only the dedicated Host entry can admit a reserved coordinator compact root.
+  // Ordinary external messages and continuations remain rejected.
+  const coordinationExecution = execution.kind === 'workhub_coordination' ||
+    (coordinationTarget && execution.kind === 'context_compact');
   return (
-    (coordinationTarget && execution.kind !== 'workhub_coordination'
+    (coordinationTarget && !coordinationExecution
       ? WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON
       : undefined) ??
-    (execution.kind === 'workhub_coordination' && !coordinationIdentity
+    (coordinationExecution && !coordinationIdentity
       ? WORKHUB_COORDINATION_TARGET_UNAVAILABLE_REASON
       : undefined) ??
-    (execution.kind === 'workhub_coordination' &&
+    (coordinationExecution &&
     header.toolProfile !== 'workhub-coordination-v1' &&
     header.toolProfile !== 'workhub-coordination-v2'
       ? WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON
       : undefined) ??
-    (execution.kind === 'workhub_coordination' &&
+    (coordinationExecution &&
     (header.permissionMode !==
       (header.toolProfile === 'workhub-coordination-v2' ? 'bypass' : 'explore') ||
       (header.collaborationMode ?? 'agent') !== 'agent' ||

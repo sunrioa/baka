@@ -43,6 +43,8 @@ import {
   writeWorkHubNewWorkPermissionMode,
   readWorkHubExecutionConcurrency,
   writeWorkHubExecutionConcurrency,
+  readWorkHubCompactionThreshold,
+  writeWorkHubCompactionThreshold,
 } from './workhub-new-work-defaults.js';
 
 type RuntimeHostWorkHubClient = Pick<
@@ -214,6 +216,8 @@ export function registerRuntimeHostWorkHubIpc(
   );
   handleReconnectableRead(ipcMain, 'workhub:getExecutionConcurrency', () => readWorkHubExecutionConcurrency(client));
   ipcMain.handle('workhub:setExecutionConcurrency', (_event, value: unknown) => writeWorkHubExecutionConcurrency(client, value));
+  handleReconnectableRead(ipcMain, 'workhub:getCompactionThreshold', () => readWorkHubCompactionThreshold(client));
+  ipcMain.handle('workhub:setCompactionThreshold', (_event, value: unknown) => writeWorkHubCompactionThreshold(client, value));
   ipcMain.handle('workhub:prepareAttachments', async (event, items: unknown): Promise<WorkHubPrepareAttachmentsResult> => {
     if (!options.attachmentIngest) throw new Error('WorkHub attachments are unavailable');
     try {

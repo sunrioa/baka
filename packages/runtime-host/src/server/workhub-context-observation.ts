@@ -28,6 +28,7 @@ import {
 import { pricingModelKey } from '@maka/core/usage-stats/pricing';
 import type { PricingConfig } from '@maka/core/usage-stats/types';
 import type { WorkHubContextObservation } from '../protocol/workhub-coordination.js';
+import { workHubContextConnection } from './workhub-context-policy.js';
 
 /** Advisory metadata only: no credentials, provider request or full transcript read. */
 export function createWorkHubContextObserver(options: {
@@ -38,6 +39,7 @@ export function createWorkHubContextObserver(options: {
   };
   runtime: Pick<ExecutionRuntimeEventWriter, 'readLatestSessionRequestObservation'>;
   catalog: Pick<RuntimePolicyStoresWriter['connectionCatalog'], 'getSnapshot'>;
+  policy?: Pick<RuntimePolicyStoresWriter['runtimePolicy'], 'getSnapshot'>;
   readPricing?(): Promise<readonly PricingConfig[]>;
 }): (sessionId: string) => Promise<WorkHubContextObservation> {
   return async (sessionId) => {
@@ -52,6 +54,18 @@ export function createWorkHubContextObserver(options: {
     let configuredInputLimit: number | null = null;
     let compactionWindow: number | null = null;
     if (connection) {
+      const contextConnection = workHubContextConnection(
+        {
+          slug: connection.slug,
+          providerType: connection.providerType,
+          defaultModel: header.model,
+          models: [...connection.models],
+          modelOverrides: connection.modelOverrides,
+        },
+        sessionId,
+        header.model,
+        options.policy ? (await options.policy.getSnapshot()).policy.chatDefaults : {},
+      );
       // Use the execution policy's limit rule, but only public catalog facts.
       try {
         configuredInputLimit =
@@ -65,17 +79,7 @@ export function createWorkHubContextObserver(options: {
             },
             header.model,
           ) ?? null;
-        compactionWindow =
-          resolveDeclaredContextWindow(
-            {
-              slug: connection.slug,
-              providerType: connection.providerType,
-              defaultModel: header.model,
-              models: [...connection.models],
-              modelOverrides: connection.modelOverrides,
-            },
-            header.model,
-          ) ?? null;
+        compactionWindow = resolveDeclaredContextWindow(contextConnection, header.model) ?? null;
       } catch {
         // Contradictory configured limits are not a usable window.
       }

@@ -1472,6 +1472,12 @@ export class DesktopRuntimeHostClient {
     return this.request("context.compact", input);
   }
 
+  compactWorkHubCoordination(
+    input: OperationInput<'workhub.coordination.compact'>,
+  ): Promise<OperationOutput<'workhub.coordination.compact'>> {
+    return this.request('workhub.coordination.compact', input);
+  }
+
   async querySessionTodo(sessionId: string): Promise<SessionTodoItem[]> {
     const result = await this.request("session.todo.query", { sessionId });
     if (result.sessionId !== sessionId) throw invalidProjection("SessionTodo");

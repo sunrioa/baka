@@ -331,7 +331,12 @@ test('result notifications include the latest delivered user correction from the
   assert.equal(f.inputReads(), 0, 'overview does not read target history');
   await f.reconcile();
   const data = JSON.parse(f.notifications[0]!.split('\n\n').at(-1)!);
-  assert.equal(data.targetTurnId, 'continued-turn');
+  assert.equal(data.sourceActionId, 'action');
+  assert.equal(
+    data.targetTurnId,
+    undefined,
+    'run/turn identity remains in Host provenance, not model-facing notification',
+  );
   assert.equal(data.latestUserInput, 'Use the corrected output. Do not repeat the command.');
   assert.equal(data.latestUserInputTruncated, false);
 

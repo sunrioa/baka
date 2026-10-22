@@ -110,3 +110,19 @@ export async function writeWorkHubExecutionConcurrency(client: WorkHubPermission
   }));
   return snapshot.policy.chatDefaults.workHubMaxConcurrentSessions ?? WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS;
 }
+
+export async function readWorkHubCompactionThreshold(client: Pick<WorkHubPermissionClient, 'queryRuntimePolicy'>): Promise<number | null> {
+  return (await client.queryRuntimePolicy()).policy.chatDefaults.workHubCompactionThreshold ?? null;
+}
+
+/** null explicitly restores inheritance; no numeric default is introduced. */
+export async function writeWorkHubCompactionThreshold(client: WorkHubPermissionClient, value: unknown): Promise<number | null> {
+  if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)) {
+    throw new Error('WorkHub compaction target must be a positive safe integer');
+  }
+  const snapshot = await client.updateRuntimePolicy(policy => {
+    const { workHubCompactionThreshold: _threshold, ...defaults } = policy.chatDefaults;
+    return { kind: 'set_chat_defaults', value: value === null ? defaults : { ...defaults, workHubCompactionThreshold: value as number } };
+  });
+  return snapshot.policy.chatDefaults.workHubCompactionThreshold ?? null;
+}

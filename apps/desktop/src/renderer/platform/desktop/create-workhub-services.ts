@@ -135,6 +135,9 @@ export function createDesktopWorkHubServices(
     subscribeNewWorkPermissionMode: (sessionId, handler) => bridge.workHub.subscribeNewWorkPermissionMode(sessionId, handler),
     getExecutionConcurrency: (sessionId) => bridge.workHub.getExecutionConcurrency(sessionId),
     setExecutionConcurrency: (sessionId, value) => bridge.workHub.setExecutionConcurrency(sessionId, value),
+    getCompactionThreshold: (sessionId) => bridge.workHub.getCompactionThreshold(sessionId),
+    setCompactionThreshold: (sessionId, value) => bridge.workHub.setCompactionThreshold(sessionId, value),
+    compactSession: (sessionId) => bridge.sessions.compact(sessionId),
     observe: (sessionId, handler, onError, onPhase, onExecution, execution) =>
       bridge.sessions.subscribeEvents(sessionId, handler, onPhase, onError, onExecution, execution),
     stop: async (sessionId, turnId) => {

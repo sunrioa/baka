@@ -182,6 +182,19 @@ test('find returns exactly one page, ask does not delegate, and stop preserves n
   assert.equal(f.defaultsCalls(), 0);
 });
 
+test('model discovery omits bulky metering while preserving candidates, exact cursor and the original Host page', async () => {
+  const f = fixture();
+  const page = { match: 'recent' as const, nextCursor: 'opaque-cursor', items: [{ kind: 'task' as const, id: 'task',
+    title: 'Original directory inventory', state: 'ended' as const, lastActivityAt: 17, location: '/private/work',
+    available: true, summary: 'Original user work', segments: 2, context: { verbose: 'Not needed for discovery' } }] };
+  f.client.findWorkHubTasks = async () => page as never;
+  const projected = await f.runtime.actTask(scope, 'turn', 'find-brief', { kind: 'find', input: {} });
+  const { context: _context, ...candidate } = page.items[0]!;
+  assert.deepEqual(projected, { match: page.match, nextCursor: page.nextCursor, items: [candidate] });
+  assert.equal(page.items[0]!.context.verbose, 'Not needed for discovery');
+  assert.match(workHubTaskToolDescriptions.find, /WorkHubRead view=status/);
+});
+
 test('a switched Host rejects all tool effects and late reads do not become current receipts', async () => {
   const f = fixture();
   f.retire();

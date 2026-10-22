@@ -17,6 +17,7 @@
  * under the License.
  */
 
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   requireCount,
   requireEntityId,
@@ -109,6 +110,24 @@ const QUERY_ERRORS = [
 ] as const;
 
 export const CONTEXT_OPERATION_SPECS = {
+  'workhub.coordination.compact': defineOperation({
+    mode: 'command',
+    availability: 'ready',
+    errors: [...QUERY_ERRORS, 'session_archived', 'session_busy', 'operation_conflict'] as const,
+    decodeInput: (value: unknown) => {
+      const input = requireExactRecord(value, 'WorkHub compact input', ['turnId']);
+      return { turnId: requireEntityId(input.turnId, 'turnId') };
+    },
+    decodeOutput: decodeContextCompactResult,
+    assertOutputForInput: (input, output) => {
+      if (
+        output.turn.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+        output.turn.turnId !== input.turnId
+      ) {
+        throw invalidProtocolFrame('WorkHub compact changed operation identity');
+      }
+    },
+  }),
   'context.diagnostics.query': defineOperation({
     mode: 'query',
     availability: 'ready',

@@ -35,6 +35,7 @@ import {
   reconcileLiveTurnBuffer,
   settleLiveTurnBufferStep,
   useUiLocale,
+  useToast,
   type LiveTurnProjection,
   type TransientUserMessageProjection,
 } from '@maka/ui';
@@ -53,6 +54,7 @@ import { useWorkHubTaskInbox } from './use-workhub-task-inbox.js';
 import { useWorkHubTaskOverview } from './use-workhub-task-overview.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
+import { createContextCompactionCommands } from '../../conversation/index.js';
 
 const emptyTranscript: WorkHubTranscriptSnapshot = {
   messages: [],
@@ -130,6 +132,17 @@ export function useWorkHubController(
   const range = useRef<WorkHubTranscript | undefined>(undefined);
   const currentSessionId = useRef(sessionId);
   currentSessionId.current = sessionId;
+  const toast = useToast();
+  const compactionFeedback = useRef({ locale, toast });
+  compactionFeedback.current = { locale, toast };
+  const compactionServices = useRef(services);
+  compactionServices.current = services;
+  const [compaction] = useState(() => createContextCompactionCommands({
+    compact: (id) => compactionServices.current.compactSession(id),
+    isCurrentSession: (id) => currentSessionId.current === id,
+    feedback: compactionFeedback,
+  }));
+  const compacting = useRef(false);
   const sendingRef = useRef(false);
   const pendingSend = useRef<SendAttempt | undefined>(undefined);
   const pendingQueued = useRef<{ sessionId: string; turnId: string; messageId: string; text: string; attachments: AttachmentRef[]; placement: MessageQueuePlacement; observed: boolean }>(undefined);
@@ -499,6 +512,9 @@ export function useWorkHubController(
       sessionId,
       (event) => {
         if (disposed) return;
+        if (event.type === 'complete' && event.contextCompactionOutcome) {
+          compaction.finishContextCompaction(sessionId, event.turnId, event.contextCompactionOutcome);
+        }
         interactionRevision.current++;
         const terminal = event.type === 'complete' || event.type === 'abort' || event.type === 'error';
         setInteractions((current) => terminal ? clearInteractions(current, sessionId) : reduceInteractionQueues(current, sessionId, event));
@@ -630,6 +646,11 @@ export function useWorkHubController(
     pendingTurnId ?? activeHostTurn(execution)?.turnId;
   const busy = sending || Boolean(runningTurnId);
   async function send(text: string, attachments: AttachmentRef[], requestedMode?: FollowUpMode) {
+    // A local command, never an Agent request or queued task instruction.
+    if (text.trim() === '/compact') {
+      if (attachments.length) { toast.info(workHubLiveCopy[locale].title, workHubLiveCopy[locale].compactAttachments); return false; }
+      return compactCoordination();
+    }
     if (!sessionId || !text.trim() || sendingRef.current) return false;
     const target = sessionId;
     const placement = requestedMode === 'steer' ? 'current_turn' : 'next_turn';
@@ -860,6 +881,13 @@ export function useWorkHubController(
   const queuedEntryDraft = sessionId
     ? { retract: deleteQueuedEntry, restoreDraft: (draft: RestoredDraftContent) => restoreDraft(sessionId, draft) }
     : undefined;
+  async function compactCoordination(): Promise<boolean> {
+    if (!sessionId) return false;
+    if (busy || compacting.current) { toast.info(workHubLiveCopy[locale].title, workHubLiveCopy[locale].compactBusy); return false; }
+    compacting.current = true;
+    try { return await compaction.compactSession(sessionId); }
+    finally { compacting.current = false; }
+  }
   return {
     services,
     taskInbox,
@@ -913,6 +941,7 @@ export function useWorkHubController(
     modelSetupChoicesReady,
     canRetry: Boolean(readError || (!sessionId && error) || (error && (pendingSend.current?.admission === 'unknown' || pendingSend.current?.admission === 'rejected'))),
     send,
+    compactCoordination,
     stop,
     changeModel,
     changeExecutor,

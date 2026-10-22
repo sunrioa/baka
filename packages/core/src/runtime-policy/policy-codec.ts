@@ -436,6 +436,7 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
       'permissionMode',
       'workHubPermissionMode',
       'workHubMaxConcurrentSessions',
+      'workHubCompactionThreshold',
       'workHubExecutor',
       'thinkingLevel',
       'codeModeEnabled',
@@ -463,6 +464,13 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
   if (item.codeModeEnabled !== undefined && typeof item.codeModeEnabled !== 'boolean') {
     throw domainError('chat default code mode is invalid');
   }
+  if (
+    item.workHubCompactionThreshold !== undefined &&
+    (!Number.isSafeInteger(item.workHubCompactionThreshold) ||
+      (item.workHubCompactionThreshold as number) <= 0)
+  ) {
+    throw domainError('WorkHub compaction target must be a positive safe integer');
+  }
   if (item.workHubExecutor !== undefined && !isWorkHubExecutorDefaults(item.workHubExecutor)) {
     throw domainError('WorkHub executor creation defaults are invalid');
   }
@@ -472,6 +480,9 @@ function normalizeChatDefaults(value: unknown): RuntimePolicy['chatDefaults'] {
     ...(item.workHubMaxConcurrentSessions === undefined
       ? {}
       : { workHubMaxConcurrentSessions: item.workHubMaxConcurrentSessions as number }),
+    ...(item.workHubCompactionThreshold === undefined
+      ? {}
+      : { workHubCompactionThreshold: item.workHubCompactionThreshold as number }),
     ...(item.workHubPermissionMode === undefined
       ? {}
       : {

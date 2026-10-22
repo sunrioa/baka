@@ -24,7 +24,7 @@ import {
 } from '@maka/core/session';
 import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
 import type { MessageContent } from '@maka/core/events';
-import { createWorkHubResultContext } from '@maka/core/workhub-result-context';
+import { createWorkHubResultNotification } from '@maka/core/workhub-result-context';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
 
 export interface WorkHubResultObservation {
@@ -82,7 +82,7 @@ export function workHubResultContent(
   assignment: WorkHubDelegationAssignedMessage,
   observation: WorkHubResultObservation,
 ): MessageContent {
-  return createWorkHubResultContext({
+  return createWorkHubResultNotification({
     origin: workHubResultOrigin(assignment, observation),
     taskId: assignment.work?.id ?? assignment.actionId,
     targetSessionName: assignment.taskTitle ?? assignment.targetSessionName,

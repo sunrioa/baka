@@ -26,6 +26,7 @@ import { useLiveContextUsage } from '../../../application/contracts/session-insp
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
 import { WorkHubComposer } from './workhub-composer.js';
+import { WorkHubContextSettings } from './workhub-context-settings.js';
 import type { RestoredDraftContent } from '../../../application/contracts/transient-message-projection.js';
 import { WorkHubConversation } from './workhub-conversation.js';
 import { FormInteractionPrompt } from '@maka/ui';
@@ -341,6 +342,10 @@ export function WorkHubRoot() {
               hidden={Boolean(controller.activeQuestion || controller.activeForm)}
               draftRestore={draftRestore}
               sessionId={controller.sessionId}
+              slashCommands={!busy && controller.sessionId ? [{
+                id: 'compact', ...getShellCopy(locale).app.slashCommands.compact,
+                keywords: ['compact', 'context', '压缩', '上下文'],
+              }] : []}
               streaming={busy}
               sendBlocked={!controller.sessionId || controller.sending || !session?.model}
               sendBlockedReason={controller.modelSetupRequired
@@ -396,7 +401,6 @@ export function WorkHubRoot() {
               modelSwitchAvailability={controller.configuringModel ? { available: false, pending: true, reason: 'pending' } : undefined}
               contextUsage={session ? {
                 usageTokens: liveContextUsage?.usageTokens ?? selectLatestRequestUsage(transcript.messages, session.model, session),
-                declaredContextWindow: coordinationModelChoice?.declaredContextWindow,
                 meteredContextWindow: liveContextUsage?.contextWindow,
                 metadataContextWindow: coordinationModelChoice?.contextWindow,
                 onOpen: () => call(services.presentation.openUsage()),
@@ -407,6 +411,11 @@ export function WorkHubRoot() {
               modelSwitchHasHistory={transcript.messages.length > 0}
               footerAccessory={
                 <div className="workHubComposerActions">
+                  {controller.sessionId && <WorkHubContextSettings key={controller.sessionId}
+                    sessionId={controller.sessionId} busy={busy}
+                    modelWindow={coordinationModelChoice?.contextWindow}
+                    modelThreshold={coordinationModelChoice?.declaredContextWindow}
+                    onCompact={controller.compactCoordination} />}
                   <span>{t.newWorkPermissions}</span>
                   <PermissionModeSelect
                     appearance="icon"

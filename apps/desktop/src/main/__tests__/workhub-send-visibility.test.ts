@@ -20,7 +20,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { act, createElement } from 'react';
-import { LocaleProvider } from '@maka/ui';
+import { LocaleProvider, ToastProvider } from '@maka/ui';
 import { deferred } from '@maka/core/test-only/async-primitives';
 import { createDefaultRuntimePolicy } from '@maka/core/runtime-policy';
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
@@ -185,7 +185,7 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
   function Probe() { controller = useWorkHubController(() => { submissions++; }, (sessionId, draft) => { restoredDrafts.push([sessionId, draft.text]); }); return null; }
   await act(async () => {
     root.render(createElement(LocaleProvider, { locale: 'en', children:
-      createElement(WorkHubServicesProvider, { services }, createElement(Probe)),
+      createElement(ToastProvider, null, createElement(WorkHubServicesProvider, { services }, createElement(Probe))),
     }));
   });
   if (!overrides.resolve) assert.equal(controller.sessionId, sessionId);
@@ -207,6 +207,25 @@ async function mountController(failFirstRead = false, overrides: Partial<WorkHub
     publish(messages: StoredMessage[]) { publish({ messages, ready: true, hasOlder: false }); },
   };
 }
+
+test('WorkHub /compact stays local, never enters steering or follow-up queues, and refuses busy or attached submissions', async () => {
+  const compactions: string[] = [];
+  const h = await mountController(false, { compactSession: async id => {
+    compactions.push(id);
+    return { kind: 'finished', turn: { sessionId: id, turnId: 'compact-local', runId: 'compact-run', status: 'completed', terminalEventId: 'compact-event' },
+      outcome: { kind: 'unchanged', reason: 'no_compactable_history' } };
+  } });
+  await act(async () => { assert.equal(await h.controller.send(' /compact ', []), true); });
+  assert.deepEqual(compactions, [h.sessionId]);
+  await act(async () => { h.admit('active-root'); });
+  await act(async () => { assert.equal(await h.controller.send('/compact', [], 'queue'), false); });
+  assert.deepEqual(compactions, [h.sessionId]);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.steers.length, 0);
+  await act(async () => { h.complete('active-root'); });
+  await act(async () => { assert.equal(await h.controller.send('/compact', [{ kind: 'doc', name: 'kept', mimeType: 'text/plain', bytes: 4, ref: { kind: 'workspace_file', relativePath: 'kept.txt' } }]), false); });
+  assert.deepEqual(compactions, [h.sessionId]);
+});
 
 test('WorkHub presents model setup instead of a retry-only resolution error', async () => {
   const h = await mountController(false, {

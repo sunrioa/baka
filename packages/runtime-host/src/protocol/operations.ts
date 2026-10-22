@@ -297,6 +297,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'connection.request-headers.replace',
   'connection.test.run',
   'context.compact',
+  'workhub.coordination.compact',
   'context.diagnostics.query',
   'credential.vault.delete',
   'credential.vault.query',

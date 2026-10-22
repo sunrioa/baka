@@ -19,6 +19,7 @@
 
 import { createWorkHubResultRuntime } from './workhub-result-runtime.js';
 import { createWorkHubContextObserver } from './workhub-context-observation.js';
+import { createWorkHubRecentTaskContext } from './workhub-recent-task-context.js';
 import { createWorkHubTaskInputRuntime } from './workhub-task-input-runtime.js';
 import { createWorkHubTaskStopRuntime } from './workhub-task-stop-runtime.js';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
@@ -46,6 +47,8 @@ import { WorkHubExecutionSlots } from './workhub-execution-slots.js';
 import { WORKHUB_DEFAULT_MAX_CONCURRENT_SESSIONS } from '@maka/core/settings';
 import { createWorkHubInspectionTool } from './workhub-inspection-tool.js';
 import { createWorkHubReadTool } from './workhub-read-tool.js';
+import { hostedExecutionClientCapabilityToolNames } from './hosted-execution-tool-profile.js';
+import { capabilityInitiatingConnectionId } from './operation-dispatcher.js';
 import { createWorkHubCoordinatorTools } from './workhub-coordinator-tools.js';
 import { copyWorkHubAttachmentsToTarget } from './workhub-message-attachments.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1215,14 +1218,21 @@ export async function createExecutionRuntimeHostComposition(
         resolvePluginTools: (sessionId, coreTools) =>
           pluginTools.resolveContributions(sessionId, coreTools),
         resolveExecutionContexts: (scope) =>
-          workHubEvidence
-            ? createWorkHubWorkerStatusContext({
-                stores,
-                messages,
-                evidence: workHubEvidence,
-                admission: sessionAdmission,
+          scope.sessionId === WORKHUB_COORDINATION_SESSION_ID
+            ? createWorkHubRecentTaskContext({
+                reader: requireTranscriptReader(transcriptReader),
+                readRoot: (sessionId, turnId) =>
+                  stores.agentRunStore.readRootTurnAdmission(sessionId, turnId),
+                readTask: (taskId) => stores.sessionStore.readLatestWorkHubAssignment(taskId),
               })(scope)
-            : Promise.resolve([]),
+            : workHubEvidence
+              ? createWorkHubWorkerStatusContext({
+                  stores,
+                  messages,
+                  evidence: workHubEvidence,
+                  admission: sessionAdmission,
+                })(scope)
+              : Promise.resolve([]),
         resolvePluginSystemPrompt: async (sessionId, promptContext, baseText) => {
           const assembly = await pluginSystemPrompt.assemble(
             {
@@ -2107,6 +2117,14 @@ export async function createExecutionRuntimeHostComposition(
       runtime: manager,
       executions: coordinator,
       sessions: stores.sessionStore,
+      prepareWorkHubCompaction: async (header, requester) => {
+        if (header.toolProfile !== 'workhub-coordination-v2') return undefined;
+        const binding = await requireClientCapabilities(clientCapabilities).bindSession(
+          header.id, capabilityInitiatingConnectionId(requester),
+          hostedExecutionClientCapabilityToolNames(header.toolProfile),
+        );
+        return binding.ok ? undefined : binding.message;
+      },
       requestDrain: context.requestDrain,
     });
     const turnControl = new HostTurnControlCoordinator({
@@ -2438,6 +2456,7 @@ export async function createExecutionRuntimeHostComposition(
       sessions: stores.sessionStore,
       runtime: stores.runtimeEventStore,
       catalog: runtimePolicyStores.connectionCatalog,
+      policy: runtimePolicyStores.runtimePolicy,
       readPricing: async () => (await openedUsageStores.pricing.snapshot()).overrides,
     });
     workHubCoordination = new HostWorkHubCoordinationCoordinator({

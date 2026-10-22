@@ -74,6 +74,7 @@ import {
 } from './execution-model-authority.js';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import type { HostRunComposer, HostRunComposerFactory } from './host-run-composer.js';
+import { workHubContextConnection } from './workhub-context-policy.js';
 
 export interface HostAiSdkBackendInput {
   readonly context: BackendFactoryContext;
@@ -144,6 +145,10 @@ async function buildHostAiSdkBackend(
   const runtimePolicySnapshot = await readDuringBackendCreation(
     () => input.runtimePolicy.runtimePolicy.getSnapshot(),
     input.context.abortSignal,
+  );
+  const contextConnection = workHubContextConnection(
+    target.connection, input.context.sessionId, target.model,
+    runtimePolicySnapshot.policy.chatDefaults,
   );
   const transport = createFetchTransport(
     toRuntimePolicyProxy(target.networkProxy, target.proxySecret),
@@ -390,7 +395,7 @@ async function buildHostAiSdkBackend(
                 input.context.store.settleSandboxBoundaryRequest!(request),
             }
           : {}),
-        connection: target.connection,
+        connection: contextConnection,
         providerStateIdentity: target.providerStateIdentity,
         apiKey,
         modelId: target.model,

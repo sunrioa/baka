@@ -70,7 +70,7 @@ const observation: WorkHubResultObservation = {
   sharedTurn: false,
 };
 
-test('result notifications identify the logical task and recommend only the current read entry', () => {
+test('new notifications keep exact task/result references without repeated tool instructions', () => {
   for (const work of [
     undefined,
     { id: 'original-task', generationId: 'fresh-generation', continuesActionId: 'previous-action' },
@@ -80,13 +80,22 @@ test('result notifications identify the logical task and recommend only the curr
     const split = content.text.lastIndexOf('\n\n');
     const instruction = content.text.slice(0, split);
     const data = JSON.parse(content.text.slice(split + 2));
-    assert.match(instruction, /WorkHubRead/u);
-    assert.doesNotMatch(instruction, /WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
-    assert.match(instruction, /sourceActionId/u);
+    assert.match(instruction, /not a new request or authorization/u);
+    assert.doesNotMatch(instruction, /WorkHubRead|WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
+    assert.equal(data.notificationVersion, 2);
     assert.equal(data.taskId, work?.id ?? assignment.actionId);
-    assert.equal(data.actionId, assignment.actionId);
+    assert.equal(data.sourceActionId, assignment.actionId);
     assert.equal(data.result, observation.result);
-    assert.equal(data.originalRequest, assignment.userText);
+    for (const field of [
+      'actionId',
+      'delegationId',
+      'targetSessionId',
+      'targetTurnId',
+      'targetRunId',
+      'originalRequest',
+      'delegatedRequest',
+    ])
+      assert.equal(data[field], undefined, field);
     const projected = projectWorkHubResultContext(
       content.text,
       workHubResultOrigin(current, observation),
@@ -171,7 +180,7 @@ test('completed, failed and cancelled results enter WorkHub once with original s
     await c.reconcile();
     await c.reconcile();
     assert.equal(f.contents.length, 1);
-    assert.ok(f.contents[0]!.includes(assignment.userText));
+    assert.equal(JSON.parse(f.contents[0]!.split('\n\n').at(-1)!).taskId, assignment.actionId);
     assert.ok(f.contents[0]!.includes(status));
   }
 });
@@ -284,7 +293,7 @@ test('bounds notification text, marks truncation and retains full-result locator
   const c = workHubResultContent(assignment, { ...observation, result: '😀'.repeat(20000) });
   assert.equal(c.displayText, assignment.targetSessionName);
   assert.ok(c.text.includes('"resultTruncated":true'));
-  assert.ok(c.text.includes('"actionId":"action"'));
+  assert.ok(c.text.includes('"sourceActionId":"action"'));
   assert.ok(!c.text.includes('�'));
   assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
 });
@@ -305,7 +314,7 @@ test('notification bounds request and interaction data independently of the full
   );
   assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
   assert.ok(c.text.includes('"status":"waiting_for_user"'));
-  assert.ok(c.text.includes('"actionId":"action"'));
+  assert.ok(c.text.includes('"sourceActionId":"action"'));
   assert.ok(c.text.includes('"detailsTruncated":true'));
   assert.ok(c.text.includes('"interactionId":"question"'));
 });

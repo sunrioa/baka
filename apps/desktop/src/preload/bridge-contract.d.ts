@@ -1154,6 +1154,8 @@ export interface MakaBridge {
     setNewWorkPermissionMode(coordinationSessionId: string, mode: import('@maka/core/settings').ChatDefaultPermissionMode): Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
     subscribeNewWorkPermissionMode(coordinationSessionId: string, handler: () => void): () => void;
     getExecutionConcurrency(coordinationSessionId: string): Promise<number>;
+    getCompactionThreshold(coordinationSessionId: string): Promise<number | null>;
+    setCompactionThreshold(coordinationSessionId: string, value: number | null): Promise<number | null>;
     setExecutionConcurrency(coordinationSessionId: string, value: number): Promise<number>;
     /** Resolve the active Runtime Host's stable coordination conversation. */
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }>;

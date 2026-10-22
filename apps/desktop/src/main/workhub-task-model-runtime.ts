@@ -46,7 +46,10 @@ export function createWorkHubTaskModelRuntime(deps: WorkHubTaskModelDeps) {
         case 'find': {
           const result = await client.findWorkHubTasks(request.input);
           requireCurrent(scope);
-          return result;
+          // Candidate discovery is not a metering report. Detailed context is
+          // available on demand through WorkHubRead(status) for the chosen task.
+          // Keep the Host/UI page untouched, including its opaque cursor.
+          return { ...result, items: result.items.map(({ context: _context, ...item }) => item) };
         }
         case 'start': {
           const { title, text, sessionRef, cwdHint } = request.input;

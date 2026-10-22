@@ -2311,6 +2311,14 @@ const makaBridge = {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       return invokeWhenReady('workhub:setExecutionConcurrency', scope, value) as Promise<number>;
     },
+    async getCompactionThreshold(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:getCompactionThreshold', scope) as Promise<number | null>;
+    },
+    async setCompactionThreshold(coordinationSessionId: string, value: number | null) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:setCompactionThreshold', scope, value) as Promise<number | null>;
+    },
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }> {
       return resolveDesktopWorkHubCoordinationSession(
         activeRuntimeHostRef,

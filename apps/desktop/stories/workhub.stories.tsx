@@ -302,6 +302,9 @@ function makeServices(failFirst: boolean, withHistory: boolean | 'usage', colore
     setNewWorkPermissionMode: async (id, mode) => { writes.permissions(id, mode); newWorkPermissionMode = mode; permissionChanged?.(); return mode; },
     subscribeNewWorkPermissionMode: (_id, handler) => { permissionChanged = handler; return () => { permissionChanged = undefined; }; },
     getExecutionConcurrency: async () => executionConcurrency,
+    getCompactionThreshold: async () => null,
+    setCompactionThreshold: async (_id, value) => value,
+    compactSession: async () => ({ kind: 'finished', turn: { sessionId, turnId: 'compact', runId: 'compact-run', status: 'completed', terminalEventId: 'compact-event', contextCompactionOutcome: { kind: 'unchanged', reason: 'no_compactable_history' } }, outcome: { kind: 'unchanged', reason: 'no_compactable_history' } }),
     setExecutionConcurrency: async (id, value) => { writes.concurrency(id, value); executionConcurrency = value; permissionChanged?.(); return value; },
     observe: (id, _event, _error, phase, execution, scope) => {
       if (id !== sessionId) { phase('ready'); execution?.({ type: 'host_execution', available: true, rootTurn: id === secondTarget.id ? { sessionId: id, turnId: 'running-turn', runId: 'running-run', status: 'running' } : null }); return () => {}; }

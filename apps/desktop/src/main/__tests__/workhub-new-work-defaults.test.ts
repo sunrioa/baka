@@ -28,9 +28,27 @@ import { createDefaultRuntimePolicy, decodeCanonicalRuntimePolicy, normalizeRunt
 import type { RuntimeHostConnection } from '@maka/runtime-host/client';
 import { DesktopRuntimeHostClient } from '../runtime-host-client.js';
 import { createWorkHubTaskModelRuntime } from '../workhub-task-model-runtime.js';
-import { readWorkHubNewWorkDefaults, readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults, writeWorkHubNewWorkPermissionMode } from '../workhub-new-work-defaults.js';
+import { readWorkHubNewWorkDefaults, readWorkHubCreationDefaults, writeWorkHubNewWorkDefaults, writeWorkHubNewWorkPermissionMode,
+  readWorkHubCompactionThreshold, writeWorkHubCompactionThreshold } from '../workhub-new-work-defaults.js';
 
 const executor = { executorId: 'codex.app-server', executorModel: 'gpt-6-astra', thinkingLevel: 'high' as const };
+test('coordinator compaction setting survives reload, clears to inheritance, and preserves all task defaults', async () => {
+  const f = fixture();
+  await writeWorkHubNewWorkDefaults(f.client, executor);
+  await writeWorkHubNewWorkPermissionMode(f.client, 'bypass');
+  const previous = structuredClone(f.policy);
+  assert.equal(await readWorkHubCompactionThreshold(f.client), null);
+  assert.equal(await writeWorkHubCompactionThreshold(f.client, 127001), 127001);
+  assert.equal(await readWorkHubCompactionThreshold(f.client), 127001);
+  assert.deepEqual(f.policy, { ...previous, chatDefaults: { ...previous.chatDefaults, workHubCompactionThreshold: 127001 } });
+  assert.equal(await writeWorkHubCompactionThreshold(f.client, null), null);
+  assert.deepEqual(f.policy, previous);
+  for (const value of [0, -1, 1.1, '1000', undefined, false, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(writeWorkHubCompactionThreshold(f.client, value));
+    assert.deepEqual(f.policy, previous);
+  }
+});
+
 function fixture() {
   let policy = createDefaultRuntimePolicy();
   let native = { id: WORKHUB_COORDINATION_SESSION_ID, revision: 1, llmConnectionId: 'saved-connection', llmConnectionSlug: 'saved-provider', model: 'saved-native', thinkingLevel: 'medium' as const };

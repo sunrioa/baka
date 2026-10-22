@@ -5074,7 +5074,7 @@ test('WorkHub receives a pending question and then the result after the target r
       coordinationBackendFactory: (context) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
-            const notification = input.text.startsWith('Host notification:');
+            const notification = input.text.startsWith('Host task result notification.');
             if (notification) received.push(input);
             yield* super.send({
               ...input,
@@ -6002,13 +6002,13 @@ test('one WorkHub Turn admits independent goals in private or registered workspa
         'Q&A does not create a task',
       );
       assert.equal(
-        coordinationInputs.filter((input) => input.text.startsWith('Host notification:')).length,
+        coordinationInputs.filter((input) => input.text.startsWith('Host task result notification.')).length,
         0,
       );
       workerRelease.resolve();
       await waitFor(
         async () =>
-          coordinationInputs.filter((input) => input.text.startsWith('Host notification:'))
+          coordinationInputs.filter((input) => input.text.startsWith('Host task result notification.'))
             .length === 3,
         12000,
       );
@@ -7978,7 +7978,7 @@ async function queuedTaskInputJourney(entry: 'native' | 'task-aware' | 'model') 
             coordinatorSends.push(input.text);
             yield* super.send({
               ...input,
-              text: input.text.startsWith('Host notification:')
+              text: input.text.startsWith('Host task result notification.')
                 ? 'Received'
                 : FAKE_HOLD_OPEN_PROMPT,
             });
@@ -8303,7 +8303,7 @@ test('native task input steers the exact same-name task and reconstructs accepte
       coordinationBackendFactory: (backendContext) =>
         new (class extends FakeBackend {
           override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
-            if (input.text.startsWith('Host notification:')) {
+            if (input.text.startsWith('Host task result notification.')) {
               notificationStarted = true;
               await finishNotifications.promise;
             }
@@ -10197,7 +10197,7 @@ async function createCapturedExecutionComposition(
             ? (options.coordinationBackendFactory?.(context) ??
               new (class extends FakeBackend {
                 override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
-                  if (input.text.startsWith('Host notification:')) {
+                  if (input.text.startsWith('Host task result notification.')) {
                     options.onWorkHubResult?.(input);
                     yield* super.send({ ...input, text: 'The delegated result was received.' });
                   } else {

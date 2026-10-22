@@ -94,6 +94,9 @@ export interface WorkHubServices extends WorkHubWorkspaceServices {
   subscribeNewWorkPermissionMode(sessionId: string, handler: () => void): () => void;
   getExecutionConcurrency(sessionId: string): Promise<number>;
   setExecutionConcurrency(sessionId: string, value: number): Promise<number>;
+  getCompactionThreshold(sessionId: string): Promise<number | null>;
+  setCompactionThreshold(sessionId: string, value: number | null): Promise<number | null>;
+  compactSession(sessionId: string): Promise<OperationOutput<'workhub.coordination.compact'>>;
   observe(
     sessionId: string,
     handler: (event: SessionEvent) => void,

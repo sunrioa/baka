@@ -313,6 +313,10 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
     }
     return pending;
   };
+  const coordinationContexts = new Map<
+    string,
+    Promise<NonNullable<ResolvedRunPrompt['contexts']>>
+  >();
   const resolveSystemPrompt = async (
     context: HostModelPromptContext,
   ): Promise<ResolvedRunPrompt> => {
@@ -321,10 +325,19 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
       input.resolveAdditionalSystemPrompt && !runProfile
         ? await input.resolveAdditionalSystemPrompt(context, base.text)
         : base;
-    const executionContexts =
-      input.resolveExecutionContexts && !runProfile && !hasToolCeiling
-        ? await input.resolveExecutionContexts(context)
-        : [];
+    let executionContexts: NonNullable<ResolvedRunPrompt['contexts']> = [];
+    if (input.resolveExecutionContexts && (!hasToolCeiling || (input.toolProfile === 'workhub-coordination-v2' && input.boundTools === undefined))) {
+      if (input.toolProfile === 'workhub-coordination-v2') {
+        let pending = coordinationContexts.get(context.turnId);
+        if (!pending) {
+          pending = input.resolveExecutionContexts(context);
+          coordinationContexts.set(context.turnId, pending);
+          if (coordinationContexts.size > 32)
+            coordinationContexts.delete(coordinationContexts.keys().next().value!);
+        }
+        executionContexts = await pending;
+      } else if (!runProfile) executionContexts = await input.resolveExecutionContexts(context);
+    }
     if (plugin === base && !executionContexts.length) return base;
     return Object.freeze({
       text: plugin.text,

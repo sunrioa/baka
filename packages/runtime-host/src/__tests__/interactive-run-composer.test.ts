@@ -247,6 +247,45 @@ test('Host execution notices are resampled without changing stable system/tool p
   await bounded.resolveSystemPrompt(scope);
 });
 
+test('WorkHub references are sampled once per Turn and never injected into the stable system prefix', async () => {
+  let text = 'first task references';
+  let samples = 0;
+  const names = ['control', 'find', 'start', 'continue', 'ask', 'stop'].map(
+    (name) => `mcp__desktop_workhub__${name}`,
+  );
+  const composer = createFixtureComposer({
+    toolProfile: 'workhub-coordination-v2',
+    hostTools: [
+      ...names,
+      ...WORKHUB_BROWSER_TOOL_NAMES.map((name) => `mcp__desktop_browser__${name}`),
+      'WorkHubRead',
+    ].map(tool),
+    resolveExecutionContexts: async () => {
+      samples++;
+      return [{ name: 'workhub.recent_user_tasks', text }];
+    },
+  });
+  const scope = {
+    sessionId: 'maka_workhub_coordination',
+    turnId: 'user-turn',
+    runId: 'run',
+    cwd: '/workspace',
+  };
+  const first = await composer.resolveSystemPrompt(scope);
+  text = 'later task references';
+  const second = await composer.resolveSystemPrompt(scope);
+  assert.equal(samples, 1);
+  assert.deepEqual(first.contexts, second.contexts);
+  assert.equal(first.text, second.text);
+  assert.ok(!first.text?.includes('first task references'));
+  const next = await composer.resolveSystemPrompt({ ...scope, turnId: 'next-turn' });
+  assert.equal(samples, 2);
+  assert.equal(next.text, first.text);
+  assert.deepEqual(next.contexts, [
+    { name: 'workhub.recent_user_tasks', text: 'later task references' },
+  ]);
+});
+
 test('scoped Plugin Skill contributions join the canonical model inventory', async () => {
   const composer = createFixtureComposer({
     skills: {
