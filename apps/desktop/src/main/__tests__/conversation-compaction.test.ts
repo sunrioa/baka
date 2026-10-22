@@ -25,7 +25,8 @@ import type { UiLocale } from '@maka/core/ui-locale';
 import type { ContextCompactResult } from '@maka/runtime-host/protocol';
 import type { DesktopSessionSummary } from '../../shared/desktop-session-projection.js';
 import { createSessionCatalogController, SessionCatalogContext } from '../../renderer/application/contracts/session-catalog/session-catalog-state.js';
-import { localizedShellErrorMessage } from '../../renderer/locales/shell-copy.js';
+import { getShellCopy, localizedShellErrorMessage } from '../../renderer/locales/shell-copy.js';
+import { getDesktopConversationCopy } from '../../renderer/application/contracts/conversation-copy.js';
 import {
   ConversationLifecycle,
   ConversationProvider,
@@ -58,12 +59,40 @@ function recordingFeedback(locale: UiLocale = 'en') {
 }
 
 describe('Conversation context compaction commands', () => {
+  it('keeps all existing shared compaction notices unchanged across locales', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+      const old = getShellCopy(locale);
+      const shared = getDesktopConversationCopy(locale).quoteCompanion;
+      for (const key of ['compactSuccessTitle', 'compactSuccessDescription', 'compactStartedTitle',
+        'compactStartedDescription', 'compactUnchangedTitle', 'compactUnchangedDescription',
+        'compactErrorTitle', 'compactErrorFallback'] as const) assert.equal(shared[key], old.app[key]);
+    }
+  });
+
+  it('keeps workspace errors in their existing locale without replacing them with shared catalog wording', async () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW'] as const) {
+      const { calls, feedback } = recordingFeedback(locale);
+      const copy = getShellCopy(locale).errors;
+      const commands = createContextCompactionCommands({
+        compact: async () => { throw new Error('SESSION_WORKSPACE_UNAVAILABLE: Working directory does not exist or is not accessible.'); },
+        isCurrentSession: () => true,
+        formatError: localizedShellErrorMessage,
+        workspaceErrorCopy: (current) => getShellCopy(current).errors,
+        feedback,
+      });
+      assert.equal(await commands.compactSession('A'), false);
+      assert.deepEqual(calls, [`error:${copy.workspaceUnavailableTitle}:${copy.workspaceUnavailableDescription}:A`]);
+    }
+  });
+
   it('opens the running notice from /compact and settles it from the Host outcome', async () => {
     const { calls, feedback } = recordingFeedback();
     const requested: string[] = [];
     const commands = createContextCompactionCommands({
       compact: async (sessionId) => { requested.push(sessionId); return started; },
       isCurrentSession: () => true,
+      formatError: localizedShellErrorMessage,
+      workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
       feedback,
     });
 
@@ -80,6 +109,8 @@ describe('Conversation context compaction commands', () => {
     const commands = createContextCompactionCommands({
       compact: async () => ({ kind: 'finished', turn, outcome: { kind: 'failed', reason: 'write_failed' } }),
       isCurrentSession: () => true,
+      formatError: localizedShellErrorMessage,
+      workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
       feedback,
     });
 
@@ -100,6 +131,8 @@ describe('Conversation context compaction commands', () => {
       const commands = createContextCompactionCommands({
         compact: async () => { throw error; },
         isCurrentSession: () => current,
+        formatError: localizedShellErrorMessage,
+        workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
         feedback,
       });
       assert.equal(await commands.compactSession('A'), false);
@@ -112,6 +145,8 @@ describe('Conversation context compaction commands', () => {
     const commands = createContextCompactionCommands({
       compact: async () => started,
       isCurrentSession: () => true,
+      formatError: localizedShellErrorMessage,
+      workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
       feedback,
     });
 

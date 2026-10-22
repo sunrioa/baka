@@ -54,7 +54,8 @@ import { useWorkHubTaskInbox } from './use-workhub-task-inbox.js';
 import { useWorkHubTaskOverview } from './use-workhub-task-overview.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
 import type { WorkHubServices, WorkHubTranscript, WorkHubTranscriptSnapshot } from '../ports.js';
-import { createContextCompactionCommands } from '../../conversation/index.js';
+import { createContextCompactionCommands } from '../../../application/contracts/context-compaction.js';
+import { getShellCopy, localizedShellErrorMessage } from '../../../locales/shell-copy.js';
 
 const emptyTranscript: WorkHubTranscriptSnapshot = {
   messages: [],
@@ -140,6 +141,8 @@ export function useWorkHubController(
   const [compaction] = useState(() => createContextCompactionCommands({
     compact: (id) => compactionServices.current.compactSession(id),
     isCurrentSession: (id) => currentSessionId.current === id,
+    formatError: localizedShellErrorMessage,
+    workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
     feedback: compactionFeedback,
   }));
   const compacting = useRef(false);

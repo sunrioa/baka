@@ -80,4 +80,3 @@ export { TaskReadinessProvider, TaskReadinessNoticeConsumer } from './ui/task-re
 export { createComposerSubmissionCommands } from './controller/composer-submission-commands.js';
 export { ComposerSubmissionServicesProvider, type ComposerSubmissionServices } from './submission-services.js';
 export { ComposerSubmissionProvider } from './ui/composer-submission-provider.js';
-export { createContextCompactionCommands } from './model/context-compaction.js';
