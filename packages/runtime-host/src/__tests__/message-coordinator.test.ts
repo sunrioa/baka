@@ -62,6 +62,7 @@ import {
   type HostMessageRootState,
 } from '../server/message-coordinator.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { retireWorkHubDelegation } from '../server/execution-composition.js';
 
 const ROOT = { sessionId: 'session-1', turnId: 'turn-1', runId: 'run-1' } as const;
 const EMPTY_SKILL_INVOCATION = { loaded: [], failed: [], receipts: [] } as const;
@@ -606,6 +607,111 @@ test('message query reports only durable cancellation proof', async () => {
   });
 });
 
+test('batch cancellation requires the exact Session lease and preserves other queued Messages', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.reserveRootTurn(ROOT);
+  await submit(fixture, 'batch-linked', 'target', 'next_turn');
+  await submit(fixture, 'batch-unrelated', 'keep', 'next_turn');
+  const cancel = (
+    lease: Parameters<typeof fixture.coordinator.cancelMessageIfPendingAdmitted>[3],
+  ) =>
+    fixture.coordinator.cancelMessageIfPendingAdmitted(
+      ROOT.sessionId,
+      'batch-linked',
+      'batch-stop',
+      lease,
+    );
+  await assert.rejects(fixture.sessionAdmission.run('wrong-session', cancel));
+  const otherGate = new SessionAdmissionGate();
+  await assert.rejects(otherGate.run(ROOT.sessionId, cancel));
+  assert.deepEqual(
+    fixture.coordinator.projection(ROOT.sessionId).followup.map((item) => item.messageId),
+    ['batch-linked', 'batch-unrelated'],
+  );
+  assert.deepEqual(await fixture.sessionAdmission.run(ROOT.sessionId, cancel), {
+    kind: 'cancelled_pending',
+  });
+  assert.deepEqual(
+    fixture.coordinator.projection(ROOT.sessionId).followup.map((item) => item.messageId),
+    ['batch-unrelated'],
+  );
+});
+
+for (const refusal of ['scope', 'binding', 'read-error'] as const)
+  test(`task Stop cancellation preserves its batch lease and queue on ${refusal}`, async () => {
+    const fixture = createFixture();
+    fixture.coordinator.reserveRootTurn(ROOT);
+    await submit(fixture, 'linked-message', 'target task', 'next_turn');
+    await submit(fixture, 'other-message', 'unrelated task', 'next_turn');
+    const source: Parameters<typeof retireWorkHubDelegation>[0] = {
+      type: 'workhub_coordination',
+      schemaVersion: 1,
+      kind: 'delegation_assigned',
+      id: `wha_${'d'.repeat(48)}`,
+      actionId: 'task-source',
+      delegationId: `whd_${'d'.repeat(48)}`,
+      actionFingerprint: `sha256:${'d'.repeat(64)}`,
+      turnId: 'coordination',
+      coordinationTurnId: 'coordination',
+      ts: 1,
+      disposition: 'delegate_existing',
+      targetSessionId: ROOT.sessionId,
+      targetSessionName: 'Target task',
+      targetTurnId: ROOT.turnId,
+      targetMessageId: 'linked-message',
+      userText: 'Target task',
+    };
+    let stops = 0;
+    const unexpectedStop = async () => {
+      stops++;
+      throw new Error('A refused target must not stop any Root');
+    };
+    const outcome = fixture.sessionAdmission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, ROOT.sessionId],
+      async (lease) => {
+        const result = await retireWorkHubDelegation(
+          source,
+          {
+            cancellationClaimId: 'original-stop',
+            cause: 'direct_stop',
+            executionBinding: 'captured-original-root',
+          },
+          {
+            messages: fixture.coordinator,
+            coordinator: {
+              readRootState: () => {
+                throw new Error('A refused target needs no Root observation');
+              },
+              read: async () => {
+                throw new Error('A refused target needs no Root observation');
+              },
+              stopRoot: unexpectedStop,
+            },
+            readStopTarget: async () => {
+              if (refusal === 'read-error') throw new Error('injected target storage failure');
+              return { binding: 'different-execution' };
+            },
+            taskStop: {
+              validate: async () => refusal !== 'scope',
+              stopRoot: unexpectedStop,
+            },
+          },
+          { pendingOnly: true, admission: lease },
+        );
+        // A caller can still record this normal refusal in the same batch.
+        await fixture.sessionAdmission.runAdmitted(ROOT.sessionId, lease, async () => {});
+        return result;
+      },
+    );
+    if (refusal === 'read-error') await assert.rejects(outcome, /injected target storage failure/);
+    else assert.deepEqual(await outcome, { outcome: 'not_owned' });
+    assert.equal(stops, 0);
+    assert.deepEqual(
+      fixture.coordinator.projection(ROOT.sessionId).followup.map((entry) => entry.messageId),
+      ['linked-message', 'other-message'],
+    );
+  });
+
 test('exact pending cancellation removes only the linked Message', async () => {
   const fixture = createFixture();
   fixture.coordinator.reserveRootTurn(ROOT);
@@ -639,11 +745,29 @@ test('a durable cancellation claim preserves cancelled_pending across restart-st
   fixture.coordinator.reserveRootTurn(ROOT);
   await submit(fixture, 'linked-message', 'wrong delegation', 'next_turn');
 
+  await assert.rejects(
+    fixture.coordinator.cancelMessageIfPending(
+      ROOT.sessionId,
+      'linked-message',
+      'changed-stop',
+      async () => {
+        throw new Error('target changed');
+      },
+    ),
+    /target changed/,
+  );
+  assert.equal(
+    (await fixture.coordinator.readMessageExecutionDisposition(ROOT.sessionId, 'linked-message'))
+      .kind,
+    'pending',
+  );
+
   assert.deepEqual(
     await fixture.coordinator.cancelMessageIfPending(
       ROOT.sessionId,
       'linked-message',
       'stop-claim',
+      async () => undefined,
     ),
     { kind: 'cancelled_pending' },
   );
@@ -652,6 +776,7 @@ test('a durable cancellation claim preserves cancelled_pending across restart-st
       ROOT.sessionId,
       'linked-message',
       'stop-claim',
+      async () => assert.fail('an owned cancellation tombstone needs no new confirmation'),
     ),
     { kind: 'cancelled_pending' },
   );
@@ -1767,6 +1892,183 @@ test('an idle retry reuses the Skill outcome from its pending admission', async 
     fixture.receipts.get('pending-skill')?.sourceMessage.skillInvocation,
     skillInvocation,
   );
+});
+
+for (const scenario of ['preserve', 'upgrade', 'full-first', 'drain'] as const)
+  test(
+    'root-only stop keeps accepted follow-ups without weakening full stop (' + scenario + ')',
+    async () => {
+      const fixture = createFixture();
+      fixture.coordinator.reserveRootTurn(ROOT);
+      const owner = fixture.coordinator.bindRun(ROOT);
+      for (const [messageId, placement] of [
+        ['steer-a', 'current_turn'],
+        ['queued-b', 'next_turn'],
+        ['queued-c', 'next_turn'],
+      ] as const)
+        assert.ok((await submit(fixture, messageId, messageId, placement)).ok);
+      const queuedBefore = fixture.coordinator.projection(ROOT.sessionId).followup;
+      const first = fixture.coordinator.commitStopFence(ROOT, scenario !== 'full-first');
+      await fixture.coordinator.cancelMessages(
+        ROOT.sessionId,
+        first.retracted.map((item) => item.messageId),
+      );
+      assert.deepEqual(
+        first.retracted.map((item) => item.messageId),
+        scenario === 'full-first' ? ['steer-a', 'queued-b', 'queued-c'] : ['steer-a'],
+      );
+      if (scenario !== 'full-first')
+        assert.deepEqual(
+          fixture.coordinator.projection(ROOT.sessionId).followup,
+          queuedBefore,
+          'text, identity, order and original placement remain intact',
+        );
+      assert.deepEqual(
+        fixture.coordinator.commitStopFence(ROOT, true),
+        first,
+        'same fence is idempotent',
+      );
+      if (scenario === 'upgrade') {
+        const expanded = fixture.coordinator.commitStopFence(ROOT);
+        assert.deepEqual(
+          expanded.retracted.map((item) => item.messageId),
+          ['queued-b', 'queued-c'],
+          'a later full stop cancels only remaining messages; prior cancellation is already durable',
+        );
+        await fixture.coordinator.cancelMessages(
+          ROOT.sessionId,
+          expanded.retracted.map((item) => item.messageId),
+        );
+        assert.deepEqual(
+          fixture.coordinator.commitStopFence(ROOT, true),
+          expanded,
+          'a narrower retry cannot undo full stop',
+        );
+      }
+      if (scenario === 'drain') fixture.coordinator.beginDrain();
+      assert.equal(
+        (await submit(fixture, 'late', 'must not enter the stopped root', 'current_turn')).ok,
+        false,
+      );
+      owner.release();
+      let batch = fixture.coordinator.beginTerminalTransition(ROOT);
+      if (scenario === 'preserve') {
+        for (const [index, messageId] of ['queued-b', 'queued-c'].entries()) {
+          assert.deepEqual(
+            batch.sources.map((item) => item.messageId),
+            [messageId],
+          );
+          const next = {
+            sessionId: ROOT.sessionId,
+            turnId: 'next-' + index,
+            runId: 'run-next-' + index,
+          };
+          fixture.coordinator.commitNextRoot(batch, next);
+          fixture.setRootState({ kind: 'active', ...next });
+          const nextOwner = fixture.coordinator.bindRun(next);
+          assert.deepEqual(
+            await nextOwner.pull(),
+            [],
+            'cancelled A correction is not folded into B or C',
+          );
+          nextOwner.release();
+          batch = fixture.coordinator.beginTerminalTransition(next);
+        }
+      }
+      assert.deepEqual(batch.sources, []);
+      fixture.coordinator.completeIdle(batch);
+      assert.equal(fixture.liveResidencies(), 0);
+      for (const messageId of ['queued-b', 'queued-c'])
+        assert.equal(
+          await fixture.admissions.hasCancelledMessageAdmission(ROOT.sessionId, messageId),
+          scenario === 'full-first' || scenario === 'upgrade',
+          'administrative drain releases memory but retains unrelated durable work for recovery',
+        );
+      assert.equal(fixture.drainRequests(), 0);
+      await fixture.coordinator.close();
+    },
+  );
+
+test('root-only stop refuses another Run without retracting accepted work', async () => {
+  const fixture = createFixture();
+  fixture.coordinator.reserveRootTurn(ROOT);
+  const owner = fixture.coordinator.bindRun(ROOT);
+  assert.ok((await submit(fixture, 'queued-b', 'B', 'next_turn')).ok);
+  const before = fixture.coordinator.projection(ROOT.sessionId);
+  assert.throws(
+    () => fixture.coordinator.commitStopFence({ ...ROOT, runId: 'wrong-run' }, true),
+    /does not match the reserved root/,
+  );
+  assert.deepEqual(fixture.coordinator.projection(ROOT.sessionId), before);
+  fixture.coordinator.commitStopFence(ROOT);
+  owner.release();
+  fixture.coordinator.completeIdle(fixture.coordinator.beginTerminalTransition(ROOT));
+  await fixture.coordinator.close();
+});
+
+test('root-only stop and administrative drain preserve SQLite follow-ups across database reopen', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-stop-queue-reopen-'));
+  let store = createSessionStore(root);
+  try {
+    await store.createStableSession({
+      sessionId: ROOT.sessionId,
+      requestFingerprint: `sha256:${'b'.repeat(64)}`,
+      input: {
+        cwd: root,
+        name: 'Queue owner',
+        llmConnectionSlug: 'test',
+        model: 'test',
+        permissionMode: 'ask',
+      },
+    });
+    // Production SQLite and Message coordinator; the Root port is the same
+    // explicit fixture used by other message-recovery tests, not a real Host.
+    const fixture = createFixture(undefined, undefined, store);
+    fixture.coordinator.reserveRootTurn(ROOT);
+    const owner = fixture.coordinator.bindRun(ROOT);
+    assert.ok((await submit(fixture, 'a-correction', 'A correction', 'current_turn')).ok);
+    assert.ok((await submit(fixture, 'queued-b', 'B request', 'next_turn')).ok);
+    assert.ok((await submit(fixture, 'queued-c', 'C request', 'next_turn')).ok);
+    const fence = fixture.coordinator.commitStopFence(ROOT, true);
+    await fixture.coordinator.cancelMessages(
+      ROOT.sessionId,
+      fence.retracted.map((item) => item.messageId),
+    );
+    fixture.coordinator.beginDrain();
+    owner.release();
+    fixture.coordinator.completeIdle(fixture.coordinator.beginTerminalTransition(ROOT));
+    await fixture.coordinator.close();
+    const pending = await store.listMessageAdmissions(ROOT.sessionId);
+    assert.deepEqual(
+      pending.map((item) => item.messageId),
+      ['queued-b', 'queued-c'],
+    );
+    assert.equal(await store.hasCancelledMessageAdmission(ROOT.sessionId, 'a-correction'), true);
+    await store.close?.();
+    store = createSessionStore(root);
+    assert.deepEqual(await store.listMessageAdmissions(ROOT.sessionId), pending);
+    const recovered = createFixture(undefined, undefined, store);
+    recovered.setRootState({ kind: 'idle' });
+    await recovered.coordinator.recoverPendingAfterHostRestart([ROOT.sessionId]);
+    assert.deepEqual(
+      recovered.recoveredBatches.map((batch) => batch.sources.map((source) => source.messageId)),
+      [['queued-b']],
+    );
+    assert.deepEqual(
+      recovered.coordinator.projection(ROOT.sessionId).followup.map((item) => item.messageId),
+      ['queued-c'],
+    );
+    const restored = await recovered.root.readRootState(ROOT.sessionId);
+    assert.equal(restored.kind, 'active');
+    if (restored.kind !== 'active') assert.fail('No recovered Root');
+    recovered.coordinator.commitStopFence(restored);
+    recovered.coordinator.abandonRootReservation(restored);
+    assert.equal(recovered.liveResidencies(), 0);
+    await recovered.coordinator.close();
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('binds the exact reserved Run after a pre-bind stop fence', async () => {

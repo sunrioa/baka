@@ -79,6 +79,21 @@ function session(
   };
 }
 
+describe('WorkHub session grouping', () => {
+  it('folds only WorkHub-created Sessions by Host and leaves adopted manual Sessions in their project', () => {
+    const manual = session('adopted-manual', { projectId: 'pA' });
+    const created = Object.assign(session('created', { projectId: 'pA', isFlagged: true }), { workHubCreated: true });
+    const fresh = Object.assign(session('fresh'), { workHubCreated: true });
+    const remote = Object.assign(session('remote', { runtimeHostId: 'remote-host', profileName: 'Remote' }), { workHubCreated: true });
+    const groups = deriveSessionNavigationGroups([manual, created, fresh, remote], [scope('local', 'keyA', project('pA'))], 'en');
+    assert.deepEqual(groups.find(group => group.id === 'project:keyA')?.sessions, [manual]);
+    assert.deepEqual(groups.find(group => group.id === 'workhub:local')?.sessions, [created, fresh]);
+    assert.equal(groups.find(group => group.id === 'workhub:local')?.defaultIsCollapsed, true);
+    assert.deepEqual(groups.find(group => group.id === 'workhub:remote-host')?.sessions, [remote]);
+    assert.equal(new Set(groups.flatMap(group => group.sessions.map(item => item.id))).size, 4);
+  });
+});
+
 describe('sessionMoveTargets', () => {
   const homes: Array<{ name: string; projectId: string; overrides: Partial<ProjectRecord> }> = [
     { name: 'active', projectId: 'pA', overrides: {} },

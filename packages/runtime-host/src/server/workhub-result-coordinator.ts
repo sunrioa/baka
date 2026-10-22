@@ -24,8 +24,9 @@ import {
 } from '@maka/core/session';
 import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
 import type { MessageContent } from '@maka/core/events';
-import { createWorkHubResultContext } from '@maka/core/workhub-result-context';
+import { createWorkHubResultNotification } from '@maka/core/workhub-result-context';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
+import { readWorkHubWorkerStatus } from './workhub-task-brief.js';
 
 export interface WorkHubResultObservation {
   readonly turnId: string;
@@ -82,9 +83,10 @@ export function workHubResultContent(
   assignment: WorkHubDelegationAssignedMessage,
   observation: WorkHubResultObservation,
 ): MessageContent {
-  return createWorkHubResultContext({
+  return createWorkHubResultNotification({
     origin: workHubResultOrigin(assignment, observation),
-    targetSessionName: assignment.targetSessionName,
+    taskId: assignment.work?.id ?? assignment.actionId,
+    targetSessionName: assignment.taskTitle ?? assignment.targetSessionName,
     targetRunId: observation.runId,
     originalRequest: assignment.userText,
     delegatedRequest: assignment.delegationText ?? assignment.userText,
@@ -92,6 +94,7 @@ export function workHubResultContent(
     status: observation.status,
     sharedTurn: observation.sharedTurn,
     result: observation.result,
+    workerStatus: readWorkHubWorkerStatus(observation.result),
     details: observation.details,
   });
 }

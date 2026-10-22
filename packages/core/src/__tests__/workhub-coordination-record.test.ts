@@ -19,9 +19,20 @@
 
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { decodeCanonicalMessage } from '../session.js';
+import {
+  decodeCanonicalMessage,
+  snapshotWorkHubTaskSettings,
+  isWorkHubTaskSettingsSnapshot,
+  isWorkHubReplacementIntentRetired,
+} from '../session.js';
+import {
+  isWorkHubTaskStopSet,
+  isWorkHubTaskStopTarget,
+  WORKHUB_TASK_STOP_MAX_TARGETS,
+  workHubStopRetiresDelegation,
+} from '../workhub-task-stop.js';
 
-const FINGERPRINT = `sha256:${'a'.repeat(64)}`;
+const FINGERPRINT = `sha256:${'a'.repeat(64)}` as const;
 
 describe('WorkHub Coordination stored records', () => {
   test('task input facts bind a source and distinguish acceptance from delivery', () => {
@@ -44,6 +55,17 @@ describe('WorkHub Coordination stored records', () => {
       mode: 'queued_supplement',
     } as const;
     assert.deepEqual(decodeCanonicalMessage(input), input);
+    const prepared = {
+      ...input,
+      originalUserText: '只补刚才的边界，不改接口',
+      inputOrigin: 'user',
+      sourceMessageId: 'real-user-message',
+    };
+    assert.deepEqual(decodeCanonicalMessage(prepared), prepared);
+    assert.deepEqual(decodeCanonicalMessage({ ...prepared, inputOrigin: 'feedback' }), {
+      ...prepared,
+      inputOrigin: 'feedback',
+    });
     const steering = {
       ...input,
       mode: 'steering',
@@ -57,6 +79,10 @@ describe('WorkHub Coordination stored records', () => {
       { ...input, workId: '../foreign' },
       { ...input, targetContentDigest: 'not-a-digest' },
       { ...input, delivered: true },
+      { ...prepared, originalUserText: ' ' },
+      { ...prepared, originalUserText: '中'.repeat(17_000) },
+      { ...prepared, inputOrigin: 'model_claimed_user' },
+      { ...prepared, sourceMessageId: '../outside' },
       { ...input, execution: steering.execution },
       { ...steering, execution: undefined },
       { ...steering, execution: { ...steering.execution, permissionMode: 'bypass' } },
@@ -86,6 +112,62 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
+    assert.deepEqual(decodeCanonicalMessage({ ...assigned, taskTitle: 'Initial objective' }), {
+      ...assigned,
+      taskTitle: 'Initial objective',
+    });
+    for (const taskTitle of ['', ' ', null, ['title'], 'bad\nname', 'x'.repeat(513)])
+      assert.throws(
+        () => decodeCanonicalMessage({ ...assigned, taskTitle }),
+        /Invalid stored message schema/u,
+      );
+    const settings = snapshotWorkHubTaskSettings(
+      {
+        id: 'payments',
+        cwd: '/work',
+        backend: 'ai-sdk',
+        model: 'user-selected',
+        llmConnectionId: 'connection',
+        llmConnectionSlug: 'proxy',
+        permissionMode: 'ask',
+        toolMode: 'code_mode',
+        thinkingLevel: 'high',
+      },
+      'current_segment',
+    );
+    assert.equal(isWorkHubTaskSettingsSnapshot(settings), true);
+    assert.deepEqual(decodeCanonicalMessage({ ...assigned, settings }), { ...assigned, settings });
+    for (const extra of [
+      { rememberForTurn: true },
+      { sandboxGrants: ['/'] },
+      { toolMode: 'invalid' },
+      { permissionMode: undefined },
+      { executorId: 'remote' },
+    ]) {
+      assert.throws(() =>
+        decodeCanonicalMessage({ ...assigned, settings: { ...settings, ...extra } }),
+      );
+    }
+    const executorConfig = { model: 'executor-model', mode: 'ask' };
+    const executorSettings = snapshotWorkHubTaskSettings(
+      {
+        ...settings,
+        id: 'executor',
+        llmConnectionId: 'connection',
+        thinkingLevel: 'high',
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig,
+      },
+      'current_segment',
+    );
+    executorConfig.mode = 'auto';
+    assert.equal(
+      executorSettings.executorConfig?.mode,
+      'ask',
+      'snapshot is independent of later user edits',
+    );
+    assert.equal(isWorkHubTaskSettingsSnapshot(executorSettings), true);
     const delegated = { ...assigned, delegationText: 'Inspect the payment retry state' };
     assert.deepEqual(decodeCanonicalMessage(delegated), delegated);
     const original = {
@@ -267,6 +349,51 @@ describe('WorkHub Coordination stored records', () => {
     assert.deepEqual(decodeCanonicalMessage(assigned), assigned);
     assert.deepEqual(decodeCanonicalMessage(superseded), superseded);
     assert.deepEqual(decodeCanonicalMessage(aborted), aborted);
+    const retired = { ...aborted, reason: 'legacy_protocol_retirement' } as const;
+    assert.deepEqual(decodeCanonicalMessage(retired), retired);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, retired), true);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, undefined), false);
+    assert.equal(isWorkHubReplacementIntentRetired(replacement, aborted), false);
+    assert.equal(
+      isWorkHubReplacementIntentRetired(replacement, {
+        ...aborted,
+        reason: 'target_waiting_for_user',
+      }),
+      false,
+    );
+    for (const mismatch of [
+      { actionId: 'foreign-action' },
+      { actionFingerprint: `sha256:${'b'.repeat(64)}` as const },
+      { turnId: 'foreign-turn', coordinationTurnId: 'foreign-turn' },
+      { turnId: 'foreign-turn' },
+      { coordinationTurnId: 'foreign-turn' },
+      { abortedActionId: 'foreign-action' },
+      { abortedDelegationId: 'foreign-delegation' },
+      { targetSessionId: 'foreign-session' },
+      { schemaVersion: 1 },
+      { reason: 'unknown_retirement' },
+    ]) {
+      assert.equal(
+        isWorkHubReplacementIntentRetired(replacement, {
+          ...retired,
+          ...mismatch,
+        } as typeof retired),
+        false,
+      );
+    }
+    for (const mismatch of [
+      { actionId: 'foreign-action' },
+      { actionFingerprint: `sha256:${'b'.repeat(64)}` as const },
+      { turnId: 'foreign-turn', coordinationTurnId: 'foreign-turn' },
+      { replacesActionId: 'foreign-action' },
+      { replacesDelegationId: 'foreign-delegation' },
+      { targetSessionId: 'foreign-session' },
+    ]) {
+      assert.equal(
+        isWorkHubReplacementIntentRetired({ ...replacement, ...mismatch }, retired),
+        false,
+      );
+    }
     assert.throws(
       () => decodeCanonicalMessage({ ...superseded, replacementDelegationId: '' }),
       /Invalid stored message schema/u,
@@ -313,10 +440,91 @@ describe('WorkHub Coordination stored records', () => {
     } as const;
 
     assert.deepEqual(decodeCanonicalMessage(requested), requested);
+    const unknownTurn = {
+      ...resolved,
+      outcome: 'not_owned',
+      targetTurnId: undefined,
+      taskStop: true,
+    };
+    assert.deepEqual(decodeCanonicalMessage(unknownTurn), unknownTurn);
+    const { taskStop: _marker, ...legacyUnknownTurn } = unknownTurn;
+    assert.throws(() => decodeCanonicalMessage(legacyUnknownTurn));
+    assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, taskStop: false }));
+    assert.throws(() => decodeCanonicalMessage({ ...unknownTurn, outcome: 'stop_delivered' }));
+    const cancelledWait = {
+      ...resolved,
+      taskStop: true,
+      outcome: 'already_terminal',
+      cancelledWaitRequestId: 'waiting-request',
+    } as const;
+    assert.deepEqual(decodeCanonicalMessage(cancelledWait), cancelledWait);
+    assert.equal(
+      workHubStopRetiresDelegation({ ...requested, taskStop: true }, cancelledWait),
+      true,
+    );
+    assert.equal(
+      workHubStopRetiresDelegation(
+        { ...requested, taskStop: true },
+        { ...cancelledWait, cancelledWaitRequestId: undefined },
+      ),
+      false,
+    );
+    for (const invalid of [
+      { ...cancelledWait, taskStop: undefined },
+      { ...cancelledWait, targetTurnId: undefined },
+      { ...cancelledWait, outcome: 'stop_delivered' },
+      { ...cancelledWait, cancelledWaitRequestId: '' },
+      { ...cancelledWait, cancelledWaitRequestId: '../foreign' },
+      { ...cancelledWait, cancelledWaitRequestId: false },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid));
+    const bound = {
+      ...requested,
+      workId: 'original-action',
+      executionBinding: '["payments","turn-1","run-1"]',
+    };
+    assert.deepEqual(decodeCanonicalMessage(bound), bound);
+    const target = {
+      workId: bound.workId,
+      generationId: 'original-generation',
+      sourceActionId: requested.stopsActionId,
+      sourceDelegationId: requested.stopsDelegationId,
+      targetSessionId: requested.targetSessionId,
+      targetMessageId: requested.targetMessageId,
+      executionBinding: bound.executionBinding,
+    };
+    const taskStop = {
+      ...bound,
+      taskStop: true,
+      stopSet: { actionId: requested.actionId, targets: [target] },
+    };
+    assert.deepEqual(decodeCanonicalMessage(taskStop), taskStop);
+    assert.deepEqual(decodeCanonicalMessage({ ...bound, taskStop: true }), {
+      ...bound,
+      taskStop: true,
+    });
+    for (const invalid of [
+      { ...taskStop, taskStop: false },
+      { ...taskStop, taskStop: undefined },
+      { ...taskStop, workId: undefined },
+      { ...taskStop, executionBinding: undefined },
+      { ...taskStop, executionBinding: 'other-root' },
+      { ...taskStop, targetMessageId: 'another-message' },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, actionId: 'different-action' } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, targets: [] } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, targets: [target, target] } },
+      { ...taskStop, stopSet: { ...taskStop.stopSet, confirmed: true } },
+      { ...taskStop, confirmed: true },
+    ])
+      assert.throws(() => decodeCanonicalMessage(invalid), /Invalid stored message schema/u);
     assert.deepEqual(decodeCanonicalMessage(resolved), resolved);
     for (const invalid of [
       { ...requested, candidateRef: 'injected' },
       { ...requested, schemaVersion: 2 },
+      { ...requested, executionBinding: '' },
+      { ...requested, executionBinding: 'x'.repeat(4097) },
+      { ...requested, executionBinding: 1 },
+      { ...requested, executionBinding: 'bad\0binding' },
       { ...resolved, outcome: 'stopped' },
       { ...resolved, runId: 'injected' },
       { ...resolved, targetTurnId: '' },
@@ -337,5 +545,39 @@ describe('WorkHub Coordination stored records', () => {
         targetTurnId: undefined,
       },
     );
+  });
+
+  test('task-stop sets are bounded, exact and reject duplicate task identities', () => {
+    const target = {
+      workId: 'work',
+      generationId: 'generation',
+      sourceActionId: 'source',
+      sourceDelegationId: 'delegation',
+      targetSessionId: 'session',
+      targetMessageId: 'message',
+      executionBinding: 'binding',
+    };
+    const targets = Array.from({ length: WORKHUB_TASK_STOP_MAX_TARGETS }, (_, i) => ({
+      ...target,
+      workId: 'work-' + i,
+    }));
+    const set = { actionId: 'stop-action', targets };
+    assert.equal(isWorkHubTaskStopSet(set), true);
+    assert.equal(isWorkHubTaskStopTarget({ ...target, executionBinding: '😀'.repeat(1024) }), true);
+    for (const invalid of [
+      { ...set, targets: [] },
+      { ...set, targets: [...targets, { ...target, workId: 'one-too-many' }] },
+      { ...set, targets: [target, { ...target, generationId: 'newer-generation' }] },
+      { ...set, targets: [{ ...target, permissionMode: 'bypass' }] },
+      { ...set, targets: [{ ...target, workId: '../outside' }] },
+      { ...set, targets: [{ ...target, generationId: '' }] },
+      { ...set, targets: [{ ...target, sourceActionId: 'a'.repeat(129) }] },
+      { ...set, targets: [{ ...target, executionBinding: 'bad\0binding' }] },
+      { ...set, targets: [{ ...target, executionBinding: 'x'.repeat(4097) }] },
+      { ...set, targets: [{ ...target, executionBinding: '😀'.repeat(1025) }] },
+      { ...set, actionId: 'outside/path' },
+      { ...set, handoffSummary: 'not part of stop authority' },
+    ])
+      assert.equal(isWorkHubTaskStopSet(invalid), false);
   });
 });

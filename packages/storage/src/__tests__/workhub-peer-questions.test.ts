@@ -24,13 +24,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import type { WorkHubDelegationAssignedMessage } from '@maka/core/session';
+import { deriveTurnRecords, type WorkHubDelegationAssignedMessage } from '@maka/core/session';
 import {
   workHubPeerQuestionIdentity,
   workHubPeerInboxId,
   workHubPeerSettlementId,
   type WorkHubPeerQuestionMessage,
   type WorkHubPeerSettlementMessage,
+  type WorkHubEvidenceRequestMessage,
+  type WorkHubEvidenceResolutionMessage,
 } from '@maka/core/workhub-evidence';
 import { createSessionStore } from '../session-store.js';
 import { assignmentRequest, createCoordinationSession } from './fixtures/workhub-assignment.js';
@@ -284,6 +286,289 @@ test('peer publication is atomic, scoped, bounded and durable without changing a
       true,
     );
     await assert.rejects(store.commitWorkHubPeerQuestion(make('retired')), /identity|retired/);
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Host retirement closes expired historical questions with exact original provenance, no live actor and no queue effects across restarts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-peer-retirement-'));
+  let store = createSessionStore(root);
+  try {
+    await createCoordinationSession(store, root);
+    const a = await store.create({
+      cwd: root,
+      name: 'A',
+      model: 'a-model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'ask',
+    });
+    const b = await store.create({
+      cwd: root,
+      name: 'B',
+      model: 'b-model',
+      llmConnectionSlug: 'test',
+      permissionMode: 'explore',
+    });
+    const assignments = [
+      assignmentRequest('a', a.id, a.name, 'turn-a'),
+      assignmentRequest('b', b.id, b.name, 'turn-b'),
+    ];
+    for (const assignment of assignments) {
+      assignment.assignment.returnResults = true;
+      await store.assignWorkHubMessage(assignment);
+    }
+    // Existing records may predate this process and already be expired. They
+    // are decoded unchanged; retirement does not re-publish/renew the question.
+    const make = (toolCallId: string): WorkHubPeerQuestionMessage => {
+      const q: WorkHubPeerQuestionMessage = {
+        type: 'workhub_peer_question',
+        schemaVersion: 1,
+        id: '',
+        turnId: 'turn-a',
+        ts: 1,
+        expiresAt: 3600001,
+        sender: task(assignments[0]!.assignment),
+        recipient: task(assignments[1]!.assignment),
+        senderRunId: 'run-a',
+        senderInvocationId: 'invocation-a',
+        toolCallId,
+        question: 'Old question',
+        round: 1,
+      };
+      return {
+        ...q,
+        id:
+          'whpq_' +
+          createHash('sha256').update(workHubPeerQuestionIdentity(q)).digest('hex').slice(0, 48),
+      };
+    };
+    const seed = async (q: WorkHubPeerQuestionMessage) => {
+      await store.appendMessage(a.id, q);
+      await store.appendMessage(b.id, {
+        type: 'workhub_peer_inbox',
+        schemaVersion: 1,
+        id: workHubPeerInboxId(q.id),
+        turnId: q.turnId,
+        ts: q.ts,
+        questionId: q.id,
+        requesterSessionId: a.id,
+        target: q.recipient,
+        expiresAt: q.expiresAt,
+      });
+    };
+    const q = make('old-question');
+    const answered = make('already-answered');
+    await seed(q);
+    await seed(answered);
+    const wait: WorkHubEvidenceRequestMessage = {
+      type: 'workhub_evidence',
+      schemaVersion: 1,
+      id: 'old-wait',
+      turnId: 'old-wait-turn',
+      ts: 1,
+      expiresAt: 3600001,
+      senderSessionId: a.id,
+      senderRunId: 'old-wait-run',
+      senderInvocationId: 'old-wait-invocation',
+      toolCallId: 'old-wait-tool',
+      actionId: 'a',
+      delegationId: assignments[0]!.assignment.delegationId,
+      rootMessageId: assignments[0]!.assignment.targetMessageId,
+      question: 'Old dependency wait',
+      round: 1,
+    };
+    const suffix = createHash('sha256')
+      .update(JSON.stringify([wait.id]))
+      .digest('hex')
+      .slice(0, 48);
+    const originalSelection: WorkHubEvidenceResolutionMessage = {
+      type: 'workhub_evidence_resolution',
+      schemaVersion: 1,
+      id: 'wher_' + suffix,
+      turnId: 'original-coordinator-turn',
+      ts: 2,
+      requestId: wait.id,
+      requesterSessionId: a.id,
+      senderRunId: 'original-coordinator-run',
+      senderInvocationId: 'original-coordinator-invocation',
+      toolCallId: 'original-coordinator-tool',
+      sourceActionId: 'b',
+      sourceDelegationId: assignments[1]!.assignment.delegationId,
+      sourceSessionId: b.id,
+      sourceMessageId: assignments[1]!.assignment.targetMessageId,
+    };
+    await store.appendMessage(a.id, wait);
+    await store.appendMessage(a.id, originalSelection);
+    const waitRetirement: WorkHubEvidenceResolutionMessage = {
+      ...originalSelection,
+      id: 'wheret_' + suffix,
+      origin: 'legacy_protocol_retirement',
+      turnId: wait.turnId,
+      ts: 3,
+      senderRunId: wait.senderRunId,
+      senderInvocationId: wait.senderInvocationId,
+      toolCallId: wait.toolCallId,
+      sourceActionId: null,
+      sourceDelegationId: null,
+      sourceSessionId: null,
+      sourceMessageId: null,
+    };
+    const previousReply: WorkHubPeerSettlementMessage = {
+      type: 'workhub_peer_settlement',
+      schemaVersion: 1,
+      id: workHubPeerSettlementId(answered.id),
+      turnId: 'old-recipient-turn',
+      ts: 2,
+      requesterSessionId: a.id,
+      questionId: answered.id,
+      actor: answered.recipient,
+      senderRunId: 'old-recipient-run',
+      senderInvocationId: 'old-recipient-invocation',
+      toolCallId: 'old-reply',
+      outcome: 'reply',
+      answer: 'Original committed answer',
+    };
+    await store.appendMessage(b.id, previousReply);
+    // A valid retirement needs neither an active sender nor an eligible
+    // recipient. No user/coordinator actor is invented to bypass this state.
+    await store.setSessionsArchivedVersioned(
+      [
+        { sessionId: a.id, expectedVersion: (await store.readHeaderRecordSnapshot(a.id)).revision },
+        { sessionId: b.id, expectedVersion: (await store.readHeaderRecordSnapshot(b.id)).revision },
+      ],
+      true,
+    );
+    const headers = await Promise.all([
+      store.readHeaderSnapshot(a.id),
+      store.readHeaderSnapshot(b.id),
+    ]);
+    const fifo = await Promise.all([
+      store.listMessageAdmissions(a.id),
+      store.listMessageAdmissions(b.id),
+    ]);
+    const turns = await Promise.all([
+      store.readMessagesSnapshot(a.id),
+      store.readMessagesSnapshot(b.id),
+    ]).then((values) => values.map((messages) => deriveTurnRecords(messages)));
+    const pending = () =>
+      store.hasUnsettledWorkHubPeerCommunication({
+        sessionId: a.id,
+        workId: 'a',
+        generationId: 'a',
+        now: 2,
+      });
+    assert.equal(
+      await pending(),
+      true,
+      'the old fact is unsettled independently of wall-clock expiry',
+    );
+    const retirement: WorkHubPeerSettlementMessage = {
+      type: 'workhub_peer_settlement',
+      schemaVersion: 1,
+      id: workHubPeerSettlementId(q.id),
+      origin: 'legacy_protocol_retirement',
+      turnId: q.turnId,
+      ts: Date.now(),
+      requesterSessionId: a.id,
+      questionId: q.id,
+      actor: q.sender,
+      senderRunId: q.senderRunId,
+      senderInvocationId: q.senderInvocationId,
+      toolCallId: q.toolCallId,
+      outcome: 'cancelled',
+    };
+    for (const mutation of [
+      { turnId: 'another-turn' },
+      { senderRunId: 'another-run' },
+      { senderInvocationId: 'another-invocation' },
+      { toolCallId: 'another-tool' },
+      { actor: { ...q.sender, actionId: 'another-action' } },
+      { actor: { ...q.sender, delegationId: 'another-delegation' } },
+      { actor: { ...q.sender, messageId: 'another-message' } },
+    ])
+      await assert.rejects(
+        store.commitWorkHubPeerSettlement({ ...retirement, ...mutation }),
+        /retirement source identity conflict/,
+      );
+    await assert.rejects(
+      store.commitWorkHubPeerSettlement({ ...retirement, ts: q.ts - 1 }),
+      /timestamp/,
+    );
+    assert.equal(
+      (await store.readMessagesSnapshot(b.id)).some((value) => value.id === retirement.id),
+      false,
+    );
+    assert.deepEqual(await store.commitWorkHubPeerSettlement(retirement), retirement);
+    await store.appendMessage(a.id, waitRetirement);
+    assert.equal(
+      await pending(),
+      false,
+      'the terminal record closes the original request, not only the expiry filter',
+    );
+    assert.deepEqual(
+      await store.commitWorkHubPeerSettlement({
+        ...retirement,
+        id: previousReply.id,
+        questionId: answered.id,
+        toolCallId: answered.toolCallId,
+      }),
+      previousReply,
+      'Host cleanup must not erase an answer committed before retirement',
+    );
+    for (let restart = 0; restart < 3; restart++) {
+      await store.close?.();
+      store = createSessionStore(root);
+      assert.deepEqual(await store.commitWorkHubPeerSettlement(retirement), retirement);
+      const oldWaitFacts = await store.readMessagesSnapshot(a.id);
+      assert.deepEqual(
+        oldWaitFacts.find((value) => value.id === originalSelection.id),
+        originalSelection,
+        'the separate deterministic E marker cannot erase the original source selection',
+      );
+      assert.deepEqual(
+        oldWaitFacts.find((value) => value.id === waitRetirement.id),
+        waitRetirement,
+      );
+      assert.deepEqual(
+        await store.commitWorkHubPeerSettlement({
+          ...retirement,
+          origin: undefined,
+          actor: q.recipient,
+          outcome: 'reply',
+          answer: 'Late answer',
+          turnId: 'late-turn',
+          senderRunId: 'late-run',
+          senderInvocationId: 'late-invocation',
+          toolCallId: 'late-reply',
+        }),
+        retirement,
+        'late replies cannot replace cancellation after restart',
+      );
+      assert.equal(await pending(), false);
+      assert.deepEqual(
+        await Promise.all([store.listMessageAdmissions(a.id), store.listMessageAdmissions(b.id)]),
+        fifo,
+      );
+      assert.deepEqual(
+        await Promise.all([store.readHeaderSnapshot(a.id), store.readHeaderSnapshot(b.id)]),
+        headers,
+      );
+      assert.deepEqual(
+        await Promise.all([
+          store.readMessagesSnapshot(a.id),
+          store.readMessagesSnapshot(b.id),
+        ]).then((values) => values.map((messages) => deriveTurnRecords(messages))),
+        turns,
+        'no Host retirement or late answer creates a Turn',
+      );
+      assert.equal(
+        (await store.readMessagesSnapshot(b.id)).filter((value) => value.id === retirement.id)
+          .length,
+        1,
+      );
+    }
   } finally {
     await store.close?.();
     await rm(root, { recursive: true, force: true });

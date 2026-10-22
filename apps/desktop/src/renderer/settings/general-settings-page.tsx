@@ -17,7 +17,6 @@
  * under the License.
  */
 
-import { JevSettingsSection } from '../features/jev-settings';
 import { useEffect, useMemo, useState } from "react";
 import { PersonalizationSettingsSection } from "./personalization-settings-section";
 import {
@@ -327,9 +326,6 @@ export function GeneralSettingsPage(props: {
               testNetworkProxy={props.testNetworkProxy!}
             />
           </SettingsSection>
-          {host && <RuntimeHostSettingsGenerationBoundary>
-            <JevSettingsSection settings={props.settings.jev} isInteractive={runtimeHostSettingsInteractive} onUpdate={props.onUpdate} />
-          </RuntimeHostSettingsGenerationBoundary>}
         </>
       ) : showRuntimeHostSettingsPlaceholder ? (
         <>

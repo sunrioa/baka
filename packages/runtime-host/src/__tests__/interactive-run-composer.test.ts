@@ -247,6 +247,45 @@ test('Host execution notices are resampled without changing stable system/tool p
   await bounded.resolveSystemPrompt(scope);
 });
 
+test('WorkHub references are sampled once per Turn and never injected into the stable system prefix', async () => {
+  let text = 'first task references';
+  let samples = 0;
+  const names = ['control', 'find', 'start', 'continue', 'ask', 'stop'].map(
+    (name) => `mcp__desktop_workhub__${name}`,
+  );
+  const composer = createFixtureComposer({
+    toolProfile: 'workhub-coordination-v2',
+    hostTools: [
+      ...names,
+      ...WORKHUB_BROWSER_TOOL_NAMES.map((name) => `mcp__desktop_browser__${name}`),
+      'WorkHubRead',
+    ].map(tool),
+    resolveExecutionContexts: async () => {
+      samples++;
+      return [{ name: 'workhub.recent_user_tasks', text }];
+    },
+  });
+  const scope = {
+    sessionId: 'maka_workhub_coordination',
+    turnId: 'user-turn',
+    runId: 'run',
+    cwd: '/workspace',
+  };
+  const first = await composer.resolveSystemPrompt(scope);
+  text = 'later task references';
+  const second = await composer.resolveSystemPrompt(scope);
+  assert.equal(samples, 1);
+  assert.deepEqual(first.contexts, second.contexts);
+  assert.equal(first.text, second.text);
+  assert.ok(!first.text?.includes('first task references'));
+  const next = await composer.resolveSystemPrompt({ ...scope, turnId: 'next-turn' });
+  assert.equal(samples, 2);
+  assert.equal(next.text, first.text);
+  assert.deepEqual(next.contexts, [
+    { name: 'workhub.recent_user_tasks', text: 'later task references' },
+  ]);
+});
+
 test('scoped Plugin Skill contributions join the canonical model inventory', async () => {
   const composer = createFixtureComposer({
     skills: {
@@ -291,32 +330,39 @@ function tool(name: string): MakaTool {
 }
 test('WorkHub v2 binds control, tasks, attachment reading and user questions while legacy WorkHub stays tool-free', () => {
   const control = tool('mcp__desktop_workhub__control');
-  const tasks = tool('mcp__desktop_workhub__tasks');
+  const tasks = ['find', 'start', 'continue'].map((name) => tool(`mcp__desktop_workhub__${name}`));
+  const confirmations = ['ask', 'stop'].map((name) => tool(`mcp__desktop_workhub__${name}`));
   const browserTools = WORKHUB_BROWSER_TOOL_NAMES.map((name) =>
     tool(`mcp__desktop_browser__${name}`),
   );
   const clientCapabilities = {
-    tools: [control, tasks, ...browserTools, tool('Bash')],
+    tools: [control, ...tasks, ...browserTools, tool('Bash')],
     groups: [],
   };
-  assert.deepEqual(
-    createFixtureComposer({
-      toolProfile: 'workhub-coordination-v2',
-      clientCapabilities,
-      hostTools: [tool('WorkHubResult'), tool('WorkHubInspect'), tool('WorkHubEvidence')],
-      resolveAdditionalTools: () => [tool('plugin_only'), tool('Read')],
-    }).tools.map(({ name }) => name),
-    [
-      control.name,
-      tasks.name,
-      ...browserTools.map(({ name }) => name),
-      'Read',
-      'AskUserQuestion',
-      'WorkHubResult',
-      'WorkHubInspect',
-      'WorkHubEvidence',
-    ],
-  );
+  const retired = ['WorkHubResult', 'WorkHubInspect', 'WorkHubEvidence'];
+  const published = createFixtureComposer({
+    toolProfile: 'workhub-coordination-v2',
+    clientCapabilities,
+    // Old readers are deliberate decoys, not members of the published contract.
+    hostTools: [...retired.map(tool), ...confirmations, tool('WorkHubRead')],
+    resolveAdditionalTools: () => [tool('plugin_only'), tool('Read')],
+  }).tools.map(({ name }) => name);
+  assert.deepEqual(published, [
+    control.name,
+    ...tasks.map(({ name }) => name),
+    ...confirmations.map(({ name }) => name),
+    ...browserTools.map(({ name }) => name),
+    'Read',
+    'AskUserQuestion',
+    'WorkHubRead',
+  ]);
+  for (const name of retired) {
+    assert.equal(
+      published.includes(name),
+      false,
+      `retired ${name} must not be republished from available host tools`,
+    );
+  }
   assert.deepEqual(
     createFixtureComposer({
       toolProfile: 'workhub-coordination-v1',
@@ -330,7 +376,7 @@ test('WorkHub v2 binds control, tasks, attachment reading and user questions whi
         toolProfile: 'workhub-coordination-v2',
         clientCapabilities: { tools: [control], groups: [] },
       }),
-    /Hosted tool profile is unavailable: mcp__desktop_workhub__tasks/,
+    /Hosted tool profile is unavailable: mcp__desktop_workhub__find/,
   );
   assert.throws(
     () =>
@@ -340,6 +386,61 @@ test('WorkHub v2 binds control, tasks, attachment reading and user questions whi
         clientCapabilities,
       }),
     /Hosted tool profile is unavailable/,
+  );
+});
+
+test('only native coordinator confirmations replace their older Desktop offers', () => {
+  const native = ['ask', 'stop'].map((name) => tool(`mcp__desktop_workhub__${name}`));
+  const offered = ['control', 'find', 'start', 'continue', 'ask', 'stop'].map((name) => ({
+    ...tool(`mcp__desktop_workhub__${name}`),
+    hostAdmission: 'client_capability' as const,
+  }));
+  const browsers = WORKHUB_BROWSER_TOOL_NAMES.map((name) => tool(`mcp__desktop_browser__${name}`));
+  const input = {
+    toolProfile: 'workhub-coordination-v2' as const,
+    hostTools: [...native, tool('WorkHubRead')],
+    clientCapabilities: { tools: [...offered, ...browsers], groups: [] },
+  };
+  const composer = createFixtureComposer(input);
+  for (const expected of [...native, ...offered.slice(0, 4), ...browsers]) {
+    assert.equal(
+      composer.tools.find(({ name }) => name === expected.name),
+      expected,
+    );
+    assert.equal(
+      composer.resolveTools?.().find(({ name }) => name === expected.name),
+      expected,
+    );
+  }
+  const legacyOnly = createFixtureComposer({ ...input, hostTools: [tool('WorkHubRead')] });
+  for (const expected of offered.slice(4))
+    assert.equal(
+      legacyOnly.tools.find(({ name }) => name === expected.name),
+      expected,
+    );
+
+  assert.throws(
+    () =>
+      createFixtureComposer({
+        ...input,
+        clientCapabilities: {
+          tools: [...offered.slice(0, 4), ...native, ...browsers],
+          groups: [],
+        },
+      }),
+    /Client Capability tool name collision: mcp__desktop_workhub__ask/,
+  );
+  assert.throws(
+    () => createFixtureComposer({ ...input, hostTools: [...input.hostTools, offered[0]!] }),
+    /Client Capability tool name collision: mcp__desktop_workhub__control/,
+  );
+  assert.throws(
+    () => createFixtureComposer({ ...input, hostTools: [...input.hostTools, native[0]!] }),
+    /Client Capability tool name collision: mcp__desktop_workhub__ask/,
+  );
+  assert.throws(
+    () => createFixtureComposer({ ...input, toolProfile: undefined }),
+    /Client Capability tool name collision: mcp__desktop_workhub__ask/,
   );
 });
 

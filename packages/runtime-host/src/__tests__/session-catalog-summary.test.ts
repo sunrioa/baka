@@ -63,3 +63,12 @@ test('adds no archive time key when the Host reports none', () => {
   assert.equal(summary.isArchived, true);
   assert.equal(Object.hasOwn(summary, 'archivedAt'), false);
 });
+
+test('preserves canonical WorkHub creation provenance and leaves old summaries unmarked', () => {
+  for (const workHubCreated of [true, false])
+    assert.equal(
+      projectSessionCatalogSummary(projection({ workHubCreated })).workHubCreated,
+      workHubCreated,
+    );
+  assert.equal(Object.hasOwn(projectSessionCatalogSummary(projection()), 'workHubCreated'), false);
+});

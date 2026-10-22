@@ -48,6 +48,19 @@ import { RuntimeHostSessionObservationRegistry } from '../runtime-host-session-o
 import { RuntimeHostSessionObserver } from "../runtime-host-session-observer.js";
 import { runtimeHostSessionFixture } from "./runtime-host-session-test-fixture.js";
 
+test('Desktop routes coordinator compact through its fixed Host operation and leaves ordinary Session compaction unchanged', async () => {
+  const ipc = ipcHarness();
+  const calls: unknown[] = [];
+  const result = { kind: 'started' as const, turn: { sessionId: WORKHUB_COORDINATION_SESSION_ID, turnId: 'compact-id', runId: 'run', status: 'running' as const } };
+  registerExecutionIpc({ client: executionClient({
+    compactWorkHubCoordination: async input => { calls.push(['workhub', input]); return result; },
+    compactContext: async input => { calls.push(['ordinary', input]); return { ...result, turn: { ...result.turn, sessionId: input.sessionId } }; },
+  }), newId: () => 'compact-id' }, ipc);
+  assert.deepEqual(await ipc.invoke('sessions:compact', WORKHUB_COORDINATION_SESSION_ID), result);
+  await ipc.invoke('sessions:compact', 'worker');
+  assert.deepEqual(calls, [['workhub', { turnId: 'compact-id' }], ['ordinary', { sessionId: 'worker', turnId: 'compact-id' }]]);
+});
+
 test('registers Session observation as one reconnectable operation', () => {
   const ipc = ipcHarness();
   registerRuntimeHostSessionObservationIpc(
@@ -2296,6 +2309,7 @@ function executionClient(overrides: Partial<ExecutionClient>): ExecutionClient {
   return {
     answerInteraction: unavailable,
     compactContext: unavailable,
+    compactWorkHubCoordination: unavailable,
     copySession: unavailable,
     getSession: unavailable,
     generatePromptSuggestion: unavailable,

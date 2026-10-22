@@ -65,6 +65,10 @@ import {
 } from '../protocol/turn.js';
 
 describe('Runtime Host bootstrap protocol', () => {
+  test('publishes a new compatibility epoch for WorkHub terminal replay projections', () => {
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH >= 239);
+  });
+
   test('accepts only authenticated-listener registration endpoints on IPv4 loopback', () => {
     const registration = {
       kind: 'maka-runtime-host',

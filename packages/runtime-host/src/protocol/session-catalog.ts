@@ -115,6 +115,7 @@ const PROJECTION_REQUIRED_FIELDS = [
 ] as const;
 const PROJECTION_FIELDS = [
   ...PROJECTION_REQUIRED_FIELDS,
+  'workHubCreated',
   'archivedAt',
   'lastMessageAt',
   'lastMessagePreview',
@@ -248,6 +249,8 @@ export interface SessionCatalogLiveRunState {
 
 export interface SessionCatalogProjection {
   readonly id: string;
+  /** Display-only canonical create provenance; never task ownership or permission. */
+  readonly workHubCreated?: boolean;
   readonly revision: number;
   readonly workspace: WorkspaceProjection;
   readonly createdAt: number;
@@ -849,6 +852,7 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     name: sessionName(record.name),
     isFlagged: boolean(record.isFlagged, 'Session flagged state'),
     isArchived: boolean(record.isArchived, 'Session archived state'),
+    ...optionalWorkHubCreated(record),
     ...optionalArchivedAt(record),
     labels: labels(record.labels),
     labelsTruncated: boolean(record.labelsTruncated, 'Session labels truncated state'),
@@ -991,6 +995,14 @@ function optionalArchivedAt(
 ): Pick<SessionCatalogProjection, 'archivedAt'> {
   return Object.hasOwn(record, 'archivedAt')
     ? { archivedAt: timestamp(record.archivedAt, 'Session archivedAt') }
+    : {};
+}
+
+function optionalWorkHubCreated(
+  record: Record<string, unknown>,
+): Pick<SessionCatalogProjection, 'workHubCreated'> {
+  return Object.hasOwn(record, 'workHubCreated')
+    ? { workHubCreated: boolean(record.workHubCreated, 'Session WorkHub creation provenance') }
     : {};
 }
 

@@ -26,7 +26,7 @@ import type { WorkHubLinkedWork } from '../model/linked-work.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { WorkHubHighlightContext } from './workhub-work-identity.js';
-import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
+import { workHubTaskTitle } from '../model/task-presentation.js';
 
 export function WorkHubDispatchCard({ works, tasks, ready, promptText }: {
   works: readonly WorkHubLinkedWork[]; tasks: readonly WorkHubTask[]; ready: boolean; promptText: string;
@@ -43,13 +43,9 @@ export function WorkHubDispatchCard({ works, tasks, ready, promptText }: {
         // never a name or shared Session, can supply the latest task facts.
         const task = tasks.filter(item => (item.workId ?? item.actionId) === work.workId)
           .reduce<WorkHubTask | undefined>((latest, item) => !latest || item.createdAt > latest.createdAt ? item : latest, undefined);
-        const target = { workId: work.workId!, sessionId: task?.targetSessionId ?? work.targetSessionId, name: task?.targetSessionName ?? work.targetSessionName };
+        const target = { workId: work.workId!, sessionId: task?.targetSessionId ?? work.targetSessionId, name: task ? workHubTaskTitle(task) : work.targetSessionName };
         const status = ready ? task?.status : undefined;
         const label = status ? status === 'pending_acceptance' ? copy.executionEnded : taskCopy.status[status] : copy.taskStatePending;
-        let workspace = target.sessionId === work.targetSessionId ? work.workspaceName : undefined;
-        try {
-          if (workspace === parseDesktopSessionKey(target.sessionId).sessionId) workspace = undefined;
-        } catch { /* Legacy display identities may not contain a Host key. */ }
         const detail = status && task?.waitReason ? taskCopy[task.waitReason] : label;
         const selected = highlight.selectedWork?.workId === work.workId;
         return <Button key={work.workId} type="button" variant="ghost" width="100%" className="workhub-dispatch-row"
@@ -57,7 +53,7 @@ export function WorkHubDispatchCard({ works, tasks, ready, promptText }: {
           onClick={() => highlight.selectWork(target)}>
           <span className="workhub-dispatch-row-content">
             <Circle className="workhub-dispatch-dot" size={7} fill="currentColor" strokeWidth={0} aria-hidden="true" />
-            <span className="workhub-dispatch-name">{target.name}<small>{[workspace, detail].filter(Boolean).join(' · ')}</small></span>
+            <span className="workhub-dispatch-name">{target.name}<small>{detail}</small></span>
             <span className="workhub-dispatch-status">{label}</span>
             <ChevronRight size={15} aria-hidden="true" />
           </span>

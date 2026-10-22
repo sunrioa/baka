@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { aggregateMessageContents, messageContentDigest } from '@maka/core/events';
@@ -187,6 +188,67 @@ test('WorkHub feedback admission preserves its receipt and source across SQLite 
       }),
       /Invalid root execution descriptor/u,
     );
+  } finally {
+    store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy routing advice on disk is discarded during pending-root recovery and replay', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-workhub-legacy-routing-'));
+  let store = createSqliteAgentRunStore(root);
+  try {
+    const input = {
+      sessionId: 'coordination-session',
+      turnId: 'pending-turn',
+      proposedRunId: 'original-run',
+      proposedUserMessageId: 'user-message',
+      execution: {
+        kind: 'workhub_coordination' as const,
+        inputDigest: messageContentDigest({ text: 'Continue the current work' }),
+        capabilityBinding: `sha256:${'b'.repeat(64)}` as const,
+      },
+      previousRootTurnId: null,
+      normalizedInput: { text: 'Continue the current work' },
+      sourceMessages: [],
+      admittedAt: 50,
+    };
+    const original = await store.admitRootTurn(input);
+    store.close?.();
+    const database = new DatabaseSync(join(root, 'runtime.sqlite'));
+    try {
+      database
+        .prepare(`
+        UPDATE core_root_turn_admissions
+        SET record_json = json_set(record_json, '$.execution.routingDecision', json(?))
+        WHERE session_id = ? AND turn_id = ?
+      `)
+        .run(
+          JSON.stringify({
+            kind: 'routing',
+            disposition: 'delegate_existing',
+            candidateSetId: `sha256:${'c'.repeat(64)}`,
+            candidateRef: 'obsolete-history-session',
+          }),
+          input.sessionId,
+          input.turnId,
+        );
+    } finally {
+      database.close();
+    }
+    store = createSqliteAgentRunStore(root);
+    const recovered = await store.readRootTurnAdmission(input.sessionId, input.turnId);
+    assert.deepEqual(recovered, original.admission);
+    assert.ok(recovered);
+    assert.equal('routingDecision' in recovered.execution, false);
+    assert.equal(recovered.execution.kind, 'workhub_coordination');
+    assert.equal(recovered.runId, 'original-run');
+    const pending = await store.listRootTurnAdmissionsForRecovery(input.sessionId);
+    assert.equal(pending.length, 1);
+    assert.deepEqual(pending[0], recovered);
+    const replay = await store.admitRootTurn({ ...input, proposedRunId: 'retry-run' });
+    assert.equal(replay.kind, 'existing');
+    assert.deepEqual(replay.admission, recovered);
   } finally {
     store.close?.();
     await rm(root, { recursive: true, force: true });

@@ -18,6 +18,7 @@
  */
 
 import { defineOperation } from './operation-spec.js';
+import { isUiLocale, type UiLocale } from '@maka/core/ui-locale';
 import { invalidProtocolFrame } from './errors.js';
 import { decodeTurnSnapshot, type TurnSnapshot } from './turn.js';
 import type { SessionExecutionScope } from './session-continuity.js';
@@ -32,6 +33,7 @@ import {
 export const WORKHUB_TASK_MAX_ITEMS = 32;
 export const WORKHUB_TASK_TEXT_MAX_BYTES = 1024;
 export const WORKHUB_DELIVERY_MAX_BYTES = 16 * 1024;
+export const WORKHUB_TASK_BRIEF_MAX_BYTES = 9_000;
 export const WORKHUB_TASK_STATUSES = [
   'queued',
   'waiting_resource',
@@ -50,7 +52,19 @@ export interface WorkHubTaskRef {
   readonly actionId: string;
   readonly delegationId: string;
 }
+export type WorkHubTaskReadInput = (WorkHubTaskRef | { readonly workId: string }) & {
+  /** Local-owner-only projection; ordinary task and inbox reads do not scan history. */
+  readonly includeBrief?: true;
+  readonly briefLocale?: UiLocale;
+};
+export type WorkHubTaskBriefProjection = WorkHubTaskRef & {
+  readonly workId: string;
+} & (
+    | { readonly status: 'ok'; readonly text: string }
+    | { readonly status: 'unavailable'; readonly reason: string }
+  );
 export interface WorkHubTask extends WorkHubTaskRef {
+  readonly title?: string;
   readonly workId?: string;
   readonly targetSessionId: string;
   readonly targetSessionName: string;
@@ -73,6 +87,8 @@ export interface WorkHubTask extends WorkHubTaskRef {
 }
 export interface WorkHubTaskDetail {
   readonly task: WorkHubTask;
+  /** Temporary bounded task facts, never persisted or execution authority. */
+  readonly brief?: WorkHubTaskBriefProjection;
   /** Committed assistant text, not verified artifacts or independent test results. */
   readonly delivery?: {
     readonly text: string;
@@ -95,6 +111,8 @@ export interface WorkHubTaskAssignment extends WorkHubTaskRef {
   readonly createdAt: number;
   readonly state: 'queued' | 'cancelled' | 'owned' | 'shared' | 'unavailable';
   readonly superseded: boolean;
+  /** Canonical Session segment ordinal; absent when complete ancestry is unavailable. */
+  readonly segment?: number;
   readonly execution?: SessionExecutionScope;
 }
 export interface WorkHubTaskHistoryInput {
@@ -134,7 +152,7 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
       'state',
       'superseded',
     ],
-    ['execution'],
+    ['execution', 'segment'],
   );
   if (
     !['queued', 'cancelled', 'owned', 'shared', 'unavailable'].includes(String(item.state)) ||
@@ -154,6 +172,9 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
   }
   if ((item.state === 'owned') !== !!execution)
     throw invalidProtocolFrame('Invalid WorkHub assignment ownership');
+  const segment =
+    item.segment === undefined ? undefined : requireCount(item.segment, 'WorkHub segment');
+  if (segment === 0) throw invalidProtocolFrame('Invalid WorkHub segment ordinal');
   return {
     ...decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId }),
     workId: requireEntityId(item.workId, 'WorkHub work'),
@@ -165,6 +186,7 @@ function decodeAssignment(value: unknown): WorkHubTaskAssignment {
     createdAt: requireCount(item.createdAt, 'WorkHub assignment time'),
     state: item.state as WorkHubTaskAssignment['state'],
     superseded: item.superseded,
+    ...(segment === undefined ? {} : { segment }),
     ...(execution ? { execution } : {}),
   };
 }
@@ -189,7 +211,7 @@ function decodeTask(value: unknown): WorkHubTask {
       'createdAt',
       'status',
     ],
-    ['workId', 'execution', 'waitReason', 'dependency', 'failure'],
+    ['workId', 'title', 'execution', 'waitReason', 'dependency', 'failure'],
   );
   if (
     !WORKHUB_TASK_STATUSES.includes(item.status as WorkHubTaskStatus) ||
@@ -240,6 +262,9 @@ function decodeTask(value: unknown): WorkHubTask {
   return {
     actionId: requireEntityId(item.actionId, 'WorkHub action'),
     ...(item.workId === undefined ? {} : { workId: requireEntityId(item.workId, 'WorkHub work') }),
+    ...(item.title === undefined
+      ? {}
+      : { title: requireUtf8String(item.title, 'WorkHub task title', 2048) }),
     delegationId: requireEntityId(item.delegationId, 'WorkHub delegation'),
     targetSessionId: requireEntityId(item.targetSessionId, 'WorkHub Session'),
     targetMessageId: requireEntityId(item.targetMessageId, 'WorkHub Message'),
@@ -395,11 +420,73 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
     mode: 'query',
     availability: 'ready',
     errors,
-    decodeInput: decodeWorkHubTaskRef,
+    decodeInput(value: unknown): WorkHubTaskReadInput {
+      const byWork = value && typeof value === 'object' && 'workId' in value;
+      const item = requireShapedRecord(
+        value,
+        'WorkHub task read',
+        byWork ? ['workId'] : ['actionId', 'delegationId'],
+        ['includeBrief', 'briefLocale'],
+      );
+      if (item.includeBrief !== undefined && item.includeBrief !== true)
+        throw invalidProtocolFrame('Invalid WorkHub brief selection');
+      if (item.briefLocale !== undefined && (!item.includeBrief || !isUiLocale(item.briefLocale)))
+        throw invalidProtocolFrame('Invalid WorkHub brief locale');
+      const ref = byWork
+        ? { workId: requireEntityId(item.workId, 'WorkHub work') }
+        : decodeWorkHubTaskRef({ actionId: item.actionId, delegationId: item.delegationId });
+      return {
+        ...ref,
+        ...(item.includeBrief ? { includeBrief: true as const } : {}),
+        ...(item.briefLocale ? { briefLocale: item.briefLocale as UiLocale } : {}),
+      };
+    },
     decodeOutput(value: unknown): WorkHubTaskDetail {
-      const item = requireShapedRecord(value, 'WorkHub task detail', ['task'], ['delivery']);
+      const item = requireShapedRecord(
+        value,
+        'WorkHub task detail',
+        ['task'],
+        ['delivery', 'brief'],
+      );
       const task = decodeTask(item.task);
-      if (item.delivery === undefined) return { task };
+      let brief: WorkHubTaskBriefProjection | undefined;
+      if (item.brief !== undefined) {
+        const raw = requireShapedRecord(
+          item.brief,
+          'WorkHub task brief',
+          ['workId', 'actionId', 'delegationId', 'status'],
+          ['text', 'reason'],
+        );
+        const binding = {
+          workId: requireEntityId(raw.workId, 'WorkHub brief work'),
+          ...decodeWorkHubTaskRef({ actionId: raw.actionId, delegationId: raw.delegationId }),
+        };
+        if (
+          binding.workId !== (task.workId ?? task.actionId) ||
+          binding.actionId !== task.actionId ||
+          binding.delegationId !== task.delegationId
+        )
+          throw invalidProtocolFrame('WorkHub brief changed task source');
+        if (raw.status === 'ok' && raw.reason === undefined)
+          brief = {
+            ...binding,
+            status: 'ok',
+            text: requireUtf8String(
+              raw.text,
+              'WorkHub task brief text',
+              WORKHUB_TASK_BRIEF_MAX_BYTES,
+            ),
+          };
+        else if (raw.status === 'unavailable' && raw.text === undefined)
+          brief = {
+            ...binding,
+            status: 'unavailable',
+            reason: requireUtf8String(raw.reason, 'WorkHub task brief limit', 512),
+          };
+        else throw invalidProtocolFrame('Invalid WorkHub task brief result');
+      }
+      const detail = { task, ...(brief ? { brief } : {}) };
+      if (item.delivery === undefined) return detail;
       const delivery = requireExactRecord(item.delivery, 'WorkHub delivery', [
         'text',
         'truncated',
@@ -413,7 +500,7 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
       )
         throw invalidProtocolFrame('Invalid WorkHub delivery ownership');
       return {
-        task,
+        ...detail,
         delivery: {
           text: requireUtf8String(delivery.text, 'WorkHub delivery', WORKHUB_DELIVERY_MAX_BYTES),
           truncated: delivery.truncated,
@@ -422,11 +509,21 @@ export const WORKHUB_TASK_OPERATION_SPECS = {
       };
     },
     assertOutputForInput(input, output) {
+      const matches =
+        'workId' in input
+          ? input.workId === (output.task.workId ?? output.task.actionId)
+          : input.actionId === output.task.actionId &&
+            input.delegationId === output.task.delegationId;
+      if (!matches) throw invalidProtocolFrame('WorkHub task response changed identity');
+      if (Boolean(input.includeBrief) !== Boolean(output.brief))
+        throw invalidProtocolFrame('WorkHub task brief response changed selection');
       if (
-        input.actionId !== output.task.actionId ||
-        input.delegationId !== output.task.delegationId
+        output.brief &&
+        (output.brief.workId !== (output.task.workId ?? output.task.actionId) ||
+          output.brief.actionId !== output.task.actionId ||
+          output.brief.delegationId !== output.task.delegationId)
       )
-        throw invalidProtocolFrame('WorkHub task response changed identity');
+        throw invalidProtocolFrame('WorkHub task brief response changed source');
     },
   }),
 } as const;

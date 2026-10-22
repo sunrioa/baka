@@ -132,6 +132,7 @@ test('round-trips a Session into another workspace, row for row', async () => {
     });
     if (!imported.ok) assert.fail(`import failed: ${JSON.stringify(imported.reason)}`);
     assert.deepEqual(imported.sessionIds, [sessionId]);
+    assert.equal(imported.rootSessionId, sessionId);
 
     // The acceptance criterion: the rows the model reads are the same rows,
     // as bytes. JSON equivalence would pass on a re-encoding that changed them.
@@ -280,6 +281,11 @@ test('carries the subagent subtree and its artifact bytes across', async () => {
     if (!imported.ok) assert.fail(`import failed: ${JSON.stringify(imported.reason)}`);
 
     assert.deepEqual([...imported.sessionIds].sort(), [parentId, childId].sort());
+    assert.equal(
+      imported.rootSessionId,
+      parentId,
+      'root identity does not depend on import row ordering',
+    );
     assert.equal(imported.artifactFiles, 1);
     // The link is not the child Session: without `subagent_spawns` the target
     // holds two Sessions and nothing saying which tool call joined them.

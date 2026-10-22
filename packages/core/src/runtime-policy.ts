@@ -29,6 +29,7 @@ import type { ModelOverride } from './model-thinking.js';
 import {
   networkProxyCredentialTarget,
   type ChatDefaultPermissionMode,
+  type WorkHubExecutorDefaults,
   type NetworkProxyCredentialTarget,
   type ProxyProtocol,
   type ShellSettings,
@@ -129,8 +130,6 @@ export interface RevisionConflict {
 }
 
 export interface RuntimePolicy {
-  /** Optional for compatibility with existing policies; missing means disabled. */
-  readonly jev?: { readonly enabled: boolean };
   readonly networkProxy: {
     readonly enabled: boolean;
     readonly protocol: ProxyProtocol;
@@ -161,6 +160,10 @@ export interface RuntimePolicy {
     readonly workHubPermissionMode?: ChatDefaultPermissionMode;
     /** Direct WorkHub root executions on this Host; absent means 3. */
     readonly workHubMaxConcurrentSessions?: number;
+    /** Coordinator only; omission inherits the selected model's compaction target. */
+    readonly workHubCompactionThreshold?: number;
+    /** New-task executor selection only; omission retains the shared native model. */
+    readonly workHubExecutor?: WorkHubExecutorDefaults;
     /** @deprecated Wire compatibility only; task creation ignores this field. */
     readonly thinkingLevel?: ThinkingLevel;
     readonly codeModeEnabled?: boolean;
@@ -188,7 +191,6 @@ export interface AgentRuntimeSettingsPatch {
 }
 
 export type RuntimePolicyMutation =
-  | { readonly kind: 'set_jev'; readonly value: { readonly enabled: boolean } }
   | { readonly kind: 'set_network_proxy'; readonly value: RuntimePolicy['networkProxy'] }
   | { readonly kind: 'set_personalization'; readonly value: RuntimePolicy['personalization'] }
   | { readonly kind: 'set_memory'; readonly value: RuntimePolicy['memory'] }

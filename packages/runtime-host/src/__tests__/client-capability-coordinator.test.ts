@@ -797,52 +797,58 @@ describe('Host Client Capability coordinator', () => {
     await connection.close();
     await coordinator.close();
   });
-  test('managed capability admission accepts only the current task grant and releases completed calls', async () => {
-    let granted = false,
-      reads = 0,
-      releases = 0;
+  test('an allow decision without the original Session grant cannot admit a managed capability', async () => {
+    let approvals = 0,
+      reads = 0;
     const coordinator = createCoordinator(() => undefined, {
-      grants: { readClientCapabilitySessionGrant: async () => undefined },
+      grants: {
+        readClientCapabilitySessionGrant: async () => {
+          reads++;
+          return undefined;
+        },
+      },
       interactions: {
-        requestClientCapabilityApproval: async () => {
-          granted = true;
+        requestClientCapabilityApproval: async ({ turnId, runId, target }) => {
+          approvals++;
+          assert.equal(runId, 'run-a');
+          assert.equal(turnId, 'turn-a');
+          assert.equal(target.scope.kind, 'browser_origin');
           return 'allow';
         },
       },
-      taskGrants: {
-        permitsCapability: async (scope, target) => {
-          reads++;
-          assert.equal(scope.runId, 'run-a');
-          assert.equal(scope.turnId, 'turn-a');
-          assert.equal(target.scope.kind, 'browser_origin');
-          return granted
-            ? () => {
-                releases++;
-              }
-            : undefined;
-        },
-      },
     });
+    const sent: unknown[] = [];
     const connection = attachAutoAdmittingConnection(
       coordinator,
       'connection-a',
       () => ({ kind: 'browser_url', url: 'https://example.com' }),
       'done',
+      sent,
     );
     await registerSessionTools(
       coordinator,
       'connection-a',
-      'registration-task',
+      'registration-session',
       'desktop_browser',
       ['browser_snapshot'],
     );
     await coordinator.bindSession('session-a', 'connection-a');
     const snapshot = coordinator.snapshotForSession('session-a')!;
     try {
-      const prepared = await prepare(snapshot.tools[0], {}, 'task-call');
+      await assert.rejects(
+        () => prepare(snapshot.tools[0], {}, 'session-call'),
+        /Client Capability approval did not publish valid execution authority/u,
+      );
+      assert.equal(approvals, 1);
       assert.equal(reads, 2);
-      assert.deepEqual(await prepared.execute(managedContext('task-call')), textResult('done'));
-      assert.equal(releases, 1);
+      assert.equal(
+        sent.some((frame) => isRecord(frame) && frame.kind === 'client.capability.admitted'),
+        false,
+      );
+      assert.equal(
+        sent.some((frame) => isRecord(frame) && frame.kind === 'client.capability.cancel'),
+        true,
+      );
     } finally {
       snapshot.release();
       await connection.close();
@@ -2235,7 +2241,7 @@ function createCoordinator(
   onModelToolsChanged: () => void = () => undefined,
   admission: Pick<
     HostClientCapabilityCoordinatorOptions,
-    'interactions' | 'grants' | 'taskGrants'
+    'interactions' | 'grants'
   > = clientCapabilityCoordinatorTestAdmission(),
 ): HostClientCapabilityCoordinator {
   return new HostClientCapabilityCoordinator({

@@ -515,7 +515,7 @@ export interface RuntimeEventContinuationStartV2 {
     prefixDigest: `sha256:${string}`;
   };
   replayManifestDigest: `sha256:${string}`;
-  providerProjectionVersion: 1 | 2 | 3 | 4;
+  providerProjectionVersion: 1 | 2 | 3 | 4 | 5 | 6;
   providerReplayDigest: `sha256:${string}`;
 }
 
@@ -1524,7 +1524,9 @@ function isRuntimeContinuationStart(value: unknown): value is RuntimeEventContin
     (value.providerProjectionVersion === 1 ||
       value.providerProjectionVersion === 2 ||
       value.providerProjectionVersion === 3 ||
-      value.providerProjectionVersion === 4) &&
+      value.providerProjectionVersion === 4 ||
+      value.providerProjectionVersion === 5 ||
+      value.providerProjectionVersion === 6) &&
     isSha256Digest(value.providerReplayDigest)
   );
 }

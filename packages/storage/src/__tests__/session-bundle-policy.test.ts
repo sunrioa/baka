@@ -18,7 +18,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -41,6 +41,26 @@ test('exports one Session as filtered SQLite', async () => {
     const excluded = await sessions.create(input('Excluded'));
     await sessions.appendMessage(selected.id, message('selected-message'));
     await sessions.appendMessage(excluded.id, message('excluded-message'));
+    const privateSearchText = 'PRIVATE-WORKHUB-INDEX-REQUIREMENT-5b219af8';
+    const index = sessions.workHubTaskIndex!;
+    await index.put({
+      kind: 'session',
+      id: excluded.id,
+      title: excluded.name,
+      summary: privateSearchText,
+      state: 'unavailable',
+      activityAt: 1,
+      cwd: excluded.cwd,
+      available: true,
+      currentSessionId: excluded.id,
+      sourceActionId: null,
+      originActionId: null,
+      sessionIds: [excluded.id],
+      requests: privateSearchText,
+      brief: '',
+      sessionNames: excluded.name,
+    });
+    assert.equal((await index.query({ query: privateSearchText })).match, 'all');
     await sessions.close?.();
     const sourceDatabase = new DatabaseSync(join(stateRoot, 'runtime.sqlite'));
     sourceDatabase
@@ -78,8 +98,33 @@ test('exports one Session as filtered SQLite', async () => {
         ).count,
         0,
       );
+      for (const table of ['workhub_task_index', 'workhub_task_search']) {
+        assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count, 0);
+      }
+      assert.equal(
+        database.prepare('SELECT through_sequence FROM workhub_task_index_state').get()
+          ?.through_sequence,
+        -1,
+      );
     } finally {
       database.close();
+    }
+    assert.equal(
+      (await readFile(join(destinationRoot, 'runtime.sqlite'))).includes(
+        Buffer.from(privateSearchText),
+      ),
+      false,
+      'neither the original text nor free-page bytes may leak through the search projection',
+    );
+    const retained = createSessionStore(stateRoot);
+    try {
+      assert.equal(
+        (await retained.workHubTaskIndex!.query({ query: privateSearchText })).match,
+        'all',
+        'export must not reset the live index',
+      );
+    } finally {
+      await retained.close?.();
     }
   } finally {
     await rm(base, { recursive: true, force: true });

@@ -28,6 +28,7 @@ import {
   type MessageContent,
 } from '@maka/core/events';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { runtimeInvocationOutcome } from '@maka/core/runtime-invocation';
 import type { TurnOrchestration } from '@maka/core/runtime-inputs';
 import type { SkillInvocationResult } from '@maka/core/skill-invocation';
 import {
@@ -244,6 +245,7 @@ type HostMessageResolvedDisposition =
 
 export type HostMessageCancellationDisposition =
   | HostMessageResolvedDisposition
+  | { readonly kind: 'not_owned' }
   | { readonly kind: 'cancelled_pending' };
 
 export type HostMessageExecutionDisposition =
@@ -406,6 +408,8 @@ interface SessionState {
   stopFence?: {
     readonly identity: RuntimeMessageRunIdentity;
     readonly result: QueueFenceResult;
+    readonly preserveFollowups: boolean;
+    readonly inFlightMessageIds: readonly string[];
   };
   pendingInterrupts: Map<string, PendingInterrupt>;
 }
@@ -736,8 +740,28 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     sessionId: string,
     messageId: string,
     cancellationClaimId: string,
+    validate?: (lease: SessionAdmissionLease) => Promise<void | boolean>,
   ): Promise<HostMessageCancellationDisposition> {
-    return this.#sessionAdmission.run(sessionId, async () => {
+    return this.#sessionAdmission.run(sessionId, (lease) =>
+      this.cancelMessageIfPendingAdmitted(
+        sessionId,
+        messageId,
+        cancellationClaimId,
+        lease,
+        validate,
+      ),
+    );
+  }
+
+  /** Host-local batch operation: validate the same lease, never reacquire it. */
+  cancelMessageIfPendingAdmitted(
+    sessionId: string,
+    messageId: string,
+    cancellationClaimId: string,
+    lease: SessionAdmissionLease,
+    validate?: (lease: SessionAdmissionLease) => Promise<void | boolean>,
+  ): Promise<HostMessageCancellationDisposition> {
+    return this.#sessionAdmission.runAdmitted(sessionId, lease, async () => {
       const disposition = await this.#resolveMessageExecution(sessionId, messageId);
       if (disposition.kind === 'cancelled') {
         const outcome = await this.#admissions.claimMessageAdmissionCancellation(
@@ -749,6 +773,11 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           ? { kind: 'cancelled_pending' as const }
           : { kind: 'cancelled' as const };
       }
+      // Reconcile an already committed cancellation first; validation guards
+      // new effects, not this caller's tombstone after a lost response/crash.
+      // Stale scope is a normal refusal, not a failed admitted leaf. Throwing
+      // and catching outside runAdmitted would still poison the batch lease.
+      if ((await validate?.(lease)) === false) return { kind: 'not_owned' };
       if (disposition.kind !== 'pending') return disposition;
 
       const state = this.#sessions.get(sessionId);
@@ -1047,8 +1076,15 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         'Terminal transition found closed admission without a stop fence',
       );
     }
-    if (this.#draining && !state.stopFence) {
-      this.#commitQueueFence(identity);
+    if (this.#draining) {
+      if (!state.stopFence) this.#commitQueueFence(identity);
+      else if (state.stopFence.preserveFollowups && state.followup.length) {
+        // Shutdown releases local leases for recovery; it is not a later user
+        // request to cancel unrelated work. Do not put those Messages into the
+        // original root-only stop's durable cancellation result.
+        this.#retractQueued(state);
+        this.#mutated(state);
+      }
     }
     state.phase = 'closed';
     const folded = state.steering.splice(0);
@@ -1147,6 +1183,22 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       NonNullable<MarkMessagesHandedOffInput['provenSteeringMessages']>[number]
     > = [];
     const admissions = await this.#admissions.listMessageAdmissions(input.sessionId);
+    // Read the terminal fact before checking echo proofs: a cancelled execution
+    // can no longer publish a later echo. Never cancel an in-flight lease merely
+    // because the stop fence closed while its durable echo was being consumed.
+    const logical = admissions.some((entry) => entry.disposition === 'steering')
+      ? await this.#durableProof.readLogicalExecution(input)
+      : undefined;
+    const fence = this.#sessions.get(input.sessionId)?.stopFence;
+    const exactFence = fence && sameRun(fence.identity, input) ? fence : undefined;
+    const outcome = logical && runtimeInvocationOutcome(logical.tip);
+    const stopped =
+      logical &&
+      !logical.pendingHandoff &&
+      outcome !== undefined &&
+      (outcome === 'cancelled' || exactFence !== undefined);
+    const stoppedInFlight = new Set(exactFence?.inFlightMessageIds ?? []);
+    const unconsumedStopped: string[] = [];
     let logicalRunIds: readonly string[] | undefined;
     for (const messageId of new Set(input.messageIds)) {
       messageIds.add(messageId);
@@ -1161,11 +1213,31 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         admission.messageId,
       );
       if (
+        stopped &&
+        !proof &&
+        !messageIds.has(admission.messageId) &&
+        ((admission.turnId === input.turnId && admission.runId === input.runId) ||
+          stoppedInFlight.has(admission.messageId))
+      ) {
+        // A successor may already own this Message even though its mutable
+        // queue row still names the predecessor (the admission/handoff crash
+        // gap). Its immutable Root source receipt also proves consumption.
+        const source = await this.#durableProof.readRootTurnSourceMessageReceipt(
+          input.sessionId,
+          admission.messageId,
+        );
+        if (
+          source?.admission.sessionId !== input.sessionId ||
+          source.sourceMessage.messageId !== admission.messageId
+        )
+          unconsumedStopped.push(admission.messageId);
+      }
+      if (
         proof?.event.turnId === input.turnId &&
         proof.event.runId !== input.runId &&
         !logicalRunIds
       ) {
-        logicalRunIds = (await this.#durableProof.readLogicalExecution(input))?.runIds ?? [];
+        logicalRunIds = logical?.runIds ?? [];
       }
       if (
         proof?.event.turnId === input.turnId &&
@@ -1191,6 +1263,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       ...(provenRootMessages.length > 0 ? { provenRootMessages } : {}),
       ...(provenSteeringMessages.length > 0 ? { provenSteeringMessages } : {}),
     });
+    await this.#admissions.cancelMessageAdmissions(input.sessionId, unconsumedStopped);
   }
 
   async #readProvenRootMessage(
@@ -1288,6 +1361,8 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   ): Promise<void> {
     const admissions = await this.#admissions.listMessageAdmissions(sessionId);
     if (admissions.length === 0) return;
+    const rootState = await this.#root.readRootState(sessionId);
+    const logicalByRoot = new Map<string, Promise<LogicalRuntimeExecution | undefined>>();
     const dispositions = await Promise.all(
       admissions.map(async (admission) => {
         const source = await this.#durableProof.readRootTurnSourceMessageReceipt(
@@ -1295,8 +1370,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           admission.messageId,
         );
         if (
-          source?.admission.turnId === admission.turnId &&
-          source.admission.runId === admission.runId &&
+          source?.admission.sessionId === sessionId &&
           source.sourceMessage.messageId === admission.messageId
         ) {
           return {
@@ -1305,6 +1379,19 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
             runId: source.admission.runId,
             messageIds: [admission.messageId],
           };
+        }
+        let logical: LogicalRuntimeExecution | undefined;
+        if (
+          hasNativeSteeringRootIdentity(admission) &&
+          (rootState.kind !== 'active' || !sameRun(rootState, admission))
+        ) {
+          const key = JSON.stringify([admission.turnId, admission.runId]);
+          let pendingRead = logicalByRoot.get(key);
+          if (!pendingRead) {
+            pendingRead = this.#durableProof.readLogicalExecution(admission);
+            logicalByRoot.set(key, pendingRead);
+          }
+          logical = await pendingRead;
         }
         const steering = await this.#durableProof.readImmutableSteeringMessageProof(
           sessionId,
@@ -1317,7 +1404,16 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
               runId: steering.event.runId,
               messageIds: [],
             }
-          : { kind: 'pending' as const, admission };
+          : logical &&
+              !logical.pendingHandoff &&
+              runtimeInvocationOutcome(logical.tip) === 'cancelled'
+            ? {
+                kind: 'handoff' as const,
+                turnId: admission.turnId,
+                runId: admission.runId,
+                messageIds: [],
+              }
+            : { kind: 'pending' as const };
       }),
     );
     await Promise.all(
@@ -1332,11 +1428,11 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           }),
         ),
     );
-    const pending = dispositions.flatMap((disposition) =>
-      disposition.kind === 'pending' ? [disposition.admission] : [],
-    );
+    // One terminal materialization can settle several rows, including a
+    // promoted Steering entry classified as pending above. Recover only the
+    // still-pending durable rows, never the pre-materialization snapshot.
+    const pending = await this.#admissions.listMessageAdmissions(sessionId);
     if (pending.length === 0) return;
-    const rootState = await this.#root.readRootState(sessionId);
     if (rootState.kind !== 'active') {
       if (rootState.kind !== 'idle') return;
       if (!this.#root.startRecoveredMessages) {
@@ -1387,6 +1483,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   ): void {
     if (!this.#sessions.has(sessionId)) this.#state(sessionId);
     const state = this.#requireState(sessionId);
+    // A nack after Stop must not acquire the closed Root's newer generation.
+    // Terminal materialization settles its durable echo/cancellation before B
+    // starts; pending recovery is not permission to reopen A's steering queue.
+    if (state.stopFence) return;
     if (!state.reservedRoot) this.reserveRootTurn(rootState);
     if (!sameRun(state.reservedRoot!, rootState)) return;
     for (const admission of pending) {
@@ -1418,8 +1518,11 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     }
   }
 
-  commitStopFence(identity: RuntimeMessageRunIdentity): QueueFenceResult {
-    return this.#commitQueueFence(identity);
+  commitStopFence(
+    identity: RuntimeMessageRunIdentity,
+    preserveFollowups = false,
+  ): QueueFenceResult {
+    return this.#commitQueueFence(identity, preserveFollowups);
   }
 
   async close(): Promise<void> {
@@ -2573,7 +2676,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     run.released = true;
   }
 
-  #commitQueueFence(identity: RuntimeMessageRunIdentity): QueueFenceResult {
+  #commitQueueFence(
+    identity: RuntimeMessageRunIdentity,
+    preserveFollowups = false,
+  ): QueueFenceResult {
     const state = this.#requireState(identity.sessionId);
     if (state.transition) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -2585,7 +2691,10 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       if (!sameRun(existing.identity, identity)) {
         throw new RuntimeMessageAuthorityInvariantError('Stop fence belongs to another root Turn');
       }
-      return existing.result;
+      if (!existing.preserveFollowups || preserveFollowups) return existing.result;
+      // An explicit full stop may supersede an earlier root-only stop. It
+      // retracts only the remaining queue; the first fence's retractions were
+      // already persisted under this same Session lane. Never restore them.
     }
     if (!state.reservedRoot || !sameRun(state.reservedRoot, identity)) {
       throw new RuntimeMessageAuthorityInvariantError(
@@ -2598,18 +2707,26 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       );
     }
     state.phase = 'closed';
-    const retracted = this.#retractQueued(state);
+    const retracted = this.#retractQueued(state, preserveFollowups);
     state.generation += 1;
+    for (const entry of state.followup) entry.generation = state.generation;
     this.#mutated(state);
     const result = { queueRevision: state.revision, retracted };
-    state.stopFence = { identity: { ...identity }, result };
+    state.stopFence = {
+      identity: { ...identity },
+      result,
+      preserveFollowups,
+      inFlightMessageIds:
+        existing?.inFlightMessageIds ??
+        [...state.inFlight.values()].map((entry) => entry.messageId),
+    };
     return result;
   }
 
-  #retractQueued(state: SessionState): RetractedMessageSnapshot[] {
-    const entries = [...state.steering, ...state.followup];
+  #retractQueued(state: SessionState, preserveFollowups = false): RetractedMessageSnapshot[] {
+    const entries = [...state.steering, ...(preserveFollowups ? [] : state.followup)];
     state.steering = [];
-    state.followup = [];
+    if (!preserveFollowups) state.followup = [];
     for (const entry of entries) this.#releaseEntry(entry);
     return entries.map(retractedSnapshot);
   }

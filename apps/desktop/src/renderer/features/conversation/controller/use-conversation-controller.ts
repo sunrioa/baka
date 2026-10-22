@@ -23,7 +23,8 @@ import { useToast, useUiLocale, dequeueInteractionByRequestId } from '@maka/ui';
 import { useSessionCatalogController } from '../../../application/contracts/session-catalog/session-catalog-state.js';
 import { recordSessionEventStreamChange } from '../../../application/contracts/session-catalog/session-event-health.js';
 import { createTranscriptCommands } from '../model/transcript-commands.js';
-import { createContextCompactionCommands } from '../model/context-compaction.js';
+import { createContextCompactionCommands } from '../../../application/contracts/context-compaction.js';
+import { getShellCopy, localizedShellErrorMessage } from '../../../locales/shell-copy.js';
 import { createConversationWorkspace } from '../model/conversation-workspace.js';
 import { renderConversationMarkdown } from '../model/conversation-markdown.js';
 import { useConversationServices } from '../services.js';
@@ -60,6 +61,8 @@ export function useConversationController() {
       ...createContextCompactionCommands({
         compact: (sessionId) => services.sessions.compact(sessionId),
         isCurrentSession: (sessionId) => workspace.activeIdRef.current === sessionId,
+        formatError: localizedShellErrorMessage,
+        workspaceErrorCopy: (locale) => getShellCopy(locale).errors,
         feedback,
       }),
       clearOwnedSessionState(sessionId: string) {

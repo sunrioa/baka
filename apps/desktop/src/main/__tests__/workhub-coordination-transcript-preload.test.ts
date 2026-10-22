@@ -68,8 +68,20 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
           }], truncated: false };
           if (channel === 'workhub:answerInteraction') return { sessionId: 'original-task', interactionId: 'question', turnId: 'turn', runId: 'run', status: 'answered' };
           if (channel === 'workhub:queryTasks') return { tasks: [{ actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' }], truncated: false };
+          if (channel === 'workhub:findTasks') {
+            assert.equal(scope.hostId, 'host-b');
+            assert.deepEqual(JSON.parse(JSON.stringify(mode)), { query: '登录 限流', cursor: 'host-cursor' });
+            return { items: [{ kind: 'task', id: 'older-than-recent-task', title: '登录限流', state: 'ended', lastActivityAt: 1, location: null, available: true, summary: 'Saved task title', segments: 2 }], match: 'all', nextCursor: 'next-page' };
+          }
+          if (channel === 'workhub:readTask' && typeof mode === 'object' && 'workId' in mode) {
+            const overview = 'includeBrief' in mode && mode.includeBrief === true;
+            assert.deepEqual(JSON.parse(JSON.stringify(mode)), { workId: 'older-than-recent-task', ...(overview ? { includeBrief: true, briefLocale: 'zh-CN' } : {}) });
+            assert.equal(scope.hostId, 'host-b');
+            return { task: { workId: 'older-than-recent-task', actionId: 'old-action', delegationId: 'old-delegation', targetSessionId: 'original-task',
+              targetSessionName: 'Older task', targetMessageId: 'old-message', text: 'Original requirement', createdAt: 1, status: 'stopped' },
+              ...(overview ? { brief: { workId: 'older-than-recent-task', actionId: 'old-action', delegationId: 'old-delegation', status: 'ok', text: 'Host 已拼装的有界概况（未经验证）' } } : {}) };
+          }
           if (channel === 'workhub:readTask') return { task: { actionId: 'task-action', delegationId: 'task-delegation', targetSessionId: 'original-task' } };
-          if (channel === 'workhub:continueTask') return { disposition: 'delegate_existing', targetSessionId: 'original-task' };
           if (channel === 'workhub:sendTaskInput' || channel === 'workhub:readTaskInput') {
             const request = mode as OperationInput<'workhub.tasks.send'>;
             assert.equal(scope.hostId, 'host-b', 'task input stays on its non-default owning Host');
@@ -102,11 +114,20 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   assert.equal(answered.sessionId, session('host-b', 'original-task'));
   const taskPage = await bridge.workHub.queryTasks(session('host-b'));
   assert.equal(taskPage.tasks[0]!.targetSessionId, session('host-b', 'original-task'));
+  const found = await bridge.workHub.findTasks(session('host-b'), { query: '登录 限流', cursor: 'host-cursor' });
+  assert.ok(!('kind' in found), 'authorized indexed discovery retains its original result');
+  assert.equal(found.items[0]!.title, '登录限流');
+  assert.equal(found.items[0]!.id, 'older-than-recent-task');
+  assert.equal(found.nextCursor, 'next-page');
   const taskRef = { actionId: 'task-action', delegationId: 'task-delegation' };
   const taskDetail = await bridge.workHub.readTask(session('host-b'), taskRef);
   assert.equal(taskDetail.task.targetSessionId, session('host-b', 'original-task'));
-  const continuation = await bridge.workHub.continueTask(session('host-b'), { ...taskRef, turnId: 'new-turn', text: 'Continue' });
-  assert.equal(continuation.targetSessionId, session('host-b', 'original-task'));
+  const olderTask = await bridge.workHub.readTask(session('host-b'), { workId: 'older-than-recent-task' });
+  assert.equal(olderTask.task.workId, 'older-than-recent-task');
+  assert.equal(olderTask.task.targetSessionId, session('host-b', 'original-task'), 'exact task lookup uses the owning Host even when it is not default');
+  const overview = await bridge.workHub.readTask(session('host-b'), { workId: 'older-than-recent-task', includeBrief: true, briefLocale: 'zh-CN' });
+  assert.equal(overview.task.targetSessionId, session('host-b', 'original-task'));
+  assert.deepEqual(structuredClone(overview.brief), { workId: 'older-than-recent-task', actionId: 'old-action', delegationId: 'old-delegation', status: 'ok', text: 'Host 已拼装的有界概况（未经验证）' }, 'preload preserves source binding and the bounded projection without remapping it into model context');
   const taskInput = { inputId: 'task-input', workId: 'task-work', generationId: 'task-generation', sourceActionId: 'task-action', sourceDelegationId: 'task-delegation', text: 'Correction' };
   const accepted = await bridge.workHub.sendTaskInput(session('host-b'), taskInput);
   assert.equal(accepted.kind, 'accepted');
@@ -122,8 +143,9 @@ test('WorkHub permission reads, writes and notifications stay on the Coordinatio
   await assert.rejects(bridge.workHub.getExecutionConcurrency(session('unknown-host')));
   await assert.rejects(bridge.workHub.queryInteractions(session('host-b', 'ordinary-session')));
   await assert.rejects(bridge.workHub.queryTasks(session('host-b', 'ordinary-session')));
+  await assert.rejects(bridge.workHub.findTasks(session('host-b', 'ordinary-session'), { query: '登录' }));
+  await assert.rejects(bridge.workHub.findTasks(session('unknown-host'), {}));
   await assert.rejects(bridge.workHub.readTask(session('unknown-host'), taskRef));
-  await assert.rejects(bridge.workHub.continueTask(session('host-b', 'ordinary-session'), { ...taskRef, turnId: 'new-turn', text: 'Continue' }));
   await assert.rejects(bridge.workHub.sendTaskInput(session('host-b', 'ordinary-session'), taskInput));
   await assert.rejects(bridge.workHub.sendTaskInput(session('unknown-host'), taskInput));
   await assert.rejects(bridge.workHub.readTaskInput(session('host-b', 'ordinary-session'), { workId: taskInput.workId, inputId: taskInput.inputId }));

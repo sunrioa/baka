@@ -27,6 +27,7 @@ import {
 } from '@maka/core/task-execution-grant';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import { workHubStopRetiresDelegation } from '@maka/core/workhub-task-stop';
 import {
   workHubPeerQuestionIdentity,
   workHubPeerInboxId,
@@ -37,6 +38,7 @@ import {
 import {
   decodeCanonicalMessage,
   deriveTurnRecords,
+  isWorkHubReplacementIntentRetired,
   WORKHUB_COORDINATION_SESSION_ID as HUB,
   WORKHUB_COORDINATION_SESSION_ROLE,
   type SessionHeader,
@@ -382,6 +384,77 @@ function hubMessage(s: MemoryState, id: string): StoredMessage | undefined {
     .get(HUB)
     ?.find((m) => m.id === id);
 }
+function stopRequest(s: MemoryState, id: string, actionId?: string, latest?: true) {
+  if (latest) {
+    if (actionId !== undefined) throw new Error('Latest Stop lookup cannot select an action');
+    const value = [...(messages(s).get(HUB) ?? [])]
+      .reverse()
+      .find(
+        (m) =>
+          m.type === 'workhub_coordination' &&
+          m.kind === 'delegation_stop_requested' &&
+          m.stopsDelegationId === id,
+      );
+    return value?.type === 'workhub_coordination' && value.kind === 'delegation_stop_requested'
+      ? value
+      : undefined;
+  }
+  const scoped = actionId
+    ? hubMessage(s, 'whq_' + suffix(JSON.stringify([id, actionId])))
+    : undefined;
+  const m = scoped ?? hubMessage(s, 'whq_' + suffix(id));
+  return m?.type === 'workhub_coordination' &&
+    m.kind === 'delegation_stop_requested' &&
+    (!actionId || m.actionId === actionId)
+    ? m
+    : undefined;
+}
+function stopResolution(
+  s: MemoryState,
+  id: string,
+  actionId?: string,
+): import('@maka/core/session').WorkHubDelegationStopResolvedMessage | undefined {
+  if (!actionId)
+    for (const prefix of ['whzs_', 'whzt_']) {
+      const m = hubMessage(s, prefix + suffix(id));
+      if (
+        m?.type === 'workhub_coordination' &&
+        m.kind === 'delegation_stop_resolved' &&
+        m.outcome !== 'not_owned'
+      )
+        return m;
+    }
+  const scoped = actionId
+    ? hubMessage(s, 'whz_' + suffix(JSON.stringify([id, actionId])))
+    : undefined;
+  const m = scoped ?? hubMessage(s, 'whz_' + suffix(id));
+  if (
+    m?.type === 'workhub_coordination' &&
+    m.kind === 'delegation_stop_resolved' &&
+    (!actionId || m.actionId === actionId)
+  )
+    return m;
+  const first = !actionId ? stopRequest(s, id) : undefined;
+  return first?.taskStop === true ? stopResolution(s, id, first.actionId) : undefined;
+}
+function stopProjection(s: MemoryState, id: string) {
+  const request = stopRequest(s, id);
+  const latest = request && stopRequest(s, id, undefined, true);
+  const ownResolution = latest && (stopResolution(s, id, latest.actionId) ?? stopResolution(s, id));
+  if (latest && (!ownResolution || ownResolution.actionId !== latest.actionId))
+    return { request: latest, resolution: undefined, retires: true };
+  const resolution = stopResolution(s, id);
+  const matched = resolution ? stopRequest(s, id, resolution.actionId) : request;
+  return {
+    request,
+    resolution,
+    retires: matched
+      ? workHubStopRetiresDelegation(matched, resolution)
+      : resolution
+        ? resolution.outcome !== 'not_owned'
+        : request !== undefined,
+  };
+}
 function latestWorkAssignment(
   s: MemoryState,
   workId: string,
@@ -492,17 +565,12 @@ function taskInputSource(
   )
     return conflict('Work generation or target unavailable');
   const read = (prefix: string) => hubMessage(s, prefix + '_' + suffix(source.delegationId));
-  const resolution = read('whzt') ?? read('whz');
+  const stop = stopProjection(s, source.delegationId);
   if (
     read('whp') ||
     read('whx') ||
     read('whb') ||
-    (read('whq') &&
-      !(
-        resolution?.type === 'workhub_coordination' &&
-        resolution.kind === 'delegation_stop_resolved' &&
-        resolution.outcome === 'not_owned'
-      ))
+    (stop.request && stop.retires && !(stop.resolution && input.mode === 'continuation'))
   )
     return conflict('Work is being retired');
   return source;
@@ -742,6 +810,42 @@ export function createMemorySessionStore(
           records.push(r);
         }
         return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
+    readWorkHubTaskFactsPage: async (request) =>
+      read((s) => {
+        requireHeader(s, HUB);
+        const all = messages(s).get(HUB)!;
+        let selected = all
+          .map((message, sequence) => ({ message, sequence }))
+          .filter(
+            (r) =>
+              r.message.type === 'workhub_coordination' &&
+              (r.message.kind === 'delegation_assigned' || r.message.kind === 'task_input') &&
+              r.sequence > (request.afterSequence ?? -1) &&
+              r.sequence < (request.beforeSequence ?? Infinity),
+          );
+        if (request.beforeSequence !== undefined) selected.reverse();
+        let bytes = 0;
+        const records = [];
+        for (const record of selected.slice(0, request.maxMessages)) {
+          const size = Buffer.byteLength(JSON.stringify(record.message));
+          if (records.length && bytes + size > request.maxStoredBytes) break;
+          records.push(record);
+          bytes += size;
+        }
+        return { records, highWaterSequence: all.length ? all.length - 1 : null };
+      }),
+    readWorkHubAssignmentByMessage: async (messageId) =>
+      read((s) => {
+        if (!/^whm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+        const fact = messages(s)
+          .get(HUB)
+          ?.find((m) => m.id === `wha_${messageId.slice(4)}`);
+        return fact?.type === 'workhub_coordination' &&
+          fact.kind === 'delegation_assigned' &&
+          fact.targetMessageId === messageId
+          ? fact
+          : undefined;
       }),
     readWorkHubAssignmentsPage: async (request) =>
       read((s) => {
@@ -1329,12 +1433,19 @@ export function createMemorySessionStore(
       a.notify(HUB);
       return result;
     },
-    readWorkHubReplacement: async (id) =>
+    readWorkHubReplacement: async (id, pendingOnly) =>
       read((s) => {
         const m = hubMessage(s, 'whp_' + suffix(id));
-        return m?.type === 'workhub_coordination' && m.kind === 'delegation_replacement_requested'
-          ? m
-          : undefined;
+        if (m?.type !== 'workhub_coordination' || m.kind !== 'delegation_replacement_requested')
+          return undefined;
+        const abort = pendingOnly && hubMessage(s, 'whb_' + suffix(id));
+        return m.replacesDelegationId === id &&
+          abort &&
+          abort.type === 'workhub_coordination' &&
+          abort.kind === 'delegation_replacement_aborted' &&
+          isWorkHubReplacementIntentRetired(m, abort)
+          ? undefined
+          : m;
       }),
     readWorkHubReplacementAbort: async (id) =>
       read((s) => {
@@ -1350,47 +1461,19 @@ export function createMemorySessionStore(
           ? m
           : undefined;
       }),
-    readWorkHubStopRequest: async (id, actionId) =>
-      read((s) => {
-        const first = hubMessage(s, 'whq_' + suffix(id));
-        const m =
-          actionId &&
-          first?.type === 'workhub_coordination' &&
-          first.kind === 'delegation_stop_requested' &&
-          first.actionId !== actionId
-            ? hubMessage(s, 'whq_' + suffix(JSON.stringify([id, actionId])))
-            : first;
-        return m?.type === 'workhub_coordination' && m.kind === 'delegation_stop_requested'
-          ? m
-          : undefined;
-      }),
-    readWorkHubStopResolution: async (id, actionId) =>
-      read((s) => {
-        if (!actionId) {
-          const terminal = hubMessage(s, 'whzt_' + suffix(id));
-          if (
-            terminal?.type === 'workhub_coordination' &&
-            terminal.kind === 'delegation_stop_resolved' &&
-            terminal.outcome !== 'not_owned'
-          )
-            return terminal;
-        }
-        const scoped = actionId
-          ? hubMessage(s, 'whz_' + suffix(JSON.stringify([id, actionId])))
-          : undefined;
-        const primary = hubMessage(s, 'whz_' + suffix(id));
-        const m =
-          scoped ??
-          (actionId &&
-          primary?.type === 'workhub_coordination' &&
-          primary.kind === 'delegation_stop_resolved' &&
-          primary.actionId !== actionId
-            ? undefined
-            : primary);
-        return m?.type === 'workhub_coordination' && m.kind === 'delegation_stop_resolved'
-          ? m
-          : undefined;
-      }),
+    readWorkHubStopRequest: async (id, actionId, latest) =>
+      read((s) => stopRequest(s, id, actionId, latest)),
+    hasOtherWorkHubStopTarget: async (turnId, workId) =>
+      read((s) =>
+        (messages(s).get(HUB) ?? []).some(
+          (m) =>
+            m.type === 'workhub_coordination' &&
+            m.kind === 'delegation_stop_requested' &&
+            m.turnId === turnId &&
+            (m.workId ?? m.targetSessionId) !== workId,
+        ),
+      ),
+    readWorkHubStopResolution: async (id, actionId) => read((s) => stopResolution(s, id, actionId)),
     readActiveWorkHubAssignmentsByTarget: async (ids, limit, includeStopped) =>
       read((s) => {
         ids.forEach(assertSafeSessionId);
@@ -1408,12 +1491,27 @@ export function createMemorySessionStore(
               m.kind !== 'delegation_assigned' ||
               !ids.includes(m.targetSessionId) ||
               hubMessage(s, 'whx_' + suffix(m.delegationId)) ||
-              hubMessage(s, 'whb_' + suffix(m.delegationId)) ||
               (!admissions(s).has(key(m.targetSessionId, m.targetMessageId)) &&
                 !rows(s, 'cancelledAdmissions').has(key(m.targetSessionId, m.targetMessageId)) &&
                 !memoryRootSourceReceipt(s, m.targetSessionId, m.targetMessageId))
             )
               return false;
+            const abort = hubMessage(s, 'whb_' + suffix(m.delegationId));
+            if (abort) {
+              const replacement = hubMessage(s, 'whp_' + suffix(m.delegationId));
+              if (
+                replacement?.type !== 'workhub_coordination' ||
+                replacement.kind !== 'delegation_replacement_requested' ||
+                replacement.replacesActionId !== m.actionId ||
+                replacement.replacesDelegationId !== m.delegationId ||
+                replacement.replacedTargetSessionId !== m.targetSessionId ||
+                replacement.replacedTargetMessageId !== m.targetMessageId ||
+                abort.type !== 'workhub_coordination' ||
+                abort.kind !== 'delegation_replacement_aborted' ||
+                !isWorkHubReplacementIntentRetired(replacement, abort)
+              )
+                return false;
+            }
             const latest = latestWorkAssignment(s, m.work?.id ?? m.actionId);
             if (
               !latest ||
@@ -1421,16 +1519,8 @@ export function createMemorySessionStore(
                 (m.work?.generationId ?? m.actionId)
             )
               return false;
-            const resolution =
-              hubMessage(s, 'whzt_' + suffix(m.delegationId)) ??
-              hubMessage(s, 'whz_' + suffix(m.delegationId));
-            if (
-              !includeStopped &&
-              resolution?.type === 'workhub_coordination' &&
-              resolution.kind === 'delegation_stop_resolved' &&
-              resolution.outcome !== 'not_owned'
-            )
-              return false;
+            const stop = stopProjection(s, m.delegationId);
+            if (!includeStopped && stop.resolution && stop.retires) return false;
             const count = counts.get(m.targetSessionId) ?? 0;
             counts.set(m.targetSessionId, count + 1);
             return limit === undefined || count < limit;

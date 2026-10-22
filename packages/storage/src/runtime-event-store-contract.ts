@@ -40,6 +40,15 @@ export type SessionRequestObservation =
       readonly connectionSlug: string;
       readonly inputTokens: number;
       readonly outputTokens?: number;
+      readonly requestedAt?: number;
+      readonly latestRequestAt?: number;
+      readonly usageScope?: 'last_completed_request';
+      readonly cacheReadInputTokens?: number;
+      readonly cacheWriteInputTokens?: number;
+      readonly cacheMissInputTokens?: number;
+      readonly cacheReadInputSource?: 'reported';
+      readonly cacheWriteInputSource?: 'reported';
+      readonly cacheMissInputSource?: 'explicit' | 'derived';
     };
 
 export interface ImmutableRuntimePrefixProofReadBudget {

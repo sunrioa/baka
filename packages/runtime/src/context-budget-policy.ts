@@ -34,8 +34,9 @@ export interface BuildDefaultContextBudgetPolicyOptions {
 /**
  * The shipped context-budget policy. It carries no history budget and no
  * reserve: whether a request fits is the provider's answer, and the only
- * proactive threshold is the context window the user declared for the model
- * (see `resolveDeclaredContextWindow`), read by the compaction seam itself.
+ * proactive threshold is the model override's `compactionThreshold`
+ * (see `resolveDeclaredContextWindow`), read by the compaction seam itself;
+ * model capacity/input limits do not supply a fallback compaction threshold.
  * What remains here are content policies — how one oversized Tool Result
  * enters the request — and the compaction switches (#4559).
  */
@@ -58,8 +59,9 @@ export function buildDefaultContextBudgetPolicy(
 }
 
 /**
- * The Maka window for the selected model: the context window the user declared,
- * resolved by core's single owner of that rule (`declaredContextWindow`), or
+ * The selected model's configured proactive compaction target (despite the
+ * historical function name), resolved by core's single owner of that rule
+ * (`declaredContextWindow` from `compactionThreshold`), or
  * undefined when nothing is declared — and then no proactive compaction runs.
  */
 export function resolveDeclaredContextWindow(
@@ -94,4 +96,11 @@ function narrowestPositiveLimit(...values: Array<number | undefined>): number | 
     (value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0,
   );
   return positiveValues.length > 0 ? Math.min(...positiveValues) : undefined;
+}
+
+/** Existing compaction reply reserve; shared with advisory observations, not a routing threshold. */
+export function compactionReplyReserveTokens(lastReplyTokens: number | undefined): number {
+  if (lastReplyTokens === undefined || !Number.isFinite(lastReplyTokens) || lastReplyTokens <= 0)
+    return 0;
+  return Math.min(lastReplyTokens * 2, 8_000);
 }

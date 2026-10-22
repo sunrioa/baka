@@ -50,7 +50,7 @@ import { SandboxCommandError } from '../sandbox/errors.js';
 import { ToolRuntime, type MakaTool, type ToolRuntimeInput } from '../tool-runtime.js';
 
 describe('ToolRuntime session sandbox boundary', () => {
-  test('a task grant approved inside a call updates its boundary and fences the current resource', async () => {
+  test('an original Session approval refreshes its live boundary without replacing invocation cancellation', async () => {
     const events: SessionEvent[] = [];
     const base: ExecutionBoundary = {
       kind: 'managed',
@@ -59,12 +59,13 @@ describe('ToolRuntime session sandbox boundary', () => {
     };
     const effective: ExecutionBoundary = {
       ...base,
+      revision: 5,
       profile: applySandboxBoundaryExpansion(base.profile, { network: { enabled: true } }),
     };
-    const grant = new AbortController();
-    const cleanup = new Set<() => void | Promise<void>>();
+    const invocation = new AbortController();
     const started = deferred<void>();
-    let active = false;
+    let boundary = base;
+    let reads = 0;
     let captured: HostedSandboxBoundarySettlement | undefined;
     const runtime = createRuntime({
       turnId: 'turn-1',
@@ -77,26 +78,15 @@ describe('ToolRuntime session sandbox boundary', () => {
       newId: nextId(),
       now: () => 1,
       getPermissionPauseTarget: () => null,
-      readExecutionBoundary: async () => base,
-      readTaskAuthority: async (scope) => {
+      readExecutionBoundary: async (scope) => {
         assert.deepEqual(scope, {
           sessionId: 'session-1',
           turnId: 'turn-1',
           runId: 'run-1',
           invocationId: 'inv-1',
         });
-        return active
-          ? {
-              boundary: effective,
-              signal: grant.signal,
-              registerCleanup: (fn) => {
-                cleanup.add(fn);
-                return () => {
-                  cleanup.delete(fn);
-                };
-              },
-            }
-          : { boundary: base };
+        reads++;
+        return boundary;
       },
       hostedInteraction: {
         sessionId: 'session-1',
@@ -116,17 +106,18 @@ describe('ToolRuntime session sandbox boundary', () => {
     });
     const pending = runtime.settleToolCall({
       tool: {
-        name: 'network_task',
-        description: 'Use task-scoped network',
+        name: 'network_session',
+        description: 'Use the approved Session network boundary',
         parameters: {},
         impl: async (_args, context) => {
           assert.deepEqual(context.executionBoundary, base);
           await context.requestSandboxBoundary!(
             { network: { enabled: true } },
-            'Connect for this task',
+            'Connect from this Session',
           );
           assert.deepEqual(context.executionBoundary, effective);
-          assert.equal(context.authoritySignal?.aborted, false);
+          assert.equal(context.abortSignal, invocation.signal);
+          assert.equal(context.authoritySignal, undefined);
           started.resolve();
           await new Promise<void>((resolve) =>
             context.abortSignal.addEventListener('abort', () => resolve(), { once: true }),
@@ -137,7 +128,7 @@ describe('ToolRuntime session sandbox boundary', () => {
       turnId: 'turn-1',
       toolCallId: 'tool-1',
       input: {},
-      abortSignal: new AbortController().signal,
+      abortSignal: invocation.signal,
       eventSink: {
         push: (event) => events.push(event),
         pushAndWaitUntilConsumed: async (event) => {
@@ -147,7 +138,7 @@ describe('ToolRuntime session sandbox boundary', () => {
     });
     try {
       const request = await waitForBoundaryRequest(events);
-      active = true;
+      boundary = effective;
       await captured!.applyDecision({
         request: {
           sessionId: 'session-1',
@@ -160,20 +151,18 @@ describe('ToolRuntime session sandbox boundary', () => {
           settledAt: 2,
           expansion: request.expansion,
           justification: request.justification,
-          outcomeReason: 'task_grant',
+          appliedRevision: 5,
         },
-        boundary: base,
-        changed: false,
+        boundary: effective,
+        changed: true,
       });
       await started.promise;
-      assert.equal(cleanup.size, 1);
-      grant.abort(new Error('Task grant revoked'));
-      await Promise.all([...cleanup].map((fn) => fn()));
-      assert.match(JSON.stringify((await pending).result), /Task grant revoked/);
-      assert.equal(cleanup.size, 0);
+      assert.equal(reads, 2, 'dispatch and post-approval both read original Session authority');
+      invocation.abort(new Error('Invocation cancelled'));
+      assert.match(JSON.stringify((await pending).result), /Invocation cancelled/);
       assert.equal(base.revision, 4);
     } finally {
-      grant.abort();
+      invocation.abort();
       await runtime.endTurn('aborted');
       await pending;
     }

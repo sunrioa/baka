@@ -183,8 +183,7 @@ export class HostSessionBundleCoordinator {
       }),
     );
     if (!result.ok) return { ok: false, error: importFailure(result.reason) };
-    const root = result.sessionIds[0];
-    if (root !== undefined) this.#options.onImported(root);
+    this.#options.onImported(result.rootSessionId);
     return {
       ok: true,
       result: { sessionCount: result.sessionIds.length, artifactFiles: result.artifactFiles },

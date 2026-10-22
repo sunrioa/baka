@@ -79,6 +79,7 @@ import {
   projectHostedExecutionTools,
 } from './hosted-execution-tool-profile.js';
 import { shouldResolveHostTavilyWebSearchReadiness } from './web-search-tool.js';
+import { WORKHUB_HOST_CONFIRMATION_TOOL_NAMES } from './workhub-coordinator-tools.js';
 
 const INTERACTIVE_RUN_COMPOSER_ID = 'maka.interactive';
 const INTERACTIVE_RUN_COMPOSER_REVISION = '1';
@@ -162,13 +163,33 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
         input.parentAgentTools,
         input.plan,
       );
+  const nativeConfirmations = new Set(
+    input.toolProfile === 'workhub-coordination-v2'
+      ? defaultTools
+          .filter(
+            (tool) =>
+              tool.hostAdmission !== 'client_capability' &&
+              WORKHUB_HOST_CONFIRMATION_TOOL_NAMES.includes(tool.name),
+          )
+          .map(({ name }) => name)
+      : [],
+  );
+  // A same-epoch older Desktop may still offer these two names. Only the
+  // coordinator's actual Host-owned confirmations supersede their CC copies.
   const clientCapabilityTools =
     input.boundTools !== undefined ||
     (input.toolProfile !== undefined && input.toolProfile !== 'workhub-coordination-v2')
       ? []
-      : (input.clientCapabilities?.tools ?? []);
+      : (input.clientCapabilities?.tools ?? []).filter(
+          (tool) =>
+            tool.hostAdmission !== 'client_capability' || !nativeConfirmations.has(tool.name),
+        );
   const resolveTools = (): readonly MakaTool[] => {
     const stableHostTools = [...defaultTools, ...clientCapabilityTools];
+    if (input.toolProfile === 'workhub-coordination-v2') {
+      const names = hostedExecutionRunProfile(input.toolProfile)!.toolNames;
+      assertUniqueToolNames(stableHostTools.filter(({ name }) => names.includes(name)));
+    }
     const additionalTools = hasToolCeiling
       ? []
       : (input.resolveAdditionalTools?.(stableHostTools) ?? []);
@@ -292,6 +313,10 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
     }
     return pending;
   };
+  const coordinationContexts = new Map<
+    string,
+    Promise<NonNullable<ResolvedRunPrompt['contexts']>>
+  >();
   const resolveSystemPrompt = async (
     context: HostModelPromptContext,
   ): Promise<ResolvedRunPrompt> => {
@@ -300,10 +325,23 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
       input.resolveAdditionalSystemPrompt && !runProfile
         ? await input.resolveAdditionalSystemPrompt(context, base.text)
         : base;
-    const executionContexts =
-      input.resolveExecutionContexts && !runProfile && !hasToolCeiling
-        ? await input.resolveExecutionContexts(context)
-        : [];
+    let executionContexts: NonNullable<ResolvedRunPrompt['contexts']> = [];
+    if (
+      input.resolveExecutionContexts &&
+      (!hasToolCeiling ||
+        (input.toolProfile === 'workhub-coordination-v2' && input.boundTools === undefined))
+    ) {
+      if (input.toolProfile === 'workhub-coordination-v2') {
+        let pending = coordinationContexts.get(context.turnId);
+        if (!pending) {
+          pending = input.resolveExecutionContexts(context);
+          coordinationContexts.set(context.turnId, pending);
+          if (coordinationContexts.size > 32)
+            coordinationContexts.delete(coordinationContexts.keys().next().value!);
+        }
+        executionContexts = await pending;
+      } else if (!runProfile) executionContexts = await input.resolveExecutionContexts(context);
+    }
     if (plugin === base && !executionContexts.length) return base;
     return Object.freeze({
       text: plugin.text,

@@ -23,6 +23,7 @@ import type {
   WorkHubAnswerResult,
   WorkHubPrepareAttachmentsResult,
   WorkHubTaskSendResult,
+  WorkHubTaskListResult,
 } from '../shared/workhub-conversation.js';
 import type { ConnectionEvent } from '@maka/core/connections';
 import type {
@@ -1136,14 +1137,13 @@ export interface MakaBridge {
   workHub: {
     queryInteractions(coordinationSessionId: string): Promise<OperationOutput<'workhub.interactions.query'>>;
     queryTasks(coordinationSessionId: string): Promise<OperationOutput<'workhub.tasks.query'>>;
+    findTasks(coordinationSessionId: string, input: OperationInput<'workhub.tasks.find'>): Promise<WorkHubTaskListResult>;
     readTask(coordinationSessionId: string, input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>>;
     taskHistory(coordinationSessionId: string, input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>>;
     taskExecutions(coordinationSessionId: string, input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>>;
     sendTaskInput(coordinationSessionId: string, input: OperationInput<'workhub.tasks.send'>): Promise<WorkHubTaskSendResult>;
     readTaskInput(coordinationSessionId: string, input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>>;
-    continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>>;
     answerInteraction(coordinationSessionId: string, input: OperationInput<'workhub.interactions.answer'>): Promise<OperationOutput<'workhub.interactions.answer'>>;
-    revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>): Promise<OperationOutput<'workhub.interactions.revoke'>>;
     getSession(coordinationSessionId: string): Promise<DesktopSessionSummary>;
     prepareAttachments(coordinationSessionId: string, items: RendererIngestInput[]): Promise<WorkHubPrepareAttachmentsResult>;
     answer(coordinationSessionId: string, input: WorkHubAnswerInput): Promise<WorkHubAnswerResult>;
@@ -1154,6 +1154,8 @@ export interface MakaBridge {
     setNewWorkPermissionMode(coordinationSessionId: string, mode: import('@maka/core/settings').ChatDefaultPermissionMode): Promise<import('@maka/core/settings').ChatDefaultPermissionMode>;
     subscribeNewWorkPermissionMode(coordinationSessionId: string, handler: () => void): () => void;
     getExecutionConcurrency(coordinationSessionId: string): Promise<number>;
+    getCompactionThreshold(coordinationSessionId: string): Promise<number | null>;
+    setCompactionThreshold(coordinationSessionId: string, value: number | null): Promise<number | null>;
     setExecutionConcurrency(coordinationSessionId: string, value: number): Promise<number>;
     /** Resolve the active Runtime Host's stable coordination conversation. */
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }>;

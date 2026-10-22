@@ -25,7 +25,7 @@ import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { ModelCallCommit } from '@maka/core/agent-run';
 import type { PermissionMode } from '@maka/core/permission';
 import { resolveCollaborationPermissionMode } from '@maka/core/collaboration';
-import { AiSdkBackend, type AiSdkBackendInput } from '@maka/runtime/ai-sdk-backend';
+import { AiSdkBackend } from '@maka/runtime/ai-sdk-backend';
 import {
   buildDefaultContextBudgetPolicy,
   resolveSelectedModelContextWindow,
@@ -74,9 +74,9 @@ import {
 } from './execution-model-authority.js';
 import { toRuntimePolicyProxy } from './runtime-policy-proxy.js';
 import type { HostRunComposer, HostRunComposerFactory } from './host-run-composer.js';
+import { workHubContextConnection } from './workhub-context-policy.js';
 
 export interface HostAiSdkBackendInput {
-  readonly readTaskAuthority?: AiSdkBackendInput['readTaskAuthority'];
   readonly context: BackendFactoryContext;
   readonly runtimePolicy: HostExecutionRuntimePolicyAuthority;
   readonly oauthCredentials: HostOAuthExecutionAuthority;
@@ -145,6 +145,12 @@ async function buildHostAiSdkBackend(
   const runtimePolicySnapshot = await readDuringBackendCreation(
     () => input.runtimePolicy.runtimePolicy.getSnapshot(),
     input.context.abortSignal,
+  );
+  const contextConnection = workHubContextConnection(
+    target.connection,
+    input.context.sessionId,
+    target.model,
+    runtimePolicySnapshot.policy.chatDefaults,
   );
   const transport = createFetchTransport(
     toRuntimePolicyProxy(target.networkProxy, target.proxySecret),
@@ -377,7 +383,6 @@ async function buildHostAiSdkBackend(
           : {}),
         readExecutionBoundary: () =>
           input.context.store.readExecutionBoundary(input.context.sessionId),
-        ...(input.readTaskAuthority ? { readTaskAuthority: input.readTaskAuthority } : {}),
         readPermissionMode: async () =>
           (await input.context.store.readHeader(input.context.sessionId)).permissionMode,
         ...(input.context.store.createSandboxBoundaryRequest
@@ -392,7 +397,7 @@ async function buildHostAiSdkBackend(
                 input.context.store.settleSandboxBoundaryRequest!(request),
             }
           : {}),
-        connection: target.connection,
+        connection: contextConnection,
         providerStateIdentity: target.providerStateIdentity,
         apiKey,
         modelId: target.model,

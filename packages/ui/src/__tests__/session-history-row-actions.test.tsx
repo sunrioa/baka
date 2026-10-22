@@ -159,6 +159,23 @@ test('renders session navigation and row actions as sibling controls', () => {
   assertNoNestedButtons(markup);
 });
 
+test('folded WorkHub groups keep their Sessions openable once in either sidebar organization', () => {
+  const manual = { ...session, id: 'manual', name: 'Manual task' };
+  const created = { ...session, id: 'created', name: 'WorkHub segment', isFlagged: true };
+  const folded = { id: 'workhub:local', label: 'WorkHub · Local', sessions: [created], defaultIsCollapsed: true };
+  for (const groupVariant of ['conversation', 'project'] as const) {
+    const markup = renderToStaticMarkup(<LocaleProvider locale="en"><Rail sessions={[manual, created]} groupVariant={groupVariant}
+      {...(groupVariant === 'project' ? { groups: [{ id: 'manual', label: 'Manual project', sessions: [manual] }, folded] } : { foldedGroups: [folded] })} /></LocaleProvider>);
+    const { document } = parseHTML(markup);
+    const createdRows = document.querySelectorAll('[data-session-id="created"].maka-session-row');
+    assert.equal(createdRows.length, 1, 'flagged WorkHub Sessions must not duplicate into the ordinary pinned section');
+    const disclosure = [...document.querySelectorAll('[aria-expanded]')].find(node => node.textContent?.includes('WorkHub · Local'));
+    assert.equal(disclosure?.getAttribute('aria-expanded'), 'false');
+    assert.equal(document.querySelectorAll('[data-session-id="manual"].maka-session-row').length, 1);
+    assertNoNestedButtons(markup);
+  }
+});
+
 test('renders a scan-friendly compact timestamp in the session rail', () => {
   const now = Date.UTC(2026, 7, 24, 12, 0, 0);
   const originalDateNow = Date.now;

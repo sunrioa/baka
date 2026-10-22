@@ -102,6 +102,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
   async function projectAssignment(
     a: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
+    segment?: number,
   ): Promise<WorkHubTaskAssignment> {
     const latest = await stores.sessionStore.readLatestWorkHubAssignment(a.work?.id ?? a.actionId);
     const base = {
@@ -111,6 +112,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
       delegationId: a.delegationId,
       targetSessionId: a.targetSessionId,
       targetMessageId: a.targetMessageId,
+      ...(segment === undefined ? {} : { segment }),
       targetSessionName: truncateUtf8(a.targetSessionName, 512, '…'),
       createdAt: a.ts,
       text: truncateUtf8(a.delegationText ?? a.userText, WORKHUB_TASK_TEXT_MAX_BYTES, '…'),
@@ -156,11 +158,49 @@ export function createWorkHubTaskHistoryRuntime(options: {
       throw error;
     }
   }
+
+  async function readAssignmentSegment(
+    assignment: WorkHubDelegationAssignedMessage,
+    sources: Map<string, WorkHubDelegationAssignedMessage | undefined>,
+  ): Promise<number | undefined> {
+    const workId = assignment.work?.id ?? assignment.actionId;
+    const lineage: WorkHubDelegationAssignedMessage[] = [];
+    const seen = new Set<string>();
+    let current = assignment;
+    // A page may start at any point in the global ledger. Follow the complete
+    // canonical task ancestry instead: neither the page rank nor a target's
+    // name/ID says where its execution container belongs in this task.
+    for (;;) {
+      if (seen.has(current.actionId) || (current.work?.id ?? current.actionId) !== workId)
+        return undefined;
+      seen.add(current.actionId);
+      lineage.push(current);
+      if (current.actionId === workId) break;
+      const sourceActionId = current.work?.continuesActionId ?? current.replacesActionId;
+      if (!sourceActionId) return undefined;
+      if (!sources.has(sourceActionId))
+        sources.set(
+          sourceActionId,
+          await stores.sessionStore.readWorkHubAssignment(sourceActionId),
+        );
+      const source = sources.get(sourceActionId);
+      if (!source || source.actionId !== sourceActionId) return undefined;
+      current = source;
+    }
+    const sessions = new Map<string, number>();
+    for (const source of lineage.reverse()) {
+      if (!sessions.has(source.targetSessionId))
+        sessions.set(source.targetSessionId, sessions.size + 1);
+    }
+    return sessions.get(assignment.targetSessionId);
+  }
+
   async function readHistory(
     workId: string,
     token?: string,
     actionId?: string,
   ): Promise<WorkHubTaskHistoryResult> {
+    const sources = new Map<string, WorkHubDelegationAssignedMessage | undefined>();
     if (actionId !== undefined) {
       if (token !== undefined)
         throw new HistoryCursorError('Exact assignment reads cannot use a history cursor');
@@ -176,7 +216,8 @@ export function createWorkHubTaskHistoryRuntime(options: {
       });
       const projected = await admission.runMany(
         [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
-        (lease) => projectAssignment(assignment, lease),
+        async (lease) =>
+          projectAssignment(assignment, lease, await readAssignmentSegment(assignment, sources)),
       );
       return { workId, assignments: [projected], nextCursor: null };
     }
@@ -211,8 +252,9 @@ export function createWorkHubTaskHistoryRuntime(options: {
       )
         continue;
       assignments.push(
-        await admission.runMany([WORKHUB_COORDINATION_SESSION_ID, a.targetSessionId], (lease) =>
-          projectAssignment(a, lease),
+        await admission.runMany(
+          [WORKHUB_COORDINATION_SESSION_ID, a.targetSessionId],
+          async (lease) => projectAssignment(a, lease, await readAssignmentSegment(a, sources)),
         ),
       );
       if (assignments.length === 8) break;
@@ -222,6 +264,15 @@ export function createWorkHubTaskHistoryRuntime(options: {
       assignments,
       nextCursor: before > 0 ? encode({ kind: 'assignments', workId, before, through }) : null,
     };
+  }
+  async function readAssignmentState(actionId: string, delegationId: string) {
+    const source = await stores.sessionStore.readWorkHubAssignment(actionId);
+    if (!source || source.delegationId !== delegationId)
+      throw new HistoryUnavailableError('The original assignment is unavailable');
+    return admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, source.targetSessionId],
+      async (lease) => (await projectAssignment(source, lease)).state,
+    );
   }
   async function readExecutions(
     actionId: string,
@@ -330,6 +381,7 @@ export function createWorkHubTaskHistoryRuntime(options: {
   }
   return {
     readExecutions,
+    readAssignmentState,
     handlers: {
       'workhub.tasks.history': (input) =>
         query(() => readHistory(input.workId, input.cursor, input.actionId)),

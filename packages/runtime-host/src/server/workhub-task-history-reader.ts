@@ -27,6 +27,7 @@ import { TOOL_RESULT_ARCHIVE_EVIDENCE_MAX_BYTES } from '@maka/core/tool-result-a
 import { createLedgerArchiveResourceReader } from '@maka/runtime/ledger-tool-result-archive-reader';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
+import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
 import type { ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admission-gate.js';
 import type { SessionTranscriptReader } from './session-transcript-reader.js';
@@ -43,8 +44,9 @@ type Cursor = {
   found: boolean;
   current?: {
     actionId: string;
-    phase: 'request' | 'execution' | 'records';
+    phase: 'request' | 'input' | 'execution' | 'records';
     offset: number;
+    inputId?: string;
     executionCursor?: string;
     execution?: {
       turnId: string;
@@ -63,10 +65,13 @@ const SCAN = { maxMessages: 64, maxStoredBytes: 256 * 1024 } as const;
 export function createWorkHubTaskHistoryReader(options: {
   stores: Pick<
     ExecutionStoresWriter<'interactive'>['sessionStore'],
-    'readWorkHubAssignment' | 'readWorkHubAssignmentsPage'
+    'readWorkHubAssignment' | 'readWorkHubTaskFactsPage' | 'readWorkHubTaskInput'
   >;
   reader: Pick<SessionTranscriptReader, 'readDurableHighWater' | 'readDurableRecords'>;
-  history: Pick<ReturnType<typeof createWorkHubTaskHistoryRuntime>, 'readExecutions'>;
+  history: Pick<
+    ReturnType<typeof createWorkHubTaskHistoryRuntime>,
+    'readExecutions' | 'readAssignmentState'
+  >;
   admission: SessionAdmissionGate;
   authorize(
     source: Assignment,
@@ -121,26 +126,43 @@ export function createWorkHubTaskHistoryReader(options: {
         const content = message.content;
         let body = JSON.stringify(content),
           archiveStatus: string | undefined;
-        if (content.kind === 'archived_tool_result') {
-          archiveStatus = content.status === 'not_loaded' ? 'unavailable' : content.status;
+        if (
+          content.kind === 'archived_tool_result' ||
+          (content.kind === 'terminal' &&
+            content.output.mode === 'pipes' &&
+            (content.output.stdoutTruncated || content.output.stderrTruncated))
+        ) {
+          // Transcript terminal tails are display projections, not the retained
+          // result. Resolve only this authorized source's canonical event; a
+          // copied recovery hint is neither a cross-Session address nor authority.
+          const runtimeEventId =
+            content.kind === 'archived_tool_result' ? content.runtimeEventId : message.id;
+          archiveStatus =
+            content.kind === 'archived_tool_result' && content.status !== 'not_loaded'
+              ? content.status
+              : 'unavailable';
           const evidence = options.archiveEvidence;
           if (evidence) {
             const loaded = await evidence.read({
               sessionId,
-              runtimeEventId: content.runtimeEventId,
+              runtimeEventId,
             });
             if (
               loaded.ok &&
+              loaded.event.id === runtimeEventId &&
               loaded.event.sessionId === sessionId &&
               loaded.event.turnId === message.turnId &&
+              loaded.event.modelVisibility !== 'hidden' &&
               loaded.event.content?.kind === 'function_response' &&
+              !loaded.event.content.providerExecuted &&
               loaded.event.content.id === message.toolUseId &&
-              loaded.event.content.name === content.toolName
+              (content.kind !== 'archived_tool_result' ||
+                loaded.event.content.name === content.toolName)
             ) {
-              const result = await createLedgerArchiveResourceReader(evidence)({
+              const result = await createLedgerArchiveResourceReader({ read: async () => loaded })({
                 storage: 'event',
                 sessionId,
-                runtimeEventId: content.runtimeEventId,
+                runtimeEventId,
                 maxBytes: TOOL_RESULT_ARCHIVE_EVIDENCE_MAX_BYTES,
               });
               if (result.ok) {
@@ -205,7 +227,7 @@ export function createWorkHubTaskHistoryReader(options: {
       )
         throw new Error('Task history cursor reader, source or filter changed');
     } else {
-      const page = await options.stores.readWorkHubAssignmentsPage({
+      const page = await options.stores.readWorkHubTaskFactsPage({
         ...SCAN,
         beforeSequence: Number.MAX_SAFE_INTEGER,
       });
@@ -220,6 +242,7 @@ export function createWorkHubTaskHistoryReader(options: {
       };
     }
     const records: Array<Record<string, unknown>> = [];
+    const unavailableExecutions: Array<{ actionId: string; reason: string }> = [];
     const touched = new Map<string, Assignment>([[source.actionId, source]]);
     let done = state.through === null;
     let current = source;
@@ -233,6 +256,7 @@ export function createWorkHubTaskHistoryReader(options: {
         recordOrder: 'newest_first_within_execution',
         offsetUnit: 'utf16_code_units',
         records,
+        ...(unavailableExecutions.length ? { unavailableExecutions } : {}),
         nextCursor,
       },
     });
@@ -278,42 +302,86 @@ export function createWorkHubTaskHistoryReader(options: {
           done = true;
           break;
         }
-        const page = await options.stores.readWorkHubAssignmentsPage({
+        const page = await options.stores.readWorkHubTaskFactsPage({
           ...SCAN,
           beforeSequence: state.before,
         });
-        let found: Assignment | undefined;
         for (const row of page.records) {
           state.before = row.sequence;
-          const a = row.message;
-          if (
-            row.sequence > state.through! ||
-            a.type !== 'workhub_coordination' ||
-            a.kind !== 'delegation_assigned' ||
-            workId(a) !== workId(source)
-          )
-            continue;
+          const fact = row.message;
+          if (row.sequence > state.through! || fact.type !== 'workhub_coordination') continue;
           if (!state.found) {
-            if (a.actionId !== state.boundaryActionId) continue;
-            state.found = true;
-            // The source identifies the work, not its latest correction. Read
-            // all earlier assignments, never this caller's live execution.
+            if (fact.kind === 'delegation_assigned' && fact.actionId === state.boundaryActionId)
+              state.found = true;
+            // The actor assignment is a fixed boundary: neither its live
+            // inputs nor future accepted facts become this historical page.
             continue;
           }
-          found = a;
-          break;
+          if (fact.kind === 'task_input') {
+            if (fact.workId !== workId(source) || !kinds.includes('user')) continue;
+            state.current = {
+              actionId: fact.sourceActionId,
+              inputId: fact.inputId,
+              phase: 'input',
+              offset: 0,
+            };
+          } else if (fact.kind === 'delegation_assigned' && workId(fact) === workId(source)) {
+            state.current = { actionId: fact.actionId, phase: 'request', offset: 0 };
+          }
+          if (state.current) break;
         }
-        if (!found) {
+        if (!state.current) {
           if (!page.records.length || state.before === 0) done = true;
           continue;
         }
-        state.current = { actionId: found.actionId, phase: 'request', offset: 0 };
       }
       const a = await options.stores.readWorkHubAssignment(state.current.actionId);
       if (!a || (await guard(a))?.actionId !== actor.actionId)
         return { status: 'unavailable' as const };
       current = a;
       touched.set(a.actionId, a);
+      if (state.current.phase === 'input') {
+        const accepted = await options.stores.readWorkHubTaskInput(state.current.inputId!);
+        if (
+          !accepted ||
+          accepted.workId !== workId(a) ||
+          accepted.generationId !== (a.work?.generationId ?? a.actionId) ||
+          accepted.sourceActionId !== a.actionId ||
+          accepted.sourceDelegationId !== a.delegationId ||
+          accepted.targetSessionId !== a.targetSessionId ||
+          accepted.turnId !== a.coordinationTurnId
+        )
+          return { status: 'unavailable' as const };
+        if (
+          !append(
+            {
+              kind: 'user',
+              recordSource: 'task_input',
+              inputOrigin: accepted.inputOrigin ?? 'unknown_legacy',
+              textSource:
+                accepted.originalUserText === undefined
+                  ? 'accepted_text_legacy'
+                  : 'original_user_text',
+              messageId: accepted.id,
+              inputId: accepted.inputId,
+              timestamp: accepted.ts,
+              mode: accepted.mode,
+              targetMessageId: accepted.targetMessageId,
+              coordinationTurnId: accepted.turnId,
+              ...(accepted.sourceMessageId ? { sourceMessageId: accepted.sourceMessageId } : {}),
+              acceptance: 'not_consumption_proof',
+              format: 'text',
+              body: accepted.originalUserText ?? accepted.text,
+            },
+            (offset, complete) => {
+              if (complete) state.current = undefined;
+              else state.current!.offset = offset;
+            },
+          )
+        )
+          break;
+        continue;
+      }
       if (state.current.phase === 'request') {
         if (kinds.includes('user')) {
           if (
@@ -321,6 +389,8 @@ export function createWorkHubTaskHistoryReader(options: {
               {
                 kind: 'user',
                 inputOrigin: 'coordination_request',
+                requestOrigin: a.inputOrigin ?? 'unknown_legacy',
+                textSource: 'recorded_user_context',
                 messageId: a.work?.sourceMessageId ?? a.id,
                 timestamp: a.ts,
                 format: 'text',
@@ -337,6 +407,19 @@ export function createWorkHubTaskHistoryReader(options: {
         continue;
       }
       if (state.current.phase === 'execution') {
+        const availability = await options.history.readAssignmentState(a.actionId, a.delegationId);
+        if (availability !== 'owned') {
+          unavailableExecutions.push({
+            actionId: a.actionId,
+            reason: availability === 'cancelled' ? 'cancelled_before_start' : availability,
+          });
+          if (Buffer.byteLength(JSON.stringify(response('x'.repeat(32)))) > READ_PAGE_MAX_BYTES) {
+            unavailableExecutions.pop();
+            break;
+          }
+          state.current = undefined;
+          continue;
+        }
         const page = await options.history.readExecutions(
           a.actionId,
           a.delegationId,
@@ -350,6 +433,16 @@ export function createWorkHubTaskHistoryReader(options: {
           a.targetSessionId,
           execution.turnId,
         );
+        if (through === null) {
+          unavailableExecutions.push({
+            actionId: a.actionId,
+            reason: 'native_transcript_unavailable',
+          });
+          if (Buffer.byteLength(JSON.stringify(response('x'.repeat(32)))) > READ_PAGE_MAX_BYTES) {
+            unavailableExecutions.pop();
+            break;
+          }
+        }
         state.current.executionCursor = page.nextCursor ?? undefined;
         state.current.execution = {
           turnId: execution.turnId,
@@ -367,16 +460,26 @@ export function createWorkHubTaskHistoryReader(options: {
         } else state.current = undefined;
         continue;
       }
-      const page = await options.reader.readDurableRecords(
-        a.targetSessionId,
-        {
-          ...SCAN,
-          direction: 'older',
-          throughSequence: execution.through,
-          position: execution.position,
-        },
-        execution.turnId,
-      );
+      let page;
+      try {
+        page = await options.reader.readDurableRecords(
+          a.targetSessionId,
+          {
+            ...SCAN,
+            direction: 'older',
+            throughSequence: execution.through,
+            position: execution.position,
+          },
+          execution.turnId,
+        );
+      } catch (error) {
+        if (error instanceof RuntimeReadModelError)
+          return {
+            status: 'unsupported' as const,
+            reason: 'The recorded native execution cannot be projected as task history',
+          };
+        throw error;
+      }
       if (page.throughSequence !== execution.through)
         throw new Error('Task history snapshot changed');
       let full = false;

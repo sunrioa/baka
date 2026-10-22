@@ -337,6 +337,11 @@ describe('Runtime Host operator commands', () => {
       assert.equal(resolved.operationGrants.includes('project.catalog.query'), true);
       assert.equal(resolved.operationGrants.includes('workhub.tasks.history'), true);
       assert.equal(resolved.operationGrants.includes('workhub.tasks.executions'), true);
+      // The unpublished task-centric bridge does not widen remote presets.
+      assert.equal(resolved.operationGrants.includes('workhub.tasks.find'), false);
+      assert.equal(resolved.operationGrants.includes('workhub.tasks.continue'), false);
+      assert.equal(resolved.operationGrants.includes('workhub.tasks.start'), false);
+      assert.equal(resolved.operationGrants.includes('workhub.tasks.ask'), false);
     }
     assert.equal(desktop.canPublishClientCapabilities, true);
     assert.equal(desktop.operationGrants.includes('client.capability.replace'), true);
@@ -506,6 +511,12 @@ describe('Runtime Host operator commands', () => {
         // these presets are `canUseHostPaths: false`.
         'session-bundle.export',
         'session-bundle.import',
+        // Local task-centric foundation, not yet a remote-owner capability.
+        'workhub.tasks.ask',
+        'workhub.tasks.continue',
+        'workhub.tasks.find',
+        'workhub.tasks.start',
+        'workhub.tasks.stop',
       ],
     );
   });

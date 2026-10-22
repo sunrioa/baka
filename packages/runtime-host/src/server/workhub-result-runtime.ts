@@ -19,6 +19,8 @@
 
 import { z } from 'zod';
 import { truncateUtf8 } from '@maka/core/diagnostic-log';
+import { readLogicalRuntimeExecutionForRun } from '@maka/core/runtime-logical-execution';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
 import {
   WORKHUB_INBOX_MAX_ITEMS,
   type WorkHubPendingInteraction,
@@ -26,36 +28,147 @@ import {
 import type { OperationHandlerMap } from './operation-dispatcher.js';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
+  isWorkHubReplacementIntentRetired,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
-import type { MakaTool } from '@maka/runtime/tool-runtime';
+import type { MakaToolContext, ToolExecutionScope } from '@maka/runtime/tool-runtime';
 import { isSessionNotFoundError, type ExecutionStoresWriter } from '@maka/storage/execution-stores';
 import type { RootTurnCoordinator } from './root-turn-coordinator.js';
 import type { HostMessageCoordinator } from './message-coordinator.js';
 import type { HostInteractionCoordinator } from './interaction-coordinator.js';
 import type { SessionAdmissionGate, SessionAdmissionLease } from './session-admission-gate.js';
 import { projectSessionInteractions } from './interaction-projection.js';
-import type { HostTaskGrantCoordinator } from './task-grant-coordinator.js';
 import {
   HostWorkHubResultCoordinator,
   type WorkHubResultObservation,
 } from './workhub-result-coordinator.js';
 import type { createWorkHubEvidenceRuntime } from './workhub-evidence-runtime.js';
 import { createWorkHubTaskHistoryRuntime } from './workhub-task-history-runtime.js';
+import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
+import {
+  formatWorkHubTaskBrief,
+  isWorkHubTaskBriefCurrent,
+  type createWorkHubTaskBriefReader,
+} from './workhub-task-brief.js';
+import { readHostedExecutionMembership } from './hosted-execution-membership.js';
 import {
   WORKHUB_TASK_MAX_ITEMS,
   WORKHUB_TASK_TEXT_MAX_BYTES,
   WORKHUB_DELIVERY_MAX_BYTES,
   type WorkHubTask,
   type WorkHubTaskDetail,
+  type WorkHubTaskBriefProjection,
 } from '../protocol/workhub-tasks.js';
+
+const resultReadParameters = z
+  .object({ actionId: z.string().min(1), offset: z.number().int().nonnegative().default(0) })
+  .strict();
+
+export type WorkHubResultRead =
+  | { readonly status: 'pending'; readonly targetSessionId: string; readonly message: string }
+  | { readonly status: 'obsolete'; readonly targetSessionId: string }
+  | (WorkHubResultObservation & {
+      readonly targetSessionId: string;
+      readonly nextOffset: number | null;
+    });
+
+/** Read-only task ancestry; interaction visibility grants no additional execution authority. */
+export function createWorkHubInteractionOwnership(input: {
+  stores: ExecutionStoresWriter<'interactive'>;
+  executions: Pick<RootTurnCoordinator, 'readLatestRootTurnLineage'>;
+}) {
+  return async function belongsToRoot(
+    scope: ToolExecutionScope,
+    root: { sessionId: string; turnId: string; runId: string },
+  ): Promise<boolean> {
+    if (!scope.runId) return false;
+    let current = { sessionId: scope.sessionId, turnId: scope.turnId, runId: scope.runId };
+    const seen = new Set<string>();
+    for (let depth = 0; depth < 32; depth++) {
+      const key = JSON.stringify(current);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      const invocation = await input.stores.runtimeEventStore.readRunInvocation(
+        current.sessionId,
+        current.runId,
+      );
+      if (
+        !invocation ||
+        invocation.turnId !== current.turnId ||
+        (depth === 0 &&
+          scope.invocationId !== undefined &&
+          invocation.invocationId !== scope.invocationId)
+      )
+        return false;
+      const logical = await readLogicalRuntimeExecutionForRun(
+        input.stores.runtimeEventStore,
+        current,
+      );
+      if (!logical || logical.tip.terminalEvent) return false;
+      if (current.sessionId === root.sessionId) {
+        const latest = await input.executions.readLatestRootTurnLineage(root);
+        const rootLogical = await readLogicalRuntimeExecutionForRun(
+          input.stores.runtimeEventStore,
+          latest,
+        );
+        return rootLogical?.runIds.includes(current.runId) === true;
+      }
+      const header = await input.stores.sessionStore.readHeaderSnapshot(current.sessionId);
+      const spawned = header.subagentParent,
+        spawn = header.subagentSpawn;
+      if (spawned?.kind !== 'subagent' || !spawn) return false;
+      if (spawned.graph) {
+        const admission = await input.stores.agentRunStore.readRootTurnAdmission(
+          current.sessionId,
+          logical.root.turnId,
+        );
+        const execution = admission?.execution;
+        if (
+          admission?.runId !== logical.root.runId ||
+          execution?.kind !== 'claimed_agent_graph_intent' ||
+          execution.claim.graphId !== spawned.graph.graphId ||
+          execution.claim.targetOperatorId !== spawned.graph.operatorId ||
+          execution.claim.targetSessionId !== current.sessionId ||
+          execution.claim.targetTurnId !== logical.root.turnId ||
+          execution.claim.targetRunId !== logical.root.runId
+        )
+          return false;
+      } else {
+        const initial = await input.stores.agentRunStore.readRootTurnAdmission(
+          current.sessionId,
+          spawn.initialTurnId,
+        );
+        if (
+          initial?.runId !== spawn.initialRunId ||
+          initial.execution.kind !== 'linked_child_initial'
+        )
+          return false;
+        const latest = await input.executions.readLatestRootTurnLineage({
+          sessionId: current.sessionId,
+          turnId: spawn.initialTurnId,
+          runId: spawn.initialRunId,
+        });
+        const childLogical = await readLogicalRuntimeExecutionForRun(
+          input.stores.runtimeEventStore,
+          latest,
+        );
+        if (!childLogical?.runIds.includes(current.runId)) return false;
+      }
+      current = {
+        sessionId: spawned.parentSessionId,
+        turnId: spawned.spawnedBy.parentTurnId,
+        runId: spawned.spawnedBy.parentRunId,
+      };
+    }
+    return false;
+  };
+}
 
 export function createWorkHubResultRuntime(options: {
   stores: ExecutionStoresWriter<'interactive'>;
   executions: RootTurnCoordinator;
   messages: HostMessageCoordinator;
   interactions: HostInteractionCoordinator;
-  taskGrants?: HostTaskGrantCoordinator;
   evidence?: Pick<
     ReturnType<typeof createWorkHubEvidenceRuntime>,
     'taskExecution' | 'waitingObservation'
@@ -64,10 +177,13 @@ export function createWorkHubResultRuntime(options: {
   admission: SessionAdmissionGate;
   readTurnResult(sessionId: string, turnId: string): Promise<string>;
   readTurnInput(sessionId: string, turnId: string): Promise<string>;
+  /** Optional task-view projection. Its history reader must run outside admission. */
+  readBrief?: ReturnType<typeof createWorkHubTaskBriefReader>;
   acquireResidency(): { release(): void };
   onError(error: unknown): void;
 }) {
   const { stores, executions, messages, admission, readTurnResult } = options;
+  const belongsToRoot = createWorkHubInteractionOwnership({ stores, executions });
   async function listAssignments() {
     const targets = (await stores.sessionStore.listHeaders())
       .filter((h) => h.id !== WORKHUB_COORDINATION_SESSION_ID && !h.isArchived)
@@ -87,23 +203,58 @@ export function createWorkHubResultRuntime(options: {
       await stores.sessionStore.listPendingSandboxBoundaryRequests(sessionId),
     ).pending;
   }
-  async function isActive(assignment: WorkHubDelegationAssignedMessage): Promise<boolean> {
+  async function visible(
+    assignment: WorkHubDelegationAssignedMessage,
+    includeStopped: boolean,
+    observedLatest?: WorkHubDelegationAssignedMessage,
+  ) {
+    if (!observedLatest)
+      return (
+        await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
+          [assignment.targetSessionId],
+          undefined,
+          includeStopped,
+        )
+      ).some(
+        (a) => a.actionId === assignment.actionId && a.delegationId === assignment.delegationId,
+      );
+    // Read-only discovery already located the canonical latest fact at its
+    // watermark. Do not re-scan every task's target ledger to rediscover its
+    // generation. Effect paths never pass this advisory observation.
+    const abort = await stores.sessionStore.readWorkHubReplacementAbort(assignment.delegationId);
+    const replacement = abort
+      ? await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)
+      : undefined;
+    return (
+      (observedLatest.work?.id ?? observedLatest.actionId) ===
+        (assignment.work?.id ?? assignment.actionId) &&
+      (observedLatest.work?.generationId ?? observedLatest.actionId) ===
+        (assignment.work?.generationId ?? assignment.actionId) &&
+      observedLatest.targetSessionId === assignment.targetSessionId &&
+      !(await stores.sessionStore.readWorkHubSupersession(assignment.delegationId)) &&
+      (!abort ||
+        (replacement &&
+          isWorkHubReplacementIntentRetired(replacement, abort) &&
+          replacement.replacesActionId === assignment.actionId &&
+          replacement.replacesDelegationId === assignment.delegationId &&
+          replacement.replacedTargetSessionId === assignment.targetSessionId &&
+          replacement.replacedTargetMessageId === assignment.targetMessageId))
+    );
+  }
+  async function isActive(
+    assignment: WorkHubDelegationAssignedMessage,
+    observedLatest?: WorkHubDelegationAssignedMessage,
+  ): Promise<boolean> {
     try {
       const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
       if (header.isArchived) return false;
-      const active = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget([
-        assignment.targetSessionId,
-      ]);
-      if (!active.some((a) => a.delegationId === assignment.delegationId && a.returnResults))
+      if (!assignment.returnResults || !(await visible(assignment, false, observedLatest)))
         return false;
       // Retirement intent takes precedence even before its final receipt exists.
-      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return false;
-      if (await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId)) {
-        const resolution = await stores.sessionStore.readWorkHubStopResolution(
-          assignment.delegationId,
-        );
-        if (resolution?.outcome !== 'not_owned') return false;
-      }
+      if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId, true))
+        return false;
+      if ((await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId))?.retires)
+        return false;
       return true;
     } catch (error) {
       if (isSessionNotFoundError(error)) return false;
@@ -165,8 +316,8 @@ export function createWorkHubResultRuntime(options: {
               .join(','),
           status: 'waiting_for_user',
           result:
-            'The delegated task needs user input. Desktop users can handle the original request in the WorkHub task inbox. Acknowledge it and continue other work; do not relay a blocking question by default. Session-wide grants remain at the original task.',
-          details: requests.map((p) => ({ interactionId: p.interactionId, request: p.request })),
+            'The task needs user input. Open its task view to answer the original request. Acknowledge the notification and continue other work; do not copy the question or answer approvals through the coordinator model.',
+          details: requests.map((p) => ({ interactionId: p.interactionId, kind: p.request.kind })),
           sharedTurn,
         };
       }
@@ -220,12 +371,80 @@ export function createWorkHubResultRuntime(options: {
           inspectLocked(assignment, lane, includeResult),
         );
   }
+  async function assertResultReader(ctx: MakaToolContext): Promise<void> {
+    ctx.abortSignal.throwIfAborted();
+    if (ctx.sessionId !== WORKHUB_COORDINATION_SESSION_ID || !ctx.runId || !ctx.invocationId)
+      throw new Error('WorkHub result access requires a current coordination invocation');
+    const run = await stores.runtimeEventStore.readRunInvocation(ctx.sessionId, ctx.runId);
+    if (
+      !run ||
+      run.sessionId !== ctx.sessionId ||
+      run.runId !== ctx.runId ||
+      run.turnId !== ctx.turnId ||
+      run.invocationId !== ctx.invocationId ||
+      run.opening.root.kind !== 'user' ||
+      run.terminalEvent
+    )
+      throw new Error('WorkHub result reader is not the current root invocation');
+    const root = await stores.agentRunStore.readRootTurnAdmission(ctx.sessionId, ctx.turnId);
+    const current = executions.readRootState(ctx.sessionId);
+    if (
+      root?.execution.kind !== 'workhub_coordination' ||
+      current.kind !== 'active' ||
+      current.turnId !== root.turnId ||
+      current.runId !== root.runId ||
+      (await readHostedExecutionMembership(stores.runtimeEventStore, root))?.tip.runId !== ctx.runId
+    )
+      throw new Error('WorkHub result access requires coordination authority');
+  }
+  /** Full coordinator results, not task-card excerpts or worker evidence envelopes. */
+  async function readResult(
+    raw: { actionId: string; offset?: number },
+    ctx: MakaToolContext,
+  ): Promise<WorkHubResultRead> {
+    const input = resultReadParameters.parse(raw);
+    const assignment = await admission.run(WORKHUB_COORDINATION_SESSION_ID, async () => {
+      await assertResultReader(ctx);
+      return stores.sessionStore.readWorkHubAssignment(input.actionId);
+    });
+    if (!assignment?.returnResults) throw new Error('Unknown WorkHub result assignment');
+    return admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
+      async (lease) => {
+        await assertResultReader(ctx);
+        const observation = await inspectLocked(assignment, lease);
+        ctx.abortSignal.throwIfAborted();
+        if (!observation) {
+          const active = await isActive(assignment);
+          ctx.abortSignal.throwIfAborted();
+          return active
+            ? {
+                status: 'pending',
+                targetSessionId: assignment.targetSessionId,
+                message:
+                  'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
+              }
+            : { status: 'obsolete', targetSessionId: assignment.targetSessionId };
+        }
+        const chars = Array.from(observation.result);
+        if (input.offset > chars.length) throw new Error('WorkHub result offset is out of bounds');
+        const end = input.offset + 16000;
+        return {
+          ...observation,
+          targetSessionId: assignment.targetSessionId,
+          result: chars.slice(input.offset, end).join(''),
+          nextOffset: end < chars.length ? end : null,
+        };
+      },
+    );
+  }
   async function taskRequests(
     assignment: WorkHubDelegationAssignedMessage,
     lease: SessionAdmissionLease,
     lanes: readonly string[] = [],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ) {
-    if (!(await isActive(assignment))) return [];
+    if (!(await isActive(assignment, observedLatest))) return [];
     const disposition = await messages.readMessageExecutionDispositionAdmitted(
       assignment.targetSessionId,
       assignment.targetMessageId,
@@ -249,20 +468,19 @@ export function createWorkHubResultRuntime(options: {
         p.turnId === identity.turnId &&
         p.runId === identity.runId,
     );
-    if (options.taskGrants)
-      for (const header of await stores.sessionStore.listHeaders()) {
-        if (!header.subagentParent || header.isArchived || !lanes.includes(header.id)) continue;
-        for (const request of await pending(header.id)) {
-          if (requests.length > WORKHUB_INBOX_MAX_ITEMS) break;
-          if (
-            await options.taskGrants.belongsToRoot(
-              { sessionId: request.sessionId, turnId: request.turnId, runId: request.runId },
-              identity,
-            )
+    for (const header of await stores.sessionStore.listHeaders()) {
+      if (!header.subagentParent || header.isArchived || !lanes.includes(header.id)) continue;
+      for (const request of await pending(header.id)) {
+        if (requests.length > WORKHUB_INBOX_MAX_ITEMS) break;
+        if (
+          await belongsToRoot(
+            { sessionId: request.sessionId, turnId: request.turnId, runId: request.runId },
+            identity,
           )
-            requests.push(request);
-        }
+        )
+          requests.push(request);
       }
+    }
     return requests;
   }
   async function taskLanes(assignment: WorkHubDelegationAssignedMessage) {
@@ -283,9 +501,10 @@ export function createWorkHubResultRuntime(options: {
     lease: SessionAdmissionLease,
     detail = false,
     lanes: readonly string[] = [],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ): Promise<WorkHubTaskDetail | undefined> {
     try {
-      return await taskProjectionLocked(assignment, lease, detail, lanes);
+      return await taskProjectionLocked(assignment, lease, detail, lanes, observedLatest);
     } catch (error) {
       if (isSessionNotFoundError(error)) return undefined;
       throw error;
@@ -296,6 +515,7 @@ export function createWorkHubResultRuntime(options: {
     lease: SessionAdmissionLease,
     detail: boolean,
     lanes: readonly string[],
+    observedLatest?: WorkHubDelegationAssignedMessage,
   ): Promise<WorkHubTaskDetail | undefined> {
     const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
     if (
@@ -306,18 +526,9 @@ export function createWorkHubResultRuntime(options: {
       header.id === WORKHUB_COORDINATION_SESSION_ID
     )
       return undefined;
-    const visible = await stores.sessionStore.readActiveWorkHubAssignmentsByTarget(
-      [assignment.targetSessionId],
-      undefined,
-      true,
-    );
-    if (
-      !visible.some(
-        (a) => a.actionId === assignment.actionId && a.delegationId === assignment.delegationId,
-      )
-    )
+    if (!(await visible(assignment, true, observedLatest))) return undefined;
+    if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId, true))
       return undefined;
-    if (await stores.sessionStore.readWorkHubReplacement(assignment.delegationId)) return undefined;
     const task: WorkHubTask = {
       workId: assignment.work?.id ?? assignment.actionId,
       actionId: assignment.actionId,
@@ -328,6 +539,7 @@ export function createWorkHubResultRuntime(options: {
         512,
         '…',
       ),
+      ...(assignment.taskTitle !== undefined ? { title: assignment.taskTitle } : {}),
       targetMessageId: assignment.targetMessageId,
       text: truncateUtf8(
         assignment.delegationText || assignment.userText,
@@ -337,14 +549,9 @@ export function createWorkHubResultRuntime(options: {
       createdAt: assignment.ts,
       status: 'queued',
     };
-    const stopped = await stores.sessionStore.readWorkHubStopRequest(assignment.delegationId);
-    if (stopped) {
-      const resolution = await stores.sessionStore.readWorkHubStopResolution(
-        assignment.delegationId,
-      );
-      if (resolution?.outcome !== 'not_owned')
-        return { task: { ...task, status: resolution ? 'stopped' : 'stopping' } };
-    }
+    const stopped = await readWorkHubStopProjection(stores.sessionStore, assignment.delegationId);
+    if (stopped?.retires)
+      return { task: { ...task, status: stopped.resolution ? 'stopped' : 'stopping' } };
     const disposition = await messages.readMessageExecutionDispositionAdmitted(
       assignment.targetSessionId,
       assignment.targetMessageId,
@@ -370,10 +577,12 @@ export function createWorkHubResultRuntime(options: {
     };
     const waiting = await options.evidence?.waitingObservation(assignment, identity);
     if (waiting) {
+      if (waiting.status === 'cancelled')
+        return { task: { ...task, execution, status: 'cancelled' } };
       const data = waiting.details as {
         requestId: string;
-        question: string;
-        sourceActionId: string | null;
+        question?: string;
+        sourceActionId?: string | null;
       };
       return {
         task: {
@@ -382,7 +591,7 @@ export function createWorkHubResultRuntime(options: {
           status: 'waiting_for_dependency',
           dependency: {
             requestId: data.requestId,
-            question: truncateUtf8(data.question, 2048, '…'),
+            question: truncateUtf8(data.question ?? waiting.result, 2048, '…'),
             ...(data.sourceActionId ? { sourceActionId: data.sourceActionId } : {}),
           },
         },
@@ -391,7 +600,7 @@ export function createWorkHubResultRuntime(options: {
     const waitReason = executions.readWorkHubDispatchWait(identity);
     if (waitReason) return { task: { ...task, execution, status: 'waiting_resource', waitReason } };
     const snapshot = await executions.read(identity);
-    const requests = await taskRequests(assignment, lease, lanes);
+    const requests = await taskRequests(assignment, lease, lanes, observedLatest);
     const status: WorkHubTask['status'] =
       snapshot.status === 'completed'
         ? 'pending_acceptance'
@@ -442,7 +651,6 @@ export function createWorkHubResultRuntime(options: {
     OperationHandlerMap,
     | 'workhub.interactions.query'
     | 'workhub.interactions.answer'
-    | 'workhub.interactions.revoke'
     | 'workhub.tasks.query'
     | 'workhub.tasks.read'
     | 'workhub.tasks.history'
@@ -517,41 +725,90 @@ export function createWorkHubResultRuntime(options: {
         },
       };
     },
-    'workhub.tasks.read': async (input) => {
+    'workhub.tasks.read': async (input, context) => {
       const missing = {
         ok: false as const,
         error: { code: 'not_found' as const, message: 'The original WorkHub task is unavailable' },
       };
-      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
-      if (!assignment || assignment.delegationId !== input.delegationId) return missing;
+      const assignment =
+        'workId' in input
+          ? await stores.sessionStore.readLatestWorkHubAssignment(input.workId)
+          : await stores.sessionStore.readWorkHubAssignment(input.actionId);
+      if (
+        !assignment ||
+        ('workId' in input
+          ? (assignment.work?.id ?? assignment.actionId) !== input.workId
+          : assignment.delegationId !== input.delegationId)
+      )
+        return missing;
       const lanes = await taskLanes(assignment);
-      return admission.runMany(lanes, async (lease) => {
-        const result = await taskProjection(assignment, lease, true, lanes);
-        return result ? { ok: true, result } : missing;
+      const result = await admission.runMany(lanes, (lease) =>
+        taskProjection(assignment, lease, true, lanes),
+      );
+      if (!result) return missing;
+      if (!input.includeBrief) return { ok: true, result };
+      const binding = {
+        workId: assignment.work?.id ?? assignment.actionId,
+        actionId: assignment.actionId,
+        delegationId: assignment.delegationId,
+      };
+      const unavailable = (): WorkHubTaskBriefProjection => ({
+        ...binding,
+        status: 'unavailable',
+        reason: 'The bounded task overview is unavailable; refresh or read task history',
       });
+      let brief = unavailable();
+      if (options.readBrief) {
+        try {
+          // This reader takes existing history admissions of its own. Never run
+          // it inside taskProjection's runMany, and never scan on default reads.
+          const prepared = await options.readBrief({
+            taskId: binding.workId,
+            sourceActionId: assignment.actionId,
+            abortSignal: context.inputClosedSignal,
+          });
+          if (
+            prepared.status === 'ok' &&
+            prepared.brief.taskId === binding.workId &&
+            prepared.brief.sourceActionId === binding.actionId &&
+            prepared.witness.taskId === binding.workId
+          ) {
+            const current = await admission.runMany(lanes, async (lease) => {
+              if (context.inputClosedSignal?.aborted) return false;
+              const source =
+                'workId' in input
+                  ? await stores.sessionStore.readLatestWorkHubAssignment(input.workId)
+                  : await stores.sessionStore.readWorkHubAssignment(input.actionId);
+              return (
+                source?.actionId === binding.actionId &&
+                source.delegationId === binding.delegationId &&
+                source.targetSessionId === assignment.targetSessionId &&
+                source.targetMessageId === assignment.targetMessageId &&
+                (source.work?.id ?? source.actionId) === binding.workId &&
+                !!(await taskProjection(source, lease, false, lanes)) &&
+                (await isWorkHubTaskBriefCurrent(stores.sessionStore, prepared.witness))
+              );
+            });
+            if (current)
+              brief = {
+                ...binding,
+                status: 'ok',
+                text: formatWorkHubTaskBrief(prepared.brief, input.briefLocale ?? 'en'),
+              };
+          }
+        } catch (error) {
+          // Brief failure is not a loss of task history, send authority or the
+          // original pending interaction. Do not turn it into a task-read error.
+          options.onError(error);
+        }
+      }
+      return { ok: true, result: { ...result, brief } };
     },
     'workhub.interactions.query': async () => {
       const requests: WorkHubPendingInteraction[] = [];
       const seen = new Set<string>();
-      const grants: import('../protocol/workhub-interactions.js').WorkHubTaskGrant[] = [];
       let truncated = false;
-      await options.taskGrants?.reconcile();
       for (const assignment of await listAssignments()) {
-        if (options.taskGrants && (await isActive(assignment))) {
-          const header = await stores.sessionStore.readHeaderSnapshot(assignment.targetSessionId);
-          for (const { grant } of await stores.sessionStore.listTaskExecutionGrants(
-            assignment.targetSessionId,
-          )) {
-            if (grant.delegationId !== assignment.delegationId) continue;
-            if (grants.length === WORKHUB_INBOX_MAX_ITEMS) truncated = true;
-            else
-              grants.push({
-                actionId: assignment.actionId,
-                targetSessionName: truncateUtf8(header.name || header.id, 512, '…'),
-                grant,
-              });
-          }
-        }
         const lanes = await taskLanes(assignment);
         const items = await admission.runMany(lanes, async (lease) => {
           const pendingRequests = await taskRequests(assignment, lease, lanes);
@@ -568,12 +825,12 @@ export function createWorkHubResultRuntime(options: {
           const key = JSON.stringify([item.interaction.sessionId, item.interaction.interactionId]);
           if (seen.has(key)) continue;
           if (requests.length === WORKHUB_INBOX_MAX_ITEMS)
-            return { ok: true, result: { requests, grants, truncated: true } };
+            return { ok: true, result: { requests, truncated: true } };
           seen.add(key);
           requests.push(item);
         }
       }
-      return { ok: true, result: { requests, grants, truncated } };
+      return { ok: true, result: { requests, truncated } };
     },
     'workhub.interactions.answer': async (input) => {
       const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
@@ -584,7 +841,7 @@ export function createWorkHubResultRuntime(options: {
           message: 'The original task request is no longer pending',
         },
       };
-      if (!assignment?.returnResults) return notFound;
+      if (!assignment?.returnResults || assignment.actionId !== input.actionId) return notFound;
       const lanes = await taskLanes(assignment);
       return admission.runMany(lanes, async (lease) => {
         const request = (await taskRequests(assignment, lease, lanes)).find(
@@ -594,59 +851,14 @@ export function createWorkHubResultRuntime(options: {
             p.runId === input.expectedRunId,
         );
         if (!request) return notFound;
-        if (
-          request.request.kind !== input.answer.kind ||
-          input.answer.kind === 'permission' ||
-          ((input.answer.kind === 'sandbox_boundary' ||
-            input.answer.kind === 'client_capability') &&
-            input.answer.decision !== 'deny' &&
-            (input.grantScope !== 'task' || !options.taskGrants))
-        )
+        if (request.request.kind !== input.answer.kind)
           return {
             ok: false,
             error: {
               code: 'operation_conflict',
-              message:
-                'WorkHub cannot grant Session-wide permissions or bypass the original approval authority',
+              message: 'The answer kind does not match the original task request',
             },
           };
-        let taskGrant: import('@maka/core/task-execution-grant').TaskExecutionGrant | undefined;
-        if (input.grantScope === 'task' && options.taskGrants) {
-          if (
-            (request.request.kind !== 'sandbox_boundary' &&
-              request.request.kind !== 'client_capability') ||
-            (input.answer.kind !== 'sandbox_boundary' &&
-              input.answer.kind !== 'client_capability') ||
-            input.answer.decision !== 'allow'
-          )
-            return {
-              ok: false,
-              error: { code: 'operation_conflict', message: 'Invalid task grant decision' },
-            };
-          const disposition = await messages.readMessageExecutionDispositionAdmitted(
-            assignment.targetSessionId,
-            assignment.targetMessageId,
-            lease,
-          );
-          if (disposition.kind !== 'owned_root') return notFound;
-          taskGrant = await options.taskGrants.create(
-            assignment,
-            {
-              sessionId: assignment.targetSessionId,
-              turnId: disposition.turnId,
-              runId: disposition.runId,
-            },
-            {
-              sessionId: request.sessionId,
-              turnId: request.turnId,
-              runId: request.runId,
-              requestId: request.interactionId,
-            },
-            request.request.kind === 'sandbox_boundary'
-              ? { kind: 'sandbox', expansion: request.request.expansion }
-              : { kind: 'client_capability', target: request.request.target },
-          );
-        }
         const outcome = await options.interactions.answerAdmitted(
           {
             sessionId: request.sessionId,
@@ -654,31 +866,12 @@ export function createWorkHubResultRuntime(options: {
             answer: input.answer,
           },
           lease,
-          taskGrant,
         );
         if (outcome.ok) {
           notify(assignment.targetSessionId);
-          options.taskGrants?.notify();
         }
         return outcome;
       });
-    },
-    'workhub.interactions.revoke': async (input) => {
-      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
-      if (!assignment?.returnResults || !options.taskGrants)
-        return { ok: false, error: { code: 'not_found', message: 'Task grant unavailable' } };
-      const grant = (
-        await stores.sessionStore.listTaskExecutionGrants(assignment.targetSessionId)
-      ).find(
-        (r) =>
-          r.grant.grantId === input.grantId && r.grant.delegationId === assignment.delegationId,
-      );
-      if (!grant)
-        return { ok: false, error: { code: 'not_found', message: 'Task grant unavailable' } };
-      // Do not hold Session admission while waiting for resource settlement.
-      await options.taskGrants.revoke(input.grantId);
-      notify(assignment.targetSessionId);
-      return { ok: true, result: { grantId: input.grantId } };
     },
   };
   const coordinator = new HostWorkHubResultCoordinator({
@@ -688,155 +881,82 @@ export function createWorkHubResultRuntime(options: {
     acquireResidency: options.acquireResidency,
     onError: options.onError,
   });
-  const relayWatchers = new Map<string, Set<() => void>>();
   function notify(sessionId: string): void {
     coordinator.notify(sessionId);
-    for (const wake of relayWatchers.get(sessionId) ?? []) wake();
   }
-  const parameters = z
-    .object({
-      actionId: z.string().min(1),
-      operation: z.enum(['read', 'ask_question']).default('read'),
-      interactionId: z.string().optional(),
-      offset: z.number().int().nonnegative().default(0),
-    })
-    .strict();
-  const tool: MakaTool<z.infer<typeof parameters>> = {
-    name: 'WorkHubResult',
-    description:
-      'Read a delegated task result in pages, or present its exact pending question to the user here and forward their actual answer. Use actionId from a Host result notification. Never use this tool to approve permissions. The read operation returns Unicode character offsets.',
-    parameters,
-    categoryHint: 'read',
-    recoveryMode: 'never_auto_retry',
-    async impl(raw, ctx) {
-      const input = parameters.parse(raw);
-      if (ctx.sessionId !== WORKHUB_COORDINATION_SESSION_ID)
-        throw new Error('WorkHub result access requires the coordination Session');
-      const assignment = await stores.sessionStore.readWorkHubAssignment(input.actionId);
-      if (!assignment?.returnResults) throw new Error('Unknown WorkHub result assignment');
-      const observation = await inspect(assignment);
-      if (!observation) {
-        if (input.operation !== 'read') throw new Error('No pending delegated question');
-        const active = await admission.runMany(
-          [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
-          () => isActive(assignment),
+  /** Startup-only retirement of copied coordinator questions, never worker originals. */
+  async function retireLegacy(): Promise<{ closed: number }> {
+    let closed = 0;
+    const runs = new Map<string, readonly import('@maka/core/runtime-event').RuntimeEvent[]>();
+    for (const pending of await stores.interactionStore.listSessionPending(
+      WORKHUB_COORDINATION_SESSION_ID,
+    )) {
+      const question = pending.request;
+      if (pending.sessionId !== WORKHUB_COORDINATION_SESSION_ID || question.kind !== 'question')
+        continue;
+      let events = runs.get(pending.runId);
+      if (!events) {
+        events = await stores.runtimeEventStore.readImmutableRuntimeEvents(
+          WORKHUB_COORDINATION_SESSION_ID,
+          pending.runId,
         );
-        return active
-          ? {
-              status: 'pending',
-              targetSessionId: assignment.targetSessionId,
-              message:
-                'No result is ready yet. The Host will automatically notify WorkHub when a result or user question is available. Acknowledge the delegation and end this response; do not poll tools to wait.',
-            }
-          : { status: 'obsolete', targetSessionId: assignment.targetSessionId };
+        runs.set(pending.runId, events);
       }
-      if (input.operation === 'read') {
-        const chars = Array.from(observation.result),
-          end = input.offset + 16000;
-        return {
-          ...observation,
-          result: chars.slice(input.offset, end).join(''),
-          nextOffset: end < chars.length ? end : null,
-        };
-      }
-      if (!input.interactionId || !ctx.askUserQuestion)
-        throw new Error('A pending question and interactive WorkHub are required');
-      const request = await admission.run(assignment.targetSessionId, async () =>
-        (await pending(assignment.targetSessionId)).find(
-          (p) => p.interactionId === input.interactionId && p.turnId === observation.turnId,
-        ),
-      );
-      if (!request || request.request.kind !== 'question')
-        throw new Error('Only pending user questions can be relayed');
-      const relayState: { closed: boolean; status: 'question_settled_in_target' | 'obsolete' } = {
-        closed: false,
-        status: 'obsolete',
-      };
-      let checking = false;
-      const checkOriginal = () => {
-        if (checking || relayState.closed) return;
-        checking = true;
-        void admission
-          .run(assignment.targetSessionId, async () => ({
-            active: await isActive(assignment),
-            questionPending: (await pending(assignment.targetSessionId)).some(
-              (item) => item.interactionId === request.interactionId,
-            ),
-          }))
-          .then(async ({ active, questionPending }) => {
-            if (active && questionPending) return;
-            relayState.status = active ? 'question_settled_in_target' : 'obsolete';
-            relayState.closed = true;
-            if (!(await options.interactions.closeRelayedQuestion(ctx.turnId, ctx.toolCallId)))
-              relayState.closed = false;
-          })
-          .catch((error) => {
-            relayState.closed = false;
-            try {
-              options.onError(error);
-            } catch {
-              // The relay watcher must not leave an unhandled timer rejection.
-            }
-          })
-          .finally(() => {
-            checking = false;
-          });
-      };
-      let watchers = relayWatchers.get(assignment.targetSessionId);
-      if (!watchers) {
-        watchers = new Set();
-        relayWatchers.set(assignment.targetSessionId, watchers);
-      }
-      watchers.add(checkOriginal);
-      const timer = setInterval(checkOriginal, 5000);
-      timer.unref();
-      let answer: Awaited<ReturnType<NonNullable<typeof ctx.askUserQuestion>>>;
-      try {
-        answer = await ctx.askUserQuestion(
-          request.request.questions.map((q) => ({
-            question: q.question,
-            options: q.options.map((o) => ({ ...o })),
-          })),
+      const relays = events.filter((event) => {
+        const call = event.content;
+        if (
+          event.sessionId !== pending.sessionId ||
+          event.turnId !== pending.turnId ||
+          event.runId !== pending.runId ||
+          event.partial ||
+          event.role !== 'model' ||
+          call?.kind !== 'function_call' ||
+          call.name !== 'WorkHubResult' ||
+          call.id !== question.toolUseId ||
+          !call.args ||
+          typeof call.args !== 'object' ||
+          Array.isArray(call.args)
+        )
+          return false;
+        const args = call.args as Record<string, unknown>;
+        return (
+          args.operation === 'ask_question' &&
+          typeof args.actionId === 'string' &&
+          typeof args.interactionId === 'string'
         );
-      } catch (error) {
-        if (relayState.closed)
-          return {
-            status: relayState.status,
-            targetSessionId: assignment.targetSessionId,
-            message:
-              relayState.status === 'question_settled_in_target'
-                ? 'The original task question has settled. Wait for the automatic task result; do not ask again.'
-                : 'The delegated task is no longer active.',
-          };
-        throw error;
-      } finally {
-        clearInterval(timer);
-        watchers.delete(checkOriginal);
-        if (watchers.size === 0) relayWatchers.delete(assignment.targetSessionId);
-      }
-      ctx.abortSignal.throwIfAborted();
-      // Recheck the original delegation after the human responds. A late answer
-      // must not revive a cancelled/replaced task or answer another interaction.
-      const outcome = await admission.runMany(
-        [WORKHUB_COORDINATION_SESSION_ID, assignment.targetSessionId],
-        async (lease) => {
-          const current = await inspectLocked(assignment, lease);
-          if (!current || current.turnId !== request.turnId) return undefined;
-          return options.interactions.answerDelegatedQuestion(
-            {
-              sessionId: assignment.targetSessionId,
-              interactionId: request.interactionId,
-              answer: { kind: 'question', answers: answer.answers.map((a) => a.answer) },
-            },
-            lease,
-          );
-        },
-      );
-      if (!outcome) return { status: 'obsolete' };
-      if (!outcome.ok) throw new Error(outcome.error.message);
-      notify(assignment.targetSessionId);
-      return { status: outcome.result.status, targetSessionId: assignment.targetSessionId };
-    },
-  };
-  return { coordinator, tool, notify, handlers };
+      });
+      if (relays.length > 1) throw new Error('Ambiguous legacy WorkHub question producer');
+      if (
+        relays.length === 1 &&
+        (await options.interactions.closeLegacyWorkHubRelay({
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          turnId: pending.turnId,
+          runId: pending.runId,
+          requestId: pending.requestId,
+          toolUseId: question.toolUseId,
+        }))
+      )
+        closed++;
+    }
+    return { closed };
+  }
+  async function projectTask(source: WorkHubDelegationAssignedMessage, detail = false) {
+    const current = await readCurrentWorkHubTaskSource(
+      options,
+      source.work?.id ?? source.actionId,
+      source,
+    );
+    if (!current) return undefined;
+    const basic = await admission.runMany(
+      [WORKHUB_COORDINATION_SESSION_ID, current.targetSessionId],
+      (lease) => taskProjection(current, lease, detail, [], source),
+    );
+    if (!basic || !['running', 'waiting_for_user'].includes(basic.task.status)) return basic;
+    const lanes = await taskLanes(current);
+    if (lanes.length <= 2) return basic;
+    return admission.runMany(lanes, (lease) =>
+      taskProjection(current, lease, detail, lanes, source),
+    );
+  }
+  return { coordinator, notify, handlers, projectTask, retireLegacy, readResult };
 }

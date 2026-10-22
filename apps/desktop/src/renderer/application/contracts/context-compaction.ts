@@ -21,8 +21,8 @@ import type { ContextCompactionOutcome } from '@maka/core/events';
 import type { UiLocale } from '@maka/core/ui-locale';
 import type { ContextCompactResult } from '@maka/runtime-host/protocol';
 import type { ToastApi } from '@maka/ui';
-import { isSessionWorkspaceUnavailableError } from '../../../application/contracts/session-workspace-errors.js';
-import { getShellCopy, localizedShellErrorMessage } from '../../../locales/shell-copy.js';
+import { isSessionWorkspaceUnavailableError } from './session-workspace-errors.js';
+import { getDesktopConversationCopy } from './conversation-copy.js';
 
 const SETTLED_PRESENTATION_LIMIT = 128;
 
@@ -36,7 +36,7 @@ export function contextCompactionNotice(
   outcome: ContextCompactionOutcome,
   uiLocale: UiLocale,
 ): ContextCompactionNotice {
-  const copy = getShellCopy(uiLocale).app;
+  const copy = getDesktopConversationCopy(uiLocale).quoteCompanion;
   if (outcome.kind === 'compacted') {
     return {
       level: 'success',
@@ -78,7 +78,7 @@ export function createContextCompactionPresentation(options: {
     started(sessionId: string, turnId: string, uiLocale: UiLocale): void {
       const key = compactionKey(sessionId, turnId);
       if (runningToastByTurn.has(key) || settledTurns.has(key)) return;
-      const copy = getShellCopy(uiLocale).app;
+      const copy = getDesktopConversationCopy(uiLocale).quoteCompanion;
       runningToastByTurn.set(
         key,
         options.toastApi.toast({
@@ -138,6 +138,11 @@ function compactionKey(sessionId: string, turnId: string): string {
 export function createContextCompactionCommands(input: {
   compact(sessionId: string): Promise<ContextCompactResult>;
   isCurrentSession(sessionId: string): boolean;
+  formatError(error: unknown, fallback: string, locale: UiLocale): string;
+  workspaceErrorCopy(locale: UiLocale): {
+    readonly workspaceUnavailableTitle: string;
+    readonly workspaceUnavailableDescription: string;
+  };
   feedback: {
     readonly current: {
       readonly locale: UiLocale;
@@ -167,13 +172,14 @@ export function createContextCompactionCommands(input: {
       } catch (error) {
         if (!input.isCurrentSession(sessionId)) return false;
         const { locale, toast } = input.feedback.current;
-        const copy = getShellCopy(locale);
+        const copy = getDesktopConversationCopy(locale).quoteCompanion;
         if (isSessionWorkspaceUnavailableError(error)) {
-          toast.error(copy.errors.workspaceUnavailableTitle, copy.errors.workspaceUnavailableDescription, undefined, { sessionId });
+          const errors = input.workspaceErrorCopy(locale);
+          toast.error(errors.workspaceUnavailableTitle, errors.workspaceUnavailableDescription, undefined, { sessionId });
         } else {
           toast.error(
-            copy.app.compactErrorTitle,
-            localizedShellErrorMessage(error, copy.app.compactErrorFallback, locale),
+            copy.compactErrorTitle,
+            input.formatError(error, copy.compactErrorFallback, locale),
             undefined,
             { sessionId },
           );

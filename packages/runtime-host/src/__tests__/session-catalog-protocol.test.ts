@@ -181,6 +181,19 @@ describe('Session catalog protocol', () => {
     }
   });
 
+  test('carries optional WorkHub creation provenance without inferring it for old peers', () => {
+    for (const workHubCreated of [true, false]) {
+      const value = { ...projection(), workHubCreated };
+      assert.deepEqual(decodeSessionCatalogItem(value), value);
+    }
+    assert.equal(Object.hasOwn(decodeSessionCatalogItem(projection()), 'workHubCreated'), false);
+    for (const workHubCreated of ['true', 1, null, undefined])
+      assert.throws(
+        () => decodeSessionCatalogItem({ ...projection(), workHubCreated }),
+        isProtocolError,
+      );
+  });
+
   test('carries an optional archive time only on an archived Session', () => {
     const archived = { ...projection(), isArchived: true, archivedAt: 1_700_000_000_000 };
     assert.deepEqual(decodeSessionCatalogItem(archived), archived);

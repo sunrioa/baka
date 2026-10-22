@@ -29,12 +29,16 @@ interface TaskViewCopy {
   panel: string; chooseTask: string; coordinationHint: string; coordinationFeed: string;
   dispatchedTasks: string; dispatchSummary: string; dispatchDetails: string; taskStatePending: string; executionEnded: string;
   source: string; feed: string; historical: string; historyLimit: string;
+  segment: string; segmentPending: string;
+  briefTitle: string; briefReadonly: string; briefLoading: string; briefUnavailable: string;
   state: Record<WorkHubTaskAssignment['state'], string>;
   status: Record<TurnSnapshot['status'], string>;
 }
 export const workHubTaskViewCopy = {
   en: {
-    title: 'Task execution', description: 'Full conversations of this task’s Sessions, including intervening work. Sending stays bound to the current task; execution ending is not verified completion.',
+    briefTitle: 'Task overview', briefReadonly: 'Read only', briefLoading: 'Refreshing the bounded overview from task records.', briefUnavailable: 'The overview is unavailable. Task history, input and original approvals remain available; refresh or read the history below.',
+    title: 'Task execution', description: 'Continuous task history. Sending stays bound to the current task; execution ending is not verified completion.',
+    segment: 'Segment {number}', segmentPending: 'Earlier segment',
     back: 'Back to WorkHub', follow: 'Follow latest execution', refresh: 'Refresh', loading: 'Refreshing task facts or waiting for the Host.',
     attempts: 'Assignments and executions', currentGeneration: 'Current generation', earlierGeneration: 'Earlier generation', loadEarlier: 'Load earlier assignments',
     chooseExecution: 'Choose execution', executionNumber: 'Execution {number}', superseded: 'Superseded', lineagePending: 'Reading execution lineage; the latest attempt is not confirmed yet.',
@@ -46,10 +50,12 @@ export const workHubTaskViewCopy = {
     source: 'Task instructions', feed: 'Execution record', historical: 'Historical execution · Read only',
     historyLimit: 'Showing the latest {count} executions. Select an earlier assignment or execution above to read older records.',
     state: { owned: 'Owned execution', queued: 'Queued', cancelled: 'Cancelled', shared: 'Shared Turn; not an exclusive task execution', unavailable: 'Execution ownership unavailable' },
-    status: { created: 'Queued', admitted: 'Queued', running: 'Running', waiting_for_user: 'Needs your input', completed: 'Execution ended · Pending acceptance', failed: 'Failed', cancelled: 'Cancelled' },
+    status: { created: 'Queued', admitted: 'Queued', running: 'Running', waiting_for_user: 'Needs your input', completed: 'Ended', failed: 'Failed / stopped', cancelled: 'Failed / stopped' },
   },
   'zh-CN': {
-    title: '任务实时执行', description: '连续展示相关 Session 的完整对话，包含期间其他任务；输入仍只发给当前任务，执行结束不代表已验收。',
+    briefTitle: '任务概况', briefReadonly: '只读', briefLoading: '正在从任务记录刷新有界概况。', briefUnavailable: '概况暂不可用；任务历史、直接输入和原审批不受影响，可刷新或查阅下方历史。',
+    title: '任务实时执行', description: '连续展示任务历史；输入只发给当前任务，执行结束不代表目标已达成。',
+    segment: '第 {number} 段', segmentPending: '较早执行段',
     back: '返回 WorkHub', follow: '跟随最新执行', refresh: '刷新', loading: '任务事实正在刷新或暂不可用。',
     attempts: '派发与执行记录', currentGeneration: '当前阶段', earlierGeneration: '历史阶段', loadEarlier: '加载更早派发',
     chooseExecution: '选择执行尝试', executionNumber: '执行 {number}', superseded: '已替换', lineagePending: '正在读取执行沿革，尚不能确定最新尝试。',
@@ -61,10 +67,12 @@ export const workHubTaskViewCopy = {
     source: '任务要求', feed: '执行记录', historical: '历史执行 · 只读',
     historyLimit: '当前展示最近 {count} 次执行；更早记录可在上方的派发与执行记录中选择查看。',
     state: { owned: '独立执行', queued: '排队中', cancelled: '已取消', shared: '共享 Turn，不能作为独占执行展示', unavailable: '执行归属不可用' },
-    status: { created: '排队中', admitted: '排队中', running: '执行中', waiting_for_user: '待你处理', completed: '执行结束 · 待验收', failed: '失败', cancelled: '已取消' },
+    status: { created: '排队中', admitted: '排队中', running: '执行中', waiting_for_user: '待你处理', completed: '已结束', failed: '失败 / 已停止', cancelled: '失败 / 已停止' },
   },
   'zh-TW': {
-    title: '任務即時執行', description: '連續顯示相關 Session 的完整對話，包含期間其他任務；輸入仍只傳給目前任務，執行結束不代表已驗收。',
+    briefTitle: '任務概況', briefReadonly: '唯讀', briefLoading: '正在從任務記錄更新有界概況。', briefUnavailable: '概況暫時無法取得；任務歷史、直接輸入與原審批不受影響，可重新整理或查閱下方歷史。',
+    title: '任務即時執行', description: '連續顯示任務歷史；輸入只傳給目前任務，執行結束不代表目標已達成。',
+    segment: '第 {number} 段', segmentPending: '較早執行段',
     back: '返回 WorkHub', follow: '跟隨最新執行', refresh: '重新整理', loading: '任務資訊正在更新或暫時無法取得。',
     attempts: '派發與執行記錄', currentGeneration: '目前階段', earlierGeneration: '歷史階段', loadEarlier: '載入更早派發',
     chooseExecution: '選擇執行嘗試', executionNumber: '執行 {number}', superseded: '已取代', lineagePending: '正在讀取執行沿革，尚無法確認最新嘗試。',
@@ -76,6 +84,6 @@ export const workHubTaskViewCopy = {
     source: '任務要求', feed: '執行記錄', historical: '歷史執行 · 唯讀',
     historyLimit: '目前顯示最近 {count} 次執行；更早記錄可在上方的派發與執行記錄中選擇查看。',
     state: { owned: '獨立執行', queued: '排隊中', cancelled: '已取消', shared: '共享 Turn，無法作為獨占執行顯示', unavailable: '執行歸屬無法取得' },
-    status: { created: '排隊中', admitted: '排隊中', running: '執行中', waiting_for_user: '待你處理', completed: '執行結束 · 待驗收', failed: '失敗', cancelled: '已取消' },
+    status: { created: '排隊中', admitted: '排隊中', running: '執行中', waiting_for_user: '待你處理', completed: '已結束', failed: '失敗 / 已停止', cancelled: '失敗 / 已停止' },
   },
 } satisfies UiCatalog<TaskViewCopy>;

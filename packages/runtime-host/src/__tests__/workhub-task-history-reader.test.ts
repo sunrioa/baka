@@ -18,16 +18,33 @@
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
-import type { StoredMessage, WorkHubDelegationAssignedMessage } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  WORKHUB_COORDINATION_SESSION_ROLE,
+  type StoredMessage,
+  type WorkHubDelegationAssignedMessage,
+} from '@maka/core/session';
+import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import type { RuntimeEvent } from '@maka/core/runtime-event';
 import { encodeDurableToolResultOutput } from '@maka/runtime/durable-tool-result-projection';
+import { projectTranscriptToolResult } from '@maka/runtime/runtime-event-read-model';
 import { READ_PAGE_MAX_BYTES } from '@maka/runtime/read-page';
+import { RuntimeReadModelError } from '@maka/runtime/runtime-read-model';
+import { shapeTerminalResult } from '@maka/runtime/shell-tools';
 import { createWorkHubTaskHistoryReader } from '../server/workhub-task-history-reader.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
 import type { MakaToolContext } from '@maka/runtime/tool-runtime';
+import { createSessionStore } from '@maka/storage/session-store';
 
 type Options = Parameters<typeof createWorkHubTaskHistoryReader>[0];
 type Input = Parameters<ReturnType<typeof createWorkHubTaskHistoryReader>>[0];
+type AssignmentState = 'queued' | 'cancelled' | 'owned' | 'shared' | 'unavailable';
+type ScanRequest = { beforeSequence?: number; maxMessages: number; maxStoredBytes: number };
 function assignment(id: string, work = 'work'): WorkHubDelegationAssignedMessage {
   return {
     type: 'workhub_coordination',
@@ -51,6 +68,37 @@ function assignment(id: string, work = 'work'): WorkHubDelegationAssignedMessage
     work: { id: work, generationId: 'old-generation' },
   };
 }
+function acceptedInput(
+  source: WorkHubDelegationAssignedMessage,
+  id: string,
+  mode: WorkHubTaskInputMessage['mode'],
+  raw: string,
+): WorkHubTaskInputMessage {
+  return {
+    type: 'workhub_coordination',
+    kind: 'task_input',
+    schemaVersion: 1,
+    id: `whti_${createHash('sha256').update(id).digest('hex').slice(0, 48)}`,
+    turnId: source.coordinationTurnId,
+    ts: 2,
+    inputId: id,
+    workId: source.work?.id ?? source.actionId,
+    generationId: source.work?.generationId ?? source.actionId,
+    sourceActionId: source.actionId,
+    sourceDelegationId: source.delegationId,
+    targetSessionId: source.targetSessionId,
+    targetMessageId: `input-message-${id}`,
+    text: `Prepared worker instruction ${id}`,
+    originalUserText: raw,
+    inputOrigin: 'user',
+    sourceMessageId: `original-${id}`,
+    targetContentDigest: `sha256:${'1'.repeat(64)}`,
+    mode,
+    ...(mode === 'steering'
+      ? { execution: { turnId: source.targetTurnId, runId: `run-${source.targetTurnId}` } }
+      : {}),
+  };
+}
 function fixture() {
   const assignments = [
     assignment('work'),
@@ -69,22 +117,51 @@ function fixture() {
     ['followup', ['turn-followup']],
   ]);
   const denied = new Set<string>();
+  const inputs: Array<{ sequence: number; message: WorkHubTaskInputMessage }> = [];
+  const hiddenInputs = new Set<string>();
+  const states = new Map<string, AssignmentState>();
   const transcriptReads: Array<{ sessionId: string; turnId?: string }> = [];
   const reads: object[] = [];
   let onRead = () => {};
+  let onInputRead = () => {};
+  const facts = () =>
+    [...assignments.map((message, index) => ({ message, sequence: index * 100 })), ...inputs].sort(
+      (a, b) => a.sequence - b.sequence,
+    );
+  const scan = async (input: ScanRequest, assignmentsOnly: boolean) => {
+    reads.push(input);
+    const all = facts();
+    const selected = all
+      .filter(
+        (row) =>
+          row.sequence < (input.beforeSequence ?? Number.MAX_SAFE_INTEGER) &&
+          (!assignmentsOnly || row.message.kind === 'delegation_assigned'),
+      )
+      .reverse();
+    const records = [];
+    let bytes = 0;
+    for (const row of selected.slice(0, input.maxMessages)) {
+      const size = Buffer.byteLength(JSON.stringify(row.message));
+      if (records.length && bytes + size > input.maxStoredBytes) break;
+      records.push(row);
+      bytes += size;
+    }
+    return { highWaterSequence: all.at(-1)?.sequence ?? null, records };
+  };
   const options: Options = {
     stores: {
       readWorkHubAssignment: async (id) => assignments.find((a) => a.actionId === id),
-      readWorkHubAssignmentsPage: async (input) => {
-        reads.push(input);
-        return {
-          highWaterSequence: assignments.length - 1,
-          records: assignments
-            .map((message, sequence) => ({ message, sequence }))
-            .filter((row) => row.sequence < (input.beforeSequence ?? Number.MAX_SAFE_INTEGER))
-            .reverse()
-            .slice(0, input.maxMessages),
-        };
+      // Keep the released assignment-only seam available to the read-only
+      // baseline comparison; both variants use the same canonical fact rows.
+      ...{
+        readWorkHubAssignmentsPage: (input: ScanRequest) => scan(input, true),
+        readWorkHubTaskFactsPage: (input: ScanRequest) => scan(input, false),
+        readWorkHubTaskInput: async (id: string) => {
+          onInputRead();
+          return hiddenInputs.has(id)
+            ? undefined
+            : inputs.find((row) => row.message.inputId === id)?.message;
+        },
       },
     },
     reader: {
@@ -112,6 +189,8 @@ function fixture() {
     },
     history: {
       readExecutions: async (actionId, _delegationId, cursor, max) => {
+        if ((states.get(actionId) ?? 'owned') !== 'owned')
+          throw new Error('This message has no exclusively owned execution');
         assert.equal(max, 1);
         const index = cursor ? Number(cursor) : 0,
           chain = chains.get(actionId) ?? [];
@@ -134,6 +213,9 @@ function fixture() {
           nextCursor: index + 1 < chain.length ? String(index + 1) : null,
         };
       },
+      ...{
+        readAssignmentState: async (actionId: string) => states.get(actionId) ?? 'owned',
+      },
     },
     admission: new SessionAdmissionGate(),
     authorize: async (a, ctx) =>
@@ -149,12 +231,18 @@ function fixture() {
     chains,
     assignments,
     denied,
+    inputs,
+    hiddenInputs,
+    states,
     transcriptReads,
     reads,
     restart: () => createWorkHubTaskHistoryReader(options),
     reader: createWorkHubTaskHistoryReader(options),
     onRead(fn: () => void) {
       onRead = fn;
+    },
+    onInputRead(fn: () => void) {
+      onInputRead = fn;
     },
   };
 }
@@ -407,6 +495,51 @@ test('history revalidates all touched sources before returning data', async () =
   );
 });
 
+test('missing native transcripts stay explicit while canonical requirements remain readable', async () => {
+  const f = fixture();
+  const omissions: unknown[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const value = await f.reader(
+      {
+        operation: 'read',
+        view: 'task_history',
+        sourceActionId: 'work',
+        ...(cursor ? { cursor } : {}),
+      },
+      f.ctx,
+    );
+    assert.ok('history' in value);
+    if ('unavailableExecutions' in value.history)
+      omissions.push(...(value.history.unavailableExecutions as unknown[]));
+    cursor = value.history.nextCursor ?? undefined;
+    if (!cursor) break;
+  }
+  assert.equal(cursor, undefined);
+  assert.deepEqual(omissions, [
+    { actionId: 'followup', reason: 'native_transcript_unavailable' },
+    { actionId: 'work', reason: 'native_transcript_unavailable' },
+    { actionId: 'work', reason: 'native_transcript_unavailable' },
+  ]);
+});
+
+test('unsupported native projection returns a limit instead of fabricated or empty history', async () => {
+  const f = fixture();
+  f.options.reader.readDurableHighWater = async () => 1;
+  f.options.reader.readDurableRecords = async () => {
+    throw new RuntimeReadModelError('unsupported native event', []);
+  };
+  f.reader = f.restart();
+  const value = await f.reader(
+    { operation: 'read', view: 'task_history', sourceActionId: 'followup' },
+    f.ctx,
+  );
+  assert.deepEqual(value, {
+    status: 'unsupported',
+    reason: 'The recorded native execution cannot be projected as task history',
+  });
+});
+
 test('history recovers a matching ledger tool result but never follows a mismatched archive into another Turn', async () => {
   const f = fixture();
   f.rows.set('old', [
@@ -468,4 +601,464 @@ test('history recovers a matching ledger tool result but never follows a mismatc
   f.options.archiveEvidence = undefined;
   const missing = await collect(f, { kinds: ['tool_result'] });
   assert.equal(missing[0]!.archiveStatus, 'unavailable');
+});
+
+function terminalHistoryFixture(stdout: string, stderr = '') {
+  const f = fixture();
+  const retained = shapeTerminalResult({
+    cwd: '/old-task',
+    command: 'synthetic retained output',
+    result: { stdout, stderr, exitCode: 1 },
+  });
+  const event: RuntimeEvent = {
+    id: 'terminal-result',
+    sessionId: 'old',
+    turnId: 'turn-work',
+    runId: 'run-turn-work',
+    invocationId: 'invocation',
+    ts: 1,
+    partial: false,
+    role: 'tool',
+    author: 'tool',
+    content: {
+      kind: 'function_response',
+      id: 'terminal-call',
+      name: 'Bash',
+      result: retained,
+      modelProjection: encodeDurableToolResultOutput(
+        { type: 'json', value: JSON.parse(JSON.stringify(retained)) },
+        'old',
+      ),
+    },
+  };
+  f.rows.set('old', [
+    {
+      type: 'tool_result',
+      id: event.id,
+      turnId: event.turnId,
+      ts: event.ts,
+      toolUseId: 'terminal-call',
+      isError: false,
+      content: projectTranscriptToolResult(event, retained),
+    },
+  ]);
+  let reads = 0;
+  f.options.archiveEvidence = {
+    read: async (input) => {
+      reads++;
+      assert.deepEqual(input, { sessionId: 'old', runtimeEventId: event.id });
+      return { ok: true, event, transitions: [] };
+    },
+  };
+  return { f, event, retained, reads: () => reads };
+}
+
+for (const stream of ['stdout', 'stderr'] as const) {
+  test(`same-work history recovers the retained ${stream}, not the terminal display tail, in bounded pages`, async () => {
+    const text = Array.from(
+      { length: 160 },
+      (_, i) => `${i}: 中文😀\"\\ ${'0123456789abcdef'.repeat(8)}`,
+    ).join('\n');
+    const { f, reads } = terminalHistoryFixture(
+      stream === 'stdout' ? text : '',
+      stream === 'stderr' ? text : '',
+    );
+    const preview = f.rows.get('old')![0]!;
+    assert.equal(preview.type, 'tool_result');
+    assert.match(JSON.stringify(preview), /truncated\. Read/);
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.ok(records.length > 1, 'the retained output, not its small preview, needs pagination');
+    let offset = 0;
+    for (const row of records) {
+      assert.equal(row.messageId, 'terminal-result');
+      assert.equal(row.sessionId, 'old');
+      assert.equal(row.archiveStatus, 'loaded');
+      assert.equal(row.textOffset, offset);
+      offset += row.text.length;
+    }
+    assert.equal(offset, records[0]!.totalTextChars);
+    const result = JSON.parse(records.map((row) => row.text).join(''));
+    assert.equal(result.output[stream], text);
+    assert.equal(result.output.stdoutTruncated, false);
+    assert.equal(result.output.stderrTruncated, false);
+    assert.doesNotMatch(JSON.stringify(result), /maka:\/\/runtime\/tool-results\//);
+    assert.equal(reads(), records.length, 'one fixed evidence snapshot per projected page');
+  });
+}
+
+for (const mismatch of ['id', 'session', 'turn', 'call', 'hidden', 'provider'] as const) {
+  test(`terminal history never hydrates a retained result with a mismatched ${mismatch}`, async () => {
+    const { f, event } = terminalHistoryFixture('PRIVATE_RETAINED_FRONT\n' + 'x'.repeat(5000));
+    assert.equal(event.content?.kind, 'function_response');
+    if (event.content?.kind !== 'function_response') assert.fail('expected a tool response');
+    if (mismatch === 'id') event.id = 'foreign-event';
+    if (mismatch === 'session') event.sessionId = 'foreign';
+    if (mismatch === 'turn') event.turnId = 'foreign-turn';
+    if (mismatch === 'call') event.content.id = 'foreign-call';
+    if (mismatch === 'hidden') event.modelVisibility = 'hidden';
+    if (mismatch === 'provider') event.content.providerExecuted = true;
+    // The query must still name the canonical projected record, never a ref
+    // extracted from its untrusted display text or a substituted source.
+    f.options.archiveEvidence = {
+      read: async (input) => {
+        assert.deepEqual(input, { sessionId: 'old', runtimeEventId: 'terminal-result' });
+        return { ok: true, event, transitions: [] };
+      },
+    };
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.equal(records[0]!.archiveStatus, 'source_mismatch');
+    assert.doesNotMatch(JSON.stringify(records), /PRIVATE_RETAINED_FRONT/);
+  });
+}
+
+test('unavailable terminal evidence is explicit, and same-work authority is checked before hydration', async () => {
+  for (const reason of ['not_found', 'too_large', 'corrupt', 'unavailable'] as const) {
+    const { f } = terminalHistoryFixture('x'.repeat(5000));
+    f.options.archiveEvidence = { read: async () => ({ ok: false, reason }) };
+    const records = await collect(f, { kinds: ['tool_result'] });
+    assert.equal(records[0]!.archiveStatus, reason);
+    assert.equal(JSON.parse(records[0]!.text).output.stdoutTruncated, true);
+  }
+  const { f, reads } = terminalHistoryFixture('PRIVATE_RETAINED_FRONT\n' + 'x'.repeat(5000));
+  f.denied.add('work');
+  assert.deepEqual(
+    await f.reader(
+      { operation: 'read', view: 'task_history', sourceActionId: 'work', kinds: ['tool_result'] },
+      f.ctx,
+    ),
+    { status: 'unavailable' },
+  );
+  assert.equal(reads(), 0);
+});
+
+test('short terminal history stays inline and never needs an evidence lookup', async () => {
+  const { f, reads } = terminalHistoryFixture('small output');
+  const records = await collect(f, { kinds: ['tool_result'] });
+  assert.equal(records[0]!.archiveStatus, undefined);
+  assert.equal(JSON.parse(records[0]!.text).output.stdout, 'small output');
+  assert.equal(reads(), 0);
+});
+
+test('accepted task inputs expose raw requirements and distinguish feedback from consumption proof', async () => {
+  const f = fixture();
+  f.assignments[2]!.inputOrigin = 'feedback';
+  const steering = acceptedInput(
+    f.assignments[0]!,
+    'steer',
+    'steering',
+    '用户原话：保留 Cookie，不要换成 JWT。',
+  );
+  const queued = acceptedInput(
+    f.assignments[2]!,
+    'queued',
+    'queued_supplement',
+    '排队时补充：编号不能丢精度。',
+  );
+  const feedback = {
+    ...acceptedInput(f.assignments[0]!, 'feedback', 'steering', '自动结果背景，不是用户新指令。'),
+    inputOrigin: 'feedback' as const,
+  };
+  const legacy = { ...acceptedInput(f.assignments[0]!, 'legacy', 'steering', 'unused') };
+  delete legacy.originalUserText;
+  delete legacy.inputOrigin;
+  delete legacy.sourceMessageId;
+  f.inputs.push(
+    { sequence: 10, message: steering },
+    { sequence: 20, message: feedback },
+    { sequence: 30, message: legacy },
+    { sequence: 210, message: queued },
+  );
+  const records = await collect(f, { kinds: ['user'] });
+  for (const accepted of [steering, queued, feedback, legacy]) {
+    const record = records.find((row) => row.messageId === accepted.id);
+    assert.ok(record, accepted.inputId);
+    assert.equal(record.text, accepted.originalUserText ?? accepted.text);
+    assert.equal(record.inputOrigin, accepted.inputOrigin ?? 'unknown_legacy');
+    assert.equal(
+      record.textSource,
+      accepted.originalUserText === undefined ? 'accepted_text_legacy' : 'original_user_text',
+    );
+    assert.equal(record.acceptance, 'not_consumption_proof');
+    assert.equal(record.mode, accepted.mode);
+    assert.equal(record.targetMessageId, accepted.targetMessageId);
+    assert.equal(record.sourceMessageId, accepted.sourceMessageId);
+    assert.equal(record.recordSource, 'task_input');
+  }
+  assert.doesNotMatch(
+    JSON.stringify(records),
+    /Prepared worker instruction (steer|queued|feedback)/,
+  );
+  assert.equal(records.find((row) => row.messageId === 'row-followup')?.requestOrigin, 'feedback');
+  assert.equal(
+    records.find((row) => row.messageId === 'row-work')?.requestOrigin,
+    'unknown_legacy',
+  );
+});
+
+test('accepted input pages preserve escaped raw text, filters and UTF-16 offsets without loss', async () => {
+  const f = fixture();
+  const raw = '\u0000😀\\"'.repeat(5000);
+  const input = acceptedInput(f.assignments[0]!, 'large', 'queued_supplement', raw);
+  f.inputs.push({ sequence: 10, message: input });
+  const rows = (await collect(f, { kinds: ['user'] })).filter((row) => row.messageId === input.id);
+  let restored = '';
+  for (const row of rows) {
+    assert.equal(row.textOffset, restored.length);
+    assert.equal(row.totalTextChars, raw.length);
+    assert.ok(!/[\uD800-\uDBFF]$/u.test(row.text));
+    restored += row.text;
+  }
+  assert.equal(restored, raw);
+  assert.ok(rows.length > 1);
+  assert.ok((await collect(f, { kinds: ['assistant'] })).every((row) => row.kind === 'assistant'));
+});
+
+test('accepted input snapshots exclude other work, the actor live generation and future facts', async () => {
+  const f = fixture();
+  const old = acceptedInput(
+    f.assignments[0]!,
+    'old-large',
+    'steering',
+    'KNOWN_OLD_INPUT '.repeat(2000),
+  );
+  f.inputs.push(
+    { sequence: 10, message: old },
+    {
+      sequence: 110,
+      message: acceptedInput(f.assignments[1]!, 'other', 'steering', 'PRIVATE_OTHER_INPUT'),
+    },
+    {
+      sequence: 350,
+      message: acceptedInput(f.assignments[3]!, 'live', 'steering', 'PRIVATE_LIVE_INPUT'),
+    },
+  );
+  const first = await f.reader(
+    { operation: 'read', view: 'task_history', sourceActionId: 'work', kinds: ['user'] },
+    f.ctx,
+  );
+  assert.ok('history' in first && first.history.nextCursor);
+  f.inputs.push({
+    sequence: 400,
+    message: acceptedInput(f.assignments[0]!, 'future', 'steering', 'PRIVATE_FUTURE_INPUT'),
+  });
+  const rest = await collect(f, {
+    sourceActionId: 'work',
+    kinds: ['user'],
+    cursor: first.history.nextCursor,
+  });
+  const records = [...first.history.records, ...rest] as RecordRow[];
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_/);
+  assert.equal(
+    records
+      .filter((row) => row.messageId === old.id)
+      .map((row) => row.text)
+      .join(''),
+    old.originalUserText,
+  );
+});
+
+test('accepted input provenance and missing canonical bodies fail closed', async () => {
+  for (const change of [
+    'generation',
+    'delegation',
+    'session',
+    'coordination',
+    'missing',
+  ] as const) {
+    const f = fixture();
+    const input = {
+      ...acceptedInput(f.assignments[0]!, `mixed-${change}`, 'steering', 'PRIVATE_MIXED_INPUT'),
+    };
+    if (change === 'generation') input.generationId = 'foreign-generation';
+    if (change === 'delegation') input.sourceDelegationId = 'foreign-delegation';
+    if (change === 'session') input.targetSessionId = 'foreign-session';
+    if (change === 'coordination') input.turnId = 'foreign-coordination';
+    if (change === 'missing') f.hiddenInputs.add(input.inputId);
+    f.inputs.push({ sequence: 10, message: input });
+    const result = await f.reader(
+      { operation: 'read', view: 'task_history', sourceActionId: 'work', kinds: ['user'] },
+      f.ctx,
+    );
+    assert.deepEqual(result, { status: 'unavailable' }, change);
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_MIXED_INPUT/);
+  }
+});
+
+test('accepted input reads revalidate source access after loading the canonical body', async () => {
+  const f = fixture();
+  f.inputs.push({
+    sequence: 10,
+    message: acceptedInput(f.assignments[0]!, 'revoked', 'steering', 'PRIVATE_REVOKED_INPUT'),
+  });
+  f.onInputRead(() => f.denied.add('work'));
+  assert.deepEqual(
+    await f.reader(
+      { operation: 'read', view: 'task_history', sourceActionId: 'work', kinds: ['user'] },
+      f.ctx,
+    ),
+    { status: 'unavailable' },
+  );
+});
+
+test('bounded empty fact pages retain a cursor past unrelated accepted inputs', async () => {
+  const f = fixture();
+  for (let sequence = 101; sequence < 200; sequence++) {
+    f.inputs.push({
+      sequence,
+      message: acceptedInput(
+        f.assignments[1]!,
+        `noise-${sequence}`,
+        'queued_supplement',
+        'PRIVATE_OTHER_LARGE_INPUT '.repeat(1800),
+      ),
+    });
+  }
+  f.rows.set('old', [
+    {
+      type: 'tool_result',
+      id: 'old-result',
+      turnId: 'turn-work',
+      ts: 2,
+      toolUseId: 'old-call',
+      isError: false,
+      content: { kind: 'text', text: 'OWNED_OLD_TOOL_RESULT' },
+    },
+  ]);
+  const input = {
+    operation: 'read',
+    view: 'task_history',
+    sourceActionId: 'work',
+    kinds: ['tool_result'],
+  } as const;
+  const first = await f.reader({ ...input, kinds: [...input.kinds] }, f.ctx);
+  assert.ok('history' in first && first.history.nextCursor);
+  assert.deepEqual(first.history.records, []);
+  const records = await collect(f, {
+    ...input,
+    kinds: [...input.kinds],
+    cursor: first.history.nextCursor,
+  });
+  assert.match(JSON.stringify(records), /OWNED_OLD_TOOL_RESULT/);
+  assert.doesNotMatch(JSON.stringify(records), /PRIVATE_OTHER_LARGE_INPUT/);
+});
+
+for (const state of ['cancelled', 'queued', 'shared', 'unavailable'] as const) {
+  test(`accepted requirements remain readable with an explicit ${state} execution limit`, async () => {
+    const f = fixture();
+    f.states.set('work', state);
+    const input = acceptedInput(
+      f.assignments[0]!,
+      'never-started',
+      'queued_supplement',
+      '已受理的原始补充，不能冒充已执行。',
+    );
+    f.inputs.push({ sequence: 10, message: input });
+    let cursor: string | undefined;
+    const records: RecordRow[] = [];
+    const omissions: unknown[] = [];
+    for (let page = 0; page < 20; page++) {
+      const result = await f.reader(
+        {
+          operation: 'read',
+          view: 'task_history',
+          sourceActionId: 'work',
+          kinds: ['user'],
+          ...(cursor ? { cursor } : {}),
+        },
+        f.ctx,
+      );
+      assert.ok('history' in result, JSON.stringify(result));
+      assert.ok(Buffer.byteLength(JSON.stringify(result)) <= READ_PAGE_MAX_BYTES);
+      records.push(...(result.history.records as RecordRow[]));
+      if ('unavailableExecutions' in result.history)
+        omissions.push(...(result.history.unavailableExecutions as unknown[]));
+      cursor = result.history.nextCursor ?? undefined;
+      if (!cursor) break;
+    }
+    assert.equal(
+      cursor,
+      undefined,
+      'bounded historical reads finish without inventing an execution',
+    );
+    assert.ok(records.some((row) => row.text === input.originalUserText));
+    assert.ok(records.some((row) => row.text === f.assignments[0]!.userText));
+    assert.deepEqual(omissions, [
+      { actionId: 'followup', reason: 'native_transcript_unavailable' },
+      { actionId: 'work', reason: state === 'cancelled' ? 'cancelled_before_start' : state },
+    ]);
+    assert.deepEqual(f.transcriptReads, []);
+  });
+}
+
+test('the SQLite-backed history reader preserves accepted raw input across reopen without including intervening work', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-task-history-input-'));
+  let store = createSessionStore(root);
+  try {
+    await store.createStableSession({
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      requestFingerprint: `sha256:${'a'.repeat(64)}`,
+      input: {
+        cwd: root,
+        name: 'WorkHub',
+        role: WORKHUB_COORDINATION_SESSION_ROLE,
+        model: 'test',
+        llmConnectionSlug: 'test',
+        permissionMode: 'explore',
+        toolProfile: 'workhub-coordination-v2',
+      },
+    });
+    const f = fixture();
+    for (const source of f.assignments) {
+      source.id = `wha_${createHash('sha256').update(source.actionId).digest('hex').slice(0, 48)}`;
+    }
+    f.assignments[0]!.work = { id: 'work', generationId: 'work' };
+    f.assignments[1]!.work = { id: 'other', generationId: 'other' };
+    f.assignments[2]!.work = { id: 'work', generationId: 'work', continuesActionId: 'work' };
+    f.assignments[3]!.work = { id: 'work', generationId: 'fresh', continuesActionId: 'followup' };
+    const old = acceptedInput(
+      f.assignments[0]!,
+      'persisted-old',
+      'steering',
+      '持久原始纠正：不能把大编号转为 Number。',
+    );
+    const other = acceptedInput(
+      f.assignments[1]!,
+      'persisted-other',
+      'queued_supplement',
+      'PRIVATE_OTHER_PERSISTED_INPUT',
+    );
+    await store.appendMessages(WORKHUB_COORDINATION_SESSION_ID, [
+      f.assignments[0]!,
+      old,
+      f.assignments[1]!,
+      other,
+      f.assignments[2]!,
+      f.assignments[3]!,
+    ]);
+    // This is the production SQLite/query composition. The unchanged actor and
+    // execution fixtures isolate read projection, not Host invocation authority.
+    for (let opening = 0; opening < 2; opening++) {
+      if (opening) {
+        await store.close?.();
+        store = createSessionStore(root);
+      }
+      f.reader = createWorkHubTaskHistoryReader({ ...f.options, stores: store });
+      const records = await collect(f, { kinds: ['user'] });
+      const projected = records.find((row) => row.messageId === old.id);
+      assert.equal(projected?.text, old.originalUserText);
+      assert.equal(projected?.acceptance, 'not_consumption_proof');
+      assert.doesNotMatch(JSON.stringify(records), /PRIVATE_OTHER_PERSISTED_INPUT/);
+      assert.equal(
+        (await store.readWorkHubTaskInput(old.inputId))?.originalUserText,
+        old.originalUserText,
+      );
+      assert.equal(
+        (await store.readHeaderSnapshot(WORKHUB_COORDINATION_SESSION_ID)).permissionMode,
+        'explore',
+      );
+    }
+  } finally {
+    await store.close?.();
+    await rm(root, { recursive: true, force: true });
+  }
 });

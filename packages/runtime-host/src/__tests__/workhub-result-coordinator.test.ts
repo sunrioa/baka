@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { WorkHubDelegationAssignedMessage } from '@maka/core/session';
 import { deferred } from '@maka/core/test-only/async-primitives';
+import { projectWorkHubResultContext } from '@maka/core/workhub-result-context';
 import type { SessionAdmissionLease } from '../server/session-admission-gate.js';
 import { HostResidencyRegistry } from '../server/host-residency-registry.js';
 import {
@@ -68,6 +69,131 @@ const observation: WorkHubResultObservation = {
   result: 'Report ready at /workspace/report.pdf',
   sharedTurn: false,
 };
+
+test('new notifications keep exact task/result references without repeated tool instructions', () => {
+  for (const work of [
+    undefined,
+    { id: 'original-task', generationId: 'fresh-generation', continuesActionId: 'previous-action' },
+  ]) {
+    const current = { ...assignment, ...(work ? { work } : {}) };
+    const content = workHubResultContent(current, observation);
+    const split = content.text.lastIndexOf('\n\n');
+    const instruction = content.text.slice(0, split);
+    const data = JSON.parse(content.text.slice(split + 2));
+    assert.match(instruction, /not a new request or authorization/u);
+    assert.doesNotMatch(instruction, /WorkHubRead|WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
+    assert.equal(data.notificationVersion, 2);
+    assert.equal(data.taskId, work?.id ?? assignment.actionId);
+    assert.equal(data.sourceActionId, assignment.actionId);
+    assert.equal(data.result, observation.result);
+    for (const field of [
+      'actionId',
+      'delegationId',
+      'targetSessionId',
+      'targetTurnId',
+      'targetRunId',
+      'originalRequest',
+      'delegatedRequest',
+    ])
+      assert.equal(data[field], undefined, field);
+    const projected = projectWorkHubResultContext(
+      content.text,
+      workHubResultOrigin(current, observation),
+    );
+    assert.equal(projected, content.text, 'current task identity survives historical projection');
+  }
+});
+
+test('new result previews prefer the final worker status over a long reply prefix', () => {
+  const status = [
+    '完成：模块实现',
+    '未完成 / 下一步：集成测试尚未执行',
+    '已验证：仅单元测试通过，未验证部署',
+    '需要用户决定：是否允许部署',
+  ].join('\n');
+  const result = `${'长篇实现说明。'.repeat(300)}\n\n<task-status>\n${status}\n</task-status>`;
+  for (const terminalStatus of ['completed', 'failed', 'cancelled'] as const) {
+    const current = { ...observation, status: terminalStatus, result };
+    const content = workHubResultContent(assignment, current);
+    const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+    assert.equal(data.result, status);
+    assert.equal(data.resultTruncated, true, 'the preview is not the complete original reply');
+    assert.equal(data.status, terminalStatus, 'worker claims never replace the Host terminal fact');
+    assert.equal(data.taskId, assignment.actionId);
+    assert.equal(data.sourceActionId, assignment.actionId);
+    assert.equal(
+      projectWorkHubResultContext(content.text, workHubResultOrigin(assignment, current)),
+      content.text,
+    );
+  }
+});
+
+test('each worker status field keeps its own preview budget, including pending decisions', () => {
+  const labels = ['完成：', '未完成 / 下一步：', '已验证：', '需要用户决定：'];
+  const text = '中文😀"\\\u0000'.repeat(300);
+  const result = `报告\n\n<task-status>\n${labels.map((label) => `${label}${text}`).join('\n')}\n</task-status>`;
+  const current = { ...observation, result };
+  const content = workHubResultContent(assignment, current);
+  const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+  const fields = data.result.split('\n');
+  assert.equal(fields.length, labels.length);
+  for (const [index, label] of labels.entries()) {
+    assert.ok(fields[index].startsWith(label), label);
+    assert.ok(fields[index].endsWith('…'), 'each oversized field marks its own omission');
+    assert.ok(!fields[index].includes('\ufffd'), 'UTF-8 boundaries are preserved');
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(data.result)) <= 512);
+  assert.equal(data.resultTruncated, true);
+  assert.equal(
+    projectWorkHubResultContext(content.text, workHubResultOrigin(assignment, current)),
+    content.text,
+  );
+});
+
+test('quoted, fenced, malformed and nonfinal worker status blocks remain ordinary reply excerpts', () => {
+  const status = '<task-status>\n完成：实现\n未完成 / 下一步：无\n已验证：测试通过\n</task-status>';
+  for (const result of [
+    'SOURCE-READY',
+    `引用示例：\n\n\`\`\`text\n${status}\n\`\`\``,
+    status
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n'),
+    status.replace('已验证：测试通过', '任意字段：测试通过'),
+    `${status}\n另外还有正文`,
+  ]) {
+    const content = workHubResultContent(assignment, { ...observation, result });
+    const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+    assert.equal(data.result, result);
+    assert.equal(data.resultTruncated, false);
+  }
+});
+
+test('legacy result projection updates read guidance without guessing a logical task identity', () => {
+  const origin = workHubResultOrigin(assignment, observation);
+  const payload = {
+    actionId: origin.actionId,
+    delegationId: origin.delegationId,
+    targetSessionId: origin.targetSessionId,
+    targetTurnId: origin.targetTurnId,
+    status: 'completed',
+    result: 'Committed legacy result',
+    originalRequest: 'Original legacy requirement',
+  };
+  const raw = `Read WorkHubResult with the original action.\n\n${JSON.stringify(payload)}`;
+  const projected = projectWorkHubResultContext(raw, origin);
+  const split = projected.lastIndexOf('\n\n');
+  assert.match(projected.slice(0, split), /WorkHubRead/u);
+  assert.doesNotMatch(projected.slice(0, split), /WorkHubResult|WorkHubEvidence|WorkHubInspect/u);
+  const data = JSON.parse(projected.slice(split + 2));
+  assert.equal(data.taskId, undefined, 'an old action ID is not proof of its logical task ID');
+  assert.equal(data.actionId, payload.actionId);
+  assert.equal(data.result, payload.result);
+  assert.equal(data.originalRequest, payload.originalRequest);
+  assert.equal(projectWorkHubResultContext(projected, origin), projected);
+  assert.match(raw, /Read WorkHubResult/u, 'projection leaves the durable text untouched');
+});
+
 function fixture() {
   let current: WorkHubResultObservation | undefined = observation;
   let active = true,
@@ -119,7 +245,7 @@ test('completed, failed and cancelled results enter WorkHub once with original s
     await c.reconcile();
     await c.reconcile();
     assert.equal(f.contents.length, 1);
-    assert.ok(f.contents[0]!.includes(assignment.userText));
+    assert.equal(JSON.parse(f.contents[0]!.split('\n\n').at(-1)!).taskId, assignment.actionId);
     assert.ok(f.contents[0]!.includes(status));
   }
 });
@@ -232,7 +358,7 @@ test('bounds notification text, marks truncation and retains full-result locator
   const c = workHubResultContent(assignment, { ...observation, result: '😀'.repeat(20000) });
   assert.equal(c.displayText, assignment.targetSessionName);
   assert.ok(c.text.includes('"resultTruncated":true'));
-  assert.ok(c.text.includes('"actionId":"action"'));
+  assert.ok(c.text.includes('"sourceActionId":"action"'));
   assert.ok(!c.text.includes('�'));
   assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
 });
@@ -253,7 +379,7 @@ test('notification bounds request and interaction data independently of the full
   );
   assert.ok(Buffer.byteLength(JSON.stringify(c), 'utf8') <= 7500);
   assert.ok(c.text.includes('"status":"waiting_for_user"'));
-  assert.ok(c.text.includes('"actionId":"action"'));
+  assert.ok(c.text.includes('"sourceActionId":"action"'));
   assert.ok(c.text.includes('"detailsTruncated":true'));
   assert.ok(c.text.includes('"interactionId":"question"'));
 });

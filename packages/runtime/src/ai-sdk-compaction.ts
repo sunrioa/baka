@@ -37,6 +37,7 @@ import type {
 } from '@maka/core/backend-types';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
 import type { LastRequestAnchor } from '@maka/core/usage-record-schema';
+import { compactionReplyReserveTokens as replyReserveTokens } from './context-budget-policy.js';
 
 import type {
   AiSdkCompactionCapabilities,
@@ -1455,15 +1456,6 @@ export class MidTurnCapacityCompactState {
  * grows, and the cap keeps a single long reply from turning the reserve into
  * the window. No previous reply means no reserve, never a guessed one.
  */
-const MAX_REPLY_RESERVE_TOKENS = 8_000;
-
-function replyReserveTokens(lastReplyTokens: number | undefined): number {
-  if (lastReplyTokens === undefined || !Number.isFinite(lastReplyTokens) || lastReplyTokens <= 0) {
-    return 0;
-  }
-  return Math.min(lastReplyTokens * 2, MAX_REPLY_RESERVE_TOKENS);
-}
-
 function usageBaselineTokens(usage: NormalizedUsage | undefined): number | undefined {
   if (!usage) return undefined;
   const input = usage.inputTokens;

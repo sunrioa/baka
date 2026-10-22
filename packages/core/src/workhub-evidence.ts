@@ -60,6 +60,8 @@ export interface WorkHubEvidenceResolutionMessage {
   readonly sourceDelegationId: string | null;
   readonly sourceSessionId: string | null;
   readonly sourceMessageId: string | null;
+  /** Startup cleanup only. Invocation fields identify the original request, not a new caller. */
+  readonly origin?: 'legacy_protocol_retirement';
 }
 
 export interface WorkHubEvidenceOrigin {
@@ -190,6 +192,8 @@ export interface WorkHubPeerSettlementMessage {
   readonly toolCallId: string;
   readonly outcome: 'reply' | 'cancelled';
   readonly answer?: string;
+  /** Host cleanup; actor/invocation fields must equal the original question's sender identity. */
+  readonly origin?: 'legacy_protocol_retirement';
 }
 
 export type WorkHubPeerMessage =
@@ -287,7 +291,7 @@ const settlementShape = defineObjectShape<WorkHubPeerSettlementMessage>()(
     'toolCallId',
     'outcome',
   ],
-  ['answer'],
+  ['answer', 'origin'],
 );
 export function isWorkHubPeerMessage(value: unknown): value is WorkHubPeerMessage {
   if (
@@ -339,6 +343,8 @@ export function isWorkHubPeerMessage(value: unknown): value is WorkHubPeerMessag
         validPeerId(value.requesterSessionId) &&
         isWorkHubPeerTaskRef(value.actor) &&
         invocation() &&
+        (value.origin === undefined ||
+          (value.origin === 'legacy_protocol_retirement' && value.outcome === 'cancelled')) &&
         ((value.outcome === 'reply' &&
           isWorkHubPeerText(value.answer, WORKHUB_PEER_ANSWER_MAX_BYTES)) ||
           (value.outcome === 'cancelled' && value.answer === undefined))
@@ -364,7 +370,7 @@ export function isWorkHubEvidenceResolution(
   const keys = ['type', 'schemaVersion', 'ts', 'toolCallId', ...ids, ...sourceIds];
   const validId = (id: unknown) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(id);
   return (
-    Object.keys(value).length === keys.length &&
+    Object.keys(value).every((key) => keys.includes(key) || key === 'origin') &&
     keys.every((key) => Object.hasOwn(value, key)) &&
     value.type === 'workhub_evidence_resolution' &&
     value.schemaVersion === 1 &&
@@ -374,6 +380,9 @@ export function isWorkHubEvidenceResolution(
     /^[A-Za-z0-9_.:-]{1,256}$/u.test(value.toolCallId) &&
     Number.isSafeInteger(value.ts) &&
     value.ts >= 0 &&
+    (value.origin === undefined ||
+      (value.origin === 'legacy_protocol_retirement' &&
+        sourceIds.every((key) => value[key] === null))) &&
     (sourceIds.every((key) => value[key] === null) || sourceIds.every((key) => validId(value[key])))
   );
 }

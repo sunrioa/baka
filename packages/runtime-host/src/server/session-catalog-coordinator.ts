@@ -48,6 +48,7 @@ import {
   isWorkHubCoordinationSessionId,
   isWorkHubCoordinationSessionTarget,
   type SessionHeader,
+  type WorkHubTaskSettingsSnapshot,
   type SessionHeaderPatch,
   type StoredMessage,
 } from '@maka/core/session';
@@ -478,6 +479,77 @@ export class HostSessionCatalogCoordinator {
         };
       },
     );
+  }
+
+  /** Resolves a legacy slug at the current snapshot without rewriting the source Session. */
+  async resolveWorkHubSettings(
+    source: WorkHubTaskSettingsSnapshot,
+  ): Promise<WorkHubTaskSettingsSnapshot> {
+    if (source.backend !== 'ai-sdk' || source.llmConnectionId !== null) return source;
+    // Legacy Sessions still execute by their exact catalog slug. Bind that
+    // current connection, never the WorkHub default, without rewriting the
+    // old Session or pretending this identity was known at its creation.
+    let catalog: ConnectionCatalogSnapshot;
+    try {
+      catalog = await this.#runtimePolicy.connectionCatalog.getSnapshot();
+    } catch {
+      throw new SessionOperationFailure('persistence_failed', 'Connection catalog is unavailable');
+    }
+    const connection = catalog.connections.find(
+      (entry) => entry.slug === source.llmConnectionSlug && entry.enabled,
+    );
+    if (!connection)
+      throw new SessionOperationFailure(
+        'operation_unavailable',
+        'The source model connection is unavailable',
+      );
+    return { ...source, llmConnectionId: connection.connectionId };
+  }
+
+  /** Inherits only the authenticated current segment's persistent configuration. */
+  async prepareWorkHubContinuation(
+    input: Pick<SessionCreateInput, 'sessionId' | 'workspace' | 'name'>,
+    source: WorkHubTaskSettingsSnapshot,
+  ): Promise<CreateStableSessionRequest> {
+    source = await this.resolveWorkHubSettings(source);
+    const prepared = await this.prepareWorkHubCreate(
+      {
+        ...input,
+        ...(source.backend === 'plugin-executor'
+          ? {
+              executorId: source.executorId!,
+              ...(source.executorConfig ? { executorConfig: source.executorConfig } : {}),
+              // Older executor Sessions saved their chosen model in header.model
+              // without executorConfig.model. The executor id itself means default.
+              ...(source.executorConfig?.model || source.model === source.executorId
+                ? {}
+                : { executorModel: source.model }),
+            }
+          : {
+              modelTarget: {
+                kind: 'explicit' as const,
+                connectionId: source.llmConnectionId!,
+                connectionSlug: source.llmConnectionSlug,
+                model: source.model,
+              },
+            }),
+        thinkingLevel: source.thinkingLevel,
+        // Explore is an existing restricted persistent mode, not a creation mode request.
+        // Keep its exact configuration below without creating a new permission exception.
+        permissionMode: source.permissionMode === 'explore' ? 'ask' : source.permissionMode,
+        collaborationMode: source.collaborationMode,
+        orchestrationMode: source.orchestrationMode,
+      },
+      { cwd: source.cwd, projectId: source.projectId },
+    );
+    return {
+      ...prepared,
+      input: {
+        ...prepared.input,
+        permissionMode: source.permissionMode,
+        toolMode: source.toolMode,
+      },
+    };
   }
 
   async #query(
@@ -1717,6 +1789,7 @@ export function projectSessionCatalogRecord(
     name: header.name,
     isFlagged: header.isFlagged,
     isArchived: header.isArchived,
+    ...(summary.workHubCreated === undefined ? {} : { workHubCreated: summary.workHubCreated }),
     // The archive state is `isArchived` alone. A stray time on an active row
     // is dropped here rather than failing this Host's own decoder and hiding
     // the task behind an unsupported-record placeholder.

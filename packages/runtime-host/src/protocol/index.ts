@@ -99,6 +99,9 @@ export * from './workspace.js';
 export * from './workhub-coordination.js';
 export * from './workhub-interactions.js';
 export * from './workhub-tasks.js';
+export * from './workhub-task-discovery.js';
+export * from './workhub-task-actions.js';
+export * from './workhub-task-stop.js';
 export * from './websocket-path.js';
 export { INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID } from '../composition-identity.js';
 
@@ -106,7 +109,18 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 221 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 240 as const;
+// 240: WorkHub owns coordinator-only native compaction and an optional policy target.
+// 239: WorkHub replay projection v6 retains canonical coordinator terminal facts.
+// The same unreleased batch adds bounded, source-bound local-owner task overviews.
+// 237: Continuation events and claims may carry WorkHub replay projection version 5.
+// 236: Task detail can resolve the current canonical assignment by logical workId.
+// 235: WorkHub Desktop capabilities publish flat task tools instead of the tasks union.
+// 233: Task Stop distinguishes a cancelled logical wait from a terminal no-op.
+// 232: Modern task-stop receipts can report non-ownership without inventing a Turn.
+// 231: Task Stop binds the server-verified target set and original coordinator origin.
+// 222: WorkHub removes pre-routing decisions and the Jev policy mutation / settings.
+// Legacy policies, credentials, usage and admission records remain readable but inactive.
 // 213: Stable WorkHub work identity, paginated source discovery and work-bound continuation.
 // 212: WorkHub task overview, exact delivery reads and user-bound task continuation.
 // 211: WorkHub evidence dependencies use durable Host-bound requests and fresh non-user Turns.

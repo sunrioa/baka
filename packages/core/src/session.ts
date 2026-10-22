@@ -17,10 +17,11 @@
  * under the License.
  */
 
-import type { ExecutorConfiguration } from './executor-catalog.js';
+import { isExecutorConfiguration, type ExecutorConfiguration } from './executor-catalog.js';
 
 import { isWorkHubActionReceipt, type WorkHubActionReceipt } from './workhub-action-result.js';
 import { isWorkHubTaskInputMessage, type WorkHubTaskInputMessage } from './workhub-task-input.js';
+import { isWorkHubTaskStopFields, type WorkHubTaskStopFields } from './workhub-task-stop.js';
 import {
   isWorkHubEvidenceRequest,
   isWorkHubEvidenceResolution,
@@ -53,9 +54,9 @@ import {
   type PolicyDecision,
   type ToolCategory,
 } from './permission.js';
-import type { CollaborationMode } from './collaboration.js';
-import type { OrchestrationMode } from './orchestration.js';
-import type { ToolMode } from './tool-mode.js';
+import { isCollaborationMode, type CollaborationMode } from './collaboration.js';
+import { isOrchestrationMode, type OrchestrationMode } from './orchestration.js';
+import { isToolMode, type ToolMode } from './tool-mode.js';
 import {
   defineObjectShape,
   hasExactShape,
@@ -376,6 +377,8 @@ export type PersistedBackendKind = BackendKind | 'fake';
 
 export interface SessionSummary {
   id: string;
+  /** Display-only provenance from a canonical WorkHub create assignment, never a permission. */
+  workHubCreated?: boolean;
   cwd?: string;
   projectId?: string | null;
   name: string;
@@ -1020,6 +1023,117 @@ export interface WorkHubWorkBinding {
   readonly sourceMessageId?: string;
 }
 
+/** Durable persistent settings only. Turn approvals and sandbox grants never enter this fact. */
+export interface WorkHubTaskSettingsSnapshot {
+  readonly basis: 'creation' | 'current_segment';
+  readonly sessionId: string;
+  readonly cwd: string;
+  readonly projectId: string | null;
+  readonly backend: 'ai-sdk' | 'plugin-executor';
+  readonly model: string;
+  readonly llmConnectionId: string | null;
+  readonly llmConnectionSlug: string;
+  readonly executorId?: string;
+  readonly executorConfig?: ExecutorConfiguration;
+  readonly thinkingLevel: ThinkingLevel | null;
+  readonly permissionMode: PermissionMode;
+  readonly toolMode: ToolMode;
+  readonly collaborationMode: CollaborationMode;
+  readonly orchestrationMode: OrchestrationMode;
+}
+
+export function snapshotWorkHubTaskSettings(
+  header: Pick<
+    SessionHeader,
+    'id' | 'cwd' | 'backend' | 'model' | 'llmConnectionSlug' | 'permissionMode'
+  > &
+    Partial<
+      Pick<
+        SessionHeader,
+        | 'projectId'
+        | 'llmConnectionId'
+        | 'executorId'
+        | 'executorConfig'
+        | 'thinkingLevel'
+        | 'toolMode'
+        | 'collaborationMode'
+        | 'orchestrationMode'
+      >
+    >,
+  basis: WorkHubTaskSettingsSnapshot['basis'],
+): WorkHubTaskSettingsSnapshot {
+  if (header.backend !== 'ai-sdk' && header.backend !== 'plugin-executor')
+    throw new Error('WorkHub cannot snapshot unsupported execution settings');
+  const snapshot: WorkHubTaskSettingsSnapshot = {
+    basis,
+    sessionId: header.id,
+    cwd: header.cwd,
+    projectId: header.projectId ?? null,
+    backend: header.backend,
+    model: header.model,
+    llmConnectionId: header.llmConnectionId ?? null,
+    llmConnectionSlug: header.llmConnectionSlug,
+    ...(header.executorId ? { executorId: header.executorId } : {}),
+    ...(header.executorConfig ? { executorConfig: { ...header.executorConfig } } : {}),
+    thinkingLevel: header.thinkingLevel ?? null,
+    permissionMode: header.permissionMode,
+    toolMode: header.toolMode ?? 'direct',
+    collaborationMode: header.collaborationMode ?? 'agent',
+    orchestrationMode: header.orchestrationMode ?? 'default',
+  };
+  if (!isWorkHubTaskSettingsSnapshot(snapshot))
+    throw new Error('Invalid WorkHub persistent settings');
+  return snapshot;
+}
+
+export function isWorkHubTaskSettingsSnapshot(
+  value: unknown,
+): value is WorkHubTaskSettingsSnapshot {
+  if (!isRecord(value)) return false;
+  const required = [
+    'basis',
+    'sessionId',
+    'cwd',
+    'projectId',
+    'backend',
+    'model',
+    'llmConnectionId',
+    'llmConnectionSlug',
+    'thinkingLevel',
+    'permissionMode',
+    'toolMode',
+    'collaborationMode',
+    'orchestrationMode',
+  ];
+  if (
+    required.some((key) => !Object.hasOwn(value, key)) ||
+    Object.keys(value).some(
+      (key) => !required.includes(key) && key !== 'executorId' && key !== 'executorConfig',
+    )
+  )
+    return false;
+  const text = (v: unknown) => typeof v === 'string' && v.length > 0 && !v.includes('\0');
+  return (
+    (value.basis === 'creation' || value.basis === 'current_segment') &&
+    text(value.sessionId) &&
+    text(value.cwd) &&
+    (value.projectId === null || text(value.projectId)) &&
+    (value.backend === 'ai-sdk' || value.backend === 'plugin-executor') &&
+    text(value.model) &&
+    (value.llmConnectionId === null || text(value.llmConnectionId)) &&
+    text(value.llmConnectionSlug) &&
+    (value.thinkingLevel === null || isThinkingLevel(value.thinkingLevel)) &&
+    isPermissionMode(value.permissionMode) &&
+    isToolMode(value.toolMode) &&
+    isCollaborationMode(value.collaborationMode) &&
+    isOrchestrationMode(value.orchestrationMode) &&
+    (value.backend === 'plugin-executor'
+      ? isExecutorId(value.executorId) &&
+        (value.executorConfig === undefined || isExecutorConfiguration(value.executorConfig))
+      : value.executorId === undefined && value.executorConfig === undefined)
+  );
+}
+
 export type WorkHubDelegationDisposition = 'delegate_existing' | 'create_new';
 
 export type WorkHubDelegationWorkspace =
@@ -1117,8 +1231,14 @@ interface WorkHubCoordinationMessageEnvelope {
  */
 export interface WorkHubDelegationAssignedMessage extends WorkHubCoordinationMessageEnvelope {
   kind: 'delegation_assigned';
+  /** Initial task title, independent of later Session renames. Absent in legacy facts. */
+  taskTitle?: string;
   /** Absent on legacy records: do not guess that equal Session identities mean equal work. */
   work?: WorkHubWorkBinding;
+  /** Absent on old records; never synthesize a historical creation snapshot from defaults. */
+  settings?: WorkHubTaskSettingsSnapshot;
+  /** Host-authenticated input provenance; feedback's userText is historical background. */
+  inputOrigin?: 'user' | 'feedback';
   /** New delegations opt into Host-owned asynchronous result delivery. */
   returnResults?: true;
   delegationId: string;
@@ -1161,7 +1281,7 @@ export interface WorkHubDelegationSupersededMessage {
   replacementDelegationId: string;
 }
 
-/** Durable terminal proof that retirement succeeded but replacement admission did not. */
+/** Durable closure of a replacement attempt; protocol retirement cancels only its intent. */
 export interface WorkHubDelegationReplacementAbortedMessage {
   type: 'workhub_coordination';
   id: string;
@@ -1175,7 +1295,38 @@ export interface WorkHubDelegationReplacementAbortedMessage {
   abortedActionId: string;
   abortedDelegationId: string;
   targetSessionId: string;
-  reason: 'target_unavailable' | 'target_waiting_for_user';
+  reason:
+    | 'target_unavailable'
+    | 'target_waiting_for_user'
+    /** Cancels only the legacy intent, never the original task, admission, or execution. */
+    | 'legacy_protocol_retirement';
+}
+
+/** Exact Host-record binding for retiring an old replacement intent, not its original task. */
+export function isWorkHubReplacementIntentRetired(
+  request: WorkHubDelegationReplacementRequestedMessage,
+  abort: WorkHubDelegationReplacementAbortedMessage | undefined,
+): boolean {
+  return (
+    isRecord(request) &&
+    isRecord(abort) &&
+    request.type === 'workhub_coordination' &&
+    request.kind === 'delegation_replacement_requested' &&
+    abort.type === 'workhub_coordination' &&
+    abort.kind === 'delegation_replacement_aborted' &&
+    isWorkHubCoordinationMessage(request) &&
+    isWorkHubCoordinationMessage(abort) &&
+    abort.reason === 'legacy_protocol_retirement' &&
+    request.actionId.length > 0 &&
+    request.targetSessionId.length > 0 &&
+    abort.actionId === request.actionId &&
+    abort.actionFingerprint === request.actionFingerprint &&
+    abort.coordinationTurnId === request.coordinationTurnId &&
+    abort.turnId === request.turnId &&
+    abort.abortedActionId === request.replacesActionId &&
+    abort.abortedDelegationId === request.replacesDelegationId &&
+    abort.targetSessionId === request.targetSessionId
+  );
 }
 
 export type WorkHubDelegationStopOutcome =
@@ -1185,7 +1336,7 @@ export type WorkHubDelegationStopOutcome =
   | 'not_owned';
 
 /** Durable destructive claim written before attempting to retire one delegation. */
-export interface WorkHubDelegationStopRequestedMessage {
+export interface WorkHubDelegationStopRequestedMessage extends WorkHubTaskStopFields {
   type: 'workhub_coordination';
   id: string;
   turnId: string;
@@ -1201,6 +1352,10 @@ export interface WorkHubDelegationStopRequestedMessage {
   targetMessageId: string;
   targetSessionName: string;
   userText: string;
+  /** Added for distinct-target confirmation; older claims remain readable. */
+  workId?: string;
+  /** Host-derived binding captured under target admission; never retarget on replay. */
+  executionBinding?: string;
 }
 
 /** Durable observed result of a direct-stop attempt. */
@@ -1219,6 +1374,10 @@ export interface WorkHubDelegationStopResolvedMessage {
   targetSessionId: string;
   outcome: WorkHubDelegationStopOutcome;
   targetTurnId?: string;
+  /** Task-scoped non-ownership may have no execution Turn to identify. */
+  taskStop?: true;
+  /** A terminal execution fragment still held this logical dependency wait. */
+  cancelledWaitRequestId?: string;
 }
 
 /**
@@ -1271,9 +1430,11 @@ export type WorkHubCoordinationMessage =
 function isWorkHubDelegationStopResolution(
   outcome: unknown,
   targetTurnId: unknown,
+  taskStop: boolean,
 ): outcome is WorkHubDelegationStopOutcome {
   const hasTargetTurnId = typeof targetTurnId === 'string' && targetTurnId.length > 0;
-  if (outcome === 'stop_delivered' || outcome === 'not_owned') return hasTargetTurnId;
+  if (outcome === 'stop_delivered') return hasTargetTurnId;
+  if (outcome === 'not_owned') return hasTargetTurnId || (taskStop && targetTurnId === undefined);
   if (outcome === 'cancelled_pending') return targetTurnId === undefined;
   return outcome === 'already_terminal' && (targetTurnId === undefined || hasTargetTurnId);
 }
@@ -1483,6 +1644,9 @@ const WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE =
       'replacesDelegationId',
       'delegationText',
       'work',
+      'settings',
+      'inputOrigin',
+      'taskTitle',
     ],
   );
 const WORKHUB_DELEGATION_REPLACEMENT_REQUESTED_MESSAGE_SHAPE =
@@ -1564,7 +1728,7 @@ const WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE =
       'targetSessionName',
       'userText',
     ],
-    [],
+    ['workId', 'executionBinding', 'taskStop', 'stopSet'],
   );
 const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
   defineObjectShape<WorkHubDelegationStopResolvedMessage>()(
@@ -1583,7 +1747,7 @@ const WORKHUB_DELEGATION_STOP_RESOLVED_MESSAGE_SHAPE =
       'targetSessionId',
       'outcome',
     ],
-    ['targetTurnId'],
+    ['targetTurnId', 'taskStop', 'cancelledWaitRequestId'],
   );
 const WORKHUB_DELEGATION_CREATE_SHAPE = defineObjectShape<WorkHubDelegationCreateSpec>()(
   ['title', 'workspace'],
@@ -1793,6 +1957,14 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
     return (
       hasMessageEnvelope(message, true) &&
       hasExactShape(message, WORKHUB_DELEGATION_STOP_REQUESTED_MESSAGE_SHAPE) &&
+      isWorkHubTaskStopFields(message) &&
+      (message.workId === undefined ||
+        (typeof message.workId === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(message.workId))) &&
+      (message.executionBinding === undefined ||
+        (typeof message.executionBinding === 'string' &&
+          message.executionBinding.length > 0 &&
+          message.executionBinding.length <= 4096 &&
+          !message.executionBinding.includes('\0'))) &&
       message.schemaVersion === WORKHUB_COORDINATION_STOP_SCHEMA_VERSION &&
       isWorkHubActionIdentity(message) &&
       typeof message.stopsActionId === 'string' &&
@@ -1821,7 +1993,19 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       message.stopsDelegationId.length > 0 &&
       typeof message.targetSessionId === 'string' &&
       message.targetSessionId.length > 0 &&
-      isWorkHubDelegationStopResolution(message.outcome, message.targetTurnId)
+      (message.taskStop === undefined || message.taskStop === true) &&
+      (message.cancelledWaitRequestId === undefined ||
+        (message.taskStop === true &&
+          message.outcome === 'already_terminal' &&
+          typeof message.targetTurnId === 'string' &&
+          message.targetTurnId.length > 0 &&
+          typeof message.cancelledWaitRequestId === 'string' &&
+          /^[A-Za-z0-9_-]{1,128}$/u.test(message.cancelledWaitRequestId))) &&
+      isWorkHubDelegationStopResolution(
+        message.outcome,
+        message.targetTurnId,
+        message.taskStop === true,
+      )
     );
   }
   if (message.kind === 'delegation_replacement_aborted') {
@@ -1840,7 +2024,9 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
       message.abortedDelegationId.length > 0 &&
       typeof message.targetSessionId === 'string' &&
       message.targetSessionId.length > 0 &&
-      (message.reason === 'target_unavailable' || message.reason === 'target_waiting_for_user')
+      (message.reason === 'target_unavailable' ||
+        message.reason === 'target_waiting_for_user' ||
+        message.reason === 'legacy_protocol_retirement')
     );
   }
   if (message.kind === 'delegation_superseded') {
@@ -1900,6 +2086,15 @@ function isWorkHubCoordinationMessage(message: Record<string, unknown>): boolean
   return (
     message.kind === 'delegation_assigned' &&
     hasExactShape(message, WORKHUB_DELEGATION_ASSIGNED_MESSAGE_SHAPE) &&
+    (message.settings === undefined || isWorkHubTaskSettingsSnapshot(message.settings)) &&
+    (message.taskTitle === undefined ||
+      (typeof message.taskTitle === 'string' &&
+        message.taskTitle.trim().length > 0 &&
+        Array.from(message.taskTitle).length <= 512 &&
+        !/[\u0000-\u001f\u007f]/u.test(message.taskTitle))) &&
+    (message.inputOrigin === undefined ||
+      message.inputOrigin === 'user' ||
+      message.inputOrigin === 'feedback') &&
     isWorkHubMessageAttachments(message.targetAttachments) &&
     typeof message.delegationId === 'string' &&
     typeof message.targetTurnId === 'string' &&
@@ -2080,7 +2275,9 @@ export function deriveTurnRecords(messages: readonly StoredMessage[]): TurnRecor
     if (
       message.type === 'workhub_peer_question' ||
       message.type === 'workhub_peer_inbox' ||
-      message.type === 'workhub_peer_settlement'
+      message.type === 'workhub_peer_settlement' ||
+      (message.type === 'workhub_evidence_resolution' &&
+        message.origin === 'legacy_protocol_retirement')
     )
       continue;
     const turnId = (message as { turnId?: string }).turnId;

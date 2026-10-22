@@ -390,7 +390,7 @@ describe('ModelAdapter.startStream onError', () => {
         outputTokens: 1,
         cacheHitInputTokens: 0,
         cacheMissInputTokens: 1,
-        cacheMissInputSource: 'explicit',
+        cacheMissInputSource: 'derived',
         cachedInputTokens: 0,
         cacheWriteInputTokens: 0,
         reasoningTokens: 0,

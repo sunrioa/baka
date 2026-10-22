@@ -118,6 +118,7 @@ import { DEFAULT_SESSION_NAME, normalizeUserSessionName } from '@maka/core/sessi
 import {
   decodeCanonicalMessage,
   deriveTurnRecords,
+  isWorkHubReplacementIntentRetired,
   WORKHUB_COORDINATION_SESSION_ID,
 } from '@maka/core/session';
 import type {
@@ -167,6 +168,19 @@ export function createSessionStore(workspaceRoot: string): SessionAuthorityStore
 }
 
 class SqliteSessionStore implements SessionAuthorityStore {
+  readonly workHubTaskIndex: NonNullable<SessionAuthorityStore['workHubTaskIndex']> = {
+    query: (input) => this.metadata.workHubTaskIndex.query(input),
+    read: (kind, id) => this.metadata.workHubTaskIndex.read(kind, id),
+    put: (document, through) => this.metadata.workHubTaskIndex.put(document, through),
+    refresh: (document, revision) => this.metadata.workHubTaskIndex.refresh(document, revision),
+    markDirty: (sessionId) => this.metadata.workHubTaskIndex.markDirty(sessionId),
+    dirty: (afterKey) => this.metadata.workHubTaskIndex.dirty(afterKey),
+    containsSession: (sessionId) => this.metadata.workHubTaskIndex.containsSession(sessionId),
+    watermark: () => this.metadata.workHubTaskIndex.watermark(),
+    advance: (sequence) => this.metadata.workHubTaskIndex.advance(sequence),
+    remove: (kind, id) => this.metadata.workHubTaskIndex.remove(kind, id),
+    rebuild: () => this.metadata.workHubTaskIndex.rebuild(),
+  };
   private readonly metadata: SqliteSessionMetadataStore;
   private readonly workspaceRoot: string;
   private readonly transcriptChangeListeners = new Set<(sessionId: string) => void>();
@@ -473,6 +487,16 @@ class SqliteSessionStore implements SessionAuthorityStore {
     );
   }
 
+  async readWorkHubAssignmentByMessage(messageId: string) {
+    if (!/^whm_[a-f0-9]{48}$/u.test(messageId)) return undefined;
+    const fact = await this.readWorkHubCoordinationMessage(`wha_${messageId.slice(4)}`);
+    return fact?.type === 'workhub_coordination' &&
+      fact.kind === 'delegation_assigned' &&
+      fact.targetMessageId === messageId
+      ? fact
+      : undefined;
+  }
+
   async readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined> {
@@ -487,16 +511,35 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.readWorkHubAssignmentsPage(request);
   }
 
+  async readWorkHubTaskFactsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    await this.ensureReady();
+    return this.metadata.readWorkHubTaskFactsPage(request);
+  }
+
   async readWorkHubReplacement(
     delegationId: string,
+    pendingOnly?: true,
   ): Promise<WorkHubDelegationReplacementRequestedMessage | undefined> {
     const message = await this.readWorkHubCoordinationMessage(
       `whp_${workHubIdentitySuffix(delegationId)}`,
     );
-    return message?.type === 'workhub_coordination' &&
-      message.kind === 'delegation_replacement_requested'
-      ? message
-      : undefined;
+    if (
+      message?.type !== 'workhub_coordination' ||
+      message.kind !== 'delegation_replacement_requested'
+    )
+      return undefined;
+    if (
+      pendingOnly &&
+      message.replacesDelegationId === delegationId &&
+      isWorkHubReplacementIntentRetired(
+        message,
+        await this.readWorkHubReplacementAbort(delegationId),
+      )
+    )
+      return undefined;
+    return message;
   }
 
   async readWorkHubReplacementAbort(
@@ -525,58 +568,22 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async readWorkHubStopRequest(
     delegationId: string,
     actionId?: string,
+    latest?: true,
   ): Promise<WorkHubDelegationStopRequestedMessage | undefined> {
-    const first = await this.readWorkHubCoordinationMessage(
-      `whq_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      actionId &&
-      first?.type === 'workhub_coordination' &&
-      first.kind === 'delegation_stop_requested' &&
-      first.actionId !== actionId
-        ? await this.readWorkHubCoordinationMessage(
-            `whq_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-          )
-        : first;
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_requested'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopRequest(delegationId, actionId, latest);
+  }
+
+  hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
+    return this.metadata.hasOtherWorkHubStopTarget(turnId, workId);
   }
 
   async readWorkHubStopResolution(
     delegationId: string,
     actionId?: string,
   ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
-    if (!actionId) {
-      const terminal = await this.readWorkHubCoordinationMessage(
-        `whzt_${workHubIdentitySuffix(delegationId)}`,
-      );
-      if (
-        terminal?.type === 'workhub_coordination' &&
-        terminal.kind === 'delegation_stop_resolved' &&
-        terminal.outcome !== 'not_owned'
-      )
-        return terminal;
-    }
-    const scoped = actionId
-      ? await this.readWorkHubCoordinationMessage(
-          `whz_${workHubIdentitySuffix(JSON.stringify([delegationId, actionId]))}`,
-        )
-      : undefined;
-    const primary = await this.readWorkHubCoordinationMessage(
-      `whz_${workHubIdentitySuffix(delegationId)}`,
-    );
-    const message =
-      scoped ??
-      (actionId &&
-      primary?.type === 'workhub_coordination' &&
-      primary.kind === 'delegation_stop_resolved' &&
-      primary.actionId !== actionId
-        ? undefined
-        : primary);
-    return message?.type === 'workhub_coordination' && message.kind === 'delegation_stop_resolved'
-      ? message
-      : undefined;
+    await this.ensureReady();
+    return this.metadata.readWorkHubStopResolution(delegationId, actionId);
   }
 
   async claimWorkHubAction(claim: WorkHubActionClaim): Promise<WorkHubActionClaimOutcome> {
@@ -1132,6 +1139,7 @@ function projectStableSessionCreateProbe(
 function toCatalogRecordSummary(record: SessionMetadataCatalogRecord): SessionSummary {
   return {
     ...toSummary(record.header),
+    ...(record.workHubCreated ? { workHubCreated: true } : {}),
     ...(record.lastMessagePreview === undefined
       ? {}
       : { lastMessagePreview: record.lastMessagePreview }),

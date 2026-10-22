@@ -139,7 +139,7 @@ export {
   createContextCompactionCommands,
   createContextCompactionPresentation,
   presentContextCompactionResult,
-} from './model/context-compaction.js';
+} from '../../application/contracts/context-compaction.js';
 export { useConversationQueue } from './ui/conversation-provider.js';
 
 export { LiveTurnReconciler } from './controller/live-turn-reconciler.js';

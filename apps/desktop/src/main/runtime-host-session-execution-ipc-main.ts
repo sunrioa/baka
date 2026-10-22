@@ -35,6 +35,7 @@ import {
   type TurnMessageExecutionResolution,
 } from '@maka/runtime-host/protocol';
 import {
+  WORKHUB_COORDINATION_SESSION_ID,
   type SessionChangedEvent,
   type SessionChangedReason,
 } from '@maka/core/session';
@@ -115,6 +116,7 @@ type RuntimeHostSessionExecutionClient = Pick<
   DesktopRuntimeHostClient,
   | "answerInteraction"
   | "compactContext"
+  | 'compactWorkHubCoordination'
   | "copySession"
   | "getSession"
   | "generatePromptSuggestion"
@@ -761,7 +763,9 @@ export function registerRuntimeHostSessionExecutionIpc(
 
   ipcMain.handle("sessions:compact", async (_event, sessionId: string) => {
     const turnId = newId();
-    const result = await deps.client.compactContext({ sessionId, turnId });
+    const result = sessionId === WORKHUB_COORDINATION_SESSION_ID
+      ? await deps.client.compactWorkHubCoordination({ turnId })
+      : await deps.client.compactContext({ sessionId, turnId });
     deps.emitSessionsChanged("status-change", sessionId, { turnId });
     return result;
   });

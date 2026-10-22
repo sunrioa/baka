@@ -30,3 +30,5 @@ export * from './maka-subject.js';
 export * from './result.js';
 export * from './runner.js';
 export * from './spec.js';
+export * from './workhub-cases.js';
+export * from './workhub-evidence.js';

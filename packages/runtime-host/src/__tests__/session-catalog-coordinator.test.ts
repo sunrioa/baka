@@ -39,6 +39,7 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
   type SessionHeader,
+  snapshotWorkHubTaskSettings,
 } from '@maka/core/session';
 import {
   SessionConfigurationTransitionError,
@@ -1851,6 +1852,208 @@ test('fresh WorkHub containers retain the actual source worktree and registered 
   }
 });
 
+test('fresh WorkHub segments inherit effective persistent settings, not defaults or turn approvals', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-settings-')));
+  try {
+    const resolved: unknown[] = [];
+    const fixture = createFixture({
+      connection: {
+        enabledModelIds: ['model-1', 'edited-model'],
+        models: [{ id: 'model-1' }, { id: 'edited-model' }],
+        onResolve: (ref) => resolved.push(ref),
+      },
+    });
+    const source = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        model: 'edited-model',
+        permissionMode: 'ask',
+        toolMode: 'code_mode',
+        thinkingLevel: undefined,
+      },
+      'current_segment',
+    );
+    const request = {
+      sessionId: 'next-segment',
+      workspace: { kind: 'host_path' as const, path: root },
+      name: 'Same work',
+    };
+    const prepared = await fixture.coordinator.prepareWorkHubContinuation(request, source);
+    assert.equal(prepared.input.model, 'edited-model');
+    assert.equal(prepared.input.llmConnectionId, source.llmConnectionId);
+    assert.equal(prepared.input.permissionMode, 'ask');
+    assert.equal(prepared.input.toolMode, 'code_mode');
+    assert.equal(
+      prepared.input.thinkingLevel,
+      undefined,
+      'an absent variant stays provider-default',
+    );
+    assert.equal(prepared.input.cwd, root);
+    assert.ok(resolved.length > 0, 'inherited model still passes current execution authorization');
+    assert.equal('rememberForTurn' in prepared.input, false);
+    assert.equal('sandboxGrants' in prepared.input, false);
+    const legacy = await fixture.coordinator.prepareWorkHubContinuation(request, {
+      ...source,
+      llmConnectionId: null,
+    });
+    assert.equal(legacy.input.llmConnectionId, source.llmConnectionId);
+    assert.equal(legacy.input.model, 'edited-model');
+    assert.equal(legacy.input.permissionMode, 'ask');
+    assert.equal(legacy.input.toolMode, 'code_mode');
+    assert.equal(legacy.input.thinkingLevel, undefined);
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        llmConnectionId: null,
+        llmConnectionSlug: 'missing-source-connection',
+      }),
+      /connection is unavailable/,
+    );
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        llmConnectionId: 'stale-connection-id',
+      }),
+      /identity changed|changed during selection/,
+    );
+    await assert.rejects(
+      fixture.coordinator.prepareWorkHubContinuation(request, {
+        ...source,
+        model: 'unavailable-model',
+      }),
+      /enabled|unavailable/,
+    );
+    const seen: unknown[] = [];
+    const executor = createFixture({
+      assertExecutorAvailable: async (_id, executorId, config) => {
+        seen.push([executorId, config]);
+        return config;
+      },
+    });
+    const executorSource = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        backend: 'plugin-executor',
+        executorId: 'remote',
+        executorConfig: { model: 'edited-executor', mode: 'ask' },
+        permissionMode: 'ask',
+        toolMode: 'direct',
+      },
+      'current_segment',
+    );
+    const external = await executor.coordinator.prepareWorkHubContinuation(request, executorSource);
+    assert.deepEqual(seen, [['remote', { model: 'edited-executor', mode: 'ask' }]]);
+    assert.equal(external.input.executorId, 'remote');
+    assert.deepEqual(external.input.executorConfig, executorSource.executorConfig);
+    assert.equal(external.input.permissionMode, 'ask');
+    for (const config of [undefined, { mode: 'ask' }]) {
+      seen.length = 0;
+      const legacyExecutor = {
+        ...executorSource,
+        model: 'legacy-chosen-model',
+        executorConfig: config,
+      };
+      const legacyExternal = await executor.coordinator.prepareWorkHubContinuation(
+        request,
+        legacyExecutor,
+      );
+      assert.equal(legacyExternal.input.model, 'legacy-chosen-model');
+      assert.deepEqual(legacyExternal.input.executorConfig, {
+        ...config,
+        model: 'legacy-chosen-model',
+      });
+      assert.deepEqual(seen, [['remote', { ...config, model: 'legacy-chosen-model' }]]);
+      assert.equal(legacyExternal.input.permissionMode, 'ask');
+      assert.deepEqual(legacyExecutor.executorConfig, config, 'legacy settings are not rewritten');
+      seen.length = 0;
+      const defaultExternal = await executor.coordinator.prepareWorkHubContinuation(request, {
+        ...legacyExecutor,
+        model: 'remote',
+      });
+      assert.equal(defaultExternal.input.model, 'remote');
+      assert.deepEqual(seen, [['remote', config]], 'do not invent an explicit executor model');
+      assert.equal(defaultExternal.input.executorConfig?.model, undefined);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy WorkHub fresh binds its current slug, not the default, and detects a later rebind', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'maka-workhub-legacy-settings-')));
+  try {
+    const policy = importTargetPolicy({
+      defaultTarget: { connectionId: 'different-default', modelId: 'default-model' },
+      connections: [
+        { connectionId: 'source-identity', slug: 'source-slug', enabledModelIds: ['source-model'] },
+        {
+          connectionId: 'different-default',
+          slug: 'default-slug',
+          enabledModelIds: ['default-model'],
+        },
+      ],
+    });
+    let replaced = false;
+    const fixture = createFixture({
+      runtimePolicy: {
+        ...policy,
+        connectionCatalog: {
+          ...policy.connectionCatalog,
+          getSnapshot: async () => {
+            const snapshot = await policy.connectionCatalog.getSnapshot();
+            return {
+              ...snapshot,
+              connections: snapshot.connections.map((entry) =>
+                replaced && entry.slug === 'source-slug'
+                  ? { ...entry, connectionId: 'replacement-identity' }
+                  : entry,
+              ),
+            };
+          },
+        },
+      },
+    });
+    const legacy = snapshotWorkHubTaskSettings(
+      {
+        ...sessionHeader('source', []),
+        cwd: root,
+        llmConnectionId: undefined,
+        llmConnectionSlug: 'source-slug',
+        model: 'source-model',
+        permissionMode: 'ask',
+      },
+      'current_segment',
+    );
+    const bound = await fixture.coordinator.resolveWorkHubSettings(legacy);
+    assert.equal(bound.llmConnectionId, 'source-identity');
+    assert.equal(legacy.llmConnectionId, null, 'does not rewrite or backfill old Session history');
+    const prepared = await fixture.coordinator.prepareWorkHubContinuation(
+      {
+        sessionId: 'fresh-legacy',
+        workspace: { kind: 'host_path', path: root },
+        name: 'Same task',
+      },
+      legacy,
+    );
+    assert.equal(prepared.input.llmConnectionId, 'source-identity');
+    assert.equal(prepared.input.llmConnectionSlug, 'source-slug');
+    assert.equal(prepared.input.model, 'source-model');
+    assert.equal(prepared.input.permissionMode, 'ask');
+    replaced = true;
+    const current = await fixture.coordinator.resolveWorkHubSettings(legacy);
+    assert.equal(current.llmConnectionId, 'replacement-identity');
+    assert.notDeepEqual(
+      current,
+      bound,
+      'the production lock-time settings comparison detects a slug rebind',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('creation reports a Project path lost before usage recording without draining', async () => {
   const fixture = createFixture({
     projectCatalog: {
@@ -2921,6 +3124,19 @@ test('reselecting the persisted executor model still confirms the Agent state an
     assert.equal(confirmations, busy ? 0 : 1);
     assert.equal(fixture.header().executorConfig?.model, 'same');
   }
+});
+
+test('projects only the supplied canonical WorkHub creation provenance', () => {
+  const record = catalogRecord(sessionHeader('ordinary', []), 2);
+  const ordinary = projectSessionCatalogRecord(record);
+  if ('kind' in ordinary) assert.fail('Expected a supported Session projection');
+  assert.equal(Object.hasOwn(ordinary, 'workHubCreated'), false);
+  const created = projectSessionCatalogRecord({
+    ...record,
+    summary: { ...record.summary, workHubCreated: true },
+  });
+  if ('kind' in created) assert.fail('Expected a supported Session projection');
+  assert.equal(created.workHubCreated, true);
 });
 
 test('projects the archive time of an archived Session and drops one on an active Session', () => {

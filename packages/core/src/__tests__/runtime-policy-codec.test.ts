@@ -90,6 +90,49 @@ test('WorkHub permission defaults survive canonical policy decoding and reject u
   }
 });
 
+test('WorkHub executor creation choices are optional, strict and independent of permissions', () => {
+  const policy = createDefaultRuntimePolicy();
+  for (const workHubExecutor of [
+    { executorId: 'codex.app-server' },
+    { executorId: 'codex.app-server', executorModel: 'gpt-6-astra', thinkingLevel: 'high' },
+  ]) {
+    const chatDefaults = { ...policy.chatDefaults, workHubExecutor };
+    assert.deepEqual(
+      decodeCanonicalRuntimePolicy({ ...policy, chatDefaults }).chatDefaults,
+      chatDefaults,
+    );
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value: chatDefaults },
+      }).operation,
+      { kind: 'set_chat_defaults', value: chatDefaults },
+    );
+  }
+  for (const workHubExecutor of [
+    null,
+    {},
+    { executorId: '../outside' },
+    { executorId: 'codex.app-server', executorModel: '' },
+    { executorId: 'codex.app-server', executorModel: '中'.repeat(171) },
+    { executorId: 'codex.app-server', thinkingLevel: 'invalid' },
+    { executorId: 'codex.app-server', permissionMode: 'bypass' },
+    {
+      executorId: 'codex.app-server',
+      model: { llmConnectionId: 'foreign', llmConnectionSlug: 'foreign', model: 'foreign' },
+    },
+    { executorId: 'codex.app-server', sourceActionId: 'forged' },
+  ])
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubExecutor },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
+});
+
 test('WorkHub concurrency is an optional bounded integer in policy and mutations', () => {
   const policy = createDefaultRuntimePolicy();
   assert.equal(
@@ -116,6 +159,47 @@ test('WorkHub concurrency is an optional bounded integer in policy and mutations
         decodeCanonicalRuntimePolicy({
           ...policy,
           chatDefaults: { ...policy.chatDefaults, workHubMaxConcurrentSessions },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
+  }
+});
+
+test('coordinator compaction target is optional, exact and never supplies a numeric default', () => {
+  const policy = createDefaultRuntimePolicy();
+  assert.equal(
+    decodeCanonicalRuntimePolicy(policy).chatDefaults.workHubCompactionThreshold,
+    undefined,
+  );
+  for (const workHubCompactionThreshold of [1, 127001, 765432, Number.MAX_SAFE_INTEGER]) {
+    const value = { ...policy.chatDefaults, workHubCompactionThreshold };
+    const decoded = decodeCanonicalRuntimePolicy({ ...policy, chatDefaults: value });
+    assert.deepEqual(decoded.chatDefaults, value);
+    assert.deepEqual(decodeCanonicalRuntimePolicy(JSON.parse(JSON.stringify(decoded))), decoded);
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value },
+      }).operation,
+      { kind: 'set_chat_defaults', value },
+    );
+  }
+  for (const workHubCompactionThreshold of [
+    0,
+    -1,
+    1.5,
+    '1000',
+    null,
+    true,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubCompactionThreshold },
         }),
       RuntimePolicyDomainDecodeError,
     );
@@ -688,24 +772,24 @@ test('per-model ApplyPatch overrides survive persistence and reject non-booleans
   );
 });
 
-test('Jev is an optional strict policy field and has a dedicated credential scope', () => {
+test('legacy Jev policy is discarded while its credential remains readable', () => {
   const legacy = createDefaultRuntimePolicy();
   assert.deepEqual(decodeCanonicalRuntimePolicy(legacy), legacy);
   const enabled = { ...legacy, jev: { enabled: true } };
-  assert.deepEqual(decodeCanonicalRuntimePolicy(enabled), enabled);
+  assert.deepEqual(decodeCanonicalRuntimePolicy(enabled), legacy);
+  assert.deepEqual(
+    decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: 'true', apiKey: 'old-secret' } }),
+    legacy,
+  );
+  assert.equal(JSON.stringify(decodeCanonicalRuntimePolicy(enabled)).includes('jev'), false);
   assert.throws(
-    () => decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: 'true' } }),
+    () =>
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 0,
+        operation: { kind: 'set_jev', value: { enabled: true } },
+      }),
     RuntimePolicyDomainDecodeError,
   );
-  assert.throws(
-    () => decodeCanonicalRuntimePolicy({ ...legacy, jev: { enabled: true, apiKey: 'secret' } }),
-    RuntimePolicyDomainDecodeError,
-  );
-  const mutation = normalizeRuntimePolicyMutation({
-    expectedRevision: 0,
-    operation: { kind: 'set_jev', value: { enabled: false } },
-  });
-  assert.deepEqual(mutation.operation, { kind: 'set_jev', value: { enabled: false } });
   const credential = normalizeSetCredentialInput({
     locator: { scope: 'jev', kind: 'api_key' },
     expected: null,

@@ -1031,22 +1031,6 @@ export class DesktopRuntimeHostClient {
     return this.request('workhub.coordination.configureModel', input);
   }
 
-  listWorkHubCoordinationCandidates() {
-    return this.request("workhub.coordination.candidates", {});
-  }
-
-  queryWorkHubWorks(input: OperationInput<'workhub.coordination.works'>) {
-    return this.request('workhub.coordination.works', input);
-  }
-
-  selectAndDelegateWorkHubTarget(input: OperationInput<'workhub.coordination.selectAndDelegate'>) {
-    return this.request('workhub.coordination.selectAndDelegate', input);
-  }
-
-  actWorkHubCoordinationFromTurn(input: OperationInput<'workhub.coordination.actFromTurn'>) {
-    return this.request('workhub.coordination.actFromTurn', input);
-  }
-
   listExternalSessionSources(): Promise<ExternalSessionSourceQueryResult> {
     return this.request("external-session.source.query", {});
   }
@@ -1402,18 +1386,19 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.interactions.query", {});
   }
   queryWorkHubTasks(): Promise<OperationOutput<'workhub.tasks.query'>> { return this.request('workhub.tasks.query', {}); }
+  findWorkHubTasks(input: OperationInput<'workhub.tasks.find'>): Promise<OperationOutput<'workhub.tasks.find'>> { return this.request('workhub.tasks.find', input); }
+  startWorkHubTask(input: OperationInput<'workhub.tasks.start'>): Promise<OperationOutput<'workhub.tasks.start'>> { return this.request('workhub.tasks.start', input); }
+  askWorkHubTask(input: OperationInput<'workhub.tasks.ask'>): Promise<OperationOutput<'workhub.tasks.ask'>> { return this.request('workhub.tasks.ask', input); }
+  continueWorkHubTaskFromTurn(input: OperationInput<'workhub.tasks.continue'>): Promise<OperationOutput<'workhub.tasks.continue'>> { return this.request('workhub.tasks.continue', input); }
+  stopWorkHubTasks(input: OperationInput<'workhub.tasks.stop'>): Promise<OperationOutput<'workhub.tasks.stop'>> { return this.request('workhub.tasks.stop', input); }
   readWorkHubTaskHistory(input: OperationInput<'workhub.tasks.history'>): Promise<OperationOutput<'workhub.tasks.history'>> { return this.request('workhub.tasks.history', input); }
   readWorkHubTaskExecutions(input: OperationInput<'workhub.tasks.executions'>): Promise<OperationOutput<'workhub.tasks.executions'>> { return this.request('workhub.tasks.executions', input); }
   sendWorkHubTaskInput(input: OperationInput<'workhub.tasks.send'>): Promise<OperationOutput<'workhub.tasks.send'>> { return this.request('workhub.tasks.send', input); }
   readWorkHubTaskInput(input: OperationInput<'workhub.tasks.input.read'>): Promise<OperationOutput<'workhub.tasks.input.read'>> { return this.request('workhub.tasks.input.read', input); }
   readWorkHubTask(input: OperationInput<'workhub.tasks.read'>): Promise<OperationOutput<'workhub.tasks.read'>> { return this.request('workhub.tasks.read', input); }
-  continueWorkHubTask(input: OperationInput<'workhub.coordination.continue'>): Promise<OperationOutput<'workhub.coordination.continue'>> { return this.request('workhub.coordination.continue', input); }
 
   answerWorkHubInteraction(input: OperationInput<"workhub.interactions.answer">): Promise<OperationOutput<"workhub.interactions.answer">> {
     return this.request("workhub.interactions.answer", input);
-  }
-  revokeWorkHubTaskGrant(input: OperationInput<"workhub.interactions.revoke">): Promise<OperationOutput<"workhub.interactions.revoke">> {
-    return this.request("workhub.interactions.revoke", input);
   }
 
   testNetworkProxy(
@@ -1485,6 +1470,12 @@ export class DesktopRuntimeHostClient {
     input: OperationInput<"context.compact">,
   ): Promise<OperationOutput<"context.compact">> {
     return this.request("context.compact", input);
+  }
+
+  compactWorkHubCoordination(
+    input: OperationInput<'workhub.coordination.compact'>,
+  ): Promise<OperationOutput<'workhub.coordination.compact'>> {
+    return this.request('workhub.coordination.compact', input);
   }
 
   async querySessionTodo(sessionId: string): Promise<SessionTodoItem[]> {

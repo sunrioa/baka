@@ -22,21 +22,25 @@ import type { InteractionAnswer, WorkHubPendingInteraction, WorkHubInteractionsQ
 import type { WorkHubServices } from '../ports.js';
 
 const empty: WorkHubInteractionsQueryResult = { requests: [], truncated: false };
+const emptyWorkIds: ReadonlyMap<string, string> = new Map();
+const assignmentKey = (item: WorkHubPendingInteraction) => JSON.stringify([item.actionId, item.delegationId]);
 export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string | undefined) {
   const current = useRef(sessionId);
   current.current = sessionId;
-  const [state, setState] = useState<{ sessionId?: string; data: WorkHubInteractionsQueryResult; ready: boolean; error?: string }>({ data: empty, ready: false });
+  const [state, setState] = useState<{ sessionId?: string; data: WorkHubInteractionsQueryResult; workIds: ReadonlyMap<string, string>; ready: boolean; error?: string }>({ data: empty, workIds: emptyWorkIds, ready: false });
   const [answering, setAnswering] = useState<ReadonlySet<string>>(new Set());
   const inFlight = useRef(new Set<string>());
   const generation = useRef(0);
   const refresh = useRef<() => Promise<void>>(async () => {});
-  const displayed = state.sessionId === sessionId ? state : { data: empty, ready: false };
+  const displayed = state.sessionId === sessionId ? state : { data: empty, workIds: emptyWorkIds, ready: false };
+  const latest = useRef(displayed); latest.current = displayed;
+  const renderedGeneration = generation.current;
 
   useEffect(() => {
     ++generation.current;
     let disposed = false;
     let revision = 0;
-    setState({ sessionId, data: empty, ready: false });
+    setState({ sessionId, data: empty, workIds: emptyWorkIds, ready: false });
     setAnswering(new Set());
     inFlight.current.clear();
     if (!sessionId) return;
@@ -54,7 +58,24 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
           const readRevision = revision;
           try {
             const data = await services.queryTaskInteractions(sessionId!);
-            if (!disposed && readRevision === revision) setState({ sessionId, data, ready: true });
+            if (disposed || readRevision !== revision) continue;
+            // Exact canonical ownership is independent of the reader's history
+            // page. Resolve once per source in this refresh, retaining the
+            // original request objects and the existing answer lifecycle.
+            const sources = new Map<string, Promise<string>>();
+            for (const item of data.requests) {
+              const key = assignmentKey(item);
+              if (!sources.has(key)) sources.set(key, (async () => {
+                const { task } = await services.readTask(sessionId!, { actionId: item.actionId, delegationId: item.delegationId });
+                // The Host inbox already proves child-run ancestry. Its original
+                // child snapshot need not share the task's root Session.
+                if (task.actionId !== item.actionId || task.delegationId !== item.delegationId)
+                  throw new Error('The original task request changed identity');
+                return task.workId ?? task.actionId;
+              })());
+            }
+            const workIds = new Map(await Promise.all([...sources].map(async ([key, source]) => [key, await source] as const)));
+            if (!disposed && readRevision === revision) setState({ sessionId, data, workIds, ready: true });
           } catch (reason) {
             if (!disposed && readRevision === revision) setState((previous) => ({
               ...previous, sessionId, ready: false, error: reason instanceof Error ? reason.message : String(reason),
@@ -70,7 +91,7 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
       inFlight.current.clear();
       setAnswering(new Set());
       ++revision;
-      setState({ sessionId, data: empty, ready: false });
+      setState({ sessionId, data: empty, workIds: emptyWorkIds, ready: false });
       void read();
     }
     refresh.current = read;
@@ -89,12 +110,12 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
     };
   }, [services, sessionId]);
 
-  async function respond(item: WorkHubPendingInteraction, answer: InteractionAnswer, grantScope?: 'task') {
+  async function respond(item: WorkHubPendingInteraction, answer: InteractionAnswer) {
     const owner = sessionId;
     const contextGeneration = generation.current;
     const { interaction } = item;
     const key = JSON.stringify([owner, interaction.interactionId, interaction.runId]);
-    if (!owner || current.current !== owner || !displayed.ready ||
+    if (!owner || current.current !== owner || renderedGeneration !== generation.current || latest.current !== displayed || !displayed.ready ||
         !displayed.data.requests.some((pending) => pending === item)) throw new Error('The original task request is unavailable');
     if (inFlight.current.has(key)) return;
     inFlight.current.add(key);
@@ -103,7 +124,6 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
       await services.answerTaskInteraction(owner, {
         actionId: item.actionId, interactionId: interaction.interactionId,
         expectedTurnId: interaction.turnId, expectedRunId: interaction.runId, answer,
-        ...(grantScope ? {grantScope} : {}),
       });
     } finally {
       // A failed/lost receipt is not proof the answer failed. Rebuild from the
@@ -119,28 +139,8 @@ export function useWorkHubTaskInbox(services: WorkHubServices, sessionId: string
   }
   return {
     ...displayed.data, ready: displayed.ready, error: displayed.error, respond,
-    revoke: async (item: NonNullable<WorkHubInteractionsQueryResult['grants']>[number]) => {
-      const owner = sessionId;
-      const contextGeneration = generation.current;
-      const key = JSON.stringify([owner, 'grant', item.grant.grantId]);
-      if (!owner || current.current !== owner || !displayed.ready || !displayed.data.grants?.includes(item))
-        throw new Error('The original task grant is unavailable');
-      if (inFlight.current.has(key)) return;
-      inFlight.current.add(key);
-      setAnswering(new Set(inFlight.current));
-      try {await services.revokeTaskGrant(owner, {actionId: item.actionId, grantId: item.grant.grantId});}
-      finally {
-        if (current.current === owner && generation.current === contextGeneration) {
-          await refresh.current();
-          if (current.current === owner && generation.current === contextGeneration) {
-            inFlight.current.delete(key);
-            setAnswering(new Set(inFlight.current));
-          }
-        }
-      }
-    },
+    requestsForWork: (workId: string) => displayed.data.requests.filter(item => displayed.workIds.get(assignmentKey(item)) === workId),
     refresh: () => refresh.current(),
     isAnswering: (item: WorkHubPendingInteraction) => answering.has(JSON.stringify([sessionId, item.interaction.interactionId, item.interaction.runId])),
-    isRevoking: (item: NonNullable<WorkHubInteractionsQueryResult['grants']>[number]) => answering.has(JSON.stringify([sessionId, 'grant', item.grant.grantId])),
   };
 }

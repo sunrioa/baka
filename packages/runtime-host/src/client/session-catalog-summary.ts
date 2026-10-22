@@ -25,6 +25,7 @@ export function projectSessionCatalogSummary(
 ): SessionCatalogSummary {
   return {
     id: session.id,
+    ...(session.workHubCreated === undefined ? {} : { workHubCreated: session.workHubCreated }),
     cwd: session.workspace.hostCwd,
     ...(session.workspace.target.kind === 'project'
       ? { projectId: session.workspace.target.projectId }

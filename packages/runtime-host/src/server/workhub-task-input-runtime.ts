@@ -20,12 +20,14 @@
 import { createHash } from 'node:crypto';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
+  isWorkHubReplacementIntentRetired,
   type WorkHubDelegationAssignedMessage,
 } from '@maka/core/session';
 import { messageContentDigest, normalizeMessageContent } from '@maka/core/events';
 import {
   workHubTaskInputMatches,
   type WorkHubTaskInputMessage,
+  type WorkHubTaskInputProvenance,
   type WorkHubTaskInputRequest,
 } from '@maka/core/workhub-task-input';
 import {
@@ -34,7 +36,10 @@ import {
   type ExecutionStoresWriter,
   type PendingMessageAdmission,
 } from '@maka/storage/execution-stores';
-import type { WorkHubTaskInputResult } from '../protocol/workhub-task-input.js';
+import type {
+  WorkHubTaskInputResult,
+  WorkHubTaskSendInput,
+} from '../protocol/workhub-task-input.js';
 import type { OperationHandlerMap, ConnectionContext } from './operation-dispatcher.js';
 import type { SessionAdmissionGate } from './session-admission-gate.js';
 import type { HostMessageCoordinator } from './message-coordinator.js';
@@ -45,6 +50,13 @@ import {
   WorkHubActionEffectFailure,
   WorkHubActionGateFailure,
 } from './workhub-coordination-action-gate.js';
+import { readCurrentWorkHubTaskSource } from './workhub-task-source.js';
+import { readWorkHubStopProjection } from './workhub-stop-projection.js';
+
+type BoundInput = WorkHubTaskInputRequest & WorkHubTaskInputProvenance;
+type ModelAuthority = NonNullable<
+  Awaited<ReturnType<RootTurnCoordinator['readActiveWorkHubRoutingRequest']>>
+> & { readonly turnId: string };
 
 class InputFailure extends Error {
   constructor(
@@ -57,6 +69,7 @@ class InputFailure extends Error {
       | 'host_not_ready'
       | 'session_archived'
       | 'internal_failure'
+      | 'persistence_failed'
       | 'commit_outcome_unknown',
     message: string,
   ) {
@@ -64,14 +77,14 @@ class InputFailure extends Error {
   }
 }
 
-/** Native user input is resolved from work ownership; the coordinator model is not on this path. */
+/** Both entry points use canonical task ownership; a preview is never routing authority. */
 export function createWorkHubTaskInputRuntime(options: {
   stores: ExecutionStoresWriter<'interactive'>;
   admission: SessionAdmissionGate;
   messages: HostMessageCoordinator;
   executions: RootTurnCoordinator;
   evidence: Pick<ReturnType<typeof createWorkHubEvidenceRuntime>, 'taskExecution'>;
-  coordination: Pick<HostWorkHubCoordinationCoordinator, 'continueTaskInput'>;
+  coordination: Pick<HostWorkHubCoordinationCoordinator, 'continueTaskInput' | 'continueTaskFresh'>;
   requestDrain(): void;
   onError(error: unknown): void;
 }) {
@@ -133,14 +146,90 @@ export function createWorkHubTaskInputRuntime(options: {
       ? { ...base, delivery: 'queued' }
       : base;
   }
-  function assertRetry(existing: WorkHubTaskInputMessage, input: WorkHubTaskInputRequest) {
-    if (!workHubTaskInputMatches(existing, input))
+  function provenance(
+    input: WorkHubTaskSendInput,
+    authority?: ModelAuthority,
+  ): WorkHubTaskInputProvenance {
+    // A saved legacy attempt may already own a pre-upgrade action claim.
+    // Preserve its exact six-field fingerprint; new task-aware inputs
+    // persist explicit provenance instead of rewriting that old payload.
+    if (!authority && 'sourceActionId' in input) return {};
+    return {
+      originalUserText: authority?.content.text ?? input.text,
+      inputOrigin: authority?.origin ?? 'user',
+      ...(authority?.sourceMessageId ? { sourceMessageId: authority.sourceMessageId } : {}),
+    };
+  }
+  function assertRetry(
+    existing: WorkHubTaskInputMessage,
+    input: WorkHubTaskSendInput,
+    authority?: ModelAuthority,
+  ) {
+    const exact: BoundInput = {
+      ...input,
+      sourceActionId: 'sourceActionId' in input ? input.sourceActionId : existing.sourceActionId,
+      sourceDelegationId:
+        'sourceDelegationId' in input ? input.sourceDelegationId : existing.sourceDelegationId,
+      ...provenance(input, authority),
+    };
+    if (!workHubTaskInputMatches(existing, exact))
       throw new InputFailure(
         'operation_conflict',
         'WorkHub input identity has different content or source',
       );
   }
-  async function source(input: WorkHubTaskInputRequest): Promise<WorkHubDelegationAssignedMessage> {
+  async function assertModelCurrent(authority: ModelAuthority) {
+    const root = executions.readRootState(WORKHUB_COORDINATION_SESSION_ID);
+    if (
+      root.kind !== 'active' ||
+      root.turnId !== authority.turnId ||
+      root.runId !== authority.runId
+    )
+      throw new InputFailure(
+        'operation_conflict',
+        'WorkHub input belongs to a previous coordinator execution',
+      );
+    const snapshot = await executions.read(root);
+    if (!['created', 'admitted', 'running', 'waiting_for_user'].includes(snapshot.status))
+      throw new InputFailure('session_busy', 'The coordinator execution is stopping or recovering');
+  }
+  async function claimModelInput(input: BoundInput, authority: ModelAuthority) {
+    await assertModelCurrent(authority);
+    const suffix = createHash('sha256').update(input.inputId).digest('hex').slice(0, 48);
+    const actionFingerprint = `sha256:${createHash('sha256')
+      .update(
+        JSON.stringify([
+          'task_input',
+          authority.turnId,
+          input.workId,
+          input.generationId,
+          input.sourceActionId,
+          input.sourceDelegationId,
+          input.text,
+          input.originalUserText,
+          input.inputOrigin,
+          input.sourceMessageId ?? null,
+          authority.content.attachments ?? [],
+        ]),
+      )
+      .digest('hex')}` as const;
+    if (
+      (await sessions.claimWorkHubAction({
+        actionId: input.inputId,
+        operation: 'delegate_existing',
+        actionFingerprint,
+        subject: `whti_${suffix}`,
+      })) === 'conflict'
+    )
+      throw new InputFailure(
+        'operation_conflict',
+        'WorkHub action already owns a different operation or task input',
+      );
+  }
+  async function source(
+    input: WorkHubTaskInputRequest,
+    taskAware: boolean,
+  ): Promise<WorkHubDelegationAssignedMessage> {
     const a = await sessions.readWorkHubAssignment(input.sourceActionId);
     const latest = await sessions.readLatestWorkHubAssignment(input.workId);
     if (
@@ -155,12 +244,20 @@ export function createWorkHubTaskInputRuntime(options: {
         'operation_conflict',
         'The selected work generation changed; return to its current task',
       );
+    const stop = await readWorkHubStopProjection(sessions, a.delegationId);
+    const replacement = await sessions.readWorkHubReplacement(a.delegationId);
+    const abort = await sessions.readWorkHubReplacementAbort(a.delegationId);
+    const retiredIntent =
+      replacement &&
+      isWorkHubReplacementIntentRetired(replacement, abort) &&
+      replacement.replacesActionId === a.actionId &&
+      replacement.replacesDelegationId === a.delegationId &&
+      replacement.replacedTargetSessionId === a.targetSessionId &&
+      replacement.replacedTargetMessageId === a.targetMessageId;
     if (
-      (await sessions.readWorkHubReplacement(a.delegationId)) ||
+      ((replacement || abort) && !retiredIntent) ||
       (await sessions.readWorkHubSupersession(a.delegationId)) ||
-      (await sessions.readWorkHubReplacementAbort(a.delegationId)) ||
-      ((await sessions.readWorkHubStopRequest(a.delegationId)) &&
-        (await sessions.readWorkHubStopResolution(a.delegationId))?.outcome !== 'not_owned')
+      (stop && (!stop.resolution || (!taskAware && stop.retires)))
     )
       throw new InputFailure('operation_conflict', 'The selected task is being retired');
     const header = await sessions.readHeaderSnapshot(a.targetSessionId);
@@ -171,38 +268,94 @@ export function createWorkHubTaskInputRuntime(options: {
       header.labels.includes('mode:side_conversation')
     )
       throw new InputFailure('operation_unavailable', 'The selected task is unavailable');
-    if (header.backend === 'plugin-executor')
+    if (!taskAware && header.backend === 'plugin-executor')
       throw new InputFailure(
         'operation_unavailable',
-        'Direct task input currently requires a native executor; live steering is not supported by this backend',
+        'Saved legacy direct inputs do not support this executor',
       );
     return a;
   }
 
   async function send(
-    input: WorkHubTaskInputRequest,
+    input: WorkHubTaskSendInput,
     context: ConnectionContext,
+    authority?: ModelAuthority,
   ): Promise<WorkHubTaskInputResult> {
     let committing = false;
     try {
       const previous = await sessions.readWorkHubTaskInput(input.inputId);
       if (previous) {
-        assertRetry(previous, input);
+        assertRetry(previous, input, authority);
+        if (authority)
+          await admission.run(WORKHUB_COORDINATION_SESSION_ID, () =>
+            claimModelInput(
+              {
+                ...input,
+                sourceActionId: previous.sourceActionId,
+                sourceDelegationId: previous.sourceDelegationId,
+                ...provenance(input, authority),
+              },
+              authority,
+            ),
+          );
         return receipt(previous);
       }
-      const resolved = await sessions.readWorkHubAssignment(input.sourceActionId);
+      const resolved =
+        'sourceActionId' in input
+          ? await sessions.readWorkHubAssignment(input.sourceActionId)
+          : await sessions.readLatestWorkHubAssignment(input.workId);
       if (!resolved) throw new InputFailure('not_found', 'The selected task does not exist');
+      let continuation: BoundInput | undefined;
+      let validateTaskInput: (() => Promise<void>) | undefined;
       const accepted = await admission.runMany(
         [WORKHUB_COORDINATION_SESSION_ID, resolved.targetSessionId],
         async (lease) => {
           const replay = await sessions.readWorkHubTaskInput(input.inputId);
           if (replay) {
-            assertRetry(replay, input);
+            assertRetry(replay, input, authority);
+            if (authority)
+              await claimModelInput(
+                {
+                  ...input,
+                  sourceActionId: replay.sourceActionId,
+                  sourceDelegationId: replay.sourceDelegationId,
+                  ...provenance(input, authority),
+                },
+                authority,
+              );
             return replay;
           }
-          const a = await source(input);
+          const current =
+            'sourceActionId' in input
+              ? resolved
+              : await readCurrentWorkHubTaskSource(
+                  {
+                    stores,
+                    executions,
+                    evidence: options.evidence,
+                    messages: {
+                      readMessageExecutionDisposition: (sessionId, messageId) =>
+                        messages.readMessageExecutionDispositionAdmitted(
+                          sessionId,
+                          messageId,
+                          lease,
+                        ),
+                    },
+                  },
+                  input.workId,
+                );
+          if (!current) throw new InputFailure('not_found', 'The selected task does not exist');
+          const bound: BoundInput = {
+            ...input,
+            sourceActionId: 'sourceActionId' in input ? input.sourceActionId : current.actionId,
+            sourceDelegationId:
+              'sourceDelegationId' in input ? input.sourceDelegationId : current.delegationId,
+            ...provenance(input, authority),
+          };
+          const a = await source(bound, !('sourceActionId' in input));
           if (a.targetSessionId !== resolved.targetSessionId)
             throw new InputFailure('operation_conflict', 'The target Session changed');
+          if (authority) await claimModelInput(bound, authority);
           const disposition = await messages.readMessageExecutionDispositionAdmitted(
             a.targetSessionId,
             a.targetMessageId,
@@ -213,7 +366,7 @@ export function createWorkHubTaskInputRuntime(options: {
             after: PendingMessageAdmission,
             mode: 'steering' | 'queued_supplement',
           ): WorkHubTaskInputMessage => ({
-            ...input,
+            ...bound,
             type: 'workhub_coordination',
             kind: 'task_input',
             schemaVersion: 1,
@@ -229,6 +382,11 @@ export function createWorkHubTaskInputRuntime(options: {
               : {}),
           });
           if (disposition.kind === 'pending') {
+            if (authority?.content.attachments?.length)
+              throw new InputFailure(
+                'operation_unavailable',
+                'Queued task supplements with attachments are not supported; no input was appended',
+              );
             let committed: WorkHubTaskInputMessage | undefined;
             const result = await messages.supplementWorkHubMessageAdmitted(
               {
@@ -257,10 +415,15 @@ export function createWorkHubTaskInputRuntime(options: {
             if (!committed) throw new Error('Queued supplementation did not commit its input');
             return committed;
           }
-          if (disposition.kind === 'cancelled' || disposition.kind === 'recovering')
+          if (disposition.kind === 'recovering')
             throw new InputFailure(
               'operation_unavailable',
-              'The selected task admission is cancelled or still recovering',
+              'The selected task admission is still recovering',
+            );
+          if (disposition.kind === 'cancelled' && 'sourceActionId' in input)
+            throw new InputFailure(
+              'operation_unavailable',
+              'The saved legacy task admission is cancelled',
             );
           if (disposition.kind === 'owned_root') {
             const owned = await options.evidence.taskExecution(a, {
@@ -281,6 +444,18 @@ export function createWorkHubTaskInputRuntime(options: {
               active.turnId === owned.turnId &&
               active.runId === owned.runId
             ) {
+              const snapshot = await executions.read(active);
+              if (!['created', 'admitted', 'running', 'waiting_for_user'].includes(snapshot.status))
+                throw new InputFailure(
+                  'session_busy',
+                  'The task execution is stopping, recovering or settling',
+                );
+              const header = await sessions.readHeaderSnapshot(a.targetSessionId);
+              if (header.backend === 'plugin-executor' || authority?.content.attachments?.length)
+                throw new InputFailure(
+                  'operation_unavailable',
+                  'Live task Steering is not supported for this executor or attachment input; no later Turn was substituted',
+                );
               const content = normalizeMessageContent({ text: input.text });
               const prepared = await executions.prepareMessage({
                 sessionId: a.targetSessionId,
@@ -322,22 +497,48 @@ export function createWorkHubTaskInputRuntime(options: {
           }
           // Ended or shared work cannot steer the Session's unrelated root. The
           // existing assignment gate revalidates this source again at admission.
+          const root = executions.readRootState(a.targetSessionId);
+          if (root.kind === 'reserved')
+            throw new InputFailure(
+              'session_busy',
+              'The task is admitting or recovering an execution',
+            );
+          continuation = bound;
+          validateTaskInput = async () => {
+            if (authority) await assertModelCurrent(authority);
+            const now = executions.readRootState(a.targetSessionId);
+            if (
+              now.kind === 'reserved' ||
+              (now.kind === 'active' &&
+                (root.kind !== 'active' || now.turnId !== root.turnId || now.runId !== root.runId))
+            )
+              throw new InputFailure(
+                'session_busy',
+                'The target execution changed before task input admission; no later Turn was substituted',
+              );
+          };
           return undefined;
         },
       );
       if (accepted) return receipt(accepted);
+      if (!continuation || !validateTaskInput) throw new Error('Task input has no admitted source');
       committing = true;
-      await options.coordination.continueTaskInput(input, context);
+      await options.coordination.continueTaskInput(continuation, context, {
+        validateTaskInput,
+        ...(authority
+          ? { coordinationTurnId: authority.turnId, attachments: authority.content.attachments }
+          : {}),
+      });
       const committed = await sessions.readWorkHubTaskInput(input.inputId);
       if (!committed) throw new Error('Task continuation has no accepted input receipt');
-      assertRetry(committed, input);
+      assertRetry(committed, input, authority);
       return receipt(committed);
     } catch (error) {
       if (committing) {
         try {
           const committed = await sessions.readWorkHubTaskInput(input.inputId);
           if (committed) {
-            assertRetry(committed, input);
+            assertRetry(committed, input, authority);
             // The durable input remains accepted, but a failed post-commit
             // hydration must recover in a fresh Host rather than lose it in
             // this process's queue projection.
@@ -390,6 +591,43 @@ export function createWorkHubTaskInputRuntime(options: {
   }
   return {
     handlers: {
+      'workhub.tasks.continue': async (input, context) => {
+        try {
+          const request = await executions.readActiveWorkHubRoutingRequest(input.turnId);
+          if (!request)
+            throw new InputFailure(
+              'operation_conflict',
+              'Task continuation requires its active WorkHub model Turn',
+            );
+          const authority: ModelAuthority = { ...request, turnId: input.turnId };
+          await assertModelCurrent(authority);
+          const previous = await sessions.readWorkHubTaskInput(input.actionId);
+          if (input.container === 'fresh') {
+            if (previous)
+              throw new InputFailure(
+                'operation_conflict',
+                'This action already owns a reused task input',
+              );
+            const action = await options.coordination.continueTaskFresh(input, context);
+            return { ok: true, result: { container: 'fresh', action } };
+          }
+          const latest = previous
+            ? undefined
+            : await sessions.readLatestWorkHubAssignment(input.taskId);
+          const generationId =
+            previous?.generationId ?? latest?.work?.generationId ?? latest?.actionId;
+          if (!generationId)
+            throw new InputFailure('not_found', 'The selected task does not exist');
+          const result = await send(
+            { inputId: input.actionId, workId: input.taskId, generationId, text: input.text },
+            context,
+            authority,
+          );
+          return { ok: true, result: { container: 'reuse', input: result } };
+        } catch (error) {
+          return failure(error);
+        }
+      },
       'workhub.tasks.send': async (input, context) => {
         try {
           return { ok: true, result: await send(input, context) };
@@ -407,6 +645,9 @@ export function createWorkHubTaskInputRuntime(options: {
           return failure(error);
         }
       },
-    } satisfies Pick<OperationHandlerMap, 'workhub.tasks.send' | 'workhub.tasks.input.read'>,
+    } satisfies Pick<
+      OperationHandlerMap,
+      'workhub.tasks.send' | 'workhub.tasks.input.read' | 'workhub.tasks.continue'
+    >,
   };
 }

@@ -37,6 +37,8 @@ import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { WorkHubTaskInputMessage } from '@maka/core/workhub-task-input';
+import { workHubStopRetiresDelegation } from '@maka/core/workhub-task-stop';
+import { SqliteWorkHubTaskIndex, type WorkHubTaskIndexStore } from './sqlite-workhub-task-index.js';
 import {
   workHubPeerQuestionIdentity,
   workHubPeerInboxId,
@@ -134,10 +136,13 @@ import {
   type WorkHubActionClaimOutcome,
   type WorkHubActionOperation,
   type WorkHubDelegationAssignedMessage,
+  type WorkHubDelegationStopRequestedMessage,
+  type WorkHubDelegationStopResolvedMessage,
   type WorkHubDelegationSupersededMessage,
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
   decodeCanonicalMessage,
+  isWorkHubReplacementIntentRetired,
   decodeStoredMessage as decodePersistedStoredMessage,
 } from '@maka/core/session';
 import { markPersisted } from '@maka/core/persisted-value';
@@ -307,6 +312,8 @@ export interface SessionMetadataRecord {
 
 export interface SessionMetadataCatalogRecord extends SessionMetadataRecord {
   readonly activityAt: number;
+  /** Derived from the original create assignment, not stored on the Session header. */
+  readonly workHubCreated?: true;
   readonly lastMessagePreview?: string;
   /**
    * When the Session last entered the archive. Absent while it is not
@@ -489,6 +496,38 @@ export class SqliteSessionMetadataStore {
   private readonly databaseLease?: OperationalStateDatabaseLease;
   private readonly now: () => number;
   private closed = false;
+  readonly workHubTaskIndex: WorkHubTaskIndexStore = {
+    query: async (input) => this.readTransaction(() => this.taskIndex().query(input)),
+    read: async (kind, id) => this.readTransaction(() => this.taskIndex().read(kind, id)),
+    put: async (document, throughSequence) =>
+      this.transaction(() => {
+        const index = this.taskIndex();
+        if (document.kind === 'session' && index.containsSession(document.currentSessionId)) {
+          index.remove('session', document.id);
+          return;
+        }
+        index.upsert(document);
+        if (document.kind === 'task')
+          for (const sessionId of document.sessionIds) index.remove('session', sessionId);
+        index.markDirty(document.currentSessionId);
+        if (throughSequence !== undefined) index.advance(throughSequence);
+      }),
+    refresh: async (document, expectedDirtyRevision) =>
+      this.transaction(() => this.taskIndex().upsert(document, expectedDirtyRevision)),
+    markDirty: async (sessionId) => this.transaction(() => this.taskIndex().markDirty(sessionId)),
+    dirty: async (afterKey) => this.readTransaction(() => this.taskIndex().dirty(afterKey)),
+    containsSession: async (sessionId) =>
+      this.readTransaction(() => this.taskIndex().containsSession(sessionId)),
+    watermark: async () => this.readTransaction(() => this.taskIndex().watermark()),
+    advance: async (sequence) => this.transaction(() => this.taskIndex().advance(sequence)),
+    remove: async (kind, id) => this.transaction(() => this.taskIndex().remove(kind, id)),
+    rebuild: async () => this.transaction(() => this.taskIndex().rebuild()),
+  };
+
+  private taskIndex(): SqliteWorkHubTaskIndex {
+    this.assertOpen();
+    return new SqliteWorkHubTaskIndex(this.db);
+  }
 
   constructor(
     private readonly path: string,
@@ -1311,7 +1350,7 @@ export class SqliteSessionMetadataStore {
       )
       .get(sessionId, ...role.parameters) as SessionMetadataCatalogRow | undefined;
     if (!row) throw new SessionNotFoundError(sessionId);
-    return decodeCatalogRecord(row);
+    return this.projectCatalogRecordsSync([row])[0]!;
   }
 
   async has(sessionId: string): Promise<boolean> {
@@ -1547,7 +1586,7 @@ export class SqliteSessionMetadataStore {
       `,
       )
       .all(...parameters) as unknown as SessionMetadataCatalogRow[];
-    return rows.map(decodeCatalogRecord);
+    return this.projectCatalogRecordsSync(rows);
   }
 
   async listCatalogPage(
@@ -1575,7 +1614,7 @@ export class SqliteSessionMetadataStore {
         .all(...query.parameters, limit + 1) as unknown as SessionMetadataCatalogRow[];
       return {
         revision: this.readCatalogRevisionSync(),
-        records: rows.slice(0, limit).map(decodeCatalogRecord),
+        records: this.projectCatalogRecordsSync(rows.slice(0, limit)),
         hasMore: rows.length > limit,
       };
     });
@@ -1584,6 +1623,87 @@ export class SqliteSessionMetadataStore {
   async readCatalogRevision(): Promise<SessionCatalogRevisionState> {
     this.assertOpen();
     return this.readCatalogRevisionSync();
+  }
+
+  private projectCatalogRecordsSync(
+    rows: readonly SessionMetadataCatalogRow[],
+  ): SessionMetadataCatalogRecord[] {
+    const created = new Set<string>();
+    // Metadata-only stores are also used without an AgentRunStore. Do not make
+    // their catalog reads initialize the execution schema just for display.
+    const hasRootProofs =
+      this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'core_root_source_message_proofs'",
+        )
+        .get() !== undefined;
+    // The lifecycle tables (or a pre-ledger transcript) retain each target
+    // Message identity after queue consumption or cancellation. They only
+    // locate candidate facts: neither an ID prefix nor a task adoption proves
+    // Session creation.
+    for (let offset = 0; offset < rows.length; offset += WORKHUB_TARGET_LINKAGE_MAX_SESSIONS) {
+      const sessionIds = rows
+        .slice(offset, offset + WORKHUB_TARGET_LINKAGE_MAX_SESSIONS)
+        .map((row) => row.session_id);
+      const list = sessionIds.map(() => '?').join(', ');
+      const candidates = this.db
+        .prepare(`
+          WITH target_messages(session_id, message_id) AS (
+            SELECT session_id, message_id FROM message_admissions
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+            ${
+              hasRootProofs
+                ? `UNION
+            SELECT session_id, message_id FROM core_root_source_message_proofs
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52`
+                : ''
+            }
+            UNION
+            SELECT session_id, message_id FROM cancelled_message_admissions
+            WHERE session_id IN (${list})
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+            UNION
+            SELECT session_id, message_id FROM session_messages
+            WHERE session_id IN (${list}) AND message_type = 'user'
+              AND message_id GLOB 'whm_*' AND length(message_id) = 52
+          )
+          SELECT target.session_id, target.message_id
+          FROM target_messages AS target
+          CROSS JOIN session_messages AS assignment INDEXED BY session_messages_by_identity
+          WHERE assignment.session_id = ?
+            AND assignment.message_id = 'wha_' || substr(target.message_id, 5)
+          ORDER BY assignment.sequence ASC
+        `)
+        .iterate(
+          ...sessionIds,
+          ...(hasRootProofs ? sessionIds : []),
+          ...sessionIds,
+          ...sessionIds,
+          WORKHUB_COORDINATION_SESSION_ID,
+        ) as Iterable<{ session_id: string; message_id: string }>;
+      for (const candidate of candidates) {
+        if (created.has(candidate.session_id)) continue;
+        const assignment = this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `wha_${candidate.message_id.slice(4)}`,
+        );
+        if (
+          assignment?.type === 'workhub_coordination' &&
+          assignment.kind === 'delegation_assigned' &&
+          assignment.disposition === 'create_new' &&
+          assignment.targetSessionId === candidate.session_id &&
+          assignment.targetMessageId === candidate.message_id
+        ) {
+          created.add(candidate.session_id);
+        }
+      }
+    }
+    return rows.map((row) => ({
+      ...decodeCatalogRecord(row),
+      ...(created.has(row.session_id) ? { workHubCreated: true as const } : {}),
+    }));
   }
 
   /**
@@ -2022,23 +2142,9 @@ export class SqliteSessionMetadataStore {
           .update(assignment.replacesDelegationId)
           .digest('hex')
           .slice(0, 48);
-        const stopRequest = this.readMessageByIdSync(
-          WORKHUB_COORDINATION_SESSION_ID,
-          `whq_${abortSuffix}`,
-        );
-        if (stopRequest) {
-          const stopResolution = this.readMessageByIdSync(
-            WORKHUB_COORDINATION_SESSION_ID,
-            `whz_${abortSuffix}`,
-          );
-          if (
-            stopResolution?.type !== 'workhub_coordination' ||
-            stopResolution.kind !== 'delegation_stop_resolved' ||
-            stopResolution.outcome !== 'not_owned'
-          ) {
-            throw new SessionMetadataConflictError('WorkHub delegation already has a stop claim');
-          }
-        }
+        const stop = this.readWorkHubStopProjectionSync(assignment.replacesDelegationId);
+        if (stop.request && stop.retires)
+          throw new SessionMetadataConflictError('WorkHub delegation already has a stop claim');
         const existingAbort = this.readMessageByIdSync(
           WORKHUB_COORDINATION_SESSION_ID,
           `whb_${abortSuffix}`,
@@ -2241,6 +2347,142 @@ export class SqliteSessionMetadataStore {
     return existing;
   }
 
+  private readWorkHubStopRequestSync(
+    delegationId: string,
+    actionId?: string,
+    latest?: true,
+  ): WorkHubDelegationStopRequestedMessage | undefined {
+    if (latest) {
+      if (actionId !== undefined) throw new Error('Latest Stop lookup cannot select an action');
+      // Canonical transcript order, not model text timestamps. Filter inline
+      // records in SQL, but also decode chunked legacy candidates.
+      const rows = this.db
+        .prepare(`SELECT message.sequence, message.record_json,
+        payload.record_bytes, payload.sha256 FROM session_messages AS message
+        LEFT JOIN session_message_payloads AS payload ON payload.session_id=message.session_id
+          AND payload.sequence=message.sequence
+        WHERE message.session_id=? AND message.message_type='workhub_coordination'
+          AND message.message_id GLOB 'whq_*' AND length(message.message_id)=52
+          AND (json_extract(message.record_json, '$.stopsDelegationId')=? OR payload.record_bytes IS NOT NULL)
+        ORDER BY message.sequence DESC`)
+        .iterate(
+          WORKHUB_COORDINATION_SESSION_ID,
+          delegationId,
+        ) as Iterable<StoredSessionMessagePayloadRow>;
+      for (const row of rows) {
+        const value = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+        if (
+          value.type === 'workhub_coordination' &&
+          value.kind === 'delegation_stop_requested' &&
+          value.stopsDelegationId === delegationId
+        )
+          return value;
+      }
+      return undefined;
+    }
+    const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
+    const first = this.readMessageByIdSync(
+      WORKHUB_COORDINATION_SESSION_ID,
+      `whq_${suffix(delegationId)}`,
+    );
+    const scoped = actionId
+      ? this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `whq_${suffix(JSON.stringify([delegationId, actionId]))}`,
+        )
+      : undefined;
+    const value = scoped ?? first;
+    return value?.type === 'workhub_coordination' &&
+      value.kind === 'delegation_stop_requested' &&
+      (!actionId || value.actionId === actionId)
+      ? value
+      : undefined;
+  }
+
+  async readWorkHubStopRequest(
+    delegationId: string,
+    actionId?: string,
+    latest?: true,
+  ): Promise<WorkHubDelegationStopRequestedMessage | undefined> {
+    this.assertOpen();
+    return this.readTransaction(() =>
+      this.readWorkHubStopRequestSync(delegationId, actionId, latest),
+    );
+  }
+
+  private readWorkHubStopResolutionSync(
+    delegationId: string,
+    actionId?: string,
+  ): WorkHubDelegationStopResolvedMessage | undefined {
+    const suffix = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 48);
+    const read = (prefix: string) =>
+      this.readMessageByIdSync(
+        WORKHUB_COORDINATION_SESSION_ID,
+        `${prefix}_${suffix(delegationId)}`,
+      );
+    if (!actionId)
+      for (const prefix of ['whzs', 'whzt']) {
+        const value = read(prefix);
+        if (
+          value?.type === 'workhub_coordination' &&
+          value.kind === 'delegation_stop_resolved' &&
+          value.outcome !== 'not_owned'
+        )
+          return value;
+      }
+    const scoped = actionId
+      ? this.readMessageByIdSync(
+          WORKHUB_COORDINATION_SESSION_ID,
+          `whz_${suffix(JSON.stringify([delegationId, actionId]))}`,
+        )
+      : undefined;
+    const value = scoped ?? read('whz');
+    if (
+      value?.type === 'workhub_coordination' &&
+      value.kind === 'delegation_stop_resolved' &&
+      (!actionId || value.actionId === actionId)
+    )
+      return value;
+    if (!actionId) {
+      const first = this.readWorkHubStopRequestSync(delegationId);
+      if (first?.taskStop === true)
+        return this.readWorkHubStopResolutionSync(delegationId, first.actionId);
+    }
+    return undefined;
+  }
+
+  async readWorkHubStopResolution(
+    delegationId: string,
+    actionId?: string,
+  ): Promise<WorkHubDelegationStopResolvedMessage | undefined> {
+    this.assertOpen();
+    return this.readTransaction(() => this.readWorkHubStopResolutionSync(delegationId, actionId));
+  }
+
+  private readWorkHubStopProjectionSync(delegationId: string) {
+    const request = this.readWorkHubStopRequestSync(delegationId);
+    const latest = request && this.readWorkHubStopRequestSync(delegationId, undefined, true);
+    const ownResolution =
+      latest &&
+      (this.readWorkHubStopResolutionSync(delegationId, latest.actionId) ??
+        this.readWorkHubStopResolutionSync(delegationId));
+    if (latest && (!ownResolution || ownResolution.actionId !== latest.actionId))
+      return { request: latest, resolution: undefined, retires: true };
+    const resolution = this.readWorkHubStopResolutionSync(delegationId);
+    const matched = resolution
+      ? this.readWorkHubStopRequestSync(delegationId, resolution.actionId)
+      : request;
+    return {
+      request,
+      resolution,
+      retires: matched
+        ? workHubStopRetiresDelegation(matched, resolution)
+        : resolution
+          ? resolution.outcome !== 'not_owned'
+          : request !== undefined,
+    };
+  }
+
   private assertWorkHubTaskInputSourceSync(
     input: WorkHubTaskInputMessage,
   ): WorkHubDelegationAssignedMessage {
@@ -2276,18 +2518,12 @@ export class SqliteSessionMetadataStore {
     const delegation = suffix(source.delegationId);
     const read = (prefix: string) =>
       this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `${prefix}_${delegation}`);
-    const stop = read('whq');
-    const resolution = read('whzt') ?? read('whz');
+    const stop = this.readWorkHubStopProjectionSync(source.delegationId);
     if (
       read('whp') ||
       read('whx') ||
       read('whb') ||
-      (stop &&
-        !(
-          resolution?.type === 'workhub_coordination' &&
-          resolution.kind === 'delegation_stop_resolved' &&
-          resolution.outcome === 'not_owned'
-        ))
+      (stop.request && stop.retires && !(stop.resolution && input.mode === 'continuation'))
     )
       throw new SessionMetadataConflictError('The selected work is being retired');
     return source;
@@ -2358,8 +2594,7 @@ export class SqliteSessionMetadataStore {
         WORKHUB_COORDINATION_SESSION_ID,
         `${prefix}_${suffix(ref.delegationId)}`,
       );
-    const stop = terminal('whq');
-    const stopResolution = terminal('whzt') ?? terminal('whz');
+    const stop = this.readWorkHubStopProjectionSync(ref.delegationId);
     if (
       assignment?.type !== 'workhub_coordination' ||
       assignment.kind !== 'delegation_assigned' ||
@@ -2379,12 +2614,7 @@ export class SqliteSessionMetadataStore {
       terminal('whp') ||
       terminal('whx') ||
       terminal('whb') ||
-      (stop &&
-        !(
-          stopResolution?.type === 'workhub_coordination' &&
-          stopResolution.kind === 'delegation_stop_resolved' &&
-          stopResolution.outcome === 'not_owned'
-        ))
+      (stop.request && stop.retires)
     )
       throw new SessionMetadataConflictError('Peer task identity is unavailable or retired');
     return assignment;
@@ -2485,6 +2715,17 @@ export class SqliteSessionMetadataStore {
       )
         throw new SessionMetadataConflictError('Peer question is unavailable');
       const actor = settlement.actor;
+      const retirement = settlement.origin === 'legacy_protocol_retirement';
+      if (
+        retirement &&
+        (settlement.outcome !== 'cancelled' ||
+          !isDeepStrictEqual(actor, question.sender) ||
+          settlement.turnId !== question.turnId ||
+          settlement.senderRunId !== question.senderRunId ||
+          settlement.senderInvocationId !== question.senderInvocationId ||
+          settlement.toolCallId !== question.toolCallId)
+      )
+        throw new SessionMetadataConflictError('Peer retirement source identity conflict');
       const inbox = this.readMessageByIdSync(
         question.recipient.sessionId,
         workHubPeerInboxId(question.id),
@@ -2519,10 +2760,10 @@ export class SqliteSessionMetadataStore {
           throw new SessionMetadataConflictError('Peer answer identity conflict');
         return old;
       }
-      this.assertWorkHubPeerTaskSync(actor);
+      if (!retirement) this.assertWorkHubPeerTaskSync(actor);
       if (settlement.outcome === 'reply') this.assertWorkHubPeerTaskSync(question.sender);
       if (
-        question.expiresAt <= this.now() ||
+        (!retirement && question.expiresAt <= this.now()) ||
         settlement.ts < question.ts ||
         settlement.ts > this.now()
       )
@@ -2898,19 +3139,23 @@ export class SqliteSessionMetadataStore {
           replacementAbort?.type === 'workhub_coordination' &&
           replacementAbort.kind === 'delegation_replacement_aborted'
         ) {
-          continue;
+          const replacement = this.readMessageByIdSync(
+            WORKHUB_COORDINATION_SESSION_ID,
+            `whp_${terminalSuffix}`,
+          );
+          if (
+            replacement?.type !== 'workhub_coordination' ||
+            replacement.kind !== 'delegation_replacement_requested' ||
+            replacement.replacesActionId !== assignment.actionId ||
+            replacement.replacesDelegationId !== assignment.delegationId ||
+            replacement.replacedTargetSessionId !== assignment.targetSessionId ||
+            replacement.replacedTargetMessageId !== assignment.targetMessageId ||
+            !isWorkHubReplacementIntentRetired(replacement, replacementAbort)
+          )
+            continue;
         }
-        const stopResolution =
-          this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whzt_${terminalSuffix}`) ??
-          this.readMessageByIdSync(WORKHUB_COORDINATION_SESSION_ID, `whz_${terminalSuffix}`);
-        if (
-          !includeStopped &&
-          stopResolution?.type === 'workhub_coordination' &&
-          stopResolution.kind === 'delegation_stop_resolved' &&
-          stopResolution.outcome !== 'not_owned'
-        ) {
-          continue;
-        }
+        const stop = this.readWorkHubStopProjectionSync(assignment.delegationId);
+        if (!includeStopped && stop.resolution && stop.retires) continue;
         const workId = assignment.work?.id ?? assignment.actionId;
         if (!generations.has(workId)) {
           const latest = this.readLatestWorkHubAssignmentSync(workId);
@@ -3447,6 +3692,45 @@ export class SqliteSessionMetadataStore {
     return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, true);
   }
 
+  async readWorkHubTaskFactsPage(
+    request: SessionMessageScanRequest,
+  ): Promise<SessionMessageScanPage> {
+    return this.readMessageScanPage(WORKHUB_COORDINATION_SESSION_ID, request, 'task_facts');
+  }
+
+  async hasOtherWorkHubStopTarget(turnId: string, workId: string): Promise<boolean> {
+    this.assertOpen();
+    assertSafeSessionId(turnId);
+    assertSafeSessionId(workId);
+    return this.readTransaction(() => {
+      const rows = this.db
+        .prepare(`
+        SELECT message.sequence, message.record_json, payload.record_bytes, payload.sha256
+        FROM session_messages AS message
+        LEFT JOIN session_message_payloads AS payload
+          ON payload.session_id = message.session_id AND payload.sequence = message.sequence
+        WHERE message.session_id = ? AND message.message_type = 'workhub_coordination'
+          AND message.message_id GLOB 'whq_*' AND length(message.message_id) = 52
+          AND (json_extract(message.record_json, '$.turnId') = ? OR json_type(message.record_json, '$.turnId') IS NULL)
+      `)
+        .iterate(
+          WORKHUB_COORDINATION_SESSION_ID,
+          turnId,
+        ) as Iterable<StoredSessionMessagePayloadRow>;
+      for (const row of rows) {
+        const fact = decodeStoredMessageRecordRow(this.db, WORKHUB_COORDINATION_SESSION_ID, row);
+        if (
+          fact.type === 'workhub_coordination' &&
+          fact.kind === 'delegation_stop_requested' &&
+          fact.turnId === turnId &&
+          (fact.workId ?? fact.targetSessionId) !== workId
+        )
+          return true;
+      }
+      return false;
+    });
+  }
+
   async readLatestWorkHubAssignment(
     workId: string,
   ): Promise<WorkHubDelegationAssignedMessage | undefined> {
@@ -3493,7 +3777,7 @@ export class SqliteSessionMetadataStore {
   private async readMessageScanPage(
     sessionId: string,
     request: SessionMessageScanRequest,
-    filter: boolean | { readonly peerActionId: string; readonly now: number },
+    filter: boolean | 'task_facts' | { readonly peerActionId: string; readonly now: number },
   ): Promise<SessionMessageScanPage> {
     this.assertOpen();
     assertSafeSessionId(sessionId);
@@ -3518,6 +3802,15 @@ export class SqliteSessionMetadataStore {
             ON payload.session_id = message.session_id AND payload.sequence = message.sequence
           WHERE message.session_id = ? AND message.sequence ${backward ? '<' : '>'} ?
             ${filter === true ? "AND message.message_id GLOB 'wha_*' AND length(message.message_id) = 52" : ''}
+            ${
+              filter === 'task_facts'
+                ? `AND message.message_type='workhub_coordination' AND (
+                  (length(message.message_id)=52 AND substr(message.message_id,1,4)
+                    IN ('wha_', 'whp_', 'whx_', 'whb_', 'whq_', 'whz_'))
+                  OR (length(message.message_id)=53 AND substr(message.message_id,1,5)
+                    IN ('whti_', 'whzt_', 'whzs_')))`
+                : ''
+            }
             ${
               peer
                 ? `AND message.message_type = 'workhub_peer_inbox' AND message.message_id GLOB 'whpi_*' AND length(message.message_id) = 53

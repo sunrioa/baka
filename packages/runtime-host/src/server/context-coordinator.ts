@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { SessionHeader } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID, type SessionHeader } from '@maka/core/session';
 import { RuntimeContextCompactError } from '@maka/runtime/runtime-kernel';
 import {
   RuntimeHostedRootConflictError,
@@ -32,8 +32,11 @@ import type {
   ContextDiagnosticsQueryInput,
   OperationOutcome,
 } from '../protocol/index.js';
-import type { ContextOperationHandlerMap } from './operation-dispatcher.js';
-import { runtimeHostExternalTurnUnavailableReason } from './host-session-availability.js';
+import type { ConnectionContext, ContextOperationHandlerMap } from './operation-dispatcher.js';
+import {
+  runtimeHostExecutionUnavailableReason,
+  runtimeHostExternalTurnUnavailableReason,
+} from './host-session-availability.js';
 import type {
   HostedExecutionAdmission,
   HostedExecutionAuthority,
@@ -57,6 +60,11 @@ export interface HostContextCoordinatorOptions {
     readHeaderSnapshot(sessionId: string): Promise<SessionHeader>;
   };
   readonly requestDrain: () => void;
+  /** Bind the requesting Desktop's existing tools, including on a cold launch. */
+  readonly prepareWorkHubCompaction?: (
+    header: SessionHeader,
+    context: ConnectionContext,
+  ) => Promise<string | undefined>;
   readonly newId?: () => string;
 }
 
@@ -65,6 +73,14 @@ export class HostContextCoordinator {
   readonly handlers: ContextOperationHandlerMap = {
     'context.diagnostics.query': (input) => this.#queryDiagnostics(input),
     'context.compact': (input) => this.#compact(input),
+    'workhub.coordination.compact': (input, context) =>
+      this.#compact(
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          turnId: input.turnId,
+        },
+        context,
+      ),
   };
 
   readonly #runtime: ContextRuntime;
@@ -72,6 +88,7 @@ export class HostContextCoordinator {
   readonly #sessions: HostContextCoordinatorOptions['sessions'];
   readonly #requestDrain: () => void;
   readonly #newId: () => string;
+  readonly #prepareWorkHubCompaction: HostContextCoordinatorOptions['prepareWorkHubCompaction'];
 
   constructor(options: HostContextCoordinatorOptions) {
     this.#runtime = options.runtime;
@@ -79,6 +96,7 @@ export class HostContextCoordinator {
     this.#sessions = options.sessions;
     this.#requestDrain = options.requestDrain;
     this.#newId = options.newId ?? randomUUID;
+    this.#prepareWorkHubCompaction = options.prepareWorkHubCompaction;
   }
 
   async #queryDiagnostics(
@@ -96,7 +114,13 @@ export class HostContextCoordinator {
     }
   }
 
-  async #compact(input: ContextCompactInput): Promise<OperationOutcome<'context.compact'>> {
+  async #compact(
+    input: ContextCompactInput,
+    coordination?: ConnectionContext,
+  ): Promise<OperationOutcome<'context.compact'>> {
+    if (input.sessionId === WORKHUB_COORDINATION_SESSION_ID && !coordination) {
+      return operationUnavailable('Use the WorkHub coordination compaction entry point');
+    }
     let prepared:
       | Extract<ReturnType<ContextExecutionAuthority['prepare']>, { kind: 'prepared' }>['admission']
       | undefined;
@@ -129,7 +153,7 @@ export class HostContextCoordinator {
       }
       prepared = preparation.admission;
 
-      const rejected = await this.#preflight(input);
+      const rejected = await this.#preflight(input, coordination);
       if (rejected) return rejected;
 
       const identity: HostedExecutionIdentity = {
@@ -188,6 +212,7 @@ export class HostContextCoordinator {
 
   async #preflight(
     input: ContextCompactInput,
+    coordination: ConnectionContext | undefined,
   ): Promise<OperationOutcome<'context.compact'> | undefined> {
     let header: SessionHeader;
     try {
@@ -203,8 +228,14 @@ export class HostContextCoordinator {
     if (header.isArchived) {
       return sessionArchived('Cannot compact an archived Session');
     }
-    const unavailableReason = runtimeHostExternalTurnUnavailableReason(header);
+    const unavailableReason = coordination
+      ? runtimeHostExecutionUnavailableReason(header, { kind: 'context_compact' })
+      : runtimeHostExternalTurnUnavailableReason(header);
     if (unavailableReason) return operationUnavailable(unavailableReason);
+    if (coordination) {
+      const reason = await this.#prepareWorkHubCompaction?.(header, coordination);
+      if (reason) return operationUnavailable(reason);
+    }
     if (
       (await this.#runtime.listTurns(input.sessionId)).some((turn) => turn.turnId === input.turnId)
     ) {

@@ -18,8 +18,9 @@
  */
 
 import type { DatabaseSync } from 'node:sqlite';
+import { WORKHUB_TASK_INDEX_SCHEMA_SQL } from './sqlite-workhub-task-index.js';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 42;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 43;
 export const SQLITE_SESSION_MESSAGE_CHUNK_BYTES = 64 * 1024;
 export const SQLITE_SESSION_MESSAGE_CHUNK_MARKER = '{"$maka":"session-message-chunks-v1"}';
 
@@ -37,6 +38,7 @@ export const SQLITE_AGENT_GRAPH_CONTROL_TABLES = [
 ] as const;
 
 const MIGRATIONS: ReadonlyMap<number, string> = new Map([
+  [43, WORKHUB_TASK_INDEX_SCHEMA_SQL],
   [
     42,
     `

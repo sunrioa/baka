@@ -35,7 +35,6 @@ import type {
   RuntimeInvocationLineage,
 } from './runtime-event.js';
 import { isTerminalRuntimeEvent } from './runtime-event.js';
-import type { WorkHubRoutingDecision } from './workhub-routing.js';
 
 /** Persisted namespace used only by deterministic legacy-transcript conversion runs. */
 export const TRANSCRIPT_LEDGER_INVOCATION_ID_PREFIX = 'transcript-' as const;
@@ -259,8 +258,6 @@ export type RootExecutionDescriptor =
       /** Stable request identity shared by physical action retries. */
       actionId?: string;
       inputDigest: `sha256:${string}`;
-      /** Model-derived, Policy-owned advice bound before the main Turn starts. */
-      routingDecision?: WorkHubRoutingDecision;
       /** Host-owned result delivery; never admitted by the public answer endpoint. */
       feedback?: WorkHubResultOrigin;
     }

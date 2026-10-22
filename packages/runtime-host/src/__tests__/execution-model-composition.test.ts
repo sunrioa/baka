@@ -25,6 +25,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { z } from 'zod';
@@ -108,7 +109,6 @@ import {
   createHostMemoryExtractionModel,
   createHostSessionEffectModel,
   createHostPromptSuggestionModel,
-  createHostWorkHubRoutingModel,
 } from '../server/execution-model-authority.js';
 import {
   createHostAiSdkBackend,
@@ -2150,7 +2150,7 @@ test('production backend preserves coordinator Client Capability semantics acros
 test('cold WorkHub recovery waits for Desktop tools across pending-message and admitted-root crash cuts', {
   timeout: 30_000,
 }, async () => {
-  for (const crashCut of ['pending-message', 'admitted-root'] as const) {
+  for (const crashCut of ['pending-message', 'admitted-root', 'legacy-admitted-root'] as const) {
     const base = await mkdtemp(join(tmpdir(), 'maka-workhub-cold-recovery-'));
     const root = join(base, 'interactive');
     const provider = await startProvider();
@@ -2167,7 +2167,6 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
     };
     let composition: Awaited<ReturnType<typeof createExecutionRuntimeHostComposition>> | undefined;
     let drained = false;
-    const routingInputs: Array<{ turnId: string; userText: string }> = [];
     const createComposition = () =>
       createExecutionRuntimeHostComposition(
         {
@@ -2183,14 +2182,7 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           waitForResidenciesExcept: (label) => residencies.waitForEmptyExcept(label),
         },
         { bootstrapRuntimePolicy: false },
-        {
-          workHubRoutingModel: {
-            decide: async ({ turnId, userText }) => {
-              routingInputs.push({ turnId, userText });
-              return { kind: 'routing', disposition: 'answer_here' };
-            },
-          },
-        },
+        {},
       );
     const registerDesktop = async (
       registrationId: string,
@@ -2245,7 +2237,14 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       const desktop = capabilities.attachConnection(clientCapabilityConnectionIdentity('desktop'), {
         send: async () => {},
       });
-      await registerDesktop('before-crash', ['control', 'tasks']);
+      await registerDesktop('before-crash', [
+        'control',
+        'find',
+        'start',
+        'continue',
+        'ask',
+        'stop',
+      ]);
       // Disconnect after binding succeeds, before its caller can admit the root.
       // Reconnect only after admission, before the real backend composes tools.
       const bindSession = capabilities.bindSession.bind(capabilities);
@@ -2271,7 +2270,7 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           // this admission is still preparing its backend.
           await registerDesktop(
             'reconnected',
-            ['control', 'tasks'],
+            ['control', 'find', 'start', 'continue', 'ask', 'stop'],
             'desktop',
             capabilities.handlers,
           );
@@ -2331,8 +2330,9 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
         skillInvocation: { loaded: [], failed: [], receipts: [] },
         admittedAt: Date.now(),
       });
-      if (crashCut === 'admitted-root') {
-        await stores.agentRunStore.admitRootTurn({
+      let expectedAdmittedIdentity: { turnId: string; runId: string } | undefined;
+      if (crashCut !== 'pending-message') {
+        const admitted = await stores.agentRunStore.admitRootTurn({
           sessionId,
           turnId: randomUUID(),
           proposedRunId: randomUUID(),
@@ -2342,7 +2342,6 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
             kind: 'workhub_coordination',
             inputDigest: digest,
             capabilityBinding,
-            routingDecision: { kind: 'routing', disposition: 'answer_here' },
           },
           normalizedInput: content,
           sourceMessages: [
@@ -2358,8 +2357,51 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           ],
           admittedAt: Date.now(),
         });
+        expectedAdmittedIdentity = {
+          turnId: admitted.admission.turnId,
+          runId: admitted.admission.runId,
+        };
       }
-      routingInputs.length = 0;
+      if (crashCut === 'legacy-admitted-root') {
+        // Write an actual old record only after closing every cached writer.
+        // The next Host must read it from disk, not reuse a normalized object.
+        const policyStores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+        const policySnapshot = await policyStores.runtimePolicy.getSnapshot();
+        await owner.close();
+        const database = new DatabaseSync(join(root, 'runtime.sqlite'));
+        try {
+          const updated = database
+            .prepare(`
+            UPDATE core_root_turn_admissions
+            SET record_json = json_set(record_json, '$.execution.routingDecision', json(?))
+            WHERE session_id = ? AND turn_id = ?
+          `)
+            .run(
+              JSON.stringify({
+                kind: 'routing',
+                disposition: 'delegate_existing',
+                candidateSetId: `sha256:${'c'.repeat(64)}`,
+                candidateRef: 'obsolete-history-target',
+              }),
+              sessionId,
+              expectedAdmittedIdentity!.turnId,
+            );
+          assert.equal(updated.changes, 1);
+        } finally {
+          database.close();
+        }
+        const policyPath = join(root, 'runtime-policy.json');
+        await writeFile(
+          policyPath,
+          JSON.stringify({
+            schemaVersion: 4,
+            revision: policySnapshot.revision,
+            policy: { ...policySnapshot.policy, jev: { enabled: true } },
+          }),
+        );
+        owner = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(owner);
+      }
       const requestsBeforeRecovery = provider.requests.length;
       composition = await createComposition();
       await composition.recover();
@@ -2382,7 +2424,11 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
           },
         },
       );
-      await registerDesktop('hostile-reg', ['control', 'tasks'], 'hostile');
+      await registerDesktop(
+        'hostile-reg',
+        ['control', 'find', 'start', 'continue', 'ask', 'stop'],
+        'hostile',
+      );
       assert.equal(
         provider.requests.length,
         requestsBeforeRecovery,
@@ -2400,7 +2446,14 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
         requestsBeforeRecovery,
         'one missing required tool keeps the successor durable and pending',
       );
-      await registerDesktop('capable-desktop', ['control', 'tasks']);
+      await registerDesktop('capable-desktop', [
+        'control',
+        'find',
+        'start',
+        'continue',
+        'ask',
+        'stop',
+      ]);
       const recoveredStores = await openInteractiveExecutionStoresForWrite(owner.lease);
       await waitFor(
         async () => {
@@ -2427,7 +2480,11 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       assert.match(responsesDeveloperPrompt(requests[0]!.body) ?? '', /WorkHub/u);
       for (const name of [
         'mcp__desktop_workhub__control',
-        'mcp__desktop_workhub__tasks',
+        'mcp__desktop_workhub__find',
+        'mcp__desktop_workhub__start',
+        'mcp__desktop_workhub__continue',
+        'mcp__desktop_workhub__ask',
+        'mcp__desktop_workhub__stop',
         ...WORKHUB_BROWSER_TOOL_NAMES.map((name) => `mcp__desktop_browser__${name}`),
       ]) {
         assert.ok(responsesToolNames(requests[0]?.body).includes(name));
@@ -2451,15 +2508,47 @@ test('cold WorkHub recovery waits for Desktop tools across pending-message and a
       const successor = admissions.at(-1)!;
       assert.ok(successor.execution.kind === 'workhub_coordination');
       assert.equal(successor.execution.capabilityBinding, capabilityBinding);
-      assert.deepEqual(
-        routingInputs.map(({ userText }) => userText),
-        crashCut === 'pending-message' ? ['Recovered follow-up'] : [],
-        'only a not-yet-admitted recovered Message receives a fresh routing decision',
-      );
-      assert.deepEqual(successor.execution.routingDecision, {
-        kind: 'routing',
-        disposition: 'answer_here',
-      });
+      assert.equal('routingDecision' in successor.execution, false);
+      if (expectedAdmittedIdentity) {
+        assert.equal(successor.turnId, expectedAdmittedIdentity.turnId);
+        assert.equal(successor.runId, expectedAdmittedIdentity.runId);
+      }
+      const recoveredPolicy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+      assert.equal('jev' in (await recoveredPolicy.runtimePolicy.getSnapshot()).policy, false);
+      if (crashCut === 'legacy-admitted-root') {
+        const settledRequestCount = provider.requests.length;
+        await composition.close();
+        composition = undefined;
+        await owner.close();
+        owner = await tryAcquireInteractiveRootOwner(capability);
+        assert.ok(owner);
+        composition = await createComposition();
+        await composition.recover();
+        composition.clientCapabilities!.attachConnection(
+          clientCapabilityConnectionIdentity('desktop'),
+          { send: async () => {} },
+        );
+        await registerDesktop('after-second-restart', [
+          'control',
+          'find',
+          'start',
+          'continue',
+          'ask',
+          'stop',
+        ]);
+        const query = await composition.handlers['turn.query'](
+          { sessionId, turnId: expectedAdmittedIdentity!.turnId },
+          context,
+        );
+        assert.ok(query.ok, JSON.stringify(query));
+        assert.equal(query.result.status, 'completed');
+        assert.equal(query.result.runId, expectedAdmittedIdentity!.runId);
+        assert.equal(
+          provider.requests.length,
+          settledRequestCount,
+          'a second Host restart must not replay the settled legacy root',
+        );
+      }
       if (crashCut === 'pending-message') {
         // The recovered WorkHub keeps its permanent Session but new turns
         // must follow the current switch rather than its creation-time default.
@@ -3846,102 +3935,6 @@ test('Host auxiliary calls preserve resolved DeepSeek reasoning settings', async
     assert.equal(request.url, '/v1/responses');
     assert.equal(request.authorization, `Bearer ${API_KEY}`);
     assert.deepEqual(request.body.reasoning, { effort: 'high' });
-  } finally {
-    await owner.close();
-    await provider.close();
-    await rm(base, { recursive: true, force: true });
-  }
-});
-
-test('WorkHub routing reuses the saved Session model and calls Intent before bounded Recall', async () => {
-  const base = await mkdtemp(join(tmpdir(), 'maka-host-workhub-routing-'));
-  const provider = await startProvider();
-  const capability = await resolveStorageRoot({
-    path: join(base, 'interactive'),
-    kind: 'interactive',
-  });
-  const owner = await tryAcquireInteractiveRootOwner(capability);
-  assert.ok(owner);
-  if (!owner) return;
-  try {
-    const policy = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
-    const usage = await openInteractiveUsageStoresForWrite(owner.lease);
-    const execution = await openInteractiveExecutionStoresForWrite(owner.lease);
-    const created = await policy.connectionCatalog.create({
-      expectedCatalogRevision: 0,
-      connection: {
-        slug: 'workhub-routing-provider',
-        name: 'WorkHub routing provider',
-        providerType: 'deepseek',
-        baseUrl: provider.baseUrl,
-        enabled: true,
-        enabledModelIds: ['deepseek-v4-flash'],
-      },
-    });
-    assert.equal(created.kind, 'committed');
-    if (created.kind !== 'committed') return;
-    const connection = created.snapshot.connections[0]!;
-    await policy.credentialVault.set({
-      locator: { scope: 'connection', connectionId: connection.connectionId, kind: 'api_key' },
-      expected: null,
-      secret: API_KEY,
-    });
-    await publishConnectionModel(policy, connection.connectionId, 'deepseek-v4-flash');
-    const session = await execution.sessionStore.create({
-      cwd: capability.canonicalPath,
-      llmConnectionId: connection.connectionId,
-      llmConnectionSlug: connection.slug,
-      model: 'deepseek-v4-flash',
-      thinkingLevel: 'high',
-      permissionMode: 'ask',
-    });
-    const model = createHostWorkHubRoutingModel({
-      runtimePolicy: policy,
-      oauthCredentials: new HostOAuthExecutionAuthority(policy),
-      usage,
-      requestDrain: () => assert.fail('WorkHub routing telemetry must not drain the Host'),
-    });
-    let candidateReads = 0;
-    const decision = await model.decide({
-      turnId: 'routing-turn',
-      header: session,
-      userText: '继续支付重试的工作',
-      transcript: [{ role: 'assistant', text: '上一轮已定位支付重试。' }],
-      resolveCandidates: async () => {
-        candidateReads += 1;
-        return {
-          candidateSetId: `sha256:${'a'.repeat(64)}`,
-          candidates: [
-            {
-              candidateRef: 'whc_payments',
-              sessionName: 'Payments',
-              workspaceName: 'payments',
-              state: 'active',
-              recency: 'today',
-            },
-          ],
-        };
-      },
-      abortSignal: new AbortController().signal,
-    });
-    assert.deepEqual(decision, {
-      kind: 'routing',
-      disposition: 'delegate_existing',
-      candidateSetId: `sha256:${'a'.repeat(64)}`,
-      candidateRef: 'whc_payments',
-    });
-    assert.equal(candidateReads, 1);
-    const requests = provider.requests.slice(-2);
-    assert.equal(requests.length, 2);
-    assert.ok(requests.every((request) => request.authorization === `Bearer ${API_KEY}`));
-    assert.ok(
-      requests.every((request) => JSON.stringify(request.body).includes('deepseek-v4-flash')),
-    );
-    const outbound = JSON.stringify(requests);
-    assert.doesNotMatch(outbound, /session-secret|\/Users\/a404/u);
-    const logs = await usage.telemetry.logs({ range: 'all' });
-    assert.ok(logs.rows.some((row) => row.callKind === 'workhub_intent'));
-    assert.ok(logs.rows.some((row) => row.callKind === 'workhub_recall'));
   } finally {
     await owner.close();
     await provider.close();

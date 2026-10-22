@@ -33,7 +33,7 @@ import {
   readLogicalRuntimeExecutionForRun,
 } from '@maka/core/runtime-logical-execution';
 import { runtimeInvocationFailureClass } from '@maka/runtime/runtime-event-read-model';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createSessionTranscriptReader } from '../server/session-transcript-reader.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -115,7 +115,6 @@ import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import {
   continuationSafetyDigest,
   RootTurnCoordinator,
-  type HostWorkHubRoutingDecisionPreparation,
   type TurnStartOutcome,
 } from '../server/root-turn-coordinator.js';
 import {
@@ -2976,6 +2975,97 @@ test('manual context compact uses durable root query, stop, and exact retry auth
   }
 });
 
+test('the real reserved coordinator lane admits only native compaction and preserves exact retries, busy refusal and Stop', async () => {
+  let backend: BlockingContextRecoveryBackend | undefined;
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) =>
+      backends.register('ai-sdk', (context) => {
+        backend = new BlockingContextRecoveryBackend(context.sessionId);
+        return backend;
+      }),
+  });
+  const sessionId = WORKHUB_COORDINATION_SESSION_ID;
+  const turnId = 'reserved-compact';
+  const context = operationContext(fixture.hostEpoch, fixture.acquireResidency);
+  try {
+    const ordinary = await fixture.stores.sessionStore.readHeaderSnapshot(fixture.sessionId);
+    await fixture.stores.sessionStore.createStableSession({
+      sessionId,
+      requestFingerprint: `sha256:${'a'.repeat(64)}`,
+      input: {
+        cwd: ordinary.cwd,
+        llmConnectionId: ordinary.llmConnectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        role: WORKHUB_COORDINATION_SESSION_ROLE,
+        toolProfile: 'workhub-coordination-v2',
+        permissionMode: 'bypass',
+      },
+    });
+    assert.equal(fixture.coordinator.prepare(sessionId).kind, 'unavailable');
+    const narrow = fixture.coordinator.contextCompactionAuthority().prepare(sessionId);
+    assert.equal(narrow.kind, 'prepared');
+    if (narrow.kind === 'prepared') {
+      await assert.rejects(
+        narrow.admission.admit({
+          sessionId,
+          turnId: 'forged-message',
+          runId: 'forged-run',
+          userMessageId: 'forged-user',
+          execution: { kind: 'external_message' },
+          content: { text: 'not a compaction' },
+          start: async function* () {},
+        }),
+        /cannot admit a message/,
+      );
+      narrow.admission.release();
+    }
+    const generic = await fixture.contextOperations.handlers['context.compact'](
+      { sessionId, turnId },
+      context,
+    );
+    assert.ok(!generic.ok && generic.error.code === 'operation_unavailable');
+    const started = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId },
+      context,
+    );
+    assert.ok(started.ok, JSON.stringify(started));
+    if (!started.ok) return;
+    assert.equal(started.result.kind, 'started');
+    await backend?.compactStarted.promise;
+    const retried = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId },
+      context,
+    );
+    assert.deepEqual(retried, started);
+    const busy = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId: 'must-not-queue' },
+      context,
+    );
+    assert.ok(!busy.ok && busy.error.code === 'session_busy');
+    const admission = await fixture.stores.agentRunStore.readRootTurnAdmission(sessionId, turnId);
+    assert.deepEqual(admission?.execution, { kind: 'context_compact' });
+    assert.equal(admission?.userMessageId, null);
+    const stopped = await fixture.turnControl.handlers['turn.stop'](
+      { sessionId, turnId, runId: started.result.turn.runId },
+      context,
+    );
+    assert.ok(stopped.ok, JSON.stringify(stopped));
+    assert.equal(stopped.result.status, 'cancelled');
+    assert.equal((await fixture.manager.listTurns(fixture.sessionId)).length, 0);
+    assert.equal(
+      await fixture.stores.agentRunStore.readRootTurnAdmission(sessionId, 'must-not-queue'),
+      undefined,
+    );
+    assert.equal(fixture.drainRequested(), false);
+  } finally {
+    backend?.releaseCompact();
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.dispose();
+  }
+});
+
 test('startup recovery replays an admitted context compact with its exact Run identity', async () => {
   let backend: BlockingContextRecoveryBackend | undefined;
   const fixture = await createFailureFixture({
@@ -4185,14 +4275,354 @@ test('WorkHub v2 requires binding evidence before admission while v1 stays unbou
   }
 });
 
-test('active WorkHub authority reads the admitted v2 input and refuses other or completed Turns', async () => {
-  for (const toolProfile of ['workhub-coordination-v1', 'workhub-coordination-v2'] as const) {
+for (const scope of [
+  'preserve',
+  'full',
+  'upgrade',
+  'late_nack',
+  'late_ack',
+  'mixed_recovery',
+  'successor_proof',
+] as const)
+  test('exact Root stop preserves later accepted work only when requested (' + scope + ')', {
+    timeout: 20_000,
+  }, async () => {
+    const entered = {
+      a: deferred<BackendSendInput>(),
+      b: deferred<BackendSendInput>(),
+      c: deferred<BackendSendInput>(),
+    };
+    const release = { a: deferred<void>(), b: deferred<void>(), c: deferred<void>() };
+    const pullCorrection = deferred<void>();
+    const correctionPulled = deferred<void>();
+    const stopEntered = deferred<void>();
+    const seen: string[] = [];
+    let stopCount = 0;
+    const fixture = await createFailureFixture({
+      registerBackend: (backends) =>
+        backends.register(
+          'ai-sdk',
+          (context) =>
+            new (class extends FakeBackend {
+              override async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+                const key = input.text;
+                assert.ok(
+                  key === 'a' || key === 'b' || key === 'c',
+                  'no correction or another task is folded into the successor',
+                );
+                seen.push(key);
+                entered[key].resolve(input);
+                const steering =
+                  key === 'a' && (scope === 'late_nack' || scope === 'late_ack')
+                    ? await (async () => {
+                        await pullCorrection.promise;
+                        const leases = await input.pullSteering!();
+                        assert.equal(leases.length, 1);
+                        return leases;
+                      })()
+                    : [];
+                if (scope === 'late_ack')
+                  for (const lease of steering)
+                    yield {
+                      type: 'steering_message',
+                      id: randomUUID(),
+                      turnId: input.turnId,
+                      ts: Date.now(),
+                      messageId: lease.messageId,
+                      content: lease.content,
+                      submittedContentDigest: lease.submittedContentDigest,
+                    };
+                if (steering.length) correctionPulled.resolve();
+                await release[key].promise;
+                if (steering.length) {
+                  const leaseIds = steering.map((lease) => lease.id);
+                  if (scope === 'late_ack') input.ackSteering!(leaseIds);
+                  else {
+                    input.nackSteering!(leaseIds);
+                    await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+                    assert.deepEqual(
+                      fixture.messages.projection(fixture.sessionId).steering,
+                      [],
+                      'recovery cannot reopen the stopped A before its terminal event',
+                    );
+                  }
+                }
+                yield {
+                  type: 'complete',
+                  id: randomUUID(),
+                  turnId: input.turnId,
+                  ts: Date.now(),
+                  stopReason: 'end_turn',
+                };
+              }
+              override async stop(): Promise<void> {
+                stopCount++;
+                stopEntered.resolve();
+              }
+            })(context),
+        ),
+    });
+    const stopping: Promise<void>[] = [];
+    try {
+      const context = operationContext(fixture.hostEpoch, fixture.acquireResidency);
+      const started = await fixture.interactiveTurns.handlers['turn.start'](
+        {
+          sessionId: fixture.sessionId,
+          turnId: 'stop-queue-a',
+          content: { text: 'a' },
+        },
+        context,
+      );
+      assertStartedTurn(started);
+      await entered.a.promise;
+      for (const [messageId, text, placement] of [
+        ['a-correction', 'do not move this correction to b', 'current_turn'],
+        ['accepted-b', 'b', 'next_turn'],
+        ['accepted-c', 'c', 'next_turn'],
+      ] as const)
+        assert.ok(
+          (
+            await fixture.messages.handlers['turn.message.submit'](
+              {
+                originHostEpoch: fixture.hostEpoch,
+                sessionId: fixture.sessionId,
+                messageId,
+                content: { text },
+                placement,
+              },
+              context,
+            )
+          ).ok,
+        );
+      const acceptedCorrection = (
+        await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)
+      ).find((entry) => entry.messageId === 'a-correction');
+      assert.ok(acceptedCorrection);
+      if (scope === 'late_nack' || scope === 'late_ack') {
+        pullCorrection.resolve();
+        await correctionPulled.promise;
+      }
+      const identity = {
+        sessionId: fixture.sessionId,
+        turnId: started.result.turn.turnId,
+        runId: started.result.turn.runId,
+      };
+      const stop =
+        scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof'
+          ? fixture.coordinator.stopRoot(identity)
+          : fixture.coordinator.stopRootPreservingFollowups(identity);
+      stopping.push(stop);
+      void stop.catch(() => undefined);
+      await stopEntered.promise;
+      if (scope === 'upgrade') {
+        const broad = fixture.coordinator.stopRoot(identity);
+        stopping.push(broad);
+        void broad.catch(() => undefined);
+        await waitUntil(
+          async () =>
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'accepted-b',
+            ),
+        );
+      }
+      release.a.resolve();
+      await Promise.all(stopping);
+      assert.equal((await fixture.coordinator.read(identity)).status, 'cancelled');
+      if (scope === 'preserve' || scope === 'late_nack' || scope === 'late_ack') {
+        const b = await entered.b.promise;
+        assert.ok(b.runId);
+        await fixture.messages.consumePendingAdmissions([fixture.sessionId]);
+        const leaked = await b.pullSteering!();
+        try {
+          assert.deepEqual(leaked, [], 'a stopped A correction cannot become B steering');
+        } finally {
+          b.ackSteering!(leaked.map((lease) => lease.id));
+        }
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), {
+          kind: 'active',
+          sessionId: fixture.sessionId,
+          turnId: b.turnId,
+          runId: b.runId,
+        });
+        const queue = fixture.messages.projection(fixture.sessionId);
+        assert.deepEqual(
+          queue.followup.map((item) => item.messageId),
+          ['accepted-c'],
+        );
+        await fixture.coordinator.stopRootPreservingFollowups(identity);
+        assert.equal(stopCount, 1, 'a stale A retry does not stop active B');
+        assert.deepEqual(fixture.messages.projection(fixture.sessionId), queue);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+          );
+        release.b.resolve();
+        await entered.c.promise;
+        release.c.resolve();
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a', 'b', 'c']);
+      } else {
+        await fixture.coordinator.whenIdle(fixture.sessionId);
+        assert.deepEqual(seen, ['a']);
+        for (const messageId of ['accepted-b', 'accepted-c'])
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            true,
+          );
+      }
+      assert.equal(
+        await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+          fixture.sessionId,
+          'a-correction',
+        ),
+        scope !== 'late_ack',
+      );
+      if (scope === 'late_ack') {
+        assert.ok(
+          await fixture.stores.runtimeEventStore.readImmutableSteeringMessageProof(
+            fixture.sessionId,
+            'a-correction',
+          ),
+          'a durable echo remains consumed even when ack arrives after Stop',
+        );
+        assert.equal(
+          (await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId)).length,
+          0,
+        );
+      }
+      if (scope === 'full' || scope === 'mixed_recovery' || scope === 'successor_proof') {
+        // Simulate the durable residue from a crash after the terminal event
+        // but before Message materialization. Runtime/Root proof and SQLite are
+        // real; inserting this pending fixture is not a whole-Host crash test.
+        assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), { kind: 'idle' });
+        const messageId = 'a-unmaterialized-at-crash';
+        await fixture.stores.sessionStore.commitMessageAdmission({
+          ...acceptedCorrection,
+          messageId,
+        });
+        if (scope === 'mixed_recovery') {
+          await fixture.stores.sessionStore.commitMessageAdmission({
+            ...acceptedCorrection,
+            messageId: 'a-promoted-at-crash',
+            submittedPlacement: 'next_turn',
+          });
+          for (const text of ['b', 'c'])
+            await fixture.stores.sessionStore.commitMessageAdmission({
+              ...acceptedCorrection,
+              messageId: 'recovered-' + text,
+              content: { text },
+              submittedContentDigest: messageContentDigest({ text }),
+              submittedPlacement: 'next_turn',
+              placement: 'next_turn',
+              disposition: 'followup',
+            });
+        }
+        if (scope === 'successor_proof') {
+          // Older execution could already have folded this native correction
+          // into a successor before the upgrade. Commit the real Root receipt
+          // but leave the mutable queue row, as at that documented crash gap.
+          const successor = await fixture.stores.agentRunStore.admitRootTurn({
+            sessionId: fixture.sessionId,
+            turnId: 'consumed-successor-root',
+            proposedRunId: 'consumed-successor-run',
+            proposedUserMessageId: messageId,
+            previousRootTurnId: identity.turnId,
+            execution: { kind: 'external_message' },
+            normalizedInput: acceptedCorrection.content,
+            sourceMessages: [
+              {
+                messageId,
+                content: acceptedCorrection.content,
+                submittedContentDigest: acceptedCorrection.submittedContentDigest,
+                submittedPlacement: acceptedCorrection.submittedPlacement,
+                placement: acceptedCorrection.placement,
+                disposition: acceptedCorrection.disposition,
+                skillInvocation: acceptedCorrection.skillInvocation,
+              },
+            ],
+            admittedAt: acceptedCorrection.admittedAt + 1,
+          });
+          assert.equal(successor.kind, 'admitted');
+          await fixture.messages.materializeMessageHandoffsForRun({ ...identity, messageIds: [] });
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              messageId,
+            ),
+            false,
+            'a committed successor source is consumption proof, not a cancellable A residue',
+          );
+        }
+        await fixture.messages.recoverPendingAfterHostRestart([fixture.sessionId]);
+        if (scope === 'mixed_recovery') {
+          await entered.b.promise;
+          release.b.resolve();
+          await entered.c.promise;
+          release.c.resolve();
+          await fixture.coordinator.whenIdle(fixture.sessionId);
+          assert.deepEqual(seen, ['a', 'b', 'c'], 'recovery keeps unrelated B/C FIFO');
+          assert.equal(
+            await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+              fixture.sessionId,
+              'a-promoted-at-crash',
+            ),
+            true,
+          );
+          for (const text of ['b', 'c'])
+            assert.equal(
+              await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+                fixture.sessionId,
+                'recovered-' + text,
+              ),
+              false,
+            );
+        }
+        assert.equal(
+          await fixture.stores.sessionStore.hasCancelledMessageAdmission(
+            fixture.sessionId,
+            messageId,
+          ),
+          scope !== 'successor_proof',
+        );
+        assert.deepEqual(
+          await fixture.stores.sessionStore.listMessageAdmissions(fixture.sessionId),
+          [],
+        );
+        if (scope !== 'mixed_recovery')
+          assert.deepEqual(seen, ['a'], 'recovery does not replay a cancelled Root correction');
+      }
+      assert.equal(stopCount, 1);
+      assert.equal(fixture.drainRequested(), false);
+      await fixture.coordinator.close();
+      await fixture.messages.close();
+    } finally {
+      pullCorrection.resolve();
+      for (const gate of Object.values(release)) gate.resolve();
+      await Promise.allSettled(stopping);
+      await fixture.coordinator.close();
+      await fixture.dispose();
+    }
+  });
+
+test('active WorkHub authority authenticates user/feedback origin and refuses other or completed Turns', async () => {
+  for (const [toolProfile, feedback] of [
+    ['workhub-coordination-v1', false],
+    ['workhub-coordination-v2', false],
+    ['workhub-coordination-v2', true],
+  ] as const) {
     let backend: BlockingRootBackend | undefined;
     const consumed: string[] = [];
     const sent: BackendSendInput[] = [];
     const successorReady = [deferred<void>(), deferred<void>()];
     const successorRelease = [deferred<void>(), deferred<void>()];
-    const preparedRouting: Array<{ turnId: string; text: string }> = [];
     const capabilities = new HostClientCapabilityCoordinator({
       ...clientCapabilityCoordinatorTestAdmission(),
       activation: new RuntimePolicyActivationGate(),
@@ -4203,14 +4633,6 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
     });
     const fixture = await createFailureFixture({
       clientCapabilities: capabilities,
-      ...(toolProfile === 'workhub-coordination-v2'
-        ? {
-            prepareWorkHubRoutingDecision: async (input: HostWorkHubRoutingDecisionPreparation) => {
-              preparedRouting.push({ turnId: input.turnId, text: input.content.text });
-              return { kind: 'routing' as const, disposition: 'answer_here' as const };
-            },
-          }
-        : {}),
       registerBackend: (backends) => {
         backends.register(
           'ai-sdk',
@@ -4289,14 +4711,70 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
       );
       const turnId = 'live-workhub-turn';
       const content = { text: 'Continue Payments and explain the result here' };
+      const priorSuffix = createHash('sha256')
+        .update('prior-assignment')
+        .digest('hex')
+        .slice(0, 48);
+      const origin = feedback
+        ? {
+            kind: 'workhub_result' as const,
+            eventId: turnId,
+            actionId: 'prior-assignment',
+            delegationId: `whd_${priorSuffix}`,
+            targetSessionId: fixture.sessionId,
+            targetTurnId: 'prior-task-turn',
+          }
+        : undefined;
+      if (origin) {
+        await fixture.stores.sessionStore.assignWorkHubMessage({
+          assignment: {
+            type: 'workhub_coordination',
+            id: `wha_${priorSuffix}`,
+            turnId: 'prior-coordination-turn',
+            ts: Date.now(),
+            schemaVersion: 1,
+            kind: 'delegation_assigned',
+            actionId: origin.actionId,
+            actionFingerprint: `sha256:${'a'.repeat(64)}`,
+            coordinationTurnId: 'prior-coordination-turn',
+            targetSessionId: origin.targetSessionId,
+            targetSessionName: ordinary.name,
+            targetTurnId: origin.targetTurnId,
+            targetMessageId: `whm_${priorSuffix}`,
+            delegationId: origin.delegationId,
+            disposition: 'delegate_existing',
+            userText: content.text,
+          },
+          admission: {
+            sessionId: origin.targetSessionId,
+            turnId: origin.targetTurnId,
+            runId: `whr_${priorSuffix}`,
+            messageId: `whm_${priorSuffix}`,
+            content,
+            submittedContentDigest: messageContentDigest(content),
+            submittedPlacement: 'current_turn',
+            placement: 'current_turn',
+            disposition: 'steering',
+            skillInvocation: { loaded: [], failed: [], receipts: [] },
+            admittedAt: Date.now(),
+          },
+        });
+      }
       assert.equal(await fixture.coordinator.readActiveWorkHubRequest(turnId), undefined);
       const started = await fixture.coordinator.startWorkHubCoordinationMessage(
         {
           sessionId: WORKHUB_COORDINATION_SESSION_ID,
           turnId,
           archivedMessage: 'Archived',
-          execution: { kind: 'workhub_coordination', inputDigest: `sha256:${'d'.repeat(64)}` },
-          prepareFreshContent: async () => ({ kind: 'ready', content }),
+          execution: {
+            kind: 'workhub_coordination',
+            inputDigest: `sha256:${'d'.repeat(64)}`,
+            ...(origin ? { feedback: origin } : {}),
+          },
+          prepareFreshContent: async () => ({
+            kind: 'ready',
+            content: origin ? { text: 'Automatic result, not another user request' } : content,
+          }),
         },
         operationContext(fixture.hostEpoch, fixture.acquireResidency, 'desktop'),
       );
@@ -4311,16 +4789,34 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
         await fixture.coordinator.readActiveWorkHubRequest(turnId),
         toolProfile === 'workhub-coordination-v2' ? content : undefined,
       );
+      const authority = await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId);
       assert.deepEqual(
-        await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+        authority,
         toolProfile === 'workhub-coordination-v2'
           ? {
               content,
               runId: started.result.runId,
-              sourceMessageId: admission.userMessageId,
-              decision: { kind: 'routing', disposition: 'answer_here' },
+              ...(origin ? {} : { sourceMessageId: admission.userMessageId }),
+              origin: origin ? 'feedback' : 'user',
             }
           : undefined,
+      );
+      await fixture.sessionAdmission.runMany(
+        [WORKHUB_COORDINATION_SESSION_ID, fixture.sessionId],
+        async () => {
+          assert.deepEqual(
+            await fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+            authority,
+            'dispatch validates under the original Coordination/target lease without re-entering admission',
+          );
+        },
+      );
+      await assert.rejects(
+        fixture.sessionAdmission.run(fixture.sessionId, () =>
+          fixture.coordinator.readActiveWorkHubRoutingRequest(turnId),
+        ),
+        /lease does not match the Session/,
+        'a lease for an unrelated Session cannot acquire WorkHub authority',
       );
       assert.equal(await fixture.coordinator.readActiveWorkHubRequest('other-turn'), undefined);
       const submitted = await submit('workhub-steering');
@@ -4352,7 +4848,7 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
             content: { text: 'workhub-followup' },
             runId: sent[1]!.runId,
             sourceMessageId: 'workhub-followup',
-            decision: { kind: 'routing', disposition: 'answer_here' },
+            origin: 'user',
           },
         );
         assert.deepEqual(
@@ -4372,11 +4868,28 @@ test('active WorkHub authority reads the admitted v2 input and refuses other or 
         assert.deepEqual(await fixture.coordinator.readActiveWorkHubRequest(sent[2]!.turnId), {
           text: 'workhub-followup-second',
         });
-        assert.deepEqual(preparedRouting, [
-          { turnId, text: content.text },
-          { turnId: sent[1]!.turnId, text: 'workhub-followup' },
-          { turnId: sent[2]!.turnId, text: 'workhub-followup-second' },
-        ]);
+        if (feedback) {
+          const last = sent[2]!;
+          assert.ok(last.runId);
+          const stopping = fixture.coordinator.stopRoot({
+            sessionId: WORKHUB_COORDINATION_SESSION_ID,
+            turnId: last.turnId,
+            runId: last.runId,
+          });
+          await waitUntil(() => backend!.stopCount > 0);
+          assert.equal(
+            fixture.coordinator.readRootState(WORKHUB_COORDINATION_SESSION_ID).kind,
+            'active',
+            'the backend is deliberately still waiting for release',
+          );
+          assert.equal(
+            await fixture.coordinator.readActiveWorkHubRoutingRequest(sent[2]!.turnId),
+            undefined,
+            'a stopped coordinator cannot dispatch while its old owner finishes cleanup',
+          );
+          successorRelease[1]!.resolve();
+          await stopping;
+        }
         successorRelease[1]!.resolve();
         await fixture.coordinator.whenIdle(WORKHUB_COORDINATION_SESSION_ID);
         assert.deepEqual(consumed, ['workhub-steering']);
@@ -6721,9 +7234,6 @@ async function createFailureFixture(options: {
     admission: RootTurnAdmission,
     state: 'pending_fire_required' | 'run_recorded',
   ): Promise<void>;
-  prepareWorkHubRoutingDecision?(
-    input: HostWorkHubRoutingDecisionPreparation,
-  ): Promise<import('@maka/core/workhub-routing').WorkHubRoutingDecision | undefined>;
 }) {
   const base = await mkdtemp(join(tmpdir(), 'maka-root-turn-message-failure-'));
   const capability = await resolveStorageRoot({
@@ -6931,12 +7441,11 @@ async function createFailureFixture(options: {
       options.agentGraphEpochs,
       undefined,
       options.directoryHostId,
-      options.prepareWorkHubRoutingDecision,
     );
   coordinator = createCoordinator(rootAdmissionOwner);
   const contextOperations = new HostContextCoordinator({
     runtime: manager,
-    executions: coordinator,
+    executions: coordinator.contextCompactionAuthority(),
     sessions: stores.sessionStore,
     requestDrain,
   });
@@ -8123,15 +8632,10 @@ async function waitForContinuityFrame(
   );
 }
 
-test('WorkHub action admission skips routing and undefined decisions preserve unbound admission', async () => {
+test('WorkHub action and conversational admissions have no pre-routing binding', async () => {
   for (const action of [true, false]) {
-    let calls = 0;
     const fixture = await createFailureFixture({
       withInteractions: true,
-      prepareWorkHubRoutingDecision: async () => {
-        calls++;
-        return action ? { kind: 'routing', disposition: 'clarify' } : undefined;
-      },
       registerBackend: (backends) =>
         backends.register('ai-sdk', (context) => new FakeBackend(context)),
     });
@@ -8181,7 +8685,6 @@ test('WorkHub action admission skips routing and undefined decisions preserve un
       );
       assert.ok(admission);
       assert.equal('routingDecision' in admission.execution, false);
-      assert.equal(calls, action ? 0 : 1);
       assert.equal(fixture.drainRequested(), false);
     } finally {
       await fixture.coordinator.close();

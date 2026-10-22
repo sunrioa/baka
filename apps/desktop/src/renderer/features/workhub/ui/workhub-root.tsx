@@ -26,6 +26,7 @@ import { useLiveContextUsage } from '../../../application/contracts/session-insp
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
 import { WorkHubComposer } from './workhub-composer.js';
+import { WorkHubContextSettings } from './workhub-context-settings.js';
 import type { RestoredDraftContent } from '../../../application/contracts/transient-message-projection.js';
 import { WorkHubConversation } from './workhub-conversation.js';
 import { FormInteractionPrompt } from '@maka/ui';
@@ -37,17 +38,10 @@ import { WorkHubTaskInbox } from './workhub-task-inbox.js';
 import type { WorkHubControlSnapshot } from '../../../../shared/workhub-control.js';
 import type { WorkHubPresentationSnapshot } from '../../../../shared/workhub-presentation.js';
 import { workHubLiveCopy } from '../locales/workhub-live-copy.js';
-import { workHubLinkedWork } from '../model/linked-work.js';
-import { parseDesktopSessionKey } from '../../../../shared/runtime-host-identity.js';
+import { useWorkHubLinkedWork } from '../controller/use-workhub-linked-work.js';
 import { workHubTaskViewCopy } from '../locales/workhub-task-view-copy.js';
 import { workHubTaskCopy } from '../locales/workhub-task-copy.js';
 import { useWorkHubTaskSelection } from '../controller/use-workhub-task-selection.js';
-
-function sameWorkHubHost(owner: string | undefined, target: string | undefined): boolean {
-  if (!owner || !target) return false;
-  try { return parseDesktopSessionKey(owner).hostId === parseDesktopSessionKey(target).hostId; }
-  catch { return false; }
-}
 
 function cancelReveal(element: HTMLDivElement | null, content: HTMLDivElement | null) {
   for (const target of [element, content]) for (const animation of target?.getAnimations() ?? []) animation.cancel();
@@ -95,12 +89,11 @@ export function WorkHubRoot() {
   if (retainedTaskOwner.current.services !== services) retainedTaskOwner.current = { services, owner: controller.sessionId };
   else if (controller.sessionId) retainedTaskOwner.current.owner = controller.sessionId;
   const taskOwner = controller.sessionId ?? retainedTaskOwner.current.owner;
-  const taskSelection = useWorkHubTaskSelection(services, taskOwner);
+  const taskSelection = useWorkHubTaskSelection(services, taskOwner, Boolean(controller.sessionId));
   const highlight = { ...localHighlight, selectedWork: taskSelection.selected,
     selectWork: (work: typeof localHighlight.selectedWork) => taskSelection.select(work?.workId ? { ...work, workId: work.workId } : undefined),
     toggleWork: (work: NonNullable<typeof localHighlight.selectedWork>) => taskSelection.select(work.workId && work.workId !== taskSelection.selected?.workId ? { ...work, workId: work.workId } : undefined),
   };
-  const selectedTask = highlight.selectedWork && sameWorkHubHost(taskOwner, highlight.selectedWork.sessionId) ? highlight.selectedWork : undefined;
   const focusComposer = () => composer.current?.focus();
   useEffect(() => {
     services.bindBrowserSession(controller.sessionId ?? null);
@@ -280,7 +273,7 @@ export function WorkHubRoot() {
       focus();
     };
   }, [services]);
-  const links = useMemo(() => workHubLinkedWork(transcript.messages, controller.sessions, t.work, controller.sessionId), [transcript.messages, controller.sessions, t.work, controller.sessionId]);
+  const links = useWorkHubLinkedWork(services, controller.sessionId, transcript.messages, controller.sessions, t.work, controller.taskOverview.tasks, controller.taskOverview.generation);
   const delegatedSessionIds = links.map((link) => link.targetSessionId);
   const call = (task: Promise<unknown>) => {
     void task.catch(controller.report);
@@ -319,9 +312,8 @@ export function WorkHubRoot() {
               </div>
             )}
             <div className="workHubTaskPanels">
-              {selectedTask ? (!!controller.taskInbox.requests.length || !!controller.taskInbox.grants?.length || !!controller.taskInbox.error) && <details className="workHubTaskViewInbox"><summary>{taskCopy.pendingInteractions}<span>{controller.taskInbox.requests.length}</span></summary>
-                <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />
-              </details> : <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox} />}
+              <WorkHubTaskInbox key={controller.sessionId} inbox={controller.taskInbox}
+                onView={item => taskSelection.open({ actionId: item.actionId, delegationId: item.delegationId })} />
             </div>
             {(controller.activeForm || controller.activeQuestion) && <div>
             {controller.activeForm && (
@@ -350,6 +342,10 @@ export function WorkHubRoot() {
               hidden={Boolean(controller.activeQuestion || controller.activeForm)}
               draftRestore={draftRestore}
               sessionId={controller.sessionId}
+              slashCommands={!busy && controller.sessionId ? [{
+                id: 'compact', ...getShellCopy(locale).app.slashCommands.compact,
+                keywords: ['compact', 'context', '压缩', '上下文'],
+              }] : []}
               streaming={busy}
               sendBlocked={!controller.sessionId || controller.sending || !session?.model}
               sendBlockedReason={controller.modelSetupRequired
@@ -405,7 +401,6 @@ export function WorkHubRoot() {
               modelSwitchAvailability={controller.configuringModel ? { available: false, pending: true, reason: 'pending' } : undefined}
               contextUsage={session ? {
                 usageTokens: liveContextUsage?.usageTokens ?? selectLatestRequestUsage(transcript.messages, session.model, session),
-                declaredContextWindow: coordinationModelChoice?.declaredContextWindow,
                 meteredContextWindow: liveContextUsage?.contextWindow,
                 metadataContextWindow: coordinationModelChoice?.contextWindow,
                 onOpen: () => call(services.presentation.openUsage()),
@@ -416,6 +411,11 @@ export function WorkHubRoot() {
               modelSwitchHasHistory={transcript.messages.length > 0}
               footerAccessory={
                 <div className="workHubComposerActions">
+                  {controller.sessionId && <WorkHubContextSettings key={controller.sessionId}
+                    sessionId={controller.sessionId} busy={busy}
+                    modelWindow={coordinationModelChoice?.contextWindow}
+                    modelThreshold={coordinationModelChoice?.declaredContextWindow}
+                    onCompact={controller.compactCoordination} />}
                   <span>{t.newWorkPermissions}</span>
                   <PermissionModeSelect
                     appearance="icon"

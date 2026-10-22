@@ -32,8 +32,17 @@ export interface WorkHubTaskInputRequest extends WorkHubTaskInputSource {
   readonly text: string;
 }
 
+/** Host-authenticated provenance; never accepted from a task-input wire request. */
+export interface WorkHubTaskInputProvenance {
+  readonly originalUserText?: string;
+  readonly inputOrigin?: 'user' | 'feedback';
+  readonly sourceMessageId?: string;
+}
+
 /** An accepted user input, committed with its target admission/update, not a model acknowledgment. */
-export interface WorkHubTaskInputMessage extends WorkHubTaskInputSource {
+export interface WorkHubTaskInputMessage
+  extends WorkHubTaskInputSource,
+    WorkHubTaskInputProvenance {
   readonly type: 'workhub_coordination';
   readonly kind: 'task_input';
   readonly schemaVersion: 1;
@@ -69,7 +78,7 @@ const shape = defineObjectShape<WorkHubTaskInputMessage>()(
     'targetContentDigest',
     'mode',
   ],
-  ['execution'],
+  ['execution', 'originalUserText', 'inputOrigin', 'sourceMessageId'],
 );
 const entity = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
@@ -100,6 +109,18 @@ export function isWorkHubTaskInputMessage(value: unknown): value is WorkHubTaskI
     !/^sha256:[a-f0-9]{64}$/u.test(value.targetContentDigest)
   )
     return false;
+  if (
+    (value.originalUserText !== undefined &&
+      (typeof value.originalUserText !== 'string' ||
+        !value.originalUserText.trim() ||
+        new TextEncoder().encode(value.originalUserText).length >
+          WORKHUB_TASK_INPUT_TEXT_MAX_BYTES)) ||
+    (value.inputOrigin !== undefined &&
+      value.inputOrigin !== 'user' &&
+      value.inputOrigin !== 'feedback') ||
+    (value.sourceMessageId !== undefined && !entity(value.sourceMessageId))
+  )
+    return false;
   if (value.mode === 'steering')
     return (
       isRecord(value.execution) &&
@@ -116,7 +137,7 @@ export function isWorkHubTaskInputMessage(value: unknown): value is WorkHubTaskI
 /** Retry identity excludes delivery facts, which may advance after a committed input. */
 export function workHubTaskInputMatches(
   a: WorkHubTaskInputMessage,
-  b: WorkHubTaskInputSource & { readonly inputId: string; readonly text: string },
+  b: WorkHubTaskInputRequest & WorkHubTaskInputProvenance,
 ): boolean {
   return (
     a.inputId === b.inputId &&
@@ -124,6 +145,9 @@ export function workHubTaskInputMatches(
     a.workId === b.workId &&
     a.generationId === b.generationId &&
     a.sourceActionId === b.sourceActionId &&
-    a.sourceDelegationId === b.sourceDelegationId
+    a.sourceDelegationId === b.sourceDelegationId &&
+    (a.originalUserText ?? a.text) === (b.originalUserText ?? b.text) &&
+    (a.inputOrigin ?? 'user') === (b.inputOrigin ?? 'user') &&
+    a.sourceMessageId === b.sourceMessageId
   );
 }

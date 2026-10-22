@@ -73,6 +73,9 @@ import { WORKHUB_COORDINATION_OPERATION_SPECS } from './workhub-coordination.js'
 import { WORKHUB_INTERACTION_OPERATION_SPECS } from './workhub-interactions.js';
 import { WORKHUB_TASK_OPERATION_SPECS } from './workhub-tasks.js';
 import { WORKHUB_TASK_INPUT_OPERATION_SPECS } from './workhub-task-input.js';
+import { WORKHUB_TASK_DISCOVERY_OPERATION_SPECS } from './workhub-task-discovery.js';
+import { WORKHUB_TASK_ACTION_OPERATION_SPECS } from './workhub-task-actions.js';
+import { WORKHUB_TASK_STOP_OPERATION_SPECS } from './workhub-task-stop.js';
 
 export type {
   HostDiagnosticsInput,
@@ -251,6 +254,9 @@ export const HOST_OPERATION_SPECS = composeOperationSpecMaps(
     ...WORKHUB_INTERACTION_OPERATION_SPECS,
     ...WORKHUB_TASK_OPERATION_SPECS,
     ...WORKHUB_TASK_INPUT_OPERATION_SPECS,
+    ...WORKHUB_TASK_DISCOVERY_OPERATION_SPECS,
+    ...WORKHUB_TASK_ACTION_OPERATION_SPECS,
+    ...WORKHUB_TASK_STOP_OPERATION_SPECS,
   },
   PLUGIN_PLATFORM_OPERATION_SPECS,
 );
@@ -291,6 +297,7 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'connection.request-headers.replace',
   'connection.test.run',
   'context.compact',
+  'workhub.coordination.compact',
   'context.diagnostics.query',
   'credential.vault.delete',
   'credential.vault.query',
@@ -387,23 +394,18 @@ export const REMOTE_OWNER_OPERATION_GRANTS = Object.freeze([
   'usage.query',
   'web-search.execute',
   'workhub.coordination.answer',
-  'workhub.coordination.actFromTurn',
-  'workhub.coordination.selectAndDelegate',
-  'workhub.coordination.candidates',
-  'workhub.coordination.works',
   'workhub.coordination.configureModel',
   'workhub.coordination.query',
   'workhub.coordination.resolve',
   'workhub.interactions.query',
   'workhub.interactions.answer',
-  'workhub.interactions.revoke',
   'workhub.tasks.query',
+  'workhub.tasks.find',
   'workhub.tasks.read',
   'workhub.tasks.history',
   'workhub.tasks.executions',
   'workhub.tasks.send',
   'workhub.tasks.input.read',
-  'workhub.coordination.continue',
 ] as const satisfies readonly OperationKey[]);
 
 const REMOTE_OWNER_OPERATION_GRANT_SET = new Set<OperationKey>(REMOTE_OWNER_OPERATION_GRANTS);

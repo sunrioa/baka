@@ -100,7 +100,21 @@ test('task history never exposes an exclusive execution for queued, shared, canc
       delegationId: 'delegation-work',
     });
     assert.ok(!result.ok && result.error.code === 'not_found', JSON.stringify(result));
+    assert.equal(
+      await f.runtime.readAssignmentState('work', 'delegation-work'),
+      kind === 'pending'
+        ? 'queued'
+        : kind === 'shared_turn'
+          ? 'shared'
+          : kind === 'unowned'
+            ? 'unavailable'
+            : kind,
+    );
   }
+  await assert.rejects(
+    f.runtime.readAssignmentState('work', 'different-delegation'),
+    /unavailable/,
+  );
   f.setArchived();
   const result = await f.runtime.handlers['workhub.tasks.history']({ workId: 'work' });
   assert.ok(result.ok, JSON.stringify(result));
@@ -111,7 +125,118 @@ test('task history never exposes an exclusive execution for queued, shared, canc
   );
 });
 
-function fixture() {
+test('segment ordinals come from complete task ancestry, not sparse pages or reused generations', async () => {
+  const assignments: WorkHubDelegationAssignedMessage[] = [];
+  const expected = new Map<string, number>();
+  let previous: string | undefined;
+  for (let index = 0; index < 12; index++) {
+    const actionId = index === 0 ? 'work' : `step-${index}`;
+    const segment = Math.floor(index / 3) + 1;
+    const generationId = index < 3 ? 'work' : `step-${Math.floor(index / 3) * 3}`;
+    const source = lineageAssignment(actionId, `container-${segment}`, {
+      id: 'work',
+      generationId,
+      ...(previous === undefined ? {} : { continuesActionId: previous }),
+    });
+    // Legacy replacement may change generation without opening another Session.
+    if (index === 2) {
+      source.work = { id: 'work', generationId: actionId };
+      source.replacesActionId = previous;
+      source.replacesDelegationId = `delegation-${previous}`;
+    }
+    assignments.push(source);
+    expected.set(actionId, segment);
+    previous = actionId;
+    for (let other = 0; other < 20; other++) {
+      const id = `unrelated-${index}-${other}`;
+      assignments.push(lineageAssignment(id, 'another-container'));
+    }
+  }
+  const f = fixture(assignments);
+  const observed = new Map<string, unknown>();
+  let cursor: string | undefined;
+  do {
+    const page = await f.runtime.handlers['workhub.tasks.history']({
+      workId: 'work',
+      ...(cursor ? { cursor } : {}),
+    });
+    assert.ok(page.ok, JSON.stringify(page));
+    for (const assignment of page.result.assignments)
+      observed.set(assignment.actionId, projectedSegment(assignment));
+    cursor = page.result.nextCursor ?? undefined;
+  } while (cursor);
+  assert.deepEqual([...observed].reverse(), [...expected]);
+  assert.ok(f.reads.length > 1, 'the source ledger crosses several sparse pages');
+  const reads = f.reads.length;
+  const exact = await f.runtime.handlers['workhub.tasks.history']({
+    workId: 'work',
+    actionId: 'step-10',
+  });
+  assert.ok(exact.ok, JSON.stringify(exact));
+  assert.equal(projectedSegment(exact.result.assignments[0]!), 4);
+  assert.equal(
+    f.reads.length,
+    reads,
+    'an exact refresh follows source identities, not global pages',
+  );
+});
+
+test('segment projection leaves missing, cross-task or cyclic ancestry unknown', async () => {
+  for (const source of ['missing', 'other-work', 'cycle']) {
+    const f = fixture([
+      lineageAssignment('work', 'first'),
+      lineageAssignment('other-work', 'unrelated'),
+      lineageAssignment('cycle', 'later', {
+        id: 'work',
+        generationId: 'cycle',
+        continuesActionId: 'selected',
+      }),
+      lineageAssignment('selected', 'later', {
+        id: 'work',
+        generationId: 'selected',
+        continuesActionId: source,
+      }),
+    ]);
+    const result = await f.runtime.handlers['workhub.tasks.history']({
+      workId: 'work',
+      actionId: 'selected',
+    });
+    assert.ok(result.ok, JSON.stringify(result));
+    assert.equal(projectedSegment(result.result.assignments[0]!), undefined, source);
+  }
+});
+
+function projectedSegment(assignment: object): unknown {
+  return 'segment' in assignment ? assignment.segment : undefined;
+}
+
+function lineageAssignment(
+  actionId: string,
+  targetSessionId: string,
+  work?: WorkHubDelegationAssignedMessage['work'],
+): WorkHubDelegationAssignedMessage {
+  return {
+    type: 'workhub_coordination',
+    kind: 'delegation_assigned',
+    id: `row-${actionId}`,
+    turnId: `coord-${actionId}`,
+    coordinationTurnId: `coord-${actionId}`,
+    schemaVersion: 4,
+    ts: 1,
+    actionId,
+    delegationId: `delegation-${actionId}`,
+    actionFingerprint: `sha256:${'0'.repeat(64)}`,
+    disposition: 'delegate_existing',
+    userText: 'Same topic',
+    targetSessionId,
+    targetSessionName: 'Same name',
+    targetMessageId: `message-${actionId}`,
+    targetTurnId: `target-${actionId}`,
+    ...(work ? { work } : {}),
+  };
+}
+
+function fixture(assignments?: readonly WorkHubDelegationAssignedMessage[]) {
   type Options = Parameters<typeof createWorkHubTaskHistoryRuntime>[0];
   const admission = new SessionAdmissionGate();
   let kind: 'pending' | 'shared_turn' | 'cancelled' | 'unowned' = 'pending';
@@ -138,10 +263,9 @@ function fixture() {
       generationId: sequence < 100 ? 'original' : 'replacement',
     },
   });
-  const rows = Array.from({ length: 181 }, (_, sequence) => ({
-    sequence,
-    message: message(sequence),
-  })).reverse();
+  const rows = (assignments ?? Array.from({ length: 181 }, (_, sequence) => message(sequence)))
+    .map((message, sequence) => ({ sequence, message }))
+    .reverse();
   const reads: Array<{ beforeSequence: number; maxMessages: number; maxStoredBytes: number }> = [];
   const runtime = createWorkHubTaskHistoryRuntime({
     admission,
@@ -154,15 +278,15 @@ function fixture() {
         readWorkHubAssignmentsPage: async (input: (typeof reads)[number]) => {
           reads.push(input);
           return {
-            highWaterSequence: 180,
+            highWaterSequence: rows[0]?.sequence ?? null,
             records: rows
               .filter((row) => row.sequence < input.beforeSequence)
               .slice(0, input.maxMessages),
           };
         },
         readWorkHubSupersession: async (id: string) => (id === 'delegation-180' ? {} : undefined),
-        readHeaderSnapshot: async () => ({
-          id: 'target',
+        readHeaderSnapshot: async (id: string) => ({
+          id,
           labels: [],
           name: 'Task',
           isArchived: archived,

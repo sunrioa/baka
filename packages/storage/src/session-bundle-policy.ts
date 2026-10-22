@@ -35,6 +35,7 @@ import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { WORKHUB_TASK_INDEX_SCHEMA_SQL } from './sqlite-workhub-task-index.js';
 import type { ArtifactRecord } from '@maka/core/artifacts';
 import { decodeArtifactRecordJsons } from './artifact-metadata-codec.js';
 import {
@@ -501,6 +502,15 @@ async function filterBackedUpDatabase(
       for (const sessionId of sessionIds) assertSessionQuiescent(database, sessionId);
     }
     database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE');
+    // This workspace-wide projection contains other tasks' original text and
+    // FTS shadow tables cannot be filtered with ordinary DELETE statements.
+    // Reset it only in the private export copy; rebuild from exported facts
+    // after import, with a new local cursor key.
+    database.exec(`
+      DROP TABLE workhub_task_search;
+      DROP TABLE workhub_task_index;
+      DROP TABLE workhub_task_index_state;
+    `);
     const tables = database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
       .all() as Array<{ name?: unknown }>;
@@ -592,6 +602,7 @@ async function filterBackedUpDatabase(
       )
     `)
       .run();
+    database.exec(WORKHUB_TASK_INDEX_SCHEMA_SQL);
     database.exec('COMMIT');
     const foreignKeyViolation = database.prepare('PRAGMA foreign_key_check').get();
     if (foreignKeyViolation) throw new Error('Filtered session database has dangling references');

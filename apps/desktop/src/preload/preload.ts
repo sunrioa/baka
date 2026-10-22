@@ -30,6 +30,7 @@ import type {
   WorkHubAnswerResult,
   WorkHubPrepareAttachmentsResult,
   WorkHubTaskSendResult,
+  WorkHubTaskListResult,
 } from '../shared/workhub-conversation.js';
 import type { SessionObservationMessage } from '../shared/session-execution-projection.js';
 import { executionEventChannel, sameExecutionScope } from '../shared/execution-observation.js';
@@ -2193,6 +2194,13 @@ const makaBridge = {
     },
   },
   workHub: {
+    async findTasks(coordinationSessionId: string, input: OperationInput<'workhub.tasks.find'>) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      const result = await invokeWhenReady('workhub:findTasks', scope, input) as WorkHubTaskListResult;
+      return 'kind' in result && result.kind === 'recent_only' ? { ...result, result: { ...result.result,
+        tasks: result.result.tasks.map(task => ({ ...task, targetSessionId: observeRuntimeHostSessionScope(scope, task.targetSessionId).sessionId })),
+      } } : result;
+    },
     async queryTasks(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       const result = await invokeWhenReady('workhub:queryTasks', scope) as OperationOutput<'workhub.tasks.query'>;
@@ -2224,15 +2232,6 @@ const makaBridge = {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       const result = await invokeWhenReady('workhub:readTaskInput', scope, input) as OperationOutput<'workhub.tasks.input.read'>;
       return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId };
-    },
-    async continueTask(coordinationSessionId: string, input: OperationInput<'workhub.coordination.continue'>) {
-      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      const result = await invokeWhenReady('workhub:continueTask', scope, input) as OperationOutput<'workhub.coordination.continue'>;
-      return { ...result, targetSessionId: observeRuntimeHostSessionScope(scope, result.targetSessionId).sessionId };
-    },
-    async revokeTaskGrant(coordinationSessionId: string, input: OperationInput<'workhub.interactions.revoke'>) {
-      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      return await invokeWhenReady('workhub:revokeTaskGrant', scope, input) as OperationOutput<'workhub.interactions.revoke'>;
     },
     async queryInteractions(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
@@ -2282,11 +2281,11 @@ const makaBridge = {
     },
     async getNewWorkDefaults(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      return ipcRenderer.invoke('workhub:getNewWorkDefaults', scope) as Promise<Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>>;
+      return invokeWhenReady('workhub:getNewWorkDefaults', scope) as Promise<Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>>;
     },
     async setNewWorkDefaults(coordinationSessionId: string, defaults: Omit<import('@maka/core/session').WorkHubCreateDefaults, 'permissionMode'>) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
-      await ipcRenderer.invoke('workhub:setNewWorkDefaults', scope, defaults);
+      await invokeWhenReady('workhub:setNewWorkDefaults', scope, defaults);
     },
     async getNewWorkPermissionMode(coordinationSessionId: string) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
@@ -2311,6 +2310,14 @@ const makaBridge = {
     async setExecutionConcurrency(coordinationSessionId: string, value: number) {
       const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
       return invokeWhenReady('workhub:setExecutionConcurrency', scope, value) as Promise<number>;
+    },
+    async getCompactionThreshold(coordinationSessionId: string) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:getCompactionThreshold', scope) as Promise<number | null>;
+    },
+    async setCompactionThreshold(coordinationSessionId: string, value: number | null) {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(coordinationSessionId, runtimeHostSessionRef);
+      return invokeWhenReady('workhub:setCompactionThreshold', scope, value) as Promise<number | null>;
     },
     resolveCoordinationSession(): Promise<string | { readonly kind: 'model_required' }> {
       return resolveDesktopWorkHubCoordinationSession(

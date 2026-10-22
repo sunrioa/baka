@@ -725,6 +725,23 @@ test('unavailable executors can be inspected but never committed', async () => {
 });
 
 
+test('a saved missing or unavailable executor stays explicit and never automatically selects native', async () => {
+  const dom = installTranscriptDom();
+  const selection = { executorId: 'saved.executor', configuration: { model: 'saved-model' } };
+  try {
+    for (const availableCatalog of [[], [{ id: 'saved.executor', displayName: 'Saved executor', readiness: 'unavailable' as const, models: [], supportsAttachments: false, supportsModelChange: false }]]) {
+      await dom.render(<LocaleProvider locale="en"><ExecutorModelPicker
+        catalog={availableCatalog} selection={selection} nativeLabel="Available native model"
+        onSelect={() => assert.fail('An unavailable saved choice must not auto-select another executor or native model')}
+        onSetup={() => {}} onRetry={() => {}} onNewTask={() => {}}
+      /></LocaleProvider>);
+      assert.match(dom.document.querySelector('.maka-executor-selector')?.textContent ?? '', /saved-model/u);
+      assert.match(dom.document.querySelector('.maka-executor-notice')?.textContent ?? '', /Unavailable/u);
+      assert.doesNotMatch(dom.document.querySelector('.maka-executor-selector')?.textContent ?? '', /Available native model/u);
+    }
+  } finally { await dom.cleanup(); }
+});
+
 test('native thinking stays beside the composer model trigger and follows executor selection', async () => {
   const dom = installTranscriptDom();
   dom.window.getSelection = () => null;

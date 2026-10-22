@@ -43,6 +43,7 @@ import { canonicalToolArgsHash } from '@maka/core/tool-args-identity';
 import {
   buildImmutableRuntimePrefix,
   createRuntimeBoundaryCursor,
+  decodeContinuationClaim,
   runtimePrefixSegment,
   type ContinuationClaimV1,
   type ImmutableRuntimePrefixV1,
@@ -77,7 +78,20 @@ describe('SqliteRuntimeStore', () => {
           tokenUsage: {
             input: 50000,
             output: 1000,
-            lastRequestAnchor: { inputTokens: 600, outputTokens: 20 },
+            lastRequestAnchor: {
+              inputTokens: 600,
+              outputTokens: 20,
+              requestedAt: 8,
+              latestRequestAt: 10,
+              usageScope: 'last_completed_request',
+              cacheSourceVersion: 2,
+              cacheReadInputTokens: 500,
+              cacheWriteInputTokens: 25,
+              cacheMissInputTokens: 75,
+              cacheReadInputSource: 'reported',
+              cacheWriteInputSource: 'reported',
+              cacheMissInputSource: 'derived',
+            },
           },
         },
       };
@@ -112,6 +126,15 @@ describe('SqliteRuntimeStore', () => {
         connectionSlug: 'fake',
         inputTokens: 600,
         outputTokens: 20,
+        requestedAt: 8,
+        latestRequestAt: 10,
+        usageScope: 'last_completed_request',
+        cacheReadInputTokens: 500,
+        cacheWriteInputTokens: 25,
+        cacheMissInputTokens: 75,
+        cacheReadInputSource: 'reported',
+        cacheWriteInputSource: 'reported',
+        cacheMissInputSource: 'derived',
       });
       // Session ordinal, not timestamp sorting, owns recency.
       await store.appendRuntimeEvent(root.sessionId, root.runId, {
@@ -126,6 +149,10 @@ describe('SqliteRuntimeStore', () => {
               inputTokens: 700,
               modelId: 'fake-model',
               connectionId: 'fake-connection',
+              requestedAt: 99,
+              cacheReadInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              cacheMissInputTokens: 700,
             },
           },
         },
@@ -135,6 +162,56 @@ describe('SqliteRuntimeStore', () => {
       assert.equal(latest.eventId, 'newer-ordinal');
       assert.equal(latest.observedAt, 1);
       assert.equal(latest.inputTokens, 700);
+      assert.equal(
+        latest.requestedAt,
+        undefined,
+        'legacy timestamp lacks the paired-request marker',
+      );
+      assert.equal(
+        latest.cacheReadInputTokens,
+        undefined,
+        'legacy normalized zero is not reported cache usage',
+      );
+      assert.equal(latest.cacheWriteInputTokens, undefined);
+      assert.equal(latest.cacheMissInputTokens, undefined);
+      await store.appendRuntimeEvent(root.sessionId, root.runId, {
+        ...usage,
+        id: 'legacy-source-labels',
+        ts: 2,
+        actions: {
+          tokenUsage: {
+            input: 50000,
+            output: 0,
+            lastRequestAnchor: {
+              inputTokens: 700,
+              outputTokens: 0,
+              modelId: 'fake-model',
+              connectionId: 'fake-connection',
+              usageScope: 'last_completed_request',
+              requestedAt: 100,
+              cacheReadInputTokens: 0,
+              cacheWriteInputTokens: 0,
+              cacheMissInputTokens: 700,
+              cacheReadInputSource: 'reported',
+              cacheWriteInputSource: 'reported',
+              cacheMissInputSource: 'explicit',
+            },
+          },
+        },
+      });
+      const legacy = await store.readLatestSessionRequestObservation(root.sessionId);
+      assert.ok(legacy.status === 'observed');
+      assert.equal(legacy.inputTokens, 700);
+      assert.equal(legacy.requestedAt, 100, 'paired request time remains usable');
+      assert.equal(
+        legacy.cacheReadInputTokens,
+        undefined,
+        'old source labels could come from SDK-filled zeros',
+      );
+      assert.equal(legacy.cacheWriteInputTokens, undefined);
+      assert.equal(legacy.cacheMissInputTokens, undefined);
+      assert.equal(legacy.cacheReadInputSource, undefined);
+      assert.equal(legacy.cacheMissInputSource, undefined);
     });
   });
 
@@ -2794,6 +2871,55 @@ describe('SqliteRuntimeStore', () => {
       assert.equal(existing.kind, 'existing');
       assert.deepEqual(existing.claim, claim);
       assert.deepEqual(await store.readContinuationClaimByBoundary(claim.boundaryDigest), claim);
+    });
+  });
+
+  for (const providerProjectionVersion of [1, 2, 3, 4, 5, 6] as const) {
+    it(`durably claims and reopens projection v${providerProjectionVersion} without duplicate admission`, async () => {
+      await withStore(async (store, dbPath) => {
+        const claim = decodeContinuationClaim({
+          ...continuationClaim(),
+          providerProjectionVersion,
+        });
+        await persistImmutablePrefix(store, continuationSourcePrefix());
+        assert.equal((await store.claimContinuation({ claim })).kind, 'acquired');
+        assert.equal((await store.claimContinuation({ claim })).kind, 'existing');
+        store.close();
+        const reopened = createSqliteRuntimeStore(dbPath);
+        try {
+          assert.deepEqual(
+            await reopened.readContinuationClaimByBoundary(claim.boundaryDigest),
+            claim,
+          );
+          const repeated = await reopened.claimContinuation({ claim });
+          assert.equal(repeated.kind, 'existing');
+          assert.deepEqual(repeated.claim, claim);
+          assert.equal(
+            (await reopened.listContinuationClaimsForRecovery(claim.target.sessionId)).length,
+            1,
+          );
+        } finally {
+          reopened.close();
+        }
+      });
+    });
+  }
+
+  it('refuses an unknown projection claim before any durable admission', async () => {
+    await withStore(async (store) => {
+      const claim = continuationClaim();
+      await persistImmutablePrefix(store, continuationSourcePrefix());
+      await assert.rejects(
+        store.claimContinuation({
+          claim: { ...claim, providerProjectionVersion: 7 } as unknown as ContinuationClaimV1,
+        }),
+        /Invalid continuation claim/,
+      );
+      assert.equal(await store.readContinuationClaimByBoundary(claim.boundaryDigest), undefined);
+      assert.deepEqual(
+        await store.readImmutableRuntimeEvents(claim.target.sessionId, claim.target.runId),
+        [],
+      );
     });
   });
 

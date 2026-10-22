@@ -21,7 +21,6 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 
 | Path | Why |
 |------|-----|
-| `apps/desktop/src/renderer/features/jev-settings/index.tsx` | barrel re-export |
 | `apps/desktop/src/renderer/main.tsx` | bundle entry, not a surface |
 
 ## Files
@@ -163,7 +162,7 @@ Wiki bar: Design Conventions · API Use-the-System · Theming · Container Paddi
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-surface-switch.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-composer.tsx` | shell-chrome-or-panel | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-inbox.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
-| `apps/desktop/src/renderer/features/workhub/ui/workhub-task-overview.tsx` | other | Button, IconButton, TextArea | aligned — uses Astryx (Button, IconButton, TextArea) | aligned |
+| `apps/desktop/src/renderer/features/workhub/ui/workhub-task-overview.tsx` | other | Button, IconButton, TextInput | aligned — uses Astryx (Button, IconButton, TextInput) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-panel.tsx` | shell-chrome-or-panel | Selector | aligned — uses Astryx (Selector) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-task-view.tsx` | other | Button | aligned — uses Astryx (Button) | aligned |
 | `apps/desktop/src/renderer/features/workhub/ui/workhub-work-identity.tsx` | other | none | aligned — no raw controls; no Astryx JSX usage | aligned |

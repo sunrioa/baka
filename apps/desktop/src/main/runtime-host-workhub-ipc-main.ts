@@ -33,6 +33,7 @@ import type {
   WorkHubCoordinationSessionResolution,
   WorkHubPrepareAttachmentsResult,
   WorkHubTaskSendResult,
+  WorkHubTaskListResult,
 } from '../shared/workhub-conversation.js';
 import { toDesktopHostSessionSummary } from './runtime-host-session-catalog-ipc-main.js';
 import {
@@ -42,6 +43,8 @@ import {
   writeWorkHubNewWorkPermissionMode,
   readWorkHubExecutionConcurrency,
   writeWorkHubExecutionConcurrency,
+  readWorkHubCompactionThreshold,
+  writeWorkHubCompactionThreshold,
 } from './workhub-new-work-defaults.js';
 
 type RuntimeHostWorkHubClient = Pick<
@@ -53,14 +56,13 @@ type RuntimeHostWorkHubClient = Pick<
   | 'getWorkHubSession'
   | 'queryWorkHubInteractions'
   | 'queryWorkHubTasks'
+  | 'findWorkHubTasks'
   | 'readWorkHubTaskHistory'
   | 'readWorkHubTaskExecutions'
   | 'sendWorkHubTaskInput'
   | 'readWorkHubTaskInput'
   | 'readWorkHubTask'
-  | 'continueWorkHubTask'
   | 'answerWorkHubInteraction'
-  | 'revokeWorkHubTaskGrant'
   | 'queryTurn'
   | 'queryRuntimePolicy'
   | 'updateRuntimePolicy'
@@ -147,6 +149,29 @@ export function registerRuntimeHostWorkHubIpc(
   ipcMain.handle('workhub:configureModel', (_event, input) => client.configureWorkHubModel(input));
   handleReconnectableRead(ipcMain, 'workhub:queryInteractions', () => client.queryWorkHubInteractions());
   handleReconnectableRead(ipcMain, 'workhub:queryTasks', () => client.queryWorkHubTasks());
+  handleReconnectableRead(ipcMain, 'workhub:findTasks', async (_event, input): Promise<WorkHubTaskListResult> => {
+    const { hostId, hostEpoch } = client;
+    const requireSameHost = () => {
+      if (client.hostId !== hostId || client.hostEpoch !== hostEpoch) throw new Error('Runtime Host changed during task list read');
+    };
+    try {
+      const result = await client.findWorkHubTasks(input);
+      requireSameHost();
+      return result;
+    } catch (error) {
+      // Electron drops custom error fields. Classify only this exact denial in
+      // Main; a path denial or failed search/page is never a recent-data fallback.
+      if (!(error instanceof RuntimeHostOperationError && error.operation === 'workhub.tasks.find' && error.code === 'unauthorized') ||
+          !input || typeof input !== 'object' || Array.isArray(input) || 'cwd' in input) throw error;
+      requireSameHost();
+      if (Object.keys(input).length) return { kind: 'index_not_authorized' };
+      // The same client must independently authorize query. Never upgrade or
+      // persist credentials, and never turn these records into a find result.
+      const result = await client.queryWorkHubTasks();
+      requireSameHost();
+      return { kind: 'recent_only', result };
+    }
+  });
   handleReconnectableRead(ipcMain, 'workhub:taskHistory', (_event, input) => client.readWorkHubTaskHistory(input));
   handleReconnectableRead(ipcMain, 'workhub:taskExecutions', (_event, input) => client.readWorkHubTaskExecutions(input));
   handleReconnectableRead(ipcMain, 'workhub:readTaskInput', (_event, input) => client.readWorkHubTaskInput(input));
@@ -170,19 +195,16 @@ export function registerRuntimeHostWorkHubIpc(
     }
   });
   handleReconnectableRead(ipcMain, 'workhub:readTask', (_event, input) => client.readWorkHubTask(input));
-  // A lost continuation receipt is never automatically replayed with a new identity.
-  ipcMain.handle('workhub:continueTask', (_event, input) => client.continueWorkHubTask(input));
   // Never blindly replay an approval after a lost acknowledgement. The inbox
   // refreshes canonical pending requests before the user can try again.
   ipcMain.handle('workhub:answerInteraction', (_event, input) => client.answerWorkHubInteraction(input));
-  ipcMain.handle('workhub:revokeTaskGrant', (_event, input) => client.revokeWorkHubTaskGrant(input));
-  ipcMain.handle('workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client.hostId));
-  ipcMain.handle('workhub:setNewWorkDefaults', (_event, value: unknown) => {
+  handleReconnectableRead(ipcMain, 'workhub:getNewWorkDefaults', () => readWorkHubNewWorkDefaults(client));
+  ipcMain.handle('workhub:setNewWorkDefaults', async (_event, value: unknown) => {
     if (!isWorkHubCreateDefaults(value) || value.permissionMode !== undefined) {
       throw new Error('Invalid WorkHub new-work defaults');
     }
-    writeWorkHubNewWorkDefaults(
-      client.hostId,
+    await writeWorkHubNewWorkDefaults(
+      client,
       value as Omit<WorkHubCreateDefaults, 'permissionMode'>,
     );
   });
@@ -194,6 +216,8 @@ export function registerRuntimeHostWorkHubIpc(
   );
   handleReconnectableRead(ipcMain, 'workhub:getExecutionConcurrency', () => readWorkHubExecutionConcurrency(client));
   ipcMain.handle('workhub:setExecutionConcurrency', (_event, value: unknown) => writeWorkHubExecutionConcurrency(client, value));
+  handleReconnectableRead(ipcMain, 'workhub:getCompactionThreshold', () => readWorkHubCompactionThreshold(client));
+  ipcMain.handle('workhub:setCompactionThreshold', (_event, value: unknown) => writeWorkHubCompactionThreshold(client, value));
   ipcMain.handle('workhub:prepareAttachments', async (event, items: unknown): Promise<WorkHubPrepareAttachmentsResult> => {
     if (!options.attachmentIngest) throw new Error('WorkHub attachments are unavailable');
     try {

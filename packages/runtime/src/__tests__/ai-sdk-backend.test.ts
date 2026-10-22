@@ -43,6 +43,7 @@ import type { LlmConnection } from '@maka/core/llm-connections';
 import { createWorkspaceWritePermissionProfile } from '@maka/core/permission-profile';
 import { createManagedExecutionBoundary } from '@maka/core/sandbox-boundary';
 import type { SessionHeader } from '@maka/core/session';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import type { StorageRef } from '@maka/core/events';
 import { encodeCanonicalRuntimeEvent } from '@maka/core/canonical-runtime-event';
 import type { SessionEvent } from '@maka/core/events';
@@ -1651,6 +1652,68 @@ describe('AiSdkBackend sandbox boundary convergence', () => {
 });
 
 describe('AiSdkBackend model history', () => {
+  test('sends the native stopped-coordinator fact to the provider before a new independent request', async () => {
+    const model = completionModel();
+    const backend = createBackend({
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      header: { ...header(), id: WORKHUB_COORDINATION_SESSION_ID },
+      connection: connection(),
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+    });
+    const original = {
+      ...runtimeTextEvent({
+        id: 'stopped-user-request',
+        turnId: 'turn-stopped',
+        role: 'user',
+        author: 'user',
+        text: 'Add a regression to the earlier task.',
+      }),
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    };
+    const terminal: RuntimeEvent = {
+      ...runtimeEvent({
+        id: 'native-stopped-terminal',
+        turnId: 'turn-stopped',
+        role: 'system',
+        author: 'system',
+        status: 'aborted',
+        actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+      }),
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      modelVisibility: 'hidden',
+    };
+    const events = [original, terminal];
+    const raw = JSON.stringify(events);
+    await drain(
+      backend.send({
+        turnId: 'turn-new-independent',
+        text: 'Start a separate new task.',
+        context: [],
+        runtimeContext: events,
+      }),
+    );
+    assert.equal(model.doStreamCalls.length, 1);
+    const prompt = compactPrompt(model) as Array<{ role: string; content: unknown }>;
+    const previousIndex = prompt.findIndex((message) =>
+      JSON.stringify(message.content).includes('Add a regression'),
+    );
+    const stopIndex = prompt.findIndex((message) =>
+      JSON.stringify(message.content).includes('native-stopped-terminal'),
+    );
+    const currentIndex = prompt.findIndex((message) =>
+      JSON.stringify(message.content).includes('Start a separate new task.'),
+    );
+    assert.ok(previousIndex >= 0 && previousIndex < stopIndex && stopIndex < currentIndex);
+    assert.equal(prompt[stopIndex]?.role, 'assistant');
+    assert.match(
+      JSON.stringify(prompt[stopIndex]?.content),
+      /unsubmitted work.*not a pending request/,
+    );
+    assert.equal(JSON.stringify(events), raw, 'native ledger input stays unchanged');
+  });
+
   test('records structured sandbox failure metadata on tool failure traces', async () => {
     const traces: RunTraceEvent[] = [];
     const messages: ToolResultMessage[] = [];
@@ -9551,6 +9614,12 @@ describe('AiSdkBackend usage telemetry', () => {
                       cacheRead: 20,
                       cacheWrite: 10,
                     },
+                    raw: {
+                      input_tokens: 70,
+                      cache_read_input_tokens: 20,
+                      cache_creation_input_tokens: 10,
+                      output_tokens: 5,
+                    },
                     outputTokens: {
                       total: 5,
                       text: 5,
@@ -9573,6 +9642,12 @@ describe('AiSdkBackend usage telemetry', () => {
                       noCache: 100,
                       cacheRead: 80,
                       cacheWrite: 20,
+                    },
+                    raw: {
+                      input_tokens: 100,
+                      cache_read_input_tokens: 80,
+                      cache_creation_input_tokens: 20,
+                      output_tokens: 7,
                     },
                     outputTokens: {
                       total: 7,
@@ -10210,6 +10285,12 @@ describe('AiSdkBackend usage telemetry', () => {
             noCache: 5,
             cacheRead: 3,
             cacheWrite: 2,
+          },
+          raw: {
+            input_tokens: 5,
+            cache_read_input_tokens: 3,
+            cache_creation_input_tokens: 2,
+            output_tokens: 7,
           },
           outputTokens: {
             total: 7,

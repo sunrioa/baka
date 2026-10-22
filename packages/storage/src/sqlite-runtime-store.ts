@@ -755,6 +755,31 @@ export class SqliteRuntimeStore
           connectionId: route.llmConnectionId,
           connectionSlug: route.llmConnectionSlug,
           inputTokens: anchor.inputTokens,
+          ...(anchor.usageScope === undefined ? {} : { usageScope: anchor.usageScope }),
+          ...(anchor.usageScope !== 'last_completed_request' || anchor.requestedAt === undefined
+            ? {}
+            : { requestedAt: anchor.requestedAt }),
+          ...(anchor.latestRequestAt === undefined
+            ? {}
+            : { latestRequestAt: anchor.latestRequestAt }),
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheReadInputSource !== 'reported'
+            ? {}
+            : {
+                cacheReadInputTokens: anchor.cacheReadInputTokens,
+                cacheReadInputSource: anchor.cacheReadInputSource,
+              }),
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheWriteInputSource !== 'reported'
+            ? {}
+            : {
+                cacheWriteInputTokens: anchor.cacheWriteInputTokens,
+                cacheWriteInputSource: anchor.cacheWriteInputSource,
+              }),
+          ...(anchor.cacheSourceVersion !== 2 || anchor.cacheMissInputSource === undefined
+            ? {}
+            : {
+                cacheMissInputTokens: anchor.cacheMissInputTokens,
+                cacheMissInputSource: anchor.cacheMissInputSource,
+              }),
           ...(anchor.outputTokens === undefined ? {} : { outputTokens: anchor.outputTokens }),
         };
       }

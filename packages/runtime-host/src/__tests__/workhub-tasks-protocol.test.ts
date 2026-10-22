@@ -19,7 +19,11 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { HOST_OPERATION_SPECS, REMOTE_OWNER_OPERATION_GRANTS } from '../protocol/index.js';
+import {
+  HOST_OPERATION_SPECS,
+  REMOTE_OWNER_OPERATION_GRANTS,
+  RUNTIME_HOST_COMPATIBILITY_EPOCH,
+} from '../protocol/index.js';
 test('native task input accepts only fixed work sources and correlates proven receipt identities', () => {
   const send = HOST_OPERATION_SPECS['workhub.tasks.send'];
   const read = HOST_OPERATION_SPECS['workhub.tasks.input.read'];
@@ -77,6 +81,94 @@ const task = {
   status: 'pending_acceptance',
   execution: { turnId: 'turn', runId: 'run', sharedTurn: false },
 };
+test('task title is optional for legacy facts and independent of the Session name', () => {
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
+  assert.equal(spec.decodeOutput({ task }).task.title, undefined);
+  const titled = { ...task, title: 'Canonical task title', targetSessionName: 'Renamed Session' };
+  assert.deepEqual(spec.decodeOutput({ task: titled }).task, titled);
+  assert.throws(() => spec.decodeOutput({ task: { ...task, title: '中'.repeat(683) } }));
+});
+test('task-id detail reads correlate the exact logical task without model-selected execution fields', () => {
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
+  const input = spec.decodeInput({ workId: 'work' });
+  assert.deepEqual(input, { workId: 'work' });
+  const detail = spec.decodeOutput({ task: { ...task, workId: 'work' } });
+  spec.assertOutputForInput!(input, detail);
+  assert.throws(() =>
+    spec.assertOutputForInput!(input, { task: { ...detail.task, workId: 'different' } }),
+  );
+  const legacyInput = spec.decodeInput({ workId: 'action' });
+  spec.assertOutputForInput!(legacyInput, spec.decodeOutput({ task }));
+  for (const extra of [
+    { actionId: 'action', delegationId: 'delegation' },
+    { targetSessionId: 'session' },
+    { generationId: 'generation' },
+    { confirmed: true },
+    { actor: 'user' },
+  ])
+    assert.throws(() => spec.decodeInput({ workId: 'work', ...extra }));
+  assert.throws(() => spec.decodeInput({ workId: '' }));
+});
+test('task overview is opt-in, bounded and bound to the returned work and original assignment', () => {
+  assert.ok(
+    RUNTIME_HOST_COMPATIBILITY_EPOCH > 238,
+    'old strict 238 decoders cannot accept the new task read input',
+  );
+  const spec = HOST_OPERATION_SPECS['workhub.tasks.read'];
+  const input = { workId: 'work', includeBrief: true as const, briefLocale: 'zh-CN' as const };
+  assert.deepEqual(spec.decodeInput(input), input);
+  assert.deepEqual(
+    spec.decodeInput({ actionId: 'action', delegationId: 'delegation', includeBrief: true }),
+    { actionId: 'action', delegationId: 'delegation', includeBrief: true },
+  );
+  const brief = {
+    workId: 'work',
+    actionId: 'action',
+    delegationId: 'delegation',
+    status: 'ok' as const,
+    text: '任务概况（来源有限，未经验证）',
+  };
+  const detail = spec.decodeOutput({ task: { ...task, workId: 'work' }, brief });
+  spec.assertOutputForInput!(input, detail);
+  for (const patch of [
+    { workId: 'foreign' },
+    { actionId: 'foreign' },
+    { delegationId: 'foreign' },
+  ]) {
+    assert.throws(() => spec.decodeOutput({ ...detail, brief: { ...brief, ...patch } }));
+    assert.throws(() =>
+      spec.assertOutputForInput!(input, { ...detail, brief: { ...brief, ...patch } }),
+    );
+  }
+  for (const invalid of [
+    { ...input, includeBrief: false },
+    { workId: 'work', briefLocale: 'en' },
+    { ...input, briefLocale: 'auto' },
+    { ...input, permissionMode: 'bypass' },
+    { ...input, principalKind: 'local_owner' },
+  ])
+    assert.throws(() => spec.decodeInput(invalid));
+  assert.throws(() =>
+    spec.decodeOutput({ ...detail, brief: { ...brief, text: '中'.repeat(3001) } }),
+  );
+  assert.throws(() =>
+    spec.decodeOutput({ ...detail, brief: { ...brief, reason: 'mixed outcome' } }),
+  );
+  assert.throws(() => spec.assertOutputForInput!({ workId: 'work' }, detail));
+  assert.throws(() => spec.assertOutputForInput!(input, { task: detail.task }));
+  const unavailable = spec.decodeOutput({
+    task: detail.task,
+    brief: {
+      workId: 'work',
+      actionId: 'action',
+      delegationId: 'delegation',
+      status: 'unavailable',
+      reason: 'Bounded sources unavailable',
+    },
+  });
+  spec.assertOutputForInput!(input, unavailable);
+  assert.equal(unavailable.task.status, task.status, 'overview availability is not task state');
+});
 test('task history and execution pages enforce bounded, exact work/assignment ownership', () => {
   const history = HOST_OPERATION_SPECS['workhub.tasks.history'];
   const assignment = {
@@ -183,22 +275,4 @@ test('WorkHub deliveries belong to an exact owned terminal task, not a shared or
       delivery: { ...result.delivery, text: 'x'.repeat(16 * 1024 + 1) },
     }),
   );
-});
-test('native task continuation accepts only the exact source and new user text, not permissions or a target override', () => {
-  const spec = HOST_OPERATION_SPECS['workhub.coordination.continue'];
-  const input = {
-    turnId: 'continuation',
-    actionId: 'action',
-    delegationId: 'delegation',
-    text: 'Continue tests',
-  };
-  assert.deepEqual(spec.decodeInput(input), input);
-  for (const patch of [
-    { targetSessionId: 'manual' },
-    { permissionMode: 'bypass' },
-    { grantId: 'old' },
-    { delegationId: '' },
-    { text: '' },
-  ])
-    assert.throws(() => spec.decodeInput({ ...input, ...patch }));
 });

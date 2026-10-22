@@ -20,6 +20,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   applyRuntimeEventHistoryCompact,
   planHistoryCompaction,
@@ -28,7 +29,11 @@ import {
 } from '../history-compaction.js';
 import { HistoryCompactSummarizerError } from '../history-compact-summarizer.js';
 import { testInvocationRecord } from './invocation-fixture.js';
-import { matchHistoryCompactCheckpointPrefix } from '../history-compact-checkpoint.js';
+import {
+  buildHistoryCompactCheckpoint,
+  matchHistoryCompactCheckpointPrefix,
+} from '../history-compact-checkpoint.js';
+import { buildRuntimeEventModelReplayPlan } from '../model-history.js';
 
 describe('safe compaction prefix selection', () => {
   test('folds the largest immutable non-partial prefix, leaving the reserved tail', () => {
@@ -488,6 +493,69 @@ describe('plan context compaction', () => {
     assert.equal(replayIds[0], `history-compact:${result.checkpoint.checkpointId}`);
     assert.equal(replayIds.includes('anchor'), true);
     assert.equal(replayIds.includes('call-a'), false);
+  });
+
+  function stoppedCoordinatorHistory(): RuntimeEvent[] {
+    const coordinator = (event: RuntimeEvent): RuntimeEvent => ({
+      ...event,
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+    });
+    return [
+      coordinator(user('old-request', 'old-turn')),
+      coordinator({
+        ...base('cancelled-terminal', 'old-turn'),
+        role: 'system',
+        author: 'system',
+        status: 'aborted',
+        modelVisibility: 'hidden',
+        actions: { endInvocation: true, stateDelta: { abortSource: 'user_stop' } },
+      }),
+      coordinator(model('old-later-reply', 'later-turn')),
+      coordinator(user('new-request', 'new-turn')),
+    ];
+  }
+
+  test('a legacy checkpoint crossing a newly visible stop fails open without swallowing cancellation', () => {
+    const events = stoppedCoordinatorHistory();
+    const checkpoint = buildHistoryCompactCheckpoint({
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      // The previous projection did not count the hidden terminal.
+      coveredRuntimeEvents: [events[0]!, events[2]!],
+      summary: structuredSummary('Legacy summary that omitted cancellation.'),
+    });
+    const before = JSON.stringify({ events, checkpoint });
+    for (let send = 0; send < 2; send += 1) {
+      const replay = applyRuntimeEventHistoryCompact(events, { enabled: true, checkpoint });
+      assert.equal(replay.checkpoint, undefined);
+      assert.deepEqual(replay.events, events);
+      const items = buildRuntimeEventModelReplayPlan(replay.events).items;
+      assert.deepEqual(
+        items.map((item) => item.eventId),
+        events.map((event) => event.id),
+      );
+      assert.match(JSON.stringify(items), /unsubmitted work.*not a pending request/);
+      assert.doesNotMatch(JSON.stringify(items), /Legacy summary/);
+    }
+    assert.equal(JSON.stringify({ events, checkpoint }), before);
+  });
+
+  test('a legacy checkpoint before cancellation keeps its summary and the native stop in the tail', () => {
+    const events = stoppedCoordinatorHistory();
+    const checkpoint = buildHistoryCompactCheckpoint({
+      sessionId: WORKHUB_COORDINATION_SESSION_ID,
+      coveredRuntimeEvents: [events[0]!],
+      summary: structuredSummary('Legacy prefix before cancellation.'),
+    });
+    const replay = applyRuntimeEventHistoryCompact(events, { enabled: true, checkpoint });
+    assert.equal(replay.checkpoint?.checkpointId, checkpoint.checkpointId);
+    assert.deepEqual(replay.events.slice(1), events.slice(1));
+    const items = buildRuntimeEventModelReplayPlan(replay.events).items;
+    assert.match(JSON.stringify(items), /Legacy prefix before cancellation/);
+    assert.match(JSON.stringify(items), /unsubmitted work.*not a pending request/);
+    assert.deepEqual(
+      items.map((item) => item.eventId),
+      replay.events.map((event) => event.id),
+    );
   });
 
   test('fails open when the summarizer throws', async () => {

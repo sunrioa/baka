@@ -29,7 +29,6 @@ import type {
   SandboxBoundaryRequestEvent,
   UserQuestionRequestEvent,
 } from '@maka/core/events';
-import type { TaskExecutionGrant } from '@maka/core/task-execution-grant';
 import {
   isInteractionAnswerValidForRequest,
   projectInteractionClientCapabilityRequest,
@@ -48,6 +47,7 @@ import type {
 import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import {
   RuntimeInteractionAdmissionRejectedError,
+  RuntimeInteractionClosedError,
   RuntimeInteractionFailStopError,
   RuntimeInteractionInvariantError,
   type RuntimeInteractionAuthority,
@@ -209,6 +209,12 @@ export interface ClientCapabilityApprovalInput {
   readonly callerSignal?: AbortSignal;
 }
 
+export interface WorkHubLegacyRelayIdentity extends RuntimeInteractionRunIdentity {
+  readonly sessionId: typeof WORKHUB_COORDINATION_SESSION_ID;
+  readonly requestId: string;
+  readonly toolUseId: string;
+}
+
 export class ClientCapabilityApprovalClosedError extends Error {
   constructor(readonly reason: InteractionClosureReason) {
     super(`Client Capability approval closed: ${reason}`);
@@ -307,6 +313,8 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       }
       if (replay.outcome) {
         const outcome = runtimeFormOutcome(replay.outcome.outcome);
+        if (outcome.kind === 'closure' && outcome.reason === 'turn_stopped')
+          throw new RuntimeInteractionClosedError(input.requestId, outcome.reason);
         return {
           createdAt: replay.request.createdAt,
           answer: outcome.kind === 'form_answer' ? outcome.answer : { action: 'cancel' },
@@ -345,8 +353,10 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
           applyAnswer: async (answer) => {
             settle(answer);
           },
-          applyClosure: async () => {
-            settle({ action: 'cancel' });
+          applyClosure: async (reason) => {
+            if (reason === 'turn_stopped')
+              reject(new RuntimeInteractionClosedError(input.requestId, reason));
+            else settle({ action: 'cancel' });
           },
           // Host publication is performed by #accept, with no Runtime event producer to await.
           waitForPublication: async () => {},
@@ -915,7 +925,6 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
   answerAdmitted(
     input: InteractionAnswerInput,
     lease: SessionAdmissionLease,
-    taskGrant?: TaskExecutionGrant,
   ): ReturnType<InteractionOperationHandlerMap['interaction.answer']> {
     return observed(
       this.#sessionAdmission
@@ -929,7 +938,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
           if (record) {
             if (record.request.sessionId !== input.sessionId) return interactionNotFound();
             return record.request.request.kind === 'client_capability'
-              ? this.#answerClientCapability(record, input.answer, admission, taskGrant)
+              ? this.#answerClientCapability(record, input.answer, admission)
               : this.#answerStoredInteraction(record, input.answer, admission);
           }
           const sandboxBoundary = await this.#readSandboxBoundary(
@@ -937,7 +946,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
             input.interactionId,
           );
           return sandboxBoundary
-            ? this.#answerSandboxBoundary(sandboxBoundary, input.answer, admission, taskGrant)
+            ? this.#answerSandboxBoundary(sandboxBoundary, input.answer, admission)
             : interactionNotFound();
         })
         .catch((error: unknown) => {
@@ -947,50 +956,35 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     );
   }
 
-  /** Only forwards an actual answer collected by a Host-owned WorkHub question tool. */
-  answerDelegatedQuestion(
-    input: InteractionAnswerInput,
-    lease: SessionAdmissionLease,
-  ): ReturnType<InteractionOperationHandlerMap['interaction.answer']> {
-    return this.#sessionAdmission.runAdmitted(input.sessionId, lease, async () => {
-      this.#throwIfPoisoned();
-      const record = await this.#readInteraction(input.interactionId);
-      if (
-        !record ||
-        record.request.sessionId !== input.sessionId ||
-        record.request.request.kind !== 'question' ||
-        input.answer.kind !== 'question'
-      )
-        return interactionNotFound();
-      return this.#answerStoredInteraction(record, input.answer, lease);
-    });
-  }
-
-  /** Close a copied WorkHub question once its original question has settled.
-   * The exact Turn and tool call bind this closure to the relay, not to another
-   * pending WorkHub interaction.
+  /** Host-only retirement after immutable WorkHubResult producer verification.
+   * Exact persisted identity closes only the coordinator copy, not its original.
+   * An unbound request may close only while no Run or continuation is bound.
    */
-  closeRelayedQuestion(turnId: string, toolUseId: string): Promise<boolean> {
+  closeLegacyWorkHubRelay(identity: WorkHubLegacyRelayIdentity): Promise<boolean> {
     return this.#sessionAdmission.run(WORKHUB_COORDINATION_SESSION_ID, async (admission) => {
       this.#throwIfPoisoned();
-      const requests = (
-        await this.#readPending({ sessionId: WORKHUB_COORDINATION_SESSION_ID })
-      ).filter(
-        (request) =>
-          request.turnId === turnId &&
-          request.request.kind === 'question' &&
-          request.request.toolUseId === toolUseId,
-      );
-      if (requests.length === 0) return false;
-      if (requests.length !== 1) {
+      if (identity.sessionId !== WORKHUB_COORDINATION_SESSION_ID) return false;
+      const record = await this.#readInteraction(identity.requestId);
+      if (
+        !record ||
+        record.outcome ||
+        record.request.sessionId !== WORKHUB_COORDINATION_SESSION_ID ||
+        record.request.turnId !== identity.turnId ||
+        record.request.runId !== identity.runId ||
+        record.request.request.kind !== 'question' ||
+        record.request.request.toolUseId !== identity.toolUseId
+      )
+        return false;
+      const request = record.request;
+      const entry = this.#live.has(request.requestId)
+        ? this.#requireLiveStored(request)
+        : undefined;
+      if (!entry && (this.#runs.size !== 0 || this.#live.size !== 0)) {
         throw this.#poison(
-          new RuntimeInteractionInvariantError('Ambiguous WorkHub question relay'),
+          new RuntimeInteractionInvariantError(
+            'Legacy relay retirement began after Runs were bound',
+          ),
         );
-      }
-      const request = requests[0]!;
-      const entry = this.#requireLiveStored(request);
-      if (entry.kind !== 'question') {
-        throw this.#poison(new RuntimeInteractionInvariantError('WorkHub relay is not a question'));
       }
       const outcome = await this.#commitOutcome(request, {
         kind: 'closure',
@@ -999,7 +993,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       });
       await this.#refreshCanonicalContinuity(WORKHUB_COORDINATION_SESSION_ID, admission);
       this.#throwIfPoisoned();
-      await this.#applyAndDelete(entry, outcome);
+      if (entry) await this.#applyAndDelete(entry, outcome);
       return true;
     });
   }
@@ -1015,6 +1009,8 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
         : operationConflict('Sandbox boundary authority is not stored in InteractionStore');
     }
     if (record.outcome) return answerOutcome(recordWithOutcome(record), answer);
+    // Permission remains a historical schema, not a current live continuation.
+    // Do not synthesize an answer or task grant for that unsupported request.
     if (
       (record.request.request.kind !== 'question' && record.request.request.kind !== 'form') ||
       record.request.request.kind !== answer.kind
@@ -1042,7 +1038,6 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     request: SandboxBoundaryRequest,
     answer: InteractionAnswerInput['answer'],
     admission: SessionAdmissionLease,
-    taskGrant?: TaskExecutionGrant,
   ) {
     const snapshot = projectSandboxBoundaryInteraction(request);
     if (snapshot.status !== 'pending') {
@@ -1064,7 +1059,6 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       sessionId: request.sessionId,
       requestId: request.requestId,
       decision: answer.decision,
-      ...(taskGrant ? { taskGrant } : {}),
     });
     await this.#refreshCanonicalContinuity(request.sessionId, admission);
     this.#throwIfPoisoned();
@@ -1104,7 +1098,6 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     record: InteractionRecord,
     answer: InteractionAnswerInput['answer'],
     admission: SessionAdmissionLease,
-    taskGrant?: TaskExecutionGrant,
   ) {
     if (record.outcome) return answerOutcome(recordWithOutcome(record), answer);
     if (
@@ -1119,7 +1112,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
     const entry = this.#requireLiveClientCapability(record.request);
     const canonical = clientCapabilityCanonicalOutcome(answer, this.#now());
     const grant: ClientCapabilitySessionGrant | undefined =
-      answer.decision === 'allow' && !taskGrant
+      answer.decision === 'allow'
         ? {
             version: 1,
             sessionId: record.request.sessionId,
@@ -1127,12 +1120,7 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
             grantedAt: canonical.committedAt,
           }
         : undefined;
-    const outcome = await this.#commitClientCapabilityOutcome(
-      entry.request,
-      canonical,
-      grant,
-      taskGrant ? { ...taskGrant, grantedAt: canonical.committedAt } : undefined,
-    );
+    const outcome = await this.#commitClientCapabilityOutcome(entry.request, canonical, grant);
     await this.#refreshCanonicalContinuity(entry.request.sessionId, admission);
     this.#throwIfPoisoned();
     await this.#applyAndDelete(entry, outcome);
@@ -1508,17 +1496,11 @@ export class HostInteractionCoordinator implements RuntimeInteractionAuthority {
       { kind: 'client_capability_decision' | 'closure' }
     >,
     grant?: ClientCapabilitySessionGrant,
-    taskGrant?: TaskExecutionGrant,
   ): Promise<StoredInteractionOutcome> {
     this.#throwIfPoisoned();
     let result: CommitInteractionOutcomeResult;
     try {
-      result = await this.#store.commitClientCapabilityOutcome(
-        request.requestId,
-        candidate,
-        grant,
-        taskGrant,
-      );
+      result = await this.#store.commitClientCapabilityOutcome(request.requestId, candidate, grant);
     } catch (error) {
       throw this.#poison(error);
     }
