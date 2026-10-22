@@ -83,6 +83,33 @@ test('correction preview stays explicit and bounded without losing its recovery 
   assert.equal(projectWorkHubResultContext(content.text, origin), content.text);
 });
 
+test('only a new Host-selected status preview replaces a result prefix; replay never reparses old text', () => {
+  const workerStatus = '完成：实现\n未完成 / 下一步：集成测试\n已验证：单元测试通过';
+  const result = `正文\n\n<task-status>\n${workerStatus}\n</task-status>`;
+  const released = createWorkHubResultNotification({
+    origin,
+    taskId: 'task',
+    status: 'completed',
+    result,
+  });
+  assert.equal(payload(released.text).result, result);
+  assert.equal(projectWorkHubResultContext(released.text, origin), released.text);
+  const current = createWorkHubResultNotification({
+    origin,
+    taskId: 'task',
+    status: 'completed',
+    result,
+    workerStatus,
+  });
+  assert.equal(payload(current.text).result, workerStatus);
+  assert.equal(payload(current.text).resultTruncated, true);
+  assert.equal(projectWorkHubResultContext(current.text, origin), current.text);
+  assert.equal(
+    projectWorkHubResultContext(projectWorkHubResultContext(current.text, origin), origin),
+    current.text,
+  );
+});
+
 test('opaque released references are never truncated and repeated replay is stable', () => {
   for (const reference of ['a'.repeat(256), '\u0000'.repeat(256), '中文'.repeat(128)]) {
     const current = { ...origin, actionId: reference };

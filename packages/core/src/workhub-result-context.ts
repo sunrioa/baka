@@ -59,6 +59,8 @@ export interface WorkHubResultContextInput {
   readonly status: Status;
   readonly sharedTurn?: boolean;
   readonly result?: string;
+  /** Valid final report extracted by the Host for a new notification, never from replay. */
+  readonly workerStatus?: string;
   readonly resultTruncated?: boolean;
   readonly details?: unknown;
   readonly detailsTruncated?: boolean;
@@ -108,7 +110,19 @@ function shortDetails(value: unknown) {
 export function createWorkHubResultNotification(input: WorkHubResultContextInput): MessageContent {
   const origin = decodeTurnOrigin(input.origin);
   const title = excerpt(input.targetSessionName ?? '', 96);
-  const result = excerpt(input.result ?? '', 512);
+  // The existing worker parser accepts three required lines and one optional
+  // decision line. Budget them independently: a verbose "done" line must not
+  // remove unfinished work, verification limits or a pending user decision.
+  // Each encoded line is <=128 bytes; their joined JSON string is <=512.
+  // Replay supplies no workerStatus, preserving released notification bytes.
+  const statusFields = input.workerStatus?.split('\n').map((line) => excerpt(line, 128));
+  const result = statusFields
+    ? {
+        text: statusFields.map((field) => field.text).join('\n'),
+        truncated:
+          input.workerStatus !== input.result || statusFields.some((field) => field.truncated),
+      }
+    : excerpt(input.result ?? '', 512);
   const correction = excerpt(input.latestUserInput ?? '', 256);
   const details = shortDetails(input.details);
   const data: Record<string, unknown> =

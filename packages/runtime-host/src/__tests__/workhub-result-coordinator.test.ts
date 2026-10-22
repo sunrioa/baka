@@ -104,6 +104,71 @@ test('new notifications keep exact task/result references without repeated tool 
   }
 });
 
+test('new result previews prefer the final worker status over a long reply prefix', () => {
+  const status = [
+    '完成：模块实现',
+    '未完成 / 下一步：集成测试尚未执行',
+    '已验证：仅单元测试通过，未验证部署',
+    '需要用户决定：是否允许部署',
+  ].join('\n');
+  const result = `${'长篇实现说明。'.repeat(300)}\n\n<task-status>\n${status}\n</task-status>`;
+  for (const terminalStatus of ['completed', 'failed', 'cancelled'] as const) {
+    const current = { ...observation, status: terminalStatus, result };
+    const content = workHubResultContent(assignment, current);
+    const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+    assert.equal(data.result, status);
+    assert.equal(data.resultTruncated, true, 'the preview is not the complete original reply');
+    assert.equal(data.status, terminalStatus, 'worker claims never replace the Host terminal fact');
+    assert.equal(data.taskId, assignment.actionId);
+    assert.equal(data.sourceActionId, assignment.actionId);
+    assert.equal(
+      projectWorkHubResultContext(content.text, workHubResultOrigin(assignment, current)),
+      content.text,
+    );
+  }
+});
+
+test('each worker status field keeps its own preview budget, including pending decisions', () => {
+  const labels = ['完成：', '未完成 / 下一步：', '已验证：', '需要用户决定：'];
+  const text = '中文😀"\\\u0000'.repeat(300);
+  const result = `报告\n\n<task-status>\n${labels.map((label) => `${label}${text}`).join('\n')}\n</task-status>`;
+  const current = { ...observation, result };
+  const content = workHubResultContent(assignment, current);
+  const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+  const fields = data.result.split('\n');
+  assert.equal(fields.length, labels.length);
+  for (const [index, label] of labels.entries()) {
+    assert.ok(fields[index].startsWith(label), label);
+    assert.ok(fields[index].endsWith('…'), 'each oversized field marks its own omission');
+    assert.ok(!fields[index].includes('\ufffd'), 'UTF-8 boundaries are preserved');
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(data.result)) <= 512);
+  assert.equal(data.resultTruncated, true);
+  assert.equal(
+    projectWorkHubResultContext(content.text, workHubResultOrigin(assignment, current)),
+    content.text,
+  );
+});
+
+test('quoted, fenced, malformed and nonfinal worker status blocks remain ordinary reply excerpts', () => {
+  const status = '<task-status>\n完成：实现\n未完成 / 下一步：无\n已验证：测试通过\n</task-status>';
+  for (const result of [
+    'SOURCE-READY',
+    `引用示例：\n\n\`\`\`text\n${status}\n\`\`\``,
+    status
+      .split('\n')
+      .map((line) => `> ${line}`)
+      .join('\n'),
+    status.replace('已验证：测试通过', '任意字段：测试通过'),
+    `${status}\n另外还有正文`,
+  ]) {
+    const content = workHubResultContent(assignment, { ...observation, result });
+    const data = JSON.parse(content.text.slice(content.text.lastIndexOf('\n\n') + 2));
+    assert.equal(data.result, result);
+    assert.equal(data.resultTruncated, false);
+  }
+});
+
 test('legacy result projection updates read guidance without guessing a logical task identity', () => {
   const origin = workHubResultOrigin(assignment, observation);
   const payload = {

@@ -26,6 +26,7 @@ import type { WorkHubResultOrigin } from '@maka/core/turn-origin';
 import type { MessageContent } from '@maka/core/events';
 import { createWorkHubResultNotification } from '@maka/core/workhub-result-context';
 import type { SessionAdmissionLease } from './session-admission-gate.js';
+import { readWorkHubWorkerStatus } from './workhub-task-brief.js';
 
 export interface WorkHubResultObservation {
   readonly turnId: string;
@@ -93,6 +94,7 @@ export function workHubResultContent(
     status: observation.status,
     sharedTurn: observation.sharedTurn,
     result: observation.result,
+    workerStatus: readWorkHubWorkerStatus(observation.result),
     details: observation.details,
   });
 }
