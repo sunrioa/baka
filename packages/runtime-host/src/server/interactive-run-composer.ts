@@ -326,7 +326,11 @@ export function createInteractiveRunComposer(input: InteractiveRunComposerInput)
         ? await input.resolveAdditionalSystemPrompt(context, base.text)
         : base;
     let executionContexts: NonNullable<ResolvedRunPrompt['contexts']> = [];
-    if (input.resolveExecutionContexts && (!hasToolCeiling || (input.toolProfile === 'workhub-coordination-v2' && input.boundTools === undefined))) {
+    if (
+      input.resolveExecutionContexts &&
+      (!hasToolCeiling ||
+        (input.toolProfile === 'workhub-coordination-v2' && input.boundTools === undefined))
+    ) {
       if (input.toolProfile === 'workhub-coordination-v2') {
         let pending = coordinationContexts.get(context.turnId);
         if (!pending) {

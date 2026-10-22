@@ -2120,7 +2120,8 @@ export async function createExecutionRuntimeHostComposition(
       prepareWorkHubCompaction: async (header, requester) => {
         if (header.toolProfile !== 'workhub-coordination-v2') return undefined;
         const binding = await requireClientCapabilities(clientCapabilities).bindSession(
-          header.id, capabilityInitiatingConnectionId(requester),
+          header.id,
+          capabilityInitiatingConnectionId(requester),
           hostedExecutionClientCapabilityToolNames(header.toolProfile),
         );
         return binding.ok ? undefined : binding.message;

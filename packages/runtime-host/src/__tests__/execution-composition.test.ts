@@ -6002,14 +6002,17 @@ test('one WorkHub Turn admits independent goals in private or registered workspa
         'Q&A does not create a task',
       );
       assert.equal(
-        coordinationInputs.filter((input) => input.text.startsWith('Host task result notification.')).length,
+        coordinationInputs.filter((input) =>
+          input.text.startsWith('Host task result notification.'),
+        ).length,
         0,
       );
       workerRelease.resolve();
       await waitFor(
         async () =>
-          coordinationInputs.filter((input) => input.text.startsWith('Host task result notification.'))
-            .length === 3,
+          coordinationInputs.filter((input) =>
+            input.text.startsWith('Host task result notification.'),
+          ).length === 3,
         12000,
       );
       const notifications = (await manager.getMessages(WORKHUB_COORDINATION_SESSION_ID)).filter(

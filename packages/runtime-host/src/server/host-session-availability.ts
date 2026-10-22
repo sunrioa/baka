@@ -106,7 +106,8 @@ export function runtimeHostExecutionUnavailableReason(
     isWorkHubCoordinationSessionId(header.id) && isWorkHubCoordinationSession(header);
   // Only the dedicated Host entry can admit a reserved coordinator compact root.
   // Ordinary external messages and continuations remain rejected.
-  const coordinationExecution = execution.kind === 'workhub_coordination' ||
+  const coordinationExecution =
+    execution.kind === 'workhub_coordination' ||
     (coordinationTarget && execution.kind === 'context_compact');
   return (
     (coordinationTarget && !coordinationExecution

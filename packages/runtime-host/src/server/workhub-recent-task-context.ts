@@ -98,7 +98,9 @@ export function createWorkHubRecentTaskContext(options: {
           // Desktop-native tools retain the MCP structured-content envelope
           // in the durable ledger; Host-native ask receipts are already bare.
           // Never infer an identity by parsing the human-readable text blocks.
-          const value = isRecord(envelope.structuredContent) ? envelope.structuredContent : envelope;
+          const value = isRecord(envelope.structuredContent)
+            ? envelope.structuredContent
+            : envelope;
           const taskId =
             message.toolName === 'mcp__desktop_workhub__ask'
               ? value.kind === 'selected' && isRecord(value.target) && value.target.kind === 'task'

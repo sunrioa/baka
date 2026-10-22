@@ -162,14 +162,27 @@ test('reads the actual Desktop structured-content receipt, not a text block or a
   const row = f.records.at(-1)!;
   assert.ok(row.message.type === 'tool_result' && row.message.content.kind === 'json');
   const value = row.message.content.value;
-  row.message = { ...row.message, content: { kind: 'json', value: {
-    structuredContent: value,
-    content: [{ type: 'text', text: '{"taskId":"wrong-text-reference"}' }],
-  } } };
+  row.message = {
+    ...row.message,
+    content: {
+      kind: 'json',
+      value: {
+        structuredContent: value,
+        content: [{ type: 'text', text: '{"taskId":"wrong-text-reference"}' }],
+      },
+    },
+  };
   assert.deepEqual(ids(await createWorkHubRecentTaskContext(f.options)(scope)), ['desktop']);
-  row.message = { ...row.message, content: { kind: 'json', value: {
-    isError: true, structuredContent: value,
-  } } };
+  row.message = {
+    ...row.message,
+    content: {
+      kind: 'json',
+      value: {
+        isError: true,
+        structuredContent: value,
+      },
+    },
+  };
   assert.deepEqual(await createWorkHubRecentTaskContext(f.options)(scope), []);
 });
 

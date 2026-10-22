@@ -167,18 +167,42 @@ test('WorkHub concurrency is an optional bounded integer in policy and mutations
 
 test('coordinator compaction target is optional, exact and never supplies a numeric default', () => {
   const policy = createDefaultRuntimePolicy();
-  assert.equal(decodeCanonicalRuntimePolicy(policy).chatDefaults.workHubCompactionThreshold, undefined);
+  assert.equal(
+    decodeCanonicalRuntimePolicy(policy).chatDefaults.workHubCompactionThreshold,
+    undefined,
+  );
   for (const workHubCompactionThreshold of [1, 127001, 765432, Number.MAX_SAFE_INTEGER]) {
     const value = { ...policy.chatDefaults, workHubCompactionThreshold };
     const decoded = decodeCanonicalRuntimePolicy({ ...policy, chatDefaults: value });
     assert.deepEqual(decoded.chatDefaults, value);
     assert.deepEqual(decodeCanonicalRuntimePolicy(JSON.parse(JSON.stringify(decoded))), decoded);
-    assert.deepEqual(normalizeRuntimePolicyMutation({ expectedRevision: 1,
-      operation: { kind: 'set_chat_defaults', value } }).operation, { kind: 'set_chat_defaults', value });
+    assert.deepEqual(
+      normalizeRuntimePolicyMutation({
+        expectedRevision: 1,
+        operation: { kind: 'set_chat_defaults', value },
+      }).operation,
+      { kind: 'set_chat_defaults', value },
+    );
   }
-  for (const workHubCompactionThreshold of [0, -1, 1.5, '1000', null, true, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.throws(() => decodeCanonicalRuntimePolicy({ ...policy,
-      chatDefaults: { ...policy.chatDefaults, workHubCompactionThreshold } }), RuntimePolicyDomainDecodeError);
+  for (const workHubCompactionThreshold of [
+    0,
+    -1,
+    1.5,
+    '1000',
+    null,
+    true,
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER + 1,
+  ]) {
+    assert.throws(
+      () =>
+        decodeCanonicalRuntimePolicy({
+          ...policy,
+          chatDefaults: { ...policy.chatDefaults, workHubCompactionThreshold },
+        }),
+      RuntimePolicyDomainDecodeError,
+    );
   }
 });
 

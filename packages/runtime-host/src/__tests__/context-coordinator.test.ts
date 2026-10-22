@@ -19,7 +19,11 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { WORKHUB_COORDINATION_SESSION_ID, WORKHUB_COORDINATION_SESSION_ROLE, type SessionHeader } from '@maka/core/session';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  WORKHUB_COORDINATION_SESSION_ROLE,
+  type SessionHeader,
+} from '@maka/core/session';
 import { CONTEXT_OPERATION_SPECS } from '../protocol/context.js';
 import type { HostedExecutionPreparation } from '../server/hosted-execution-authority.js';
 import { completedHostedExecutionAdmission } from '../server/hosted-execution-authority.js';
@@ -27,56 +31,116 @@ import { HostContextCoordinator } from '../server/context-coordinator.js';
 
 test('the dedicated coordinator compaction entry is fixed-target and reuses native admission without ordinary chat authority', async () => {
   const sessionId = WORKHUB_COORDINATION_SESSION_ID;
-  let header = { id: sessionId, role: WORKHUB_COORDINATION_SESSION_ROLE, toolProfile: 'workhub-coordination-v2',
-    permissionMode: 'bypass', collaborationMode: 'agent', orchestrationMode: 'default',
-    backend: 'ai-sdk', llmConnectionId: 'account', transcriptLedgerVersion: 1, isArchived: false } as SessionHeader;
+  let header = {
+    id: sessionId,
+    role: WORKHUB_COORDINATION_SESSION_ROLE,
+    toolProfile: 'workhub-coordination-v2',
+    permissionMode: 'bypass',
+    collaborationMode: 'agent',
+    orchestrationMode: 'default',
+    backend: 'ai-sdk',
+    llmConnectionId: 'account',
+    transcriptLedgerVersion: 1,
+    isArchived: false,
+  } as SessionHeader;
   const turn = { sessionId, turnId: 'manual-compact', runId: 'run', status: 'running' as const };
   const admissions: unknown[] = [];
-  let busy = false, nativeStarts = 0, preflights = 0, bindings = 0;
+  let busy = false,
+    nativeStarts = 0,
+    preflights = 0,
+    bindings = 0;
   let bindingError: string | undefined;
   const coordinator = new HostContextCoordinator({
     sessions: { readHeaderSnapshot: async () => header },
-    prepareWorkHubCompaction: async current => {
-      assert.equal(current.id, sessionId); bindings++; return bindingError;
+    prepareWorkHubCompaction: async (current) => {
+      assert.equal(current.id, sessionId);
+      bindings++;
+      return bindingError;
     },
-    runtime: { compactSession: async function* () { nativeStarts++; },
-      listTurns: async () => [], getContextDiagnostics: async () => ({}) as never,
-      preflightContextCompaction: async () => { preflights++; } },
-    executions: { lookup: async () => undefined,
-      prepare: () => busy ? { kind: 'busy', whenIdle: new Promise(() => {}) } : { kind: 'prepared', admission: {
-        sessionId, release() {}, admit: async input => { admissions.push(input); return completedHostedExecutionAdmission(turn); } } },
+    runtime: {
+      compactSession: async function* () {
+        nativeStarts++;
+      },
+      listTurns: async () => [],
+      getContextDiagnostics: async () => ({}) as never,
+      preflightContextCompaction: async () => {
+        preflights++;
+      },
+    },
+    executions: {
+      lookup: async () => undefined,
+      prepare: () =>
+        busy
+          ? { kind: 'busy', whenIdle: new Promise(() => {}) }
+          : {
+              kind: 'prepared',
+              admission: {
+                sessionId,
+                release() {},
+                admit: async (input) => {
+                  admissions.push(input);
+                  return completedHostedExecutionAdmission(turn);
+                },
+              },
+            },
       reconcile: async () => assert.fail('No terminal worker is reconciled or stopped'),
-      admit: async () => assert.fail('Must use the existing prepared lane') },
-    requestDrain: () => assert.fail('A rejection is not a drain'), newId: () => 'run',
+      admit: async () => assert.fail('Must use the existing prepared lane'),
+    },
+    requestDrain: () => assert.fail('A rejection is not a drain'),
+    newId: () => 'run',
   });
-  const generic = await coordinator.handlers['context.compact']({ sessionId, turnId: turn.turnId }, {} as never);
+  const generic = await coordinator.handlers['context.compact'](
+    { sessionId, turnId: turn.turnId },
+    {} as never,
+  );
   assert.equal(generic.ok, false);
   assert.equal(admissions.length, 0);
-  const accepted = await coordinator.handlers['workhub.coordination.compact']({ turnId: turn.turnId }, {} as never);
+  const accepted = await coordinator.handlers['workhub.coordination.compact'](
+    { turnId: turn.turnId },
+    {} as never,
+  );
   assert.deepEqual(accepted, { ok: true, result: { kind: 'started', turn } });
   assert.equal(admissions.length, 1);
   assert.equal(preflights, 1);
-  assert.equal(bindings, 1, 'cold compaction binds the requesting Desktop through the existing capability owner');
+  assert.equal(
+    bindings,
+    1,
+    'cold compaction binds the requesting Desktop through the existing capability owner',
+  );
   assert.equal(nativeStarts, 0, 'only the existing execution lane starts the admitted generator');
   busy = true;
-  const rejected = await coordinator.handlers['workhub.coordination.compact']({ turnId: 'busy' }, {} as never);
+  const rejected = await coordinator.handlers['workhub.coordination.compact'](
+    { turnId: 'busy' },
+    {} as never,
+  );
   assert.ok(!rejected.ok && rejected.error.code === 'session_busy');
   assert.equal(admissions.length, 1, 'busy does not register a delayed compaction');
   assert.equal(bindings, 1, 'busy compaction cannot rebind active execution tools');
   busy = false;
   bindingError = 'Desktop capability unavailable';
-  const noDesktop = await coordinator.handlers['workhub.coordination.compact']({ turnId: 'unbound' }, {} as never);
+  const noDesktop = await coordinator.handlers['workhub.coordination.compact'](
+    { turnId: 'unbound' },
+    {} as never,
+  );
   assert.ok(!noDesktop.ok && noDesktop.error.code === 'operation_unavailable');
   assert.equal(preflights, 1, 'no backend/model call on a missing Desktop binding');
   bindingError = undefined;
   header = { ...header, role: undefined };
-  const malformed = await coordinator.handlers['workhub.coordination.compact']({ turnId: 'invalid' }, {} as never);
+  const malformed = await coordinator.handlers['workhub.coordination.compact'](
+    { turnId: 'invalid' },
+    {} as never,
+  );
   assert.ok(!malformed.ok && malformed.error.code === 'operation_unavailable');
   assert.equal(admissions.length, 1);
   const spec = CONTEXT_OPERATION_SPECS['workhub.coordination.compact'];
   assert.deepEqual(spec.decodeInput({ turnId: turn.turnId }), { turnId: turn.turnId });
   assert.throws(() => spec.decodeInput({ turnId: turn.turnId, sessionId: 'worker' }));
-  assert.throws(() => spec.assertOutputForInput!({ turnId: turn.turnId }, { kind: 'started', turn: { ...turn, sessionId: 'worker' } }));
+  assert.throws(() =>
+    spec.assertOutputForInput!(
+      { turnId: turn.turnId },
+      { kind: 'started', turn: { ...turn, sessionId: 'worker' } },
+    ),
+  );
 });
 
 test('context compaction waits for terminal execution cleanup before preparing', async () => {

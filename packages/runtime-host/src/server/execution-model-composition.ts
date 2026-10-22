@@ -147,7 +147,9 @@ async function buildHostAiSdkBackend(
     input.context.abortSignal,
   );
   const contextConnection = workHubContextConnection(
-    target.connection, input.context.sessionId, target.model,
+    target.connection,
+    input.context.sessionId,
+    target.model,
     runtimePolicySnapshot.policy.chatDefaults,
   );
   const transport = createFetchTransport(
