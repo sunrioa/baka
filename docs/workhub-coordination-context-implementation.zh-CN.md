@@ -118,3 +118,11 @@ Runtime 对上次请求的估算为 283,998 token；本次 portable 载荷按 UT
 - Desktop 类型检查、Renderer 构建及架构门禁通过；没有打开 GitHub CI。当前实例真实 coding 和压缩后旧任务关联/全文读取的证据与用量仍待本阶段实测，不以测试数量替代。
 - 随后的 Host 全量复跑：2,537 项中 2,525 通过、0 失败、12 跳过；补充的真实 MCP 回执结构与协调入口测试 8 项通过。原生压缩/上下文预算/回放回归 179 项通过。
 - 一次重复的受限 Desktop 全量命令未申请既有临时锁权限，在账户级 state-root-owners 的 chmod 处失败；未通过修改权限或锁算法绕开。上面的 3,373 通过来自已获准的全量运行，不将这次环境拒绝写成产品测试通过。
+
+### 原实例探测发现并修正的接线缺口
+
+新版启动后，原实例仍为 Command Code DeepSeek、bypass、并发 8、协调阈值未配置；四份原配置文件 hash 与重启前一致。Mac 锁屏期间通过真实 Owner SDK 探测固定压缩入口，返回 operation_unavailable，未产生压缩轮次或模型调用。
+
+定位到 RootTurnCoordinator 的通用 prepare/admit 会提前拒绝协调 Session，单独的 ContextCoordinator 桩没有覆盖这一层。修复为仅供原生压缩协调器持有的窄接口，仍使用原保留/准入/重试机制，只接受 context_compact、空正文和空用户消息身份；普通 prepare/admit 与普通 context.compact 的 WorkHub 拒绝不变。补充真实 Root lane 的压缩启动、同身份重试、忙碌拒绝、Stop 与窄接口不可派发消息测试。没有放宽公开会话入口或任务权限。
+
+该故障轮次保留在私有实测记录；不把它算作实机压缩通过。后续需在新构建上继续验证。

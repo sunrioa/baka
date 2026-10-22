@@ -966,6 +966,23 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     if (isWorkHubCoordinationSessionId(sessionId)) {
       return { kind: 'unavailable', reason: WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON };
     }
+    return this.#prepare(sessionId);
+  }
+
+  /** Narrow native-compaction facade. Ordinary admission still rejects WorkHub. */
+  contextCompactionAuthority(): Pick<
+    HostedExecutionAuthority,
+    'prepare' | 'admit' | 'lookup' | 'reconcile'
+  > {
+    return {
+      prepare: (sessionId) => this.#prepare(sessionId, true),
+      admit: (input) => this.#admit(input, undefined, true),
+      lookup: (sessionId, turnId) => this.lookup(sessionId, turnId),
+      reconcile: (ref) => this.reconcile(ref),
+    };
+  }
+
+  #prepare(sessionId: string, contextCompact = false): HostedExecutionPreparation {
     if (this.#admissions.isDraining) {
       return {
         kind: 'unavailable',
@@ -1002,8 +1019,20 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
           if (input.sessionId !== sessionId) {
             return Promise.reject(new Error('Hosted Execution preparation changed Session'));
           }
+          if (
+            contextCompact &&
+            (input.execution.kind !== 'context_compact' ||
+              input.content !== null ||
+              input.userMessageId !== null)
+          ) {
+            return Promise.reject(
+              new Error(
+                'Context compaction authority cannot admit a message or another execution kind',
+              ),
+            );
+          }
           consumed = true;
-          return this.#admit(input, reservation);
+          return this.#admit(input, reservation, contextCompact);
         },
         release: () => {
           if (consumed) return;
@@ -1021,8 +1050,15 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   #admit(
     input: HostedExecutionAdmission,
     preparedReservation?: RootTurnReservation,
+    contextCompact = false,
   ): Promise<HostedExecutionAdmissionResult> {
-    if (isWorkHubCoordinationSessionId(input.sessionId)) {
+    if (
+      (contextCompact &&
+        (input.execution.kind !== 'context_compact' ||
+          input.content !== null ||
+          input.userMessageId !== null)) ||
+      (isWorkHubCoordinationSessionId(input.sessionId) && !contextCompact)
+    ) {
       return Promise.reject(
         new RuntimeHostedRootUnavailableError(
           input.sessionId,

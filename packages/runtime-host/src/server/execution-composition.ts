@@ -2115,7 +2115,7 @@ export async function createExecutionRuntimeHostComposition(
     });
     const contextOperations = new HostContextCoordinator({
       runtime: manager,
-      executions: coordinator,
+      executions: coordinator.contextCompactionAuthority(),
       sessions: stores.sessionStore,
       prepareWorkHubCompaction: async (header, requester) => {
         if (header.toolProfile !== 'workhub-coordination-v2') return undefined;

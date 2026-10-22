@@ -2975,6 +2975,97 @@ test('manual context compact uses durable root query, stop, and exact retry auth
   }
 });
 
+test('the real reserved coordinator lane admits only native compaction and preserves exact retries, busy refusal and Stop', async () => {
+  let backend: BlockingContextRecoveryBackend | undefined;
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) =>
+      backends.register('ai-sdk', (context) => {
+        backend = new BlockingContextRecoveryBackend(context.sessionId);
+        return backend;
+      }),
+  });
+  const sessionId = WORKHUB_COORDINATION_SESSION_ID;
+  const turnId = 'reserved-compact';
+  const context = operationContext(fixture.hostEpoch, fixture.acquireResidency);
+  try {
+    const ordinary = await fixture.stores.sessionStore.readHeaderSnapshot(fixture.sessionId);
+    await fixture.stores.sessionStore.createStableSession({
+      sessionId,
+      requestFingerprint: `sha256:${'a'.repeat(64)}`,
+      input: {
+        cwd: ordinary.cwd,
+        llmConnectionId: ordinary.llmConnectionId,
+        llmConnectionSlug: 'fake',
+        model: 'fake-model',
+        role: WORKHUB_COORDINATION_SESSION_ROLE,
+        toolProfile: 'workhub-coordination-v2',
+        permissionMode: 'bypass',
+      },
+    });
+    assert.equal(fixture.coordinator.prepare(sessionId).kind, 'unavailable');
+    const narrow = fixture.coordinator.contextCompactionAuthority().prepare(sessionId);
+    assert.equal(narrow.kind, 'prepared');
+    if (narrow.kind === 'prepared') {
+      await assert.rejects(
+        narrow.admission.admit({
+          sessionId,
+          turnId: 'forged-message',
+          runId: 'forged-run',
+          userMessageId: 'forged-user',
+          execution: { kind: 'external_message' },
+          content: { text: 'not a compaction' },
+          start: async function* () {},
+        }),
+        /cannot admit a message/,
+      );
+      narrow.admission.release();
+    }
+    const generic = await fixture.contextOperations.handlers['context.compact'](
+      { sessionId, turnId },
+      context,
+    );
+    assert.ok(!generic.ok && generic.error.code === 'operation_unavailable');
+    const started = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId },
+      context,
+    );
+    assert.ok(started.ok, JSON.stringify(started));
+    if (!started.ok) return;
+    assert.equal(started.result.kind, 'started');
+    await backend?.compactStarted.promise;
+    const retried = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId },
+      context,
+    );
+    assert.deepEqual(retried, started);
+    const busy = await fixture.contextOperations.handlers['workhub.coordination.compact'](
+      { turnId: 'must-not-queue' },
+      context,
+    );
+    assert.ok(!busy.ok && busy.error.code === 'session_busy');
+    const admission = await fixture.stores.agentRunStore.readRootTurnAdmission(sessionId, turnId);
+    assert.deepEqual(admission?.execution, { kind: 'context_compact' });
+    assert.equal(admission?.userMessageId, null);
+    const stopped = await fixture.turnControl.handlers['turn.stop'](
+      { sessionId, turnId, runId: started.result.turn.runId },
+      context,
+    );
+    assert.ok(stopped.ok, JSON.stringify(stopped));
+    assert.equal(stopped.result.status, 'cancelled');
+    assert.equal((await fixture.manager.listTurns(fixture.sessionId)).length, 0);
+    assert.equal(
+      await fixture.stores.agentRunStore.readRootTurnAdmission(sessionId, 'must-not-queue'),
+      undefined,
+    );
+    assert.equal(fixture.drainRequested(), false);
+  } finally {
+    backend?.releaseCompact();
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.dispose();
+  }
+});
+
 test('startup recovery replays an admitted context compact with its exact Run identity', async () => {
   let backend: BlockingContextRecoveryBackend | undefined;
   const fixture = await createFailureFixture({
@@ -7354,7 +7445,7 @@ async function createFailureFixture(options: {
   coordinator = createCoordinator(rootAdmissionOwner);
   const contextOperations = new HostContextCoordinator({
     runtime: manager,
-    executions: coordinator,
+    executions: coordinator.contextCompactionAuthority(),
     sessions: stores.sessionStore,
     requestDrain,
   });
