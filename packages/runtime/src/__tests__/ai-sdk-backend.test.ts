@@ -5241,6 +5241,180 @@ describe('AiSdkBackend model history', () => {
     assert.equal(recorded[0]?.coverage.eventCount, 3);
   });
 
+  test('manual compactHistory folds a sealed unknown tool and later history without fabricating a result (#6254)', async () => {
+    const args = { command: 'touch marker.txt' };
+    const unknown = testInvocationRecord({
+      sessionId: 'session-1',
+      invocationId: 'unknown-invocation',
+      runId: 'unknown-run',
+      turnId: 'unknown-turn',
+      openedAt: 100,
+      closedAt: 110,
+      outcome: 'failed',
+      failureClass: 'outcome_unknown',
+    });
+    Object.assign(unknown.terminalEvent!.actions!.stateDelta!, {
+      recovered: true,
+      recoveryReason: 'outcome_unknown',
+    });
+    const identity = {
+      sessionId: unknown.sessionId,
+      invocationId: unknown.invocationId,
+      runId: unknown.runId,
+      turnId: unknown.turnId,
+      ts: 101,
+      partial: false,
+    } as const;
+    const history: RuntimeEvent[] = [
+      {
+        ...identity,
+        id: 'unknown-protocol',
+        role: 'system',
+        author: 'system',
+        actions: { runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' } },
+      },
+      {
+        ...identity,
+        id: 'unknown-user',
+        role: 'user',
+        author: 'user',
+        content: { kind: 'text', text: 'Create a marker once.' },
+      },
+      {
+        ...identity,
+        id: 'unknown-call',
+        role: 'model',
+        author: 'agent',
+        origin: 'provider',
+        content: { kind: 'function_call', id: 'unknown-provider-call', name: 'Bash', args },
+        refs: { operationId: 'unknown-operation', toolCallId: 'unknown-provider-call' },
+      },
+      {
+        ...identity,
+        id: 'unknown-dispatch',
+        role: 'system',
+        author: 'system',
+        actions: {
+          toolDispatch: {
+            protocol: 't1_after_preflight_v1',
+            operationId: 'unknown-operation',
+            providerToolCallId: 'unknown-provider-call',
+            toolName: 'Bash',
+            canonicalArgsHash: canonicalToolArgsHash('Bash', args),
+            recoveryMode: 'never_auto_retry',
+          },
+        },
+        refs: { operationId: 'unknown-operation', toolCallId: 'unknown-provider-call' },
+      },
+      unknown.terminalEvent!,
+      runtimeTextEvent({
+        id: 'after-unknown-user',
+        turnId: 'later-turn',
+        role: 'user',
+        author: 'user',
+        text: 'Do not retry the old effect; continue with this newer requirement.',
+      }),
+      runtimeTextEvent({
+        id: 'after-unknown-answer',
+        turnId: 'later-turn',
+        role: 'model',
+        author: 'agent',
+        text: 'Newer work completed.',
+      }),
+    ];
+    const original = JSON.stringify(history);
+    let summaryInput: RuntimeEvent[] = [];
+    let checkpoint: HistoryCompactCheckpoint | undefined;
+    const backend = createBackend({
+      connection: connection(),
+      modelId: 'mock-model-id',
+      modelFactory: () => completionModel(),
+      tools: [],
+      contextBudget: { name: 'unknown-recovery-compact' },
+      summarizeHistoryCompact: async (input) => {
+        summaryInput = input.source.foldedRuntimeEvents;
+        return structuredSummary('The old effect remains unknown; newer work is complete.');
+      },
+      recordHistoryCompactCheckpoint: (value) => {
+        checkpoint = value;
+      },
+    });
+    const compact = await backend.compactHistory({
+      turnId: 'compact-turn',
+      runId: 'compact-run',
+      runtimeContext: history,
+      runtimeContextInvocations: [unknown],
+    });
+    assert.equal(compact.outcome.kind, 'compacted');
+    assert.equal(checkpoint?.coverage.through.runtimeEventId, 'after-unknown-answer');
+    assert.match(JSON.stringify(summaryInput), /outcome_unknown/);
+    assert.match(JSON.stringify(summaryInput), /effect may have happened/);
+    assert.equal(
+      summaryInput.some((event) => event.content?.kind === 'function_response'),
+      false,
+    );
+    assert.equal(JSON.stringify(history), original);
+  });
+
+  test('manual compactHistory reports unchanged when an open tool holds the selected prefix at the previous checkpoint (#6254)', async () => {
+    const prefix = runtimeTextEvent({
+      id: 'blocked-prefix',
+      turnId: 'prefix-turn',
+      role: 'user',
+      author: 'user',
+      text: 'Older settled history.',
+    });
+    const previous = buildHistoryCompactCheckpoint({
+      sessionId: 'session-1',
+      coveredRuntimeEvents: [prefix],
+      summary: structuredSummary('Older history was already compacted.'),
+    });
+    let summaryCalls = 0;
+    let writes = 0;
+    const backend = createBackend({
+      connection: connection(),
+      modelId: 'mock-model-id',
+      modelFactory: () => completionModel(),
+      tools: [],
+      contextBudget: { name: 'unknown-no-progress' },
+      loadHistoryCompactCheckpoint: () => previous,
+      summarizeHistoryCompact: async () => {
+        summaryCalls++;
+        return previous.summary;
+      },
+      recordHistoryCompactCheckpoint: () => {
+        writes++;
+      },
+    });
+    const open: RuntimeEvent = {
+      ...prefix,
+      id: 'still-open-call',
+      turnId: 'open-turn',
+      role: 'model',
+      author: 'agent',
+      content: { kind: 'function_call', id: 'still-open', name: 'Bash', args: {} },
+    };
+    const compact = await backend.compactHistory({
+      turnId: 'compact-turn',
+      runId: 'compact-run',
+      runtimeContext: [
+        prefix,
+        open,
+        runtimeTextEvent({
+          id: 'blocked-tail',
+          turnId: 'later-turn',
+          role: 'user',
+          author: 'user',
+          text: 'Additional history behind the unresolved call.',
+        }),
+      ],
+    });
+    assert.deepEqual(compact.outcome, { kind: 'unchanged', reason: 'already_compacted' });
+    assert.equal(summaryCalls, 0);
+    assert.equal(writes, 0);
+    assert.equal(compact.contextBudget?.compactionDecisions?.[0]?.decision, 'unchanged');
+  });
+
   test('manual compactHistory reuses a checkpoint that already covers the full fold', async () => {
     const oldEvents = [
       runtimeTextEvent({

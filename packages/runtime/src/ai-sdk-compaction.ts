@@ -375,6 +375,7 @@ export class AiSdkCompaction {
         sessionId: this.sessionId,
         phase: 'standalone',
         orderedEvents: runtimeContext,
+        recoveryRuntimeEvents: input.runtimeContext,
         ...(input.runtimeContextInvocations
           ? { invocations: input.runtimeContextInvocations }
           : {}),
@@ -425,6 +426,22 @@ export class AiSdkCompaction {
 
       const diagnosticShell = (events: readonly RuntimeEvent[]) =>
         buildContextBudgetDiagnosticShell(runtimeContext, events, policy);
+      if (plan.decision === 'unchanged') {
+        return {
+          outcome: { kind: 'unchanged', reason: plan.reason },
+          contextBudget: mergeContextBudgetDiagnostic(diagnosticShell(plan.replacementEvents), {
+            ...compactionDecisionDiagnosticPatch({
+              stage: 'priorReplay',
+              sourceKind: 'runtimeEvents',
+              decision: 'unchanged',
+              phase: 'pre_turn',
+              boundaryKind: 'historyCompact',
+              boundaryIds: [plan.checkpoint.checkpointId],
+              reason: plan.reason,
+            }),
+          }),
+        };
+      }
       if (plan.decision !== 'compacted') {
         const failureReason = plan.diagnosticReason ?? plan.reason;
         return {
@@ -817,6 +834,7 @@ export class AiSdkCompaction {
       priorContentEvents,
       input.runtimeContextInvocations ?? [],
       resolveDeclaredContextWindow(this.input.connection, this.input.modelId),
+      input.runtimeContext ?? [],
     );
     // Seed the turn's FIRST request with the last request the provider
     // actually counted, so step 0 is judged by the same real number as every
@@ -946,6 +964,7 @@ export class AiSdkCompaction {
         onMemoryCompaction,
         abortSignal,
       });
+      if (outcome.decision === 'unchanged') return keepProjection();
       if (outcome.decision === 'fail') {
         return failOpen(outcome.diagnosticReason);
       }
@@ -1082,6 +1101,7 @@ export class AiSdkCompaction {
       sessionId: this.sessionId,
       phase: input.phase ?? 'mid_turn',
       orderedEvents,
+      recoveryRuntimeEvents: [...state.priorRuntimeEvents, ...turnLedger],
       headAnchor: { runtimeEventId: state.headAnchor.id, turnId },
       invocations: state.priorInvocations,
       acceptedRoute: {
@@ -1127,6 +1147,9 @@ export class AiSdkCompaction {
       },
     });
 
+    if (plan.decision === 'unchanged') {
+      return { decision: 'unchanged' };
+    }
     if (plan.decision === 'fail_open') {
       const diagnosticReason = plan.diagnosticReason ?? plan.reason;
       // Latch only a fail-open the summarizer actually produced. The baseline
@@ -1433,6 +1456,8 @@ export class MidTurnCapacityCompactState {
      * and then no proactive fold ever runs — the provider decides (#4559).
      */
     readonly capacity: number | undefined,
+    /** Unfiltered immutable prior facts, retained by reference for recovery validation. */
+    readonly priorRuntimeEvents: readonly RuntimeEvent[] = priorContentEvents,
   ) {}
 
   compactionPhase(stepNumber: number): 'pre_turn' | 'mid_turn' {
@@ -1508,6 +1533,7 @@ function persistedRequestAnchor(
  * `overflow` reason). The verdict/diagnostic is the caller's; this only shapes.
  */
 type ActiveRequestCompactionOutcome =
+  | { decision: 'unchanged' }
   | {
       decision: 'fail';
       diagnosticReason: string;
