@@ -40,8 +40,17 @@ const copy = {
     window: '模型視窗', unknown: '未設定', failed: '無法更新上下文設定' },
 };
 
+export function WorkHubContextSettingsButton(props: { onOpen(): void }) {
+  const t = copy[useUiLocale()];
+  return <IconButton type="button" size="sm" variant="ghost" icon={<Settings size={14} />}
+    label={t.title} onClick={props.onOpen} />;
+}
+
+/** Mount beside the Composer, not in its footer: its click-to-focus owns Selection. */
 export function WorkHubContextSettings(props: {
   sessionId: string;
+  open: boolean;
+  onOpenChange(open: boolean): void;
   busy: boolean;
   modelWindow?: number;
   modelThreshold?: number;
@@ -49,7 +58,7 @@ export function WorkHubContextSettings(props: {
 }) {
   const services = useWorkHubServices();
   const t = copy[useUiLocale()];
-  const [open, setOpen] = useState(false);
+  const { open, onOpenChange: setOpen } = props;
   const [value, setValue] = useState('');
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -65,10 +74,7 @@ export function WorkHubContextSettings(props: {
   }, [services, props.sessionId, open, t.failed]);
   const trimmed = value.trim();
   const valid = !trimmed || (/^\d+$/.test(trimmed) && Number.isSafeInteger(Number(trimmed)) && Number(trimmed) > 0);
-  return <>
-    <IconButton type="button" size="sm" variant="ghost" icon={<Settings size={14} />}
-      label={t.title} onClick={() => setOpen(true)} />
-    {open && <Dialog isOpen purpose="form" width={460} onOpenChange={setOpen}>
+  return open ? <Dialog isOpen purpose="form" width={460} onOpenChange={setOpen}>
       <Layout header={<DialogHeader title={t.title} onOpenChange={setOpen} />}
         content={<LayoutContent>
           <p>{t.window}: {props.modelWindow?.toLocaleString() ?? t.unknown}</p>
@@ -88,6 +94,5 @@ export function WorkHubContextSettings(props: {
               finally { setSaving(false); }
             }} />
         </HStack></LayoutFooter>} />
-    </Dialog>}
-  </>;
+    </Dialog> : null;
 }

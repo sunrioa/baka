@@ -37,7 +37,7 @@ import type { WorkHubPresentationSnapshot, WorkHubMainNavigation as MainNavigati
 // Real host: a persistent WebContentsView mounts WorkHubRoot once and moves between windows.
 const sessionId = desktopSessionKey({ hostId: 'story-host', sessionId: 'maka_workhub_coordination' });
 const targetId = desktopSessionKey({ hostId: 'story-host', sessionId: 'payments' });
-const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskInput: fn() };
+const writes = { panel: fn(), answer: fn(), model: fn(), defaults: fn(), permissions: fn(), concurrency: fn(), threshold: fn(), upload: fn(), open: fn(), question: fn(), form: fn(), taskAnswer: fn(), taskInput: fn() };
 const overviewHostListeners = new Set<Parameters<WorkHubServices['subscribeHosts']>[0]>();
 const choices = ['model-a', 'model-b'].map((model, index) => ({
   connectionId: 'connection-test', connectionSlug: 'test', connectionName: 'Test', providerType: 'openai' as const,
@@ -784,6 +784,72 @@ export const UsageInspector: Story = {
     expect(editor).toHaveTextContent('再检查一下并发回调。');
   },
 };
+// Real path: WorkHub composer → coordinator context settings → edit, save or
+// dismiss the modal. Real Chromium selection is needed: the old inline Dialog
+// bubbled input clicks into ChatComposer, which moved Selection to its editor
+// even while the modal textbox still appeared focused.
+export const CoordinatorContextSettings: Story = {
+  render: () => <Surface configureServices={services => {
+    let threshold: number | null = null;
+    services.getCompactionThreshold = async () => threshold;
+    services.setCompactionThreshold = async (id, value) => {
+      writes.threshold(id, value); threshold = value; return value;
+    };
+  }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const page = within(canvasElement.ownerDocument.body);
+    const editor = await canvas.findByRole('textbox', { name: '消息输入框' });
+    const draft = '保留这条未发送的草稿。';
+    await userEvent.click(editor);
+    await userEvent.keyboard(draft);
+    const open = async () => {
+      await userEvent.click(canvas.getByRole('button', { name: '主协调上下文' }));
+      const dialog = await page.findByRole('dialog', { name: '主协调上下文' });
+      const input = within(dialog).getByRole('textbox', { name: '压缩目标（token）' });
+      await waitFor(() => expect(input).toBeEnabled());
+      await waitFor(() => expect(dialog).toBeVisible());
+      return { dialog, input };
+    };
+    let { dialog, input } = await open();
+    // Check Chromium's live Selection before keyboard simulation; setting the
+    // value directly repairs Selection and hid the original defect.
+    await userEvent.click(input);
+    expect(editor.contains(canvasElement.ownerDocument.getSelection()?.anchorNode ?? null)).toBe(false);
+    await userEvent.keyboard('50000');
+    expect(input).toHaveValue('50000');
+    expect(input).toHaveFocus();
+    expect(editor).toHaveTextContent(draft);
+    expect(dialog.closest('form, .astryx-chat-composer')).toBeNull();
+    await userEvent.click(within(dialog).getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(writes.threshold).toHaveBeenLastCalledWith(sessionId, 50_000);
+    ({ dialog, input } = await open());
+    expect(input).toHaveValue('50000');
+    await userEvent.clear(input);
+    await userEvent.keyboard('60000');
+    expect(input).toHaveValue('60000');
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    ({ dialog, input } = await open());
+    expect(input).toHaveValue('50000');
+    await userEvent.clear(input);
+    await userEvent.keyboard('{Enter}');
+    expect(dialog).toBeVisible();
+    expect(writes.threshold).toHaveBeenCalledTimes(1);
+    expect(writes.answer).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: '保存' }));
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(writes.threshold).toHaveBeenLastCalledWith(sessionId, null);
+    ({ input } = await open());
+    expect(input).toHaveValue('');
+    expect(input).toHaveAttribute('placeholder', '继承模型配置');
+    expect(editor).toHaveTextContent(draft);
+    for (const action of [writes.answer, writes.model, writes.defaults, writes.permissions, writes.concurrency])
+      expect(action).not.toHaveBeenCalled();
+  },
+};
+
 // Real path: the docked WorkHub composer opens its model picker before sending.
 export const StandardComposer: Story = {
   render: () => <Surface />,

@@ -26,7 +26,7 @@ import { useLiveContextUsage } from '../../../application/contracts/session-insp
 import { selectLatestRequestUsage } from '../../../application/contracts/session-inspector/latest-request-usage.js';
 import { WorkHubProgressCard } from './workhub-progress-card.js';
 import { WorkHubComposer } from './workhub-composer.js';
-import { WorkHubContextSettings } from './workhub-context-settings.js';
+import { WorkHubContextSettings, WorkHubContextSettingsButton } from './workhub-context-settings.js';
 import type { RestoredDraftContent } from '../../../application/contracts/transient-message-projection.js';
 import { WorkHubConversation } from './workhub-conversation.js';
 import { FormInteractionPrompt } from '@maka/ui';
@@ -77,6 +77,7 @@ function revealWordmark(element: HTMLDivElement | null, content: HTMLDivElement 
 export function WorkHubRoot() {
   const localHighlight = useWorkHubHighlightState();
   const [presentation, setPresentation] = useState<WorkHubPresentationSnapshot>();
+  const [contextSettingsSessionId, setContextSettingsSessionId] = useState<string>();
   const floating = presentation?.placement === 'floating';
   const composer = useRef<ComposerHandle>(null);
   const draftRestore = useRef<((sessionId: string, draft: RestoredDraftContent) => void) | undefined>(undefined);
@@ -96,6 +97,7 @@ export function WorkHubRoot() {
   };
   const focusComposer = () => composer.current?.focus();
   useEffect(() => {
+    setContextSettingsSessionId(undefined);
     services.bindBrowserSession(controller.sessionId ?? null);
     return () => services.bindBrowserSession(null);
   }, [services, controller.sessionId]);
@@ -411,11 +413,8 @@ export function WorkHubRoot() {
               modelSwitchHasHistory={transcript.messages.length > 0}
               footerAccessory={
                 <div className="workHubComposerActions">
-                  {controller.sessionId && <WorkHubContextSettings key={controller.sessionId}
-                    sessionId={controller.sessionId} busy={busy}
-                    modelWindow={coordinationModelChoice?.contextWindow}
-                    modelThreshold={coordinationModelChoice?.declaredContextWindow}
-                    onCompact={controller.compactCoordination} />}
+                  {controller.sessionId && <WorkHubContextSettingsButton
+                    onOpen={() => setContextSettingsSessionId(controller.sessionId)} />}
                   <span>{t.newWorkPermissions}</span>
                   <PermissionModeSelect
                     appearance="icon"
@@ -486,6 +485,13 @@ export function WorkHubRoot() {
         />
         </div>
       </ChatSurfaceLayout>
+      {controller.sessionId && <WorkHubContextSettings key={controller.sessionId}
+        sessionId={controller.sessionId} busy={busy}
+        open={contextSettingsSessionId === controller.sessionId}
+        onOpenChange={open => setContextSettingsSessionId(open ? controller.sessionId : undefined)}
+        modelWindow={coordinationModelChoice?.contextWindow}
+        modelThreshold={coordinationModelChoice?.declaredContextWindow}
+        onCompact={controller.compactCoordination} />}
       </div>
       </div>
     </section>
