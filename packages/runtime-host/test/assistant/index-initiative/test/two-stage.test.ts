@@ -55,7 +55,11 @@ test('two persistent workers share append-only knowledge, not a fixed candidate 
       await until(
         async () => judgements.length === i + 1 && !(await f.invoke('InitiativeStatus')).active,
       );
-      assert.equal((await f.invoke('InitiativeStatus')).lastError, null);
+      const state = await f.invoke('InitiativeStatus');
+      assert.equal(state.lastError, null);
+      // Persisted legacy bindings remain authoritative if presentation labels change.
+      for (const id of [state.discoverySession, state.judgementSession])
+        f.workers.get(id).labels = [];
     }
     assert.equal(new Set(discoveries).size, 1);
     assert.equal(new Set(judgements).size, 1);

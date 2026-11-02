@@ -29,8 +29,8 @@ export const QUICK_DISCOVERY_TASK = `你是用户的主动个人助手。结合�
 
 通过 QuickDiscoveryReport 提交消息，按用户会直接读到的正文来写，自然、直接地说清发现了什么、可以帮用户做什么。不要指导 Bot 如何转述、筛选或安排发送时机。不要把尚未开展的工作说成已经接手。`;
 
-export function quickWakeInput(from: number, to: number, first: boolean) {
+export function quickWakeInput(from: number, to: number, first: boolean, scoped = false) {
   return `${first ? QUICK_DISCOVERY_TASK + '\n\n' : ''}当前 UTC 时间：${new Date(to).toISOString()}
 本次检查时间范围：${new Date(from).toISOString()} 至 ${new Date(to).toISOString()}。
-这是定时唤醒，不是新的人类指令。按需调用工具查询信息；时间范围是入口，应基于用户的全局信息探索，不只看新内容或本轮增量。DiscoveryContext 可查实际交流和当前任务，QuickDiscoveryNotebook 可读现有记事本。使用 QuickDiscoveryReport 提交消息；普通文本不会发送给用户。`;
+这是定时唤醒，不是新的人类指令。按需调用工具查询信息；时间范围是入口，应基于用户的全局信息探索，不只看新内容或本轮增量。DiscoveryContext 可查实际交流和当前任务，QuickDiscoveryNotebook 可读现有记事本。使用 QuickDiscoveryReport 提交消息；普通文本不会发送给用户。${scoped ? '\n本轮使用干净的工作上下文。先读 QuickDiscoveryNotebook 的目录与反馈，再按需读取 topic、deliveries 或 event；目录不是证据，也不是探索白名单，旧主题和后续目录页仍可读取。尊重 topic 当前状态和真实送达记录，不重复交流已送达的内容。不要把无关历史和重复工具输出搬入本轮。记事本按 nextOffset 字符分页，继续时传 notebookRevision 作为 revision；DiscoveryContext 从最近一页开始，nextTextOffset 继续当前文本页，nextOffset 读取更早的消息页，可传 taskId 查看具体任务。' : ''}`;
 }
