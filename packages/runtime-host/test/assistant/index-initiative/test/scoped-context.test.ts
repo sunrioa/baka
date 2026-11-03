@@ -21,6 +21,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { Notebook } from '../../../../src/assistant/index-initiative/notebook.js';
 import { fixture, until } from './fixture.js';
 import { output, view, note } from './notebook-output.js';
@@ -45,6 +46,70 @@ async function check(f: any) {
   assert.equal(state.lastError, null);
   return state;
 }
+
+test('pre-upgrade quick pending keeps its legacy Session before adopting scoped mode', async () => {
+  const f = await fixture();
+  const runs: { id: string; scoped: boolean; inputs: number }[] = [];
+  try {
+    await f.remote('assistant.bind', { sessionId: 'owner' });
+    f.setRunner(async ({ id, prompt, invoke }: any) => {
+      if (prompt.startsWith('Inbox 有新消息')) {
+        const batch = await invoke('InboxCheck', {});
+        await invoke('Sleep', {
+          notNotified: batch.items.map((item: any) => ({
+            inboxId: item.id,
+            reason: 'Controlled upgrade fixture',
+          })),
+        });
+        return;
+      }
+      runs.push({
+        id,
+        scoped: prompt.includes('干净的工作上下文'),
+        inputs: f.workers.get(id).transcript.length,
+      });
+      if (runs.length === 1) throw Error('pre-upgrade provider failure');
+    });
+    await f.remote('assistant.quick-discovery', { action: 'check' });
+    await until(async () => !!(await f.remote('assistant.quick-discovery-status')).pending);
+    const before = await f.remote('assistant.quick-discovery-status');
+    // Old releases persisted the pending operation but had no context-mode metadata.
+    const db = new DatabaseSync(
+      join(f.root, 'dev.maka.index-initiative', 'quick-discovery', 'initiative.sqlite'),
+    );
+    try {
+      const state = JSON.parse(
+        String(db.prepare('SELECT payload FROM state WHERE id=1').get()!.payload),
+      );
+      delete state.contextWake;
+      db.prepare('UPDATE state SET payload=? WHERE id=1').run(JSON.stringify(state));
+      db.exec('DELETE FROM context_workers');
+    } finally {
+      db.close();
+    }
+    await f.restart();
+    await f.invoke('InitiativeConfigure', { contextMode: 'scoped' });
+    const run = async (count: number) => {
+      await f.remote('assistant.quick-discovery', { action: 'check' });
+      await until(async () => {
+        const state = await f.remote('assistant.quick-discovery-status');
+        return runs.length === count && !state.active && !state.pending;
+      });
+      return f.remote('assistant.quick-discovery-status');
+    };
+    const recovered = await run(2);
+    assert.equal(recovered.workerSession, before.workerSession);
+    assert.equal(recovered.checkedThrough, before.pending.to);
+    assert.deepEqual(recovered.checkedTokens, before.pending.tokens);
+    assert.deepEqual(runs[1], { id: runs[0].id, scoped: false, inputs: 2 });
+    const next = await run(3);
+    assert.notEqual(next.workerSession, before.workerSession);
+    assert.equal(runs[2].scoped, true);
+    assert.equal(runs[2].inputs, 1);
+  } finally {
+    await f.close();
+  }
+});
 
 test('30 scoped cycles use fresh workers while relevant knowledge, receipts and closed feedback survive restart', async () => {
   const f = await scoped();

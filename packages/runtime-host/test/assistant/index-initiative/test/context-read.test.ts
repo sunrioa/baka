@@ -30,7 +30,7 @@ import { note } from './notebook-output.js';
 function whole(book: Notebook, input: any) {
   let offset = 0,
     result = '',
-    revision: number | undefined;
+    revision: string | undefined;
   for (;;) {
     const page = notebookContext(book, { ...input, offset, limit: 97, revision });
     assert.ok(page.text.length <= 97);
@@ -41,6 +41,57 @@ function whole(book: Notebook, input: any) {
     offset = page.nextOffset;
   }
 }
+
+test('topic continuation rejects time-derived state changes and a fresh read retains all evidence', () => {
+  let now = '2030-01-01T23:59:59.000Z';
+  const book = new Notebook(':memory:', () => now);
+  const text = '原始证据😀'.repeat(2000);
+  try {
+    book.appendNote({ ...note, text }, 'evidence');
+    book.put('delivered', 'delivery', { topicIds: [note.topicId], text: '已交流的发现' });
+    book.recordFeedback({ id: 'later', text: '明天再提醒', replyTo: 'delivered' });
+    book.resolveFeedback(
+      {
+        feedbackId: 'later',
+        understanding: '等待用户指定时间',
+        rules: [
+          {
+            quote: '明天再提醒',
+            status: 'deferred',
+            reason: '用户指定时间',
+            resumeAt: '2030-01-02T00:00:00.000Z',
+            topicIds: [note.topicId],
+            tags: [],
+          },
+        ],
+      },
+      'defer',
+    );
+    const first = notebookContext(book, { view: 'topic', topicId: note.topicId, limit: 700 });
+    assert.notEqual(first.nextOffset, null);
+    assert.equal(book.state(note.topicId).status, 'deferred');
+    const sequence = book.events().at(-1)!.seq;
+    now = '2030-01-02T00:00:01.000Z';
+    assert.equal(book.events().at(-1)!.seq, sequence, 'no events changed at the deadline');
+    assert.equal(book.state(note.topicId).status, 'open');
+    assert.throws(
+      () =>
+        notebookContext(book, {
+          view: 'topic',
+          topicId: note.topicId,
+          limit: 700,
+          offset: first.nextOffset!,
+          revision: first.notebookRevision,
+        }),
+      /Notebook changed/,
+    );
+    const fresh = JSON.parse(whole(book, { view: 'topic', topicId: note.topicId }));
+    assert.equal(fresh.topic.status, 'open');
+    assert.equal(fresh.events.find((event: any) => event.id === 'evidence').payload.text, text);
+  } finally {
+    book.close();
+  }
+});
 
 test('bootstrap stays bounded while every catalog topic and full source remain recoverable', () => {
   const book = new Notebook(':memory:');
@@ -59,6 +110,9 @@ test('bootstrap stays bounded while every catalog topic and full source remain r
     assert.ok(seed.length < 10000);
     assert.doesNotMatch(seed, /UNRELATED_PAYLOAD/);
     const first = notebookContext(book, { limit: 6000 });
+    const feedback = notebookContext(book, { view: 'feedback', limit: 3000 });
+    assert.ok(seed.includes(first.notebookRevision));
+    assert.ok(seed.includes(feedback.notebookRevision));
     assert.notEqual(first.nextOffset, null);
     const catalog = whole(book, { view: 'catalog' });
     for (let i = 0; i < 80; i++) assert.ok(catalog.includes(`"topic-${i}"`));

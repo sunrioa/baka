@@ -19,6 +19,7 @@
 
 import type { Notebook } from './notebook.js';
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 
 export type DiscoveryContextMode = 'legacy' | 'scoped';
 export type NotebookView = 'catalog' | 'topic' | 'feedback' | 'deliveries' | 'event';
@@ -40,11 +41,11 @@ export const notebookReadSchema = z
       .max(MAX_CONTEXT_PAGE_CHARACTERS)
       .default(CONTEXT_PAGE_CHARACTERS),
     revision: z
-      .number()
-      .int()
-      .nonnegative()
+      .string()
       .optional()
-      .describe('Pass notebookRevision on continuation; restart the read if the notebook changed.'),
+      .describe(
+        'Pass notebookRevision for the same view and ID on continuation; restart if its content changed.',
+      ),
   })
   .strict();
 
@@ -101,12 +102,10 @@ export function notebookContext(
     eventId?: string;
     offset?: number;
     limit?: number;
-    revision?: number;
+    revision?: string;
   } = {},
 ) {
-  const revision = book.events().at(-1)?.seq ?? 0;
-  if (input.revision !== undefined && input.revision !== revision)
-    throw Error('Notebook changed; restart this view from offset 0');
+  const sequence = book.events().at(-1)?.seq ?? 0;
   const view = input.view ?? 'catalog';
   let text: string;
   if (view === 'catalog') {
@@ -210,6 +209,13 @@ export function notebookContext(
     if (!event) throw Error('Unknown notebook event');
     text = JSON.stringify(event, null, 2);
   }
+  // Derived state (e.g. a deferred topic reaching resumeAt) can change without
+  // appending an event. Version the actual view before accepting an old offset.
+  const revision = createHash('sha256')
+    .update(JSON.stringify([sequence, view, input.topicId ?? null, input.eventId ?? null, text]))
+    .digest('hex');
+  if (input.revision !== undefined && input.revision !== revision)
+    throw Error('Notebook changed; restart this view from offset 0');
   return {
     ...contextPage(text, input.offset, input.limit),
     view,
@@ -224,10 +230,11 @@ export function discoverySeed(book: Notebook) {
   const catalog = notebookContext(book, { view: 'catalog', limit: 6000 });
   const feedback = notebookContext(book, { view: 'feedback', limit: 3000 });
   return [
-    `Notebook revision：${catalog.notebookRevision}（分页续读时作为 revision）。`,
+    `目录 revision：${catalog.notebookRevision}（续读 catalog 时作为 revision）。`,
     catalog.text,
     `\n目录后续 offset：${catalog.nextOffset ?? '无'}；目录总字符：${catalog.totalCharacters}。`,
     '\n# 用户反馈（先处理，再决定是否交流）',
+    `反馈 revision：${feedback.notebookRevision}（续读 feedback 时作为 revision）。`,
     feedback.text,
     `\n反馈后续 offset：${feedback.nextOffset ?? '无'}。`,
     '\n通过 DiscoveryNotebook 分页读取目录、具体 topic、反馈、真实送达或原始 event。nextOffset 非空表示仍有未读取内容。旧线索仍可查询；不要只查看目录第一页。',

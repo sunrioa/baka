@@ -297,7 +297,10 @@ export class QuickDiscoveryController {
   private async worker(s: any) {
     return this.owner(s, async () => {
       // Pin the mode until this wake (including its outbox retries) has settled.
-      const context = this.store.prepareContext(this.parent.store.get()?.contextMode ?? 'legacy');
+      // Pre-upgrade pending work has no contextWake and must finish on its legacy worker.
+      const mode =
+        s.pending && !s.contextWake ? 'legacy' : (this.parent.store.get()?.contextMode ?? 'legacy');
+      const context = this.store.prepareContext(mode);
       const sessions = await this.ctx.sessionQuery.list();
       const key = context.mode === 'scoped' ? context.id : 'legacy';
       const label = `assistant-quick-discovery:${s.sessionId}${context.mode === 'scoped' ? ':' + key : ''}`;
