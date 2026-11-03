@@ -165,3 +165,52 @@ test('recovery removes obsolete instructions without changing conversation or sc
     f.close();
   }
 });
+
+test('context identity and worker roles survive interrupted admission and rotate only after success', () => {
+  const f = fixture();
+  let next: InitiativeStore | undefined;
+  try {
+    f.store.configure({ sessionId: 'owner', cwd: f.dir }, 60000, false, 'scoped');
+    const context = f.store.prepareContext('scoped');
+    f.store.bindWorker('created-before-response', 'discovery', 'scoped', context.id);
+    f.store.update((s) => {
+      s.discoverySession = 'created-before-response';
+    });
+    f.store.control('check');
+    f.store.claim();
+    f.store.release();
+    next = new InitiativeStore(f.dir, 'next');
+    assert.ok(next.lease());
+    next.recover();
+    assert.deepEqual(
+      next.prepareContext('legacy'),
+      context,
+      'pending mode cannot change on recovery',
+    );
+    assert.deepEqual(next.worker('created-before-response'), {
+      role: 'discovery',
+      mode: 'scoped',
+      contextKey: context.id,
+    });
+    assert.throws(
+      () => next!.bindWorker('created-before-response', 'judgement', 'scoped', context.id),
+      /identity conflict/,
+    );
+    assert.throws(
+      () => f.store.bindWorker('stale-owner', 'discovery', 'scoped', context.id),
+      /ownership changed/,
+    );
+    next.control('check');
+    next.finish(next.claim().active.id, 'transient error');
+    assert.deepEqual(next.prepareContext('scoped'), context);
+    next.control('check');
+    next.finish(next.claim().active.id);
+    assert.notEqual(next.prepareContext('scoped').id, context.id);
+    assert.equal(next.worker('created-before-response')?.contextKey, context.id);
+    assert.equal(next.worker('unknown'), undefined);
+  } finally {
+    next?.release();
+    next?.close();
+    f.close();
+  }
+});

@@ -22,7 +22,8 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { InitiativeStore } from './store.js';
 import { awaitingUser } from '../execution-outcome.js';
-import { wakeInput, DISCOVERY_TASK, JUDGEMENT_TASK, NOTEBOOK_RULES } from './prompt.js';
+import { wakeInput, roleInstructions, NOTEBOOK_RULES } from './prompt.js';
+import { discoverySeed } from './context-read.js';
 import { Notebook, NotebookValidationError } from './notebook.js';
 import type { AssistantRunOutcome, RunSegment } from '../run-cost.js';
 import { createHash } from 'node:crypto';
@@ -92,8 +93,11 @@ export class InitiativeController {
     for (const feedback of context.feedback) {
       const replyTo = `delivery:${feedback.messageId}`;
       if (!this.notebook.event(replyTo)) continue;
+      const id = `feedback:${JSON.stringify([feedback.id, feedback.messageId])}`;
+      // Imported feedback is append-only, even if its text projection later gains fields.
+      if (this.notebook.event(id)?.kind === 'feedback') continue;
       this.notebook.recordFeedback({
-        id: `feedback:${JSON.stringify([feedback.id, feedback.messageId])}`,
+        id,
         text: feedback.text,
         at: feedback.at,
         replyTo,
@@ -207,31 +211,41 @@ export class InitiativeController {
   private async worker(s: any, phase: 'discovery' | 'judgement') {
     return this.asOwner(s, async () => {
       const field = phase === 'discovery' ? 'discoverySession' : 'judgementSession';
+      // Pin even legacy admission before the first await: configuration must not
+      // switch modes between selecting the worker and claiming the cycle.
+      const context = this.store.prepareContext(s.contextMode ?? 'legacy');
+      const mode = context.mode;
+      const key = mode === 'scoped' ? context.id : 'legacy';
+      const label = `assistant-${phase}:${s.sessionId}${mode === 'scoped' ? ':' + key : ''}`;
       const sessions = await this.ctx.sessionQuery.list();
-      const bound = sessions.find((item: any) => item.id === s[field]);
-      let sessionId = bound && !bound.isArchived ? bound.id : undefined;
-      if (!sessionId) {
-        const label = `assistant-${phase}:${s.sessionId}`;
-        const matches = sessions.filter(
-          (item: any) => !item.isArchived && item.labels?.includes(label),
-        );
-        if (matches.length > 1) throw Error(`Multiple ${phase} workers found`);
-        sessionId =
-          matches[0]?.id ??
-          (
-            await this.ctx.agents.create({
-              background: true,
-              name: phase === 'discovery' ? '个人助手 · 主动发现' : '个人助手 · 发现判断',
-              labels: [label, ASSISTANT_BACKGROUND_SESSION_LABEL],
-            })
-          ).sessionId;
-        this.store.update((current) => {
-          current[field] = sessionId;
-          // A replacement worker has no role instructions in its conversation yet.
-          if (current.promptVersions)
-            delete current.promptVersions[phase === 'discovery' ? 'exploration' : 'judgement'];
-        });
-      }
+      const matches = sessions.filter(
+        (item: any) => !item.isArchived && item.labels?.includes(label),
+      );
+      const previous = this.store.worker(s[field]);
+      const bound =
+        previous && previous.mode === mode && previous.contextKey === key
+          ? sessions.find((item: any) => item.id === s[field] && !item.isArchived)
+          : undefined;
+      if (!bound && matches.length > 1) throw Error(`Multiple ${phase} workers found`);
+      const sessionId =
+        bound?.id ??
+        matches[0]?.id ??
+        (
+          await this.ctx.agents.create({
+            background: true,
+            name: phase === 'discovery' ? '个人助手 · 主动发现' : '个人助手 · 发现判断',
+            labels: [label, ASSISTANT_BACKGROUND_SESSION_LABEL],
+          })
+        ).sessionId;
+      // Keep old worker roles durable so replacing a worker never restores write tools.
+      if (previous)
+        this.store.bindWorker(s[field], previous.role, previous.mode, previous.contextKey);
+      this.store.bindWorker(sessionId, phase, mode, key);
+      this.store.update((current) => {
+        if (current[field] !== sessionId && current.promptVersions)
+          delete current.promptVersions[phase === 'discovery' ? 'exploration' : 'judgement'];
+        current[field] = sessionId;
+      });
       return this.ctx.agents.resume({ sessionId });
     });
   }
@@ -251,8 +265,9 @@ export class InitiativeController {
     const directory = join(this.store.directory, 'notebook-wakes', pending.id, role);
     const viewPath = join(directory, 'notebook.md');
     const outputPath = join(directory, 'operations.json');
+    const scoped = this.store.worker(agent.sessionId)?.mode === 'scoped';
     const version = createHash('sha256')
-      .update((role === 'exploration' ? DISCOVERY_TASK : JUDGEMENT_TASK) + '\n' + NOTEBOOK_RULES)
+      .update(roleInstructions(role, scoped) + '\n' + NOTEBOOK_RULES)
       .digest('hex');
     let repair =
       pending.error ?? (state.pendingDraft ? '上次执行中断，尚无成功提交记录。' : undefined);
@@ -262,10 +277,18 @@ export class InitiativeController {
       this.ready();
       await this.refreshNotebook(state);
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      writeFileSync(viewPath, this.notebook.render(), { mode: 0o600 });
+      const context = scoped ? discoverySeed(this.notebook) : this.notebook.render();
+      writeFileSync(viewPath, context, { mode: 0o600 });
+      this.store.log('context-prepared', {
+        phase: role,
+        mode: scoped ? 'scoped' : 'legacy',
+        characters: context.length,
+        sessionId: agent.sessionId,
+      });
       const revision = this.notebook.revision();
       let input = wakeInput({
         role,
+        scoped,
         now: new Date().toISOString(),
         viewPath,
         outputPath,
@@ -404,7 +427,10 @@ export class InitiativeController {
       this.enabling = false;
     }
   }
-  async configure(input: { intervalMinutes: number }, call: any) {
+  async configure(
+    input: { intervalMinutes?: number; contextMode?: 'legacy' | 'scoped' },
+    call: any,
+  ) {
     await this.bindingReady;
     this.ready();
     const old = this.store.get();
@@ -412,8 +438,9 @@ export class InitiativeController {
       throw Error('Only the assistant conversation may configure heartbeats');
     return this.store.configure(
       { sessionId: old.sessionId, cwd: old.cwd },
-      input.intervalMinutes * 60000,
+      input.intervalMinutes === undefined ? old.intervalMs : input.intervalMinutes * 60000,
       old?.enabled ?? false,
+      input.contextMode,
     );
   }
   async control(action: string, call: any) {
