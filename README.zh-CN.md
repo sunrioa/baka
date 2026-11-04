@@ -17,246 +17,124 @@
   under the License.
 -->
 
-<h1 align="center">
-  <img src="apps/desktop/assets/app-icons/sky.png" alt="Maka" width="72" valign="middle" /> Apache Maka (Incubating)
-</h1>
+# Baka · WorkHub
 
-<h3 align="center">Apache Maka（孵化中）是一个高性能的 Agent 工作台，并完整记录它做过的每一件事。</h3>
+**用一个对话推进工作，以任务为中心，不必围着 Session 转。**
 
-<p align="center">
-  <a href="https://maka.apache.org/zh-CN/">官网</a> ·
-  <a href="./docs/README.md">文档</a> ·
-  <a href="https://maka.apache.org/zh-CN/downloads/">下载</a> ·
-  <a href="./README.md">English</a>
-</p>
+[English](./README.md) · [当前架构](./docs/architecture/workhub-current.zh-CN.md) · [测试与用量](./docs/eval/workhub-validation-2026-10-23.md) · [上游 RFC 草稿](./docs/rfcs/workhub-task-centric-coordination.md)
 
-<p align="center">
-  <a href="https://github.com/apache/maka/stargazers"><img src="https://img.shields.io/github/stars/apache/maka?style=flat&label=stars&color=4C8DFF" alt="GitHub stars" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-4C8DFF?style=flat" alt="License: Apache 2.0" /></a>
-  <img src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-macOS%20%C2%B7%20Windows%20%E9%A2%84%E8%A7%88%20%C2%B7%20Linux%20%E9%A2%84%E8%A7%88-4C8DFF?style=flat" alt="平台：macOS、Windows 预览、Linux 预览" />
-</p>
+Baka 是基于 [Apache Maka（孵化中）](https://github.com/apache/maka) 独立维护的实验分支，重点探索 **WorkHub 的任务中心形态**：复用 Maka 的 Runtime Host、Session、工具、权限和事件日志，让用户主要面对任务，而不是手动管理一组会话。它不是新的 coding harness，不是 Apache 官方发行版，也不代表该设计已被上游接受。
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/readme-hero.zh-CN.dark.png" />
-  <img alt="一轮交互的运行时事件：模型说、执行命令、请求权限、你批准了、拿到结果、编辑文件、本轮结束。" src="./.github/assets/readme-hero.zh-CN.light.png" />
-</picture>
+## WorkHub 改变了什么
 
-## 什么是 Maka
+传统会话式使用中，你需要记住“这件事在哪个 Session 做过”，再决定去哪里追问。WorkHub 把**任务**作为持续身份：
 
-Agent harness 的本职就是把任务做完。衡量它的标准只有一条：完成了多少，花了多少。我们公开每一次运行：同一个模型，同一个官方验证器，逐任务的完整记录。
+- 在主对话描述需求，协调模型可以直接回答、查找旧任务、澄清，或创建独立任务。
+- 自然追问，由 AI 判断接到哪件事上；右栏正在预览什么，不会悄悄改变总输入的派发目标。
+- 在右栏查看某个任务，并直接向它补充要求或纠正方向。
+- 同一任务可以复用当前 Session（`reuse`），也可以换新 Session 继续（`fresh`），任务身份不变。由 AI 判断，不按固定 token 数强制换窗。
+- 新段需要旧信息时，按需读取原要求、纠正和可见工具输出，而不是复制整份旧上下文。
 
-- **靠测量，不靠宣称。** Maka 与其他 harness 在同一个模型、同一个官方验证器下对比跑分，每份报告都附逐任务结果，见 [`docs/eval/`](./docs/eval)。
-- **日志就是运行时。** 每条模型消息、工具调用、权限决定和终止都是一条只追加的 RuntimeEvent。界面、下一轮 prompt 和崩溃恢复都是这份日志的投影，从不是唯一副本。旧的工具输出可以不进下一轮 prompt，但不会从日志里消失。
-- **数据在你的机器上，模型由你接。** 会话、设置和运行记录保存在本机；云 API、本地模型或兼容网关都可以。
-- **一个 Runtime Host。** Desktop、TUI 和 CLI、Eval 都是瘦客户端，执行只由这一个 Runtime Host 说了算；Eval 只负责实验和分数。
-
-[官网](https://maka.apache.org/zh-CN/)演示了日志中的一轮，并链接到公开的运行结果。系统地图见 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md)。
-
-## 获取 Maka
-
-**Apache Releases**：Maka 尚未发布过 Apache release。发布之后，带签名的源码包才是正式 release，其他渠道分发的包属于便利构建。候选版本的准入标准、签名路径与验包步骤见[下载页面](https://maka.apache.org/zh-CN/downloads/)与 [`.github/ASF_SOURCE_RELEASE.md`](./.github/ASF_SOURCE_RELEASE.md)。
-
-**开发测试**：如果希望贡献代码或协助测试尚未发布的改动，请阅读[贡献指南](./CONTRIBUTING.zh-CN.md)并关注[开发邮件列表](https://lists.apache.org/list.html?dev@maka.apache.org)。开发构建不是获批的 Apache 正式版本。
-
-**从源码构建**：要从源码 checkout 直接构建并运行 Desktop、TUI 或 CLI，见下方的[从源码构建](#从源码构建)一节。
-
-## 从源码构建
-
-### 环境要求
-
-- Node.js 22.19 或更高（CI 使用 Node.js 24）；
-- npm（仓库 lockfile 和 scripts 以 npm 为准，`packageManager` 当前为 npm 11）；
-- Git；
-- `ripgrep`，供 Runtime 的 `Grep` 工具使用。
-
-### 启动 Desktop
-
-```sh
-git clone https://github.com/apache/maka.git
-cd maka
-npm ci
-npm run dev
-```
-
-`npm run dev` 启动带 HMR 的 Desktop 开发环境。需要先完整构建再启动 Electron 时使用：
-
-```sh
-npm run dev:full
-```
-
-开发 Direct Peer 和 Peer Mesh 还需要 Rust stable 1.98 或更高版本及平台 linker
-（macOS 使用 Xcode Command Line Tools，Windows 使用 MSVC Build Tools）。使用 Peer 开发入口，
-Desktop 会在启动前构建原生 addon：
-
-```sh
-npm run dev:peer       # HMR
-npm run dev:full:peer  # 完整构建
-```
-
-如果安装时设置过 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`，启动前需要补装 Electron 平台二进制：
-
-```sh
-node node_modules/electron/install.js
-```
-
-### 第一次运行
-
-Maka 不内置共享模型账号。第一次打开时：
-
-1. 进入 `设置 → 模型`；
-2. 添加一个 API、本地模型或已经接通的账号连接；
-3. 测试连接并选择默认模型；
-4. 返回工作台开始任务。
-
-应用会根据真实连接状态区分“已配置”“可发送”和“实验入口”，不会把没有接入 Runtime 的账号展示成可用模型。
-
-## 使用终端入口
-
-公共 npm 包的安装和使用方式请查看 [CLI 中文指南](./packages/cli/README.zh-CN.md)。下面的命令
-用于从源码 checkout 运行开发版 CLI。
-
-先构建 workspace：
-
-```sh
-npm run build
-```
-
-然后可以启动 TUI 或执行单次 Turn：
-
-```sh
-npm run cli:dev
-npm run cli:dev -- run "总结当前仓库并指出最重要的风险"
-npm run cli:dev -- run --graph "并行实现两个切片，完成集成，然后独立审查"
-npm run cli:dev -- --help
-```
-
-TUI 同时支持 `/graph on`、`/graph off` 和 `/graph <任务>`。非交互
-`--graph` 会等待持久化 Graph 真正结束，再输出 supervisor 的最终结果。
-Graph 的 implementation operator 使用隔离的 Git worktree，因此源项目必须是干净的
-Git worktree。
-
-仓库 CLI 使用与开发版 Desktop 构建相同的 `Maka Dev` profile；发布版 `maka` 二进制仍使用
-`Maka` profile，二者不会自动复制或同步。评测 spec 和 adapter 位于 [`packages/eval`](./packages/eval)。
+Session 和工作目录依然存在。WorkHub 只是弱化它们在用户界面的地位，没有取消底层执行、归属或安全边界。
 
 ## 架构
 
-Maka 后端可以用一条主线概括：
-
-```text
-Desktop / TUI / CLI → Runtime Host → SessionManager → AgentRun
-                                             ↓
-                         Model + Tool Runtime → Runtime Event Log
-                                             ↓
-                              Context / Session / UI projections
-
-Experiment → Cells → Attempts → Results
-                    ↓
-       Runtime Host 执行 Maka subjects
+```mermaid
+flowchart TB
+    U[用户] --> C[WorkHub 主对话与协调模型]
+    C --> T[find · start · continue · ask · stop]
+    T --> H[Runtime Host：身份、权限、准入与排队]
+    P[任务侧栏：查看与定向输入] --> H
+    H --> A[任务 A：稳定任务身份]
+    H --> B[任务 B：独立工作]
+    A --> S1[第 1 段 Session]
+    A --> S2[fresh 后的第 2 段 Session]
+    B --> S3[自己的执行 Session]
+    S1 --> L[持久事件与原始工具输出]
+    S2 --> L
+    S3 --> L
+    L --> N[有界结果通知]
+    N --> C
+    C -. WorkHubRead：授权内分页回查 .-> L
+    S2 -. 按需读取同任务旧段 .-> L
 ```
 
-从 [ARCHITECTURE.zh-CN.md](./ARCHITECTURE.zh-CN.md) 开始阅读。它提供总体架构图、代码边界、按问题组织的阅读路径，以及 `docs/architecture/` 下深度文章的链接。
+**AI 负责理解和选择，Host 负责验证和执行。** Host 校验具体目标与操作，不声称能证明 AI 理解了用户意图。真正执行仍由普通 Maka Session 承担，使用自己的模型、目录、权限、审批和恢复机制。
 
-## 仓库结构
+| 场景 | 实际处理 |
+| --- | --- |
+| 任务还在排队 | 原位补充待执行内容，不重新排到队尾。 |
+| 任务正在执行 | 在下一次可消费输入的模型边界交付 Steering，不打断正在运行的工具；受理不等于 Agent 已读到。 |
+| 任务已结束 | 在原 Session 受理新一轮，仍走既有队列。 |
+| AI 选择 `fresh` | 保留任务身份，继承当前段的持久设置；忙碌、排队或有未决交互时拒绝，不建立延迟换窗队列。 |
+| 有审批待处理 | 回答原始审批；普通聊天纠正不代表授权。 |
 
-```text
-apps/desktop/          Electron main / preload / React renderer
+模型入口是五个任务动作加 `WorkHubRead`，没有额外的预路由模型、纠正事务、问题转发、依赖等待协议或通用记忆系统。
 
-packages/core/         Session、Event、Permission、Connection 等纯 contracts
-packages/storage/      SQLite 运行状态、配置与 payload stores
-packages/mcp/          与提供商无关的 Model Context Protocol 客户端集成
-packages/runtime/      AgentRun、模型适配、工具、上下文和恢复
-packages/runtime-host/ 单一所有者的 Runtime Host 生命周期、协议和客户端启动
-packages/eval/         Experiment cell、attempt、result 与 executor/subject adapter
-packages/computer-use/ Computer Use 后端选择、Host 生命周期和协议适配
-packages/cli/          TUI 和非交互 CLI
-packages/ui/           共享对话、Markdown、Artifact 与 UI primitives
-native/                Rust：Runtime Host 的 direct-peer addon 与 gitoxide helper
-website/               maka.apache.org 的 Astro 源码
+### 主协调对话变长时
 
-docs/                  架构、产品、安全、隐私和测试契约
-scripts/               Build hygiene、视觉检查、smoke 和 release helpers
-skills/                随仓库分发的 agent skill
-patches/               安装时应用到 npm 依赖的补丁
-experiments/           平台实验，目前是 Windows 沙箱 smoke 脚本
-```
+WorkHub 与普通 Session **共用原生压缩器**，额外补上任务定位线索：
 
-## 本地数据与恢复
+- 结果通知保留任务和精确结果引用，不默认反复复制执行全文。
+- 从用户相关的成功操作重建一小段近期任务引用。它不是派发决定，也不是所有旧任务的完整记忆；更早的工作仍需 `find`。
+- `/compact` 只压缩主协调；可选阈值仅覆盖主协调，留空继承模型配置，不自动填一个固定值。
+- 原始事件仍在。`WorkHubRead` 按经过核验的任务关系读取旧段，必要时分页回源到工具原文。
 
-Workspace 数据默认放在 Electron `userData` 下：
+没有独立的滑动回包清理器，没有额外的交接摘要模型调用。压缩会产生开销，也可能让供应商缓存重建，不能承诺无成本。
 
-```text
-<Electron userData>/workspaces/default/
-  runtime.sqlite
-  settings.json                  # 界面与工作区偏好
-  connection-catalog.json        # 提供商与模型元数据
-  credential-vault.json          # 本地提供商密钥
-  artifacts/
-```
+## 已验证到哪里
 
-- 手动编辑 `settings.json` 或 `mcp.json` 时，请保存为 UTF-8（建议不带 BOM；也支持 UTF-8 BOM）。Maka 不会猜测无 BOM 文件的其他编码，也不会自动转换 UTF-16；请先在编辑器中显式转换为 UTF-8，再使用这些文件。
-- API key 一类的机密存在本地明文文件（`credential-vault.json`），只有你的系统账号能读。界面进程拿不到明文。
-- 写文件、跑 Shell 的工具必须先过沙箱边界。
-- `runtime.sqlite` 是当前生效的那份记录。更早的 JSONL transcript 和 Electron `safeStorage` 凭据不会导入；升级后会话可能是空的，那些凭据需要重新填写。
-- Desktop 与 CLI/TUI `/resume` 默认可以显式恢复中断回合；成功续跑会请求模型并消耗 token。设置 `MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=0` 可关闭新的 resume planning；设置 `=1` 会额外开启 activation 和 WorkHub 的自动 resume。默认情况下，即使 activation 使用已有 Session，也会处理这次新的 stimulus。启动恢复只修复已经 admission 的 continuation，不会自动选择普通的 failed 或 cancelled Turn。
+文档快照：Baka [`04281faee`](https://github.com/sunrioa/baka/commit/04281faee875d381d7f5d6a13e7408888ae9ba27)，2026-10-23。真实模型测试使用 macOS 上的 Command Code `deepseek/deepseek-v4.1-flash`。
 
-细节见 [SECURITY.md](./SECURITY.md)、[隐私](./docs/workspace-privacy-context.md)、[续跑](./docs/architecture/runtime-resume-architecture.zh-CN.md)。
+| 证据 | 观察结果 | 边界 |
+| --- | --- | --- |
+| 真实 coding 与派发 | 已覆盖独立 A/B、自然追问、预览与总对话主题不一致、同轮纠正、FIFO 和排队取消。 | 是具体用例证据，不是路由准确率基准。 |
+| 同任务跨 Session 读取 | 6 段历史片段拼回原来的 21,322 字节 stdout，SHA-256 一致；该次复测没有新的 `not_found`。 | 原生 ai-sdk 路径，不代表 executor fresh 已支持。 |
+| 异常恢复后的压缩 | 隔离 Host 真实崩溃 / 重启后，压缩能越过旧异常调用，覆盖从 9 条推进到 13 条；立即重复返回 `unchanged`。 | 真实 Host、原生 SDK 和模型；该项不是桌面 UI 测试。 |
+| 最新定向回归 | 压缩 / 预算 / 回放 562 项，加恢复 / 交互 / 策略 226 项通过；全仓类型检查通过。 | 共 788 项相关测试，不等于最新提交重跑了全仓所有测试。 |
 
-## 开发与验证
+[验证报告](./docs/eval/workhub-validation-2026-10-23.md) 分开列出更早的套件、失败记录、模型用量与受控 `reuse` / `fresh` 对照。不同版本和重叠窗口不累计成一个“总分”；这些观察也不证明实际费用降低或优于其他 harness。
 
-提交改动前请先阅读 [CONTRIBUTING.zh-CN.md](./CONTRIBUTING.zh-CN.md)。
+### 当前限制
 
-常用仓库级命令：
+- 支持范围内可以新建、继续 executor 任务；在原生历史桥接接通前，**executor `fresh` 明确拒绝**。
+- 自然语言任务关联仍可能出错。不确定时应检索或澄清，不能依赖预览或相似标题硬猜。
+- 长历史路由使用了明确标记的夹具，不冒充自然老化九天；macOS DeepSeek 实测不代表所有模型和平台。
+- “执行结束”不等于目标或产物已经独立验收。
+- 压缩阈值与模型窗口的合理性校验仍待处理；配置值不是已测得的供应商硬上限。
+- 既有 React / ResizeObserver 诊断不在本轮完成声明内。
+
+## 本地试用
+
+推荐 Node.js 24、npm 11.19.0，需要 Git 和 `ripgrep`。平台依赖见[贡献指南](./CONTRIBUTING.md)。
 
 ```sh
-npm run build
-npm run typecheck
-npm test
-npm run check:release
+git clone https://github.com/sunrioa/baka.git
+cd baka
+npm ci
+npm run dev:worktree
 ```
 
-针对单个 workspace：
+在设置中配置自己的模型连接，在通用设置里启用 WorkHub，然后打开 WorkHub。每个开发 checkout 默认使用独立且可持续使用的数据目录，不会自动导入其他安装的密钥或历史。
+
+如需沿用已有开发数据，先备份并退出占用它的 App / Host，再明确指定 Electron 的 userData 根目录，**不是**下面的 `workspaces/default`：
 
 ```sh
-npm --workspace @maka/runtime run test:dist
-npm --workspace @maka/eval run test:dist
-npm --workspace @maka/desktop run test:dist
+npm run dev:worktree -- --user-data-dir="/absolute/path/to/existing-user-data"
 ```
 
-用 `refresh:model-metadata` 从 models.dev 获取当前目录、更新仓库内快照，并重新生成派生的 TypeScript 文件。已提交的模型、能力、provider override 或 pricing 字段消失时，refresh 会 fail closed；审查确认上游确实有意删除后，用 `npm run refresh:model-metadata -- --accept-upstream-removals` 显式确认。`sync:model-metadata` 刻意保持离线，只会从已提交快照重新生成这些文件。访问路径特有的 override 写在 `model-metadata.ts`，不要手动修改生成文件。
+不要同时启动两个实例使用同一份数据。应用与启动脚本仍沿用 Maka 名称；此次 README 不重命名二进制、包或数据目录。
 
-```sh
-npm run refresh:model-metadata
-npm --workspace @maka/core run test:dist
-```
+## 文档与上游讨论
 
-Desktop 的真实窗口与视觉验证：
+- [当前架构](./docs/architecture/workhub-current.zh-CN.md)：职责、任务与 Session、输入交付、历史和压缩。
+- [验证报告](./docs/eval/workhub-validation-2026-10-23.md)：通过项、失败、未覆盖项和用量。
+- [任务中心 ADR](./docs/architecture/workhub-task-centric-adr.zh-CN.md)：已确认设计与演变。
+- [RFC 草稿](./docs/rfcs/workhub-task-centric-coordination.md)：最小提案、替代方案与开放问题，尚未发布。
+- [文档索引](./docs/README.md)、[底层 Maka 架构](./ARCHITECTURE.zh-CN.md)、[安全策略](./SECURITY.md)、[桌面开发](./apps/desktop/README.md)、[CLI](./packages/cli/README.md)。
 
-```sh
-npm --workspace @maka/desktop run e2e
-npm --workspace @maka/desktop run smoke:real-window
-```
+上游 [WorkHub 精简讨论](https://github.com/apache/maka/issues/5745) 是相关出发点，不代表 Baka 的实现已经获上游接受。RFC 先讨论设计，再决定是否、以多小的补丁贡献实现。
 
-提交代码前至少运行与改动范围相称的 typecheck、build 和 focused tests，并执行 `git diff --check`。
+## 许可与归属
 
-## 文档入口
-
-- [官网](https://maka.apache.org/zh-CN/)
-- [文档索引与权威来源说明](./docs/README.md)
-- [后端架构总览](./ARCHITECTURE.zh-CN.md)
-- [产品设计](./DESIGN.md)
-- [贡献指南](./CONTRIBUTING.zh-CN.md)
-- [安全政策](./SECURITY.md)
-- [DeepWiki](https://deepwiki.com/apache/maka)，第三方 AI 生成文档，不由项目维护
-
-## 开源协议
-
-Maka 使用 [Apache License 2.0](./LICENSE) 开源，归属信息见
-[NOTICE](./NOTICE)。第三方组件仍分别适用其自身的许可证与声明。
-
-Apache Maka、Maka、Apache、Apache 羽毛标志和 Apache Maka 项目标志是 Apache 软件基金会的注册商标或商标。
-
-> [!NOTE]
-> Apache Maka (Incubating) 是一个正在 Apache 软件基金会（ASF）孵化的项目，由 Apache Incubator PMC 主办。所有新接受的项目都必须经过孵化，直到进一步审查表明其基础设施、沟通方式和决策流程已经稳定到与其他成功的 ASF 项目一致的程度。孵化状态未必反映代码的完成度或稳定性，但它确实表明该项目尚未得到 ASF 的完全认可。项目当前已知的问题记录在 [DISCLAIMER-WIP](./DISCLAIMER-WIP)（以英文原文为准）。
-
-> [!IMPORTANT]
-> Maka 仍在活跃开发中。数据格式、CLI 和实验能力仍可能变化。
+采用 Apache License 2.0，见 [LICENSE](./LICENSE)、[NOTICE](./NOTICE)。保留现有声明和第三方许可。Apache Maka、Maka、Apache 等名称及标识的权利归相应所有者，包括 Apache 软件基金会。Baka 是独立分支，不是 ASF 认可的发行版；继承项目的孵化状态说明见 [DISCLAIMER-WIP](./DISCLAIMER-WIP)。

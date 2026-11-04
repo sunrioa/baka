@@ -17,248 +17,124 @@
   under the License.
 -->
 
-<h1 align="center">
-  <img src="apps/desktop/assets/app-icons/sky.png" alt="Maka" width="72" valign="middle" /> Apache Maka (Incubating)
-</h1>
+# Baka · WorkHub
 
-<h3 align="center">Apache Maka (Incubating) is a high-performance agent workspace that keeps a complete record of everything it did.</h3>
+**One conversation to move work forward. Stable tasks, replaceable Sessions.**
 
-<p align="center">
-  <a href="https://maka.apache.org/en/">Website</a> ·
-  <a href="./docs/README.md">Documentation</a> ·
-  <a href="https://maka.apache.org/en/downloads/">Download</a> ·
-  <a href="./README.zh-CN.md">中文文档</a>
-</p>
+[简体中文](./README.zh-CN.md) · [Architecture](./docs/architecture/workhub-current.zh-CN.md) · [Validation](./docs/eval/workhub-validation-2026-10-23.md) · [Upstream RFC draft](./docs/rfcs/workhub-task-centric-coordination.md)
 
-<p align="center">
-  <a href="https://github.com/apache/maka/stargazers"><img src="https://img.shields.io/github/stars/apache/maka?style=flat&label=stars&color=4C8DFF" alt="GitHub stars" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-4C8DFF?style=flat" alt="License: Apache 2.0" /></a>
-  <img src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20preview%20%C2%B7%20Linux%20preview-4C8DFF?style=flat" alt="Platforms: macOS, Windows preview, Linux preview" />
-</p>
+Baka is an independently maintained experimental fork of [Apache Maka (Incubating)](https://github.com/apache/maka). Its focus is **WorkHub**: task-centric coordination built on Maka's existing Runtime Host, Sessions, tools, permissions and event log. It is not a new coding harness, an official Apache distribution, or an accepted upstream design.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./.github/assets/readme-hero.en.dark.png" />
-  <img alt="One turn of RuntimeEvents: the model speaks, runs a command, asks permission, you approve, it gets the result, edits a file, the turn ends." src="./.github/assets/readme-hero.en.light.png" />
-</picture>
+## What WorkHub changes
 
-## What Maka is
+In a Session-first workflow, you remember where earlier work happened and decide where to continue. WorkHub makes the **task** the persistent unit:
 
-An agent harness exists to finish tasks. We hold it to one measure: how many it completes and at what cost. We publish every run: same model, same official verifier, full per-task record.
+- Describe work in the main conversation. The coordinator can answer, find an existing task, clarify, or start independent work.
+- Follow up naturally. The AI decides which task is meant; the task preview does not silently redirect the main conversation.
+- Inspect a task in the right panel and send corrections directly to that task.
+- Continue in the current Session (`reuse`), or in a new Session (`fresh`) without changing task identity. The AI chooses; there is no fixed context-size switch.
+- Retrieve old requirements, corrections and visible tool output on demand, instead of copying the entire old context.
 
-- **Measured, not claimed.** Maka is benchmarked against other harnesses on the same model with the official verifier, and the per-task results ship with every report in [`docs/eval/`](./docs/eval).
-- **The log is the runtime.** Every model message, tool call, permission decision and termination is an append-only RuntimeEvent. The UI, the next prompt and crash recovery are projections of that log, never the only copy. Old tool output can leave the next prompt without leaving the log.
-- **Your machine, your model.** Sessions, settings and run records stay local. You bring the model: a cloud API, a local model or a compatible gateway.
-- **One Runtime Host.** Desktop, the TUI and CLI, and Eval are thin clients of one execution authority; Eval owns only the experiment and its scores.
-
-The [website](https://maka.apache.org/en/) walks through one turn of the log and links the published runs. [ARCHITECTURE.md](./ARCHITECTURE.md) has the system map.
-
-## Get Maka
-
-**Apache Releases**: Maka has not made an Apache release yet. When one exists, the signed source archive will be the official release; packages distributed elsewhere are convenience artifacts. See the [downloads page](https://maka.apache.org/en/downloads/) and [`.github/ASF_SOURCE_RELEASE.md`](./.github/ASF_SOURCE_RELEASE.md) for candidate criteria, signing procedures, and verification steps.
-
-**Development testing**: To contribute or help test unreleased changes, see [CONTRIBUTING](./CONTRIBUTING.md) and the [development mailing list](https://lists.apache.org/list.html?dev@maka.apache.org). Development builds are not approved Apache releases.
-
-**Build from source**: To compile and run Desktop, the TUI, or the CLI directly from a source checkout, see the [Build from source](#build-from-source) section below.
-
-## Build from source
-
-### Requirements
-
-- Node.js 22.19 or newer (CI uses Node.js 24);
-- npm (the lockfile and scripts use npm; the current `packageManager` is npm 11);
-- Git;
-- `ripgrep`, used by Runtime's `Grep` tool.
-
-### Start Desktop
-
-```sh
-git clone https://github.com/apache/maka.git
-cd maka
-npm ci
-npm run dev
-```
-
-`npm run dev` starts the Desktop development environment with HMR. To build every workspace before starting Electron, use:
-
-```sh
-npm run dev:full
-```
-
-Direct Peer and Peer Mesh development additionally requires Rust stable 1.98 or newer and the
-platform linker (Xcode Command Line Tools on macOS, MSVC Build Tools on Windows). Use the
-peer-enabled entry point so the native addon is built before Desktop starts:
-
-```sh
-npm run dev:peer       # HMR
-npm run dev:full:peer  # full build
-```
-
-If dependencies were installed with `ELECTRON_SKIP_BINARY_DOWNLOAD=1`, install the Electron platform binary before starting:
-
-```sh
-node node_modules/electron/install.js
-```
-
-### First run
-
-Maka does not bundle a shared model account. On first launch:
-
-1. Open `Settings → Models`;
-2. Add an API, local-model, or supported account connection;
-3. Test it and choose a default model;
-4. Return to the workspace and start a task.
-
-The app distinguishes configured, send-ready, and experimental connection states. An account flow that is not wired into Runtime is not presented as a usable model.
-
-## Terminal entry points
-
-For the public npm package, see the [CLI installation and usage guide](./packages/cli/README.md).
-The commands below run the development CLI from a source checkout.
-
-Build the workspaces first:
-
-```sh
-npm run build
-```
-
-Then start the TUI or run one Turn:
-
-```sh
-npm run cli:dev
-npm run cli:dev -- run "Summarize this repository and identify its most important risk"
-npm run cli:dev -- run --graph "Implement two independent slices, integrate them, then review the result"
-npm run cli:dev -- --help
-```
-
-The TUI also accepts `/graph on`, `/graph off`, and `/graph <task>`. Non-interactive
-`--graph` runs wait for the durable Graph to finish before printing the final
-supervisor output. Graph implementation operators use isolated Git worktrees, so
-the source project must be a clean Git worktree.
-
-The repository CLI uses the same `Maka Dev` profile as a development Desktop build. The
-released `maka` binary continues to use the `Maka` profile; the two profiles are not copied or
-synchronized automatically. Evaluation specs and adapters live in [`packages/eval`](./packages/eval).
+Sessions and working directories still exist. WorkHub makes them secondary in its interface; it does not remove their execution, ownership or security boundaries.
 
 ## Architecture
 
-The backend spine is:
-
-```text
-Desktop / TUI / CLI → Runtime Host → SessionManager → AgentRun
-                                             ↓
-                         Model + Tool Runtime → Runtime Event Log
-                                             ↓
-                              Context / Session / UI projections
-
-Experiment → Cells → Attempts → Results
-                    ↓
-       Runtime Host executes Maka subjects
+```mermaid
+flowchart TB
+    U[User] --> C[WorkHub conversation and coordinator]
+    C --> T[find · start · continue · ask · stop]
+    T --> H[Runtime Host: identity, permissions, admission and queues]
+    P[Task panel: inspect and send direct input] --> H
+    H --> A[Task A: stable task identity]
+    H --> B[Task B: independent work]
+    A --> S1[Session segment 1]
+    A --> S2[Session segment 2 after fresh]
+    B --> S3[Its own execution Session]
+    S1 --> L[Durable events and original outputs]
+    S2 --> L
+    S3 --> L
+    L --> N[Bounded result notifications]
+    N --> C
+    C -. WorkHubRead: authorized paged originals .-> L
+    S2 -. Same-task history on demand .-> L
 ```
 
-Start with [ARCHITECTURE.md](./ARCHITECTURE.md). It provides the system map, code boundaries, problem-oriented reading paths, and links to the deep dives under `docs/architecture/`.
+The coordinator interprets intent. The Host validates the specific target and operation; it does not certify that the model understood the user's intent. Workers remain ordinary Maka executions with their own configuration, approvals, tools and recovery.
 
-## Repository layout
+| Situation | Execution contract |
+| --- | --- |
+| Queued | Supplement pending input in place; retain the queue position. |
+| Running | Deliver Steering at the next consumable model boundary without interrupting a running tool. Admission is not consumption. |
+| Ended | Admit a new Turn through the existing queue. |
+| `fresh` requested | Keep task identity and inherit the current segment's persistent settings. Reject while busy, queued or awaiting an interaction; no delayed switch. |
+| Approval pending | Answer the original interaction. A chat correction is not permission. |
 
-```text
-apps/desktop/          Electron main / preload / React renderer
+The model-facing surface is five task actions plus `WorkHubRead`. It does not add a pre-routing model, correction transaction, question relay, dependency-wait protocol or general memory service.
 
-packages/core/         Pure contracts for Sessions, Events, Permissions, and Connections
-packages/storage/      SQLite operational state, configuration, and payload stores
-packages/mcp/          Provider-neutral Model Context Protocol client integration
-packages/runtime/      AgentRun, model adapters, tools, context, and recovery
-packages/runtime-host/ Single-owner Runtime Host lifecycle, protocol, and client bootstrap
-packages/eval/         Experiment cells, attempts, results, and executor/subject adapters
-packages/computer-use/ Computer-use backend selection, host lifecycle, and protocol adapters
-packages/cli/          TUI and non-interactive CLI
-packages/ui/           Shared conversation, Markdown, Artifact, and UI primitives
-native/                Rust: the direct-peer addon for Runtime Host and the gitoxide helper
-website/               Astro source for maka.apache.org
+### Long-running coordination
 
-docs/                  Architecture, product, security, privacy, and test contracts
-scripts/               Build hygiene, visual checks, smoke tests, and release helpers
-skills/                Agent skills shipped with the repository
-patches/               Patches applied to npm dependencies at install
-experiments/           Platform experiments, currently the Windows sandbox smoke scripts
-```
+WorkHub uses the **same native history compactor** as an ordinary Session:
 
-## Local data and recovery
+- Short result notifications retain task and exact result references, rather than repeatedly copying transcripts.
+- A small recent-task reference block is rebuilt from successful user-associated actions. It is a hint, not a routing decision or complete memory. Older work still needs `find`.
+- `/compact` compacts only the coordinator. Its optional threshold applies only there; blank inherits the model configuration, with no invented fallback.
+- Original events remain stored. `WorkHubRead` follows verified task lineage and pages through permitted history and archived output.
 
-Workspace data lives under Electron `userData` by default:
+There is no independent sliding tool-result cleaner or extra handoff-summary model call. Compaction has a model cost and can rebuild the provider's prompt cache.
 
-```text
-<Electron userData>/workspaces/default/
-  runtime.sqlite
-  settings.json                  # UI and workspace preferences
-  connection-catalog.json        # provider and model metadata
-  credential-vault.json          # local provider secrets
-  artifacts/
-```
+## Validation snapshot
 
-- When editing `settings.json` or `mcp.json` by hand, save the file as UTF-8 (preferably without a BOM). A UTF-8 BOM is accepted. Maka does not guess other encodings for files without a BOM or automatically convert UTF-16; explicitly convert those files to UTF-8 in your editor before using them.
-- API keys and similar secrets are a local plaintext file (`credential-vault.json`), readable only by your OS account. The renderer never sees them.
-- Tools that write files or run a shell must pass the sandbox boundary first.
-- `runtime.sqlite` is the live record. Older JSONL transcripts and Electron `safeStorage` credential files are not imported; an upgraded workspace can show empty threads, and those credentials must be entered again.
-- Explicit interrupted-turn resume is available by default in Desktop and through CLI/TUI `/resume`; a successful continuation calls the model and uses tokens. Set `MAKA_RUNTIME_SAFE_BOUNDARY_RESUME=0` to disable new resume planning, or `=1` to additionally allow automated activation and model-driven WorkHub resume. An activation sent to an existing Session still processes its new stimulus by default. Startup recovery repairs already admitted continuations but does not automatically select an ordinary failed or cancelled turn.
+Baka [`04281faee`](https://github.com/sunrioa/baka/commit/04281faee875d381d7f5d6a13e7408888ae9ba27), 2026-10-23. Live tests used Command Code `deepseek/deepseek-v4.1-flash` on macOS.
 
-Details: [SECURITY.md](./SECURITY.md), [privacy](./docs/workspace-privacy-context.md), [resume](./docs/architecture/runtime-resume-architecture.md).
+| Evidence | Observed result | Boundary |
+| --- | --- | --- |
+| Real coding and routing | Independent A/B tasks, natural follow-ups, preview/main-topic disagreement, same-Turn corrections, FIFO and queued cancellation exercised. | Case-based evidence, not a routing-accuracy benchmark. |
+| Same-task fresh history | Six fragments reconstructed prior 21,322-byte stdout; SHA-256 matched, with no new `not_found` in that retest. | Native ai-sdk path, not executor fresh. |
+| Recovered abnormal tool history | Real isolated Host crash/restart no longer blocked compaction; coverage advanced from 9 to 13 content events, then an immediate repeat returned `unchanged`. | Host/native SDK and real model; not a Desktop UI test. |
+| Latest focused regressions | 562 compaction/budget/replay tests + 226 recovery/interaction/policy tests passed; workspace typecheck passed. | 788 targeted tests, not a fresh whole-repository run. |
 
-## Development and verification
+The [dated report](./docs/eval/workhub-validation-2026-10-23.md) separates earlier suite results, failures, model usage and controlled `reuse`/`fresh` comparisons. Different revisions and overlapping windows are not added into one score. These observations do not establish monetary savings or superiority over another harness.
 
-Before sending a change, read [CONTRIBUTING.md](./CONTRIBUTING.md).
+### Current limits
 
-Common repository-level commands:
+- Executor tasks can be created and continued where supported, but **executor `fresh` is rejected** until a native history bridge exists.
+- Natural-language task association remains fallible. Uncertain targets should be searched or clarified, not guessed from the preview or a similar title.
+- Long-history routing used a labelled fixture, not nine days of natural aging. The macOS DeepSeek runs do not establish cross-provider or cross-platform behavior.
+- An ended execution is not independent verification that its goal or artifacts are correct.
+- Threshold/window reasonableness validation remains deferred; configuration is not a measured service-side limit.
+- Existing React/ResizeObserver diagnostics are outside these completion claims.
+
+## Try the development build
+
+Use Node.js 24, npm 11.19.0, Git and `ripgrep`. Platform dependencies are in [CONTRIBUTING](./CONTRIBUTING.md).
 
 ```sh
-npm run build
-npm run typecheck
-npm test
-npm run check:release
+git clone https://github.com/sunrioa/baka.git
+cd baka
+npm ci
+npm run dev:worktree
 ```
 
-Run one workspace in isolation:
+Configure a model in Settings, enable WorkHub under General settings, and open WorkHub. Each checkout defaults to a separate persistent profile; it does not import another installation's keys or history.
+
+To reuse a profile, first back it up and quit its owning App/Host, then pass the exact Electron user-data path, **not** its `workspaces/default` child:
 
 ```sh
-npm --workspace @maka/runtime run test:dist
-npm --workspace @maka/eval run test:dist
-npm --workspace @maka/desktop run test:dist
+npm run dev:worktree -- --user-data-dir="/absolute/path/to/existing-user-data"
 ```
 
-Use `refresh:model-metadata` to fetch the current catalog from models.dev, update the committed snapshot, and regenerate the derived TypeScript files. A refresh fails closed when any committed model, capability, provider override, or pricing field disappears; after reviewing an intentional upstream removal, acknowledge it with `npm run refresh:model-metadata -- --accept-upstream-removals`. `sync:model-metadata` is intentionally offline: it only regenerates those files from the committed snapshot. Keep access-path-specific overrides in `model-metadata.ts`; do not edit the generated files by hand.
+Do not run two instances against the same profile. App and package names still use Maka; this README does not rename binaries or data roots.
 
-```sh
-npm run refresh:model-metadata
-npm --workspace @maka/core run test:dist
-```
+## Documentation and upstream
 
-Desktop real-window and visual verification:
+- [Current architecture](./docs/architecture/workhub-current.zh-CN.md): ownership, task/Session identity, input, history and compaction.
+- [Validation and usage](./docs/eval/workhub-validation-2026-10-23.md): passed cases, failures and exclusions.
+- [Task-centric ADR](./docs/architecture/workhub-task-centric-adr.zh-CN.md): the agreed design and its evolution.
+- [RFC draft](./docs/rfcs/workhub-task-centric-coordination.md): a small upstream proposal, alternatives and open questions; not yet submitted.
+- [Documentation index](./docs/README.md), [underlying Maka architecture](./ARCHITECTURE.md), [security](./SECURITY.md), [Desktop development](./apps/desktop/README.md) and [CLI](./packages/cli/README.md).
 
-```sh
-npm --workspace @maka/desktop run e2e
-npm --workspace @maka/desktop run smoke:real-window
-```
+Upstream's [WorkHub simplification discussion](https://github.com/apache/maka/issues/5745) is a related starting point, not acceptance of Baka's implementation. Discuss the design before preparing implementation PRs.
 
-Before submitting code, run typecheck, build, and focused tests proportionate to the change, followed by `git diff --check`.
+## License and attribution
 
-## Documentation
-
-- [Website](https://maka.apache.org/en/)
-- [Documentation index and authority map](./docs/README.md)
-- [Backend architecture](./ARCHITECTURE.md)
-- [Product design](./DESIGN.md)
-- [Contributing guide](./CONTRIBUTING.md)
-- [Security policy](./SECURITY.md)
-- [DeepWiki](https://deepwiki.com/apache/maka), third-party AI-generated documentation the project does not maintain
-
-## License
-
-Maka is licensed under the [Apache License 2.0](./LICENSE). See
-[NOTICE](./NOTICE) for attribution information. Third-party components remain
-subject to their respective licenses and notices.
-
-Apache Maka, Maka, Apache, the Apache feather, and the Apache Maka project logo are either registered trademarks or trademarks of The Apache Software Foundation.
-
-> [!NOTE]
-> Apache Maka (Incubating) is an effort undergoing incubation at The Apache Software Foundation (ASF), sponsored by the Apache Incubator PMC. Incubation is required of all newly accepted projects until a further review indicates that the infrastructure, communications, and decision-making process have stabilized in a manner consistent with other successful ASF projects. While incubation status is not necessarily a reflection of the completeness or stability of the code, it does indicate that the project has yet to be fully endorsed by the ASF. [DISCLAIMER-WIP](./DISCLAIMER-WIP) records the issues the project is currently aware of.
-
-> [!IMPORTANT]
-> Maka is under active development. Data formats, CLI commands, and experimental capabilities may still change.
+Apache License 2.0; see [LICENSE](./LICENSE) and [NOTICE](./NOTICE). Existing notices and third-party licenses remain applicable. Apache Maka, Maka and Apache marks belong to their respective owners, including The Apache Software Foundation. Baka is an independent fork, not an ASF-endorsed release. See the inherited [incubation disclaimer](./DISCLAIMER-WIP).

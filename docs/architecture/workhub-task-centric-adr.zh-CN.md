@@ -19,11 +19,13 @@
 
 # ADR：WorkHub 以任务为中心的精简设计
 
-- 状态：已确认；分阶段实施中，完成情况见[实施记录](../workhub-task-centric-implementation.zh-CN.md)
+- 状态：已确认；核心原生路径已进入 Baka main（收敛提交 `6f1902d7f`），后续补修截至 `04281faee`。当前说明见[架构快照](./workhub-current.zh-CN.md)，证据与未覆盖项见[验证报告](../eval/workhub-validation-2026-10-23.md)；以下旧“现状”保留其标注的源码基准
 - 修订日期：2026-10-19（补齐执行契约，保留 AI 自主决策）
 - 适用仓库：sunrioa/baka
 - 代码基准：`a7f6925`（2026-10-18）。本文所有"现状"描述均来自源码，不依据现有文档
 - 相关讨论：apache/maka#5745、sunrioa/baka#8
+
+本文是设计决策和演进记录，不是最新源码逐项说明；早期章节的旧工具名、行号及“现状”不得脱离当时版本理解。完整失败与阶段过程仍见[实施记录](../workhub-task-centric-implementation.zh-CN.md)。[上游 RFC](../rfcs/workhub-task-centric-coordination.md) 只是准备稿，不表示上游采纳。
 
 ---
 

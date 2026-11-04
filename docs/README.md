@@ -17,9 +17,27 @@
   under the License.
 -->
 
-# Maka documentation
+# Baka / Maka documentation
 
 This page is the authority map for Maka documentation. Code and contract tests remain the final authority when documentation disagrees with the implementation.
+
+## WorkHub in Baka
+
+This independent fork documents its task-centric WorkHub separately from the
+inherited Maka platform. These links describe the code snapshot in the document,
+not an accepted upstream design or an official Apache release.
+
+- [WorkHub overview](../README.md) ([中文](../README.zh-CN.md))
+- [Current architecture](./architecture/workhub-current.zh-CN.md)
+- [Dated validation and metering report](./eval/workhub-validation-2026-10-23.md)
+- [Task-centric design ADR](./architecture/workhub-task-centric-adr.zh-CN.md)
+- [Task-centric upstream RFC draft](./rfcs/workhub-task-centric-coordination.md), not submitted
+- [Domain contracts](./workhub-domain-language.md) and [fixed evaluation protocol](./workhub-task-centric-evaluation.zh-CN.md)
+
+The [implementation record](./workhub-task-centric-implementation.zh-CN.md) and
+[coordinator context record](./workhub-coordination-context-implementation.zh-CN.md)
+preserve historical stages and failures. Their dated “not merged” or “pending”
+statements are not the current completion checklist.
 
 ## Where information belongs
 
@@ -55,7 +73,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 - [Work Board contract](./work-board-contract.md)
 - [Work Board Phase 1 surface](./work-board-phase1.md)
 - [WorkHub domain language](./workhub-domain-language.md)
-- [WorkHub Coordination Session ADR](./architecture/workhub-coordination-session-adr.md)
+- [WorkHub current architecture](./architecture/workhub-current.zh-CN.md)
 - [Runtime resume architecture](./architecture/runtime-resume-architecture.md) ([中文](./architecture/runtime-resume-architecture.zh-CN.md))
 - [Runtime Host architecture](./architecture/runtime-host-architecture.md) ([中文](./architecture/runtime-host-architecture.zh-CN.md))
 - [Peer Mesh architecture](./architecture/peer-mesh-architecture.md) ([中文](./architecture/peer-mesh-architecture.zh-CN.md))
@@ -97,6 +115,7 @@ This page is the authority map for Maka documentation. Code and contract tests r
 
 ## Historical material
 
+- [WorkHub Coordination Session ADR](./architecture/workhub-coordination-session-adr.md): the per-Host ownership decision remains; superseded routing/relay protocols are historical
 - [Runtime kernel extraction](./archive/runtime-kernel.md)
 - [Runtime v2 architecture evolution](./archive/runtime-v2-architecture-evolution.md)
 - [Runtime v2 implementation notes](./archive/runtime-v2-implementation-notes.md)

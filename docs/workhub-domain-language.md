@@ -6,7 +6,7 @@ source_language: en
 implementation_status: current
 document_status: current
 translation_status: source-only
-last_verified: 2026-10-20
+last_verified: 2026-10-23
 owners:
   - maka-backend
 ---
@@ -33,8 +33,12 @@ owners:
 
 The optional Jev / Intent / Recall pre-router has been removed. Coordination is
 performed by the main WorkHub model with tools; old routing advice is ignored on
-read. The [task-centric ADR](architecture/workhub-task-centric-adr.zh-CN.md) governs
-the incremental rollout; later-step features described there are not yet shipped.
+read. The [task-centric ADR](architecture/workhub-task-centric-adr.zh-CN.md) records
+the design. Its core native path has landed in Baka; current ownership, capability
+limits and coordinator context behavior are summarized in the
+[current architecture](architecture/workhub-current.zh-CN.md). Consult the
+[dated verification report](eval/workhub-validation-2026-10-23.md) rather than
+interpreting every historical rollout note as a current completion claim.
 
 WorkHub is one persistent conversation per Runtime Host. Its coordination model
 answers questions, clarifies requests, coordinates ordinary tasks, and operates
